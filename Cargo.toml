@@ -1,0 +1,22 @@
+[package]
+name = "chakrapy"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rustpython-parser = "0.4.0"
+wasm-encoder = "0.229.0"
+anyhow = "1.0"
+
+[lib]
+name = "chakrapy"
+path = "src/lib.rs"
+
+# Examples configuration
+[[example]]
+name = "compiler"
+path = "examples/compiler.rs"
+
+[[example]]
+name = "flexible_compiler"
+path = "examples/flexible_compiler.rs"
