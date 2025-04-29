@@ -1,7 +1,7 @@
-pub mod parser;
-pub mod ir;
 pub mod compiler;
+pub mod ir;
 pub mod optimizer;
+pub mod parser;
 
 use anyhow::Result;
 
@@ -15,13 +15,13 @@ pub fn compile_python_to_wasm(source: &str) -> Result<Vec<u8>> {
 pub fn compile_python_to_wasm_with_options(source: &str, optimize: bool) -> Result<Vec<u8>> {
     // Parse Python to AST
     let ast = parser::parse_python(source)?;
-    
+
     // Lower AST to IR
     let ir = ir::lower_ast_to_ir(&ast)?;
-    
+
     // Generate WASM binary
     let raw_wasm = compiler::compile_ir(&ir);
-    
+
     // Optimize the WASM binary
     if optimize {
         optimizer::optimize_wasm(&raw_wasm)

@@ -1,7 +1,7 @@
+use crate::ir::{IRExpr, IRFunction};
 use wasm_encoder::{
     CodeSection, Function, FunctionSection, Instruction, Module, TypeSection, ValType,
 };
-use crate::ir::{IRExpr, IRFunction};
 
 pub fn compile_ir(ir: &IRFunction) -> Vec<u8> {
     let mut module = Module::new();
