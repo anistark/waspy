@@ -16,16 +16,11 @@ ChakraPy translates simple Python functions into WebAssembly. The current implem
 [Custom IR (functions, ops)]
          ↓ (wasm-encoder)
 [Raw WASM binary]
-         ↓ (optional: wasm-opt)
+         ↓ (binaryen optimizer)
 [Optimized .wasm]
          ↓
 [Run/test in browser or server]
 ```
-
-1. Python Source Code to AST: Uses `rustpython_parser` to parse Python code into an Abstract Syntax Tree (AST)
-2. AST to Intermediate Representation (IR): Transforms the Python AST into a simplified custom IR
-3. IR to WebAssembly Binary: Transforms your IR into actual WebAssembly bytecode
-4. Optimization: The raw WebAssembly can be further optimized to get final `.wasm` file.
 
 ## Current Features
 
@@ -33,6 +28,7 @@ ChakraPy translates simple Python functions into WebAssembly. The current implem
 - Supports integer arithmetic operations (`+`, `-`, `*`, `/`)
 - Function parameters
 - Integer constants
+- Automatic WebAssembly optimization using Binaryen
 
 ## Limitations
 
@@ -47,11 +43,17 @@ ChakraPy translates simple Python functions into WebAssembly. The current implem
 ### Using the Library
 
 ```rust
-use chakrapy::compile_python_to_wasm;
+use chakrapy::{compile_python_to_wasm, compile_python_to_wasm_with_options};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let python_code = "def add(a, b):\n    return a + b";
-    let wasm_binary = compile_python_to_wasm(python_code)?;
+    
+    // With optimization (default)
+    let optimized_wasm = compile_python_to_wasm(python_code)?;
+    
+    // Without optimization
+    let unoptimized_wasm = compile_python_to_wasm_with_options(python_code, false)?;
+    
     // Use the WebAssembly binary...
     Ok(())
 }
@@ -63,7 +65,7 @@ ChakraPy includes examples to demonstrate its functionality:
 
 #### Basic Example
 
-Compiles a predefined addition function:
+Compiles a predefined addition function and compares optimized vs. unoptimized output:
 
 ```bash
 cargo run --example compiler
@@ -74,7 +76,15 @@ cargo run --example compiler
 Compiles any Python file you specify:
 
 ```bash
+# With optimization (default)
 cargo run --example flexible_compiler -- examples/test_add.py
+
+# Without optimization
+cargo run --example flexible_compiler -- examples/test_add.py --no-optimize
+```
+
+Other examples:
+```bash
 cargo run --example flexible_compiler -- examples/test_sub.py
 cargo run --example flexible_compiler -- examples/test_mul.py
 ```
@@ -102,7 +112,8 @@ chakrapy/
 │   ├── lib.rs        - Main library entry point
 │   ├── parser.rs     - Python parsing using RustPython
 │   ├── ir.rs         - Intermediate representation
-│   └── compiler.rs   - WASM generation using wasm-encoder
+│   ├── compiler.rs   - WASM generation using wasm-encoder
+│   └── optimizer.rs  - WASM optimization using Binaryen
 ├── examples/
 │   ├── compiler.rs              - Basic example compiler
 │   ├── flexible_compiler.rs     - Command-line compiler
@@ -111,6 +122,19 @@ chakrapy/
 │   └── test_mul.py              - Multiplication test
 └── Cargo.toml        - Project configuration
 ```
+
+## Optimization
+
+ChakraPy uses the Binaryen library to optimize WebAssembly output:
+
+- **Size Reduction**: The optimizer can significantly reduce the size of the generated WASM files
+- **Performance Improvement**: Optimized code runs faster in WebAssembly environments
+- **Configurable**: Optimization can be enabled/disabled and configured via API
+
+The optimization settings can be adjusted in the `optimizer.rs` file. Current settings include:
+- Optimization level: 3 (0-4 scale, with 4 being most aggressive)
+- Shrink level: 1 (0-2 scale, with 2 being most aggressive for size)
+- Inline optimization: Enabled with various size thresholds
 
 ## Testing Generated WebAssembly
 
@@ -126,7 +150,7 @@ To verify the generated WebAssembly, you can use:
    ```
 
 2. **Node.js**:
-   ```javascript
+   ```js
    const fs = require('fs');
    const wasmBuffer = fs.readFileSync('your_file.wasm');
    WebAssembly.instantiate(wasmBuffer).then(result => {
@@ -143,7 +167,8 @@ To verify the generated WebAssembly, you can use:
 - Function imports/exports
 - Memory management
 - Standard library support
+- Additional optimization passes
 
 ## License
 
-[MIT]
+[MIT](./LICENSE)

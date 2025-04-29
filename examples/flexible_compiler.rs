@@ -1,7 +1,7 @@
 use std::env;
 use std::fs;
 use std::path::Path;
-use chakrapy::compile_python_to_wasm;
+use chakrapy::compile_python_to_wasm_with_options;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Get the Python file path from command line arguments
@@ -10,6 +10,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.len() < 2 {
         println!("Usage: cargo run --example flexible_compiler -- <python_file_path>");
         println!("Example: cargo run --example flexible_compiler -- examples/test_add.py");
+        println!("The compiler will generate both optimized and unoptimized versions for comparison");
         return Ok(());
     }
     
@@ -25,21 +26,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     println!("Compiling Python code from {}:\n{}", python_file.display(), python_code);
     
-    // Compile it to WASM
-    let wasm_binary = compile_python_to_wasm(&python_code)?;
+    // Generate both optimized and unoptimized versions to compare
+    println!("\n=== Compiling without optimization ===");
+    let start_time_unopt = std::time::Instant::now();
+    let unoptimized_wasm = compile_python_to_wasm_with_options(&python_code, false)?;
+    let unopt_time = start_time_unopt.elapsed();
     
-    // Generate output path
+    println!("\n=== Compiling with optimization ===");
+    let start_time_opt = std::time::Instant::now();
+    let optimized_wasm = compile_python_to_wasm_with_options(&python_code, true)?;
+    let opt_time = start_time_opt.elapsed();
+    
+    // Generate output paths
     let file_stem = python_file.file_stem().unwrap_or_default();
-    let output_path = python_file.with_file_name(format!("{}.wasm", file_stem.to_string_lossy()));
+    let unopt_path = python_file.with_file_name(format!("{}.raw.wasm", file_stem.to_string_lossy()));
+    let opt_path = python_file.with_file_name(format!("{}.opt.wasm", file_stem.to_string_lossy()));
     
-    fs::write(&output_path, &wasm_binary)?;
+    // Write both versions
+    fs::write(&unopt_path, &unoptimized_wasm)?;
+    fs::write(&opt_path, &optimized_wasm)?;
     
-    println!("Successfully compiled Python to WebAssembly!");
-    println!("Output written to {}", output_path.display());
+    // Print comparison information
+    println!("\n=== Compilation Results ===");
+    println!("Unoptimized output: {}", unopt_path.display());
+    println!("  - Size: {} bytes", unoptimized_wasm.len());
+    println!("  - Compilation time: {:?}", unopt_time);
     
-    // Print the size of the generated WASM file
-    let wasm_size = fs::metadata(&output_path)?.len();
-    println!("WASM file size: {} bytes", wasm_size);
+    println!("Optimized output: {}", opt_path.display());
+    println!("  - Size: {} bytes", optimized_wasm.len());
+    println!("  - Compilation time: {:?}", opt_time);
+    
+    let size_reduction = 100.0 * (1.0 - (optimized_wasm.len() as f64 / unoptimized_wasm.len() as f64));
+    println!("Size reduction: {:.2}%", size_reduction);
     
     Ok(())
 }

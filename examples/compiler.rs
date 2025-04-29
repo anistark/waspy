@@ -10,20 +10,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let python_code = fs::read_to_string(python_file)?;
     
     println!("Compiling Python code:\n{}", python_code);
+
+    let start_time_opt = std::time::Instant::now();
+    let optimized_wasm = compile_python_to_wasm(&python_code)?;
+    let opt_time = start_time_opt.elapsed();
     
-    // Compile it to WASM
-    let wasm_binary = compile_python_to_wasm(&python_code)?;
+    // Write the WASM outputs to files
+    let opt_path = Path::new("examples/output.wasm");
+
+    fs::write(opt_path, &optimized_wasm)?;
     
-    // Write the WASM output to a file
-    let output_path = Path::new("examples/output.wasm");
-    fs::write(output_path, &wasm_binary)?;
+    // Print comparison information
+    println!("\n=== Compilation Results ===");
     
-    println!("Successfully compiled Python to WebAssembly!");
-    println!("Output written to {}", output_path.display());
-    
-    // Print the size of the generated WASM file
-    let wasm_size = fs::metadata(output_path)?.len();
-    println!("WASM file size: {} bytes", wasm_size);
-    
+    println!("Output: {}", opt_path.display());
+    println!("  - Size: {} bytes", optimized_wasm.len());
+    println!("  - Compilation time: {:?}", opt_time);
+
     Ok(())
 }

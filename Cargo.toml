@@ -2,17 +2,25 @@
 name = "chakrapy"
 version = "0.1.0"
 edition = "2021"
+description = "A Python interpreter written in Rust, designed for WebAssembly."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/anistark/chakrapy"
+keywords = ["python", "interpreter", "webassembly"]
+categories = ["Programming Language :: Python", "WebAssembly"]
+readme = "README.md"
+authors = ["Kumar Anirudha <hi@anirudha.dev>"]
 
 [dependencies]
 rustpython-parser = "0.4.0"
 wasm-encoder = "0.229.0"
 anyhow = "1.0"
+binaryen = "0.12.0"
 
 [lib]
 name = "chakrapy"
 path = "src/lib.rs"
 
-# Examples configuration
+# Examples
 [[example]]
 name = "compiler"
 path = "examples/compiler.rs"
