@@ -6,7 +6,7 @@ description = "A Python interpreter written in Rust, designed for WebAssembly."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/anistark/chakrapy"
 keywords = ["python", "interpreter", "webassembly"]
-categories = ["Programming Language :: Compilers", "WebAssembly", "Web programming"]
+categories = ["Compilers", "WebAssembly", "Web programming"]
 readme = "README.md"
 authors = ["Kumar Anirudha <hi@anirudha.dev>"]
 

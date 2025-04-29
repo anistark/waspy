@@ -1,9 +1,16 @@
 # ChakraPy Justfile
 # Install just with: cargo install just
 
-# Default recipe to run when just is called without arguments
+# Get version from Cargo.toml
+version := `grep -m 1 'version = ' Cargo.toml | cut -d '"' -f 2`
+
+# Repository information
+repo := `if git remote -v >/dev/null 2>&1; then git remote get-url origin | sed -E 's/.*github.com[:/]([^/]+)\/([^/.]+).*/\1\/\2/'; else echo "anistark/chakrapy"; fi`
+
+# Default recipe to display help information
 default:
     @just --list
+    @echo "\nCurrent version: {{version}}"
 
 # Build the project
 build:
