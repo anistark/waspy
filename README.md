@@ -2,6 +2,9 @@
 
 A Python to WebAssembly compiler written in Rust.
 
+[![Crates.io Version](https://img.shields.io/crates/v/chakrapy)
+](https://crates.io/crates/chakrapy) [![Crates.io Downloads](https://img.shields.io/crates/d/chakrapy)](https://crates.io/crates/chakrapy) [![Crates.io Downloads (latest version)](https://img.shields.io/crates/dv/chakrapy)](https://crates.io/crates/chakrapy) [![Open Source](https://img.shields.io/badge/open-source-brightgreen)](https://github.com/anistark/chakrapy) [![Contributors](https://img.shields.io/github/contributors/anistark/chakrapy)](https://github.com/anistark/chakrapy/graphs/contributors) ![maintenance-status](https://img.shields.io/badge/maintenance-actively--developed-brightgreen.svg)
+
 ## Overview
 
 ChakraPy translates simple Python functions into WebAssembly. The current implementation supports basic integer arithmetic operations in single-function Python files.
@@ -43,21 +46,16 @@ ChakraPy translates simple Python functions into WebAssembly. The current implem
 ### Using the Library
 
 ```rust
-use chakrapy::{compile_python_to_wasm, compile_python_to_wasm_with_options};
+use chakrapy::compile_python_to_wasm;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let python_code = "def add(a, b):\n    return a + b";
-    
-    // With optimization (default)
-    let optimized_wasm = compile_python_to_wasm(python_code)?;
-    
-    // Without optimization
-    let unoptimized_wasm = compile_python_to_wasm_with_options(python_code, false)?;
-    
-    // Use the WebAssembly binary...
+    let wasm = compile_python_to_wasm(python_code)?;
     Ok(())
 }
 ```
+
+By default it'll create optimized wsam. But if you want to create unoptimized for further processing or testing, you can use `compile_python_to_wasm_with_options` instead.
 
 ### Running the Examples
 
