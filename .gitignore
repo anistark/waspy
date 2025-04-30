@@ -1,4 +1,10 @@
-/target
-.DS_Store
+# Build files
+target
+debug
+pkg
 
+# testing
 examples/*.wasm
+
+# MacOS
+.DS_Store

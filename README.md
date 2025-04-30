@@ -7,7 +7,7 @@ A Python to WebAssembly compiler written in Rust.
 
 ## Overview
 
-ChakraPy translates simple Python functions into WebAssembly. The current implementation supports basic integer arithmetic operations in single-function Python files.
+ChakraPy translates Python functions into WebAssembly. The current implementation supports basic arithmetic operations, control flow, and multiple functions in a single file.
 
 ### Compilation Pipeline
 
@@ -27,19 +27,30 @@ ChakraPy translates simple Python functions into WebAssembly. The current implem
 
 ## Current Features
 
-- Compiles simple Python functions to WebAssembly
-- Supports integer arithmetic operations (`+`, `-`, `*`, `/`)
-- Function parameters
-- Integer constants
+- Compiles Python functions to WebAssembly
+- Supports multiple functions in a single file
+- Control flow with if/else and while loops
+- Variable declarations and assignments
+- Function parameters and return statements
+- Function calls between compiled functions
+- Expanded type system: integers, floats, booleans, strings (basic)
+- Comparison operators (`==`, `!=`, `<`, `<=`, `>`, `>=`)
+- Boolean operators (`and`, `or`)
 - Automatic WebAssembly optimization using Binaryen
 
 ## Limitations
 
-- Only supports a single function per file
-- Only handles integer operations
-- Single return statement required
-- No control flow, loops, or complex features
+- Limited standard library support
+- Only basic memory management
+- No complex data structures yet (lists, dicts, etc.)
 - Limited error handling
+- No closures or higher-order functions
+
+## Installation
+
+```sh
+cargo add chakrapy
+```
 
 ## Usage
 
@@ -49,123 +60,120 @@ ChakraPy translates simple Python functions into WebAssembly. The current implem
 use chakrapy::compile_python_to_wasm;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let python_code = "def add(a, b):\n    return a + b";
+    let python_code = r#"
+    def add(a, b):
+        return a + b
+        
+    def fibonacci(n):
+        if n <= 1:
+            return n
+        a = 0
+        b = 1
+        i = 2
+        while i <= n:
+            temp = a + b
+            a = b
+            b = temp
+            i = i + 1
+        return b
+    "#;
+    // You can also import your python file code and parse it here
+    
     let wasm = compile_python_to_wasm(python_code)?;
+    // Write to file or use the WebAssembly binary
     Ok(())
 }
 ```
 
-By default it'll create optimized wsam. But if you want to create unoptimized for further processing or testing, you can use `compile_python_to_wasm_with_options` instead.
+For unoptimized WebAssembly (useful for debugging or further processing):
 
-### Running the Examples
+```rust
+use chakrapy::compile_python_to_wasm_with_options;
 
-ChakraPy includes examples to demonstrate its functionality:
-
-#### Basic Example
-
-Compiles a predefined addition function and compares optimized vs. unoptimized output:
-
-```bash
-cargo run --example compiler
+let wasm = compile_python_to_wasm_with_options(python_code, false)?;
 ```
 
-#### Flexible Compiler
-
-Compiles any Python file you specify:
-
-```bash
-# With optimization (default)
-cargo run --example flexible_compiler -- examples/test_add.py
-
-# Without optimization
-cargo run --example flexible_compiler -- examples/test_add.py --no-optimize
-```
-
-Other examples:
-```bash
-cargo run --example flexible_compiler -- examples/test_sub.py
-cargo run --example flexible_compiler -- examples/test_mul.py
-```
-
-### Creating Your Own Python Functions
-
-Create a Python file with a single function that returns an integer expression:
+### Example Python Code
 
 ```python
-def my_function(a, b, c):
-    return a * b + c
+def factorial(n):
+    result = 1
+    i = 1
+    while i <= n:
+        result = result * i
+        i = i + 1
+    return result
+
+def max_num(a, b):
+    if a > b:
+        return a
+    else:
+        return b
 ```
 
-Then compile it:
+### Using the Generated WebAssembly
 
-```bash
-cargo run --example flexible_compiler -- path/to/your_function.py
+The compiled WebAssembly can be used in various environments:
+
+```js
+// Browser or Node.js
+WebAssembly.instantiate(wasmBuffer).then(result => {
+  const instance = result.instance;
+  console.log(instance.exports.factorial(5)); // 120
+  console.log(instance.exports.max_num(42, 17)); // 42
+});
 ```
 
-## Project Structure
+## Implementation Details
 
-```
-chakrapy/
-├── src/
-│   ├── lib.rs        - Main library entry point
-│   ├── parser.rs     - Python parsing using RustPython
-│   ├── ir.rs         - Intermediate representation
-│   ├── compiler.rs   - WASM generation using wasm-encoder
-│   └── optimizer.rs  - WASM optimization using Binaryen
-├── examples/
-│   ├── compiler.rs              - Basic example compiler
-│   ├── flexible_compiler.rs     - Command-line compiler
-│   ├── test_add.py              - Addition test
-│   ├── test_sub.py              - Subtraction test
-│   └── test_mul.py              - Multiplication test
-└── Cargo.toml        - Project configuration
-```
+### Multiple Functions
 
-## Optimization
+ChakraPy supports multiple function definitions in a single Python file:
 
-ChakraPy uses the Binaryen library to optimize WebAssembly output:
+- Each function is compiled to a separate WebAssembly function
+- All functions are exported with their original names
+- Functions can call other functions that are defined in the same file
 
-- **Size Reduction**: The optimizer can significantly reduce the size of the generated WASM files
-- **Performance Improvement**: Optimized code runs faster in WebAssembly environments
-- **Configurable**: Optimization can be enabled/disabled and configured via API
+### Control Flow
 
-The optimization settings can be adjusted in the `optimizer.rs` file. Current settings include:
-- Optimization level: 3 (0-4 scale, with 4 being most aggressive)
-- Shrink level: 1 (0-2 scale, with 2 being most aggressive for size)
-- Inline optimization: Enabled with various size thresholds
+The compiler supports basic control flow constructs:
 
-## Testing Generated WebAssembly
+- **If/Else Statements**: Conditional execution using WebAssembly's block and branch instructions
+- **While Loops**: Implemented using WebAssembly's loop and branch instructions
+- **Comparison Operators**: All standard Python comparison operators
 
-To verify the generated WebAssembly, you can use:
+### Variable Support
 
-1. **WebAssembly Binary Toolkit (WABT)**:
-   ```bash
-   # Validate the WebAssembly binary
-   wasm-validate your_file.wasm
-   
-   # Convert to text format
-   wasm2wat your_file.wasm -o your_file.wat
-   ```
+ChakraPy handles variables through WebAssembly locals:
 
-2. **Node.js**:
-   ```js
-   const fs = require('fs');
-   const wasmBuffer = fs.readFileSync('your_file.wasm');
-   WebAssembly.instantiate(wasmBuffer).then(result => {
-     const func = result.instance.exports.your_function_name;
-     console.log(func(5, 3)); // Example call
-   });
-   ```
+- Local variables are allocated in the function's local variable space
+- Assignment statements modify these locals
+- Variables are statically typed based on their usage (currently defaulting to `i32`)
 
-## Future Improvements
+### Type System
 
-- Support for more Python features (conditionals, loops)
-- Multiple functions per file
-- More data types (floats, strings, lists)
-- Function imports/exports
-- Memory management
-- Standard library support
-- Additional optimization passes
+The type system currently includes:
+
+- **Integers**: Mapped to WebAssembly's `i32` type
+- **Floats**: Supported as `f64` with conversion to `i32` when necessary
+- **Booleans**: Represented as `i32` (`0` for `false`, `1` for `true`)
+- **Strings**: Basic support for string literals (memory-based)
+
+## Contributing
+
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for details on how to get started.
+
+## Roadmap
+
+- Complete support for all Python data types (lists, dicts, sets, etc.)
+- Classes and object-oriented programming features
+- Exception handling
+- More comprehensive standard library support
+- Memory management improvements
+- Dynamic typing support
+- Modules and imports
+- Optimization improvements specific to Python patterns
+- Type inference and annotation support
 
 ## License
 
