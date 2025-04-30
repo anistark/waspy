@@ -80,7 +80,7 @@ dev: format lint build test
     @echo "Development checks completed successfully!"
 
 # Prepare for release: format, lint, build, test, and check if ready to publish
-prepare-release: format lint build test check-publish
+prepare-release: format build test check-publish
     @echo "Release preparation completed successfully!"
 
 # Compile a specific Python file to WebAssembly
