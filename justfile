@@ -48,18 +48,27 @@ check-publish:
     cargo publish --dry-run
 
 # Create a GitHub release with an optional custom title
-github-release title="ChakraPy v{{version}}":
-    @echo "Creating GitHub release for v{{version}}..."
-    git tag -a v{{version}} -m "Release v{{version}}"
-    git push origin v{{version}}
-    @if command -v gh >/dev/null 2>&1; then \
-        echo "Creating GitHub release using the GitHub CLI..." && \
-        gh release create v{{version}} \
-            --title "{{title}}" \
-            --generate-notes; \
-    else \
-        echo "GitHub CLI not found. Please install it or create the release manually at:" && \
-        echo "https://github.com/{{repo}}/releases/new?tag=v{{version}}&title={{title}}"; \
+github-release title="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    
+    VERSION="{{version}}"
+    # Use provided title or default if none provided
+    RELEASE_TITLE="${title:-ChakraPy v$VERSION}"
+    
+    echo "Creating GitHub release for v$VERSION..."
+    git tag -a "v$VERSION" -m "Release v$VERSION"
+    git push origin "v$VERSION"
+    
+    if command -v gh >/dev/null 2>&1; then
+      echo "Creating GitHub release using the GitHub CLI..."
+      gh release create "v$VERSION" \
+        --title "$RELEASE_TITLE" \
+        --generate-notes
+    else
+      ENCODED_TITLE=$(echo "$RELEASE_TITLE" | sed 's/ /%20/g')
+      echo "GitHub CLI not found. Please install it or create the release manually at:"
+      echo "https://github.com/{{repo}}/releases/new?tag=v$VERSION&title=$ENCODED_TITLE"
     fi
 
 # Publish the crate to crates.io
@@ -80,7 +89,7 @@ dev: format lint build test
     @echo "Development checks completed successfully!"
 
 # Prepare for release: format, lint, build, test, and check if ready to publish
-prepare-release: format build test check-publish
+prepare-release: format lint build test check-publish
     @echo "Release preparation completed successfully!"
 
 # Compile a specific Python file to WebAssembly
