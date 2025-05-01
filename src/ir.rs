@@ -37,6 +37,7 @@ pub enum IRStatement {
     Expression(IRExpr),
 }
 
+/// Expression types in the intermediate representation
 #[derive(Debug, Clone)]
 pub enum IRExpr {
     Const(IRConstant),
@@ -67,6 +68,7 @@ pub enum IRExpr {
     },
 }
 
+/// Constant value types supported in the IR
 #[derive(Debug, Clone)]
 pub enum IRConstant {
     Int(i32),
@@ -75,23 +77,26 @@ pub enum IRConstant {
     String(String),
 }
 
+/// Binary operators in the IR
 #[derive(Debug, Clone)]
 pub enum IROp {
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Mod,      // %
+    Add,     // +
+    Sub,     // -
+    Mul,     // *
+    Div,     // /
+    Mod,     // %
     FloorDiv, // //
-    Pow,      // **
+    Pow,     // **
 }
 
+/// Unary operators in the IR
 #[derive(Debug, Clone)]
 pub enum IRUnaryOp {
     Neg, // -x
     Not, // not x
 }
 
+/// Comparison operators in the IR
 #[derive(Debug, Clone)]
 pub enum IRCompareOp {
     Eq,    // ==
@@ -102,10 +107,11 @@ pub enum IRCompareOp {
     GtE,   // >=
 }
 
+/// Boolean operators in the IR
 #[derive(Debug, Clone)]
 pub enum IRBoolOp {
-    And,
-    Or,
+    And, // and
+    Or,  // or
 }
 
 /// Lower a Python AST (Suite) into our IR.
@@ -113,30 +119,27 @@ pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
     let mut functions = Vec::new();
 
     for stmt in ast {
-        match stmt {
-            Stmt::FunctionDef(fundef) => {
-                let name = fundef.name.to_string();
+        if let Stmt::FunctionDef(fundef) = stmt {
+            let name = fundef.name.to_string();
 
-                let params = fundef
-                    .args
-                    .args
-                    .iter()
-                    .map(|arg_with_default| arg_with_default.def.arg.to_string())
-                    .collect();
+            let params = fundef
+                .args
+                .args
+                .iter()
+                .map(|arg_with_default| arg_with_default.def.arg.to_string())
+                .collect();
 
-                let body = lower_function_body(&fundef.body)?;
+            let body = lower_function_body(&fundef.body)?;
 
-                functions.push(IRFunction { name, params, body });
-            }
-            _ => {
-                // For now, we only handle function definitions at the module level
-                anyhow::bail!("Only function definitions are supported at the module level");
-            }
+            functions.push(IRFunction { name, params, body });
+        } else {
+            // For now, we only handle function definitions at the module level
+            return Err(anyhow::anyhow!("Only function definitions are supported at the module level"));
         }
     }
 
     if functions.is_empty() {
-        anyhow::bail!("No functions found in the module");
+        return Err(anyhow::anyhow!("No functions found in the module"));
     }
 
     Ok(IRModule { functions })
@@ -150,7 +153,7 @@ fn lower_function_body(stmts: &[Stmt]) -> Result<IRBody> {
         match stmt {
             Stmt::Return(ret) => {
                 let expr = if let Some(value) = &ret.value {
-                    Some(lower_expr(&*value)?)
+                    Some(lower_expr(value)?)
                 } else {
                     None
                 };
@@ -159,19 +162,19 @@ fn lower_function_body(stmts: &[Stmt]) -> Result<IRBody> {
             Stmt::Assign(assign) => {
                 // For simplicity, we only support single target assignments for now
                 if assign.targets.len() != 1 {
-                    anyhow::bail!("Only single target assignments supported");
+                    return Err(anyhow::anyhow!("Only single target assignments supported"));
                 }
 
                 let target = match &assign.targets[0] {
                     Expr::Name(name) => name.id.to_string(),
-                    _ => anyhow::bail!("Only variable assignment supported"),
+                    _ => return Err(anyhow::anyhow!("Only variable assignment supported")),
                 };
 
-                let value = lower_expr(&*assign.value)?;
+                let value = lower_expr(&assign.value)?;
                 ir_statements.push(IRStatement::Assign { target, value });
             }
             Stmt::If(if_stmt) => {
-                let condition = lower_expr(&*if_stmt.test)?;
+                let condition = lower_expr(&if_stmt.test)?;
                 let then_body = Box::new(lower_function_body(&if_stmt.body)?);
 
                 let else_body = if !if_stmt.orelse.is_empty() {
@@ -187,17 +190,17 @@ fn lower_function_body(stmts: &[Stmt]) -> Result<IRBody> {
                 });
             }
             Stmt::While(while_stmt) => {
-                let condition = lower_expr(&*while_stmt.test)?;
+                let condition = lower_expr(&while_stmt.test)?;
                 let body = Box::new(lower_function_body(&while_stmt.body)?);
 
                 ir_statements.push(IRStatement::While { condition, body });
             }
             Stmt::Expr(expr_stmt) => {
-                let expr = lower_expr(&*expr_stmt.value)?;
+                let expr = lower_expr(&expr_stmt.value)?;
                 ir_statements.push(IRStatement::Expression(expr));
             }
             _ => {
-                anyhow::bail!("Unsupported statement type");
+                return Err(anyhow::anyhow!("Unsupported statement type"));
             }
         }
     }
@@ -219,12 +222,12 @@ fn lower_expr(expr: &Expr) -> Result<IRExpr> {
                 rustpython_parser::ast::Operator::Mod => IROp::Mod,
                 rustpython_parser::ast::Operator::FloorDiv => IROp::FloorDiv,
                 rustpython_parser::ast::Operator::Pow => IROp::Pow,
-                _ => anyhow::bail!("Unsupported binary operator"),
+                _ => return Err(anyhow::anyhow!("Unsupported binary operator")),
             };
 
             Ok(IRExpr::BinaryOp {
-                left: Box::new(lower_expr(&*binop.left)?),
-                right: Box::new(lower_expr(&*binop.right)?),
+                left: Box::new(lower_expr(&binop.left)?),
+                right: Box::new(lower_expr(&binop.right)?),
                 op,
             })
         }
@@ -232,17 +235,17 @@ fn lower_expr(expr: &Expr) -> Result<IRExpr> {
             let op = match &unaryop.op {
                 rustpython_parser::ast::UnaryOp::USub => IRUnaryOp::Neg,
                 rustpython_parser::ast::UnaryOp::Not => IRUnaryOp::Not,
-                _ => anyhow::bail!("Unsupported unary operator"),
+                _ => return Err(anyhow::anyhow!("Unsupported unary operator")),
             };
 
             Ok(IRExpr::UnaryOp {
-                operand: Box::new(lower_expr(&*unaryop.operand)?),
+                operand: Box::new(lower_expr(&unaryop.operand)?),
                 op,
             })
         }
         Expr::Compare(compare) => {
             if compare.ops.len() != 1 || compare.comparators.len() != 1 {
-                anyhow::bail!("Only single comparisons supported");
+                return Err(anyhow::anyhow!("Only single comparisons supported"));
             }
 
             let op = match &compare.ops[0] {
@@ -252,18 +255,18 @@ fn lower_expr(expr: &Expr) -> Result<IRExpr> {
                 rustpython_parser::ast::CmpOp::LtE => IRCompareOp::LtE,
                 rustpython_parser::ast::CmpOp::Gt => IRCompareOp::Gt,
                 rustpython_parser::ast::CmpOp::GtE => IRCompareOp::GtE,
-                _ => anyhow::bail!("Unsupported comparison operator"),
+                _ => return Err(anyhow::anyhow!("Unsupported comparison operator")),
             };
 
             Ok(IRExpr::CompareOp {
-                left: Box::new(lower_expr(&*compare.left)?),
+                left: Box::new(lower_expr(&compare.left)?),
                 right: Box::new(lower_expr(&compare.comparators[0])?),
                 op,
             })
         }
         Expr::BoolOp(boolop) => {
             if boolop.values.len() != 2 {
-                anyhow::bail!("Only binary boolean operations supported");
+                return Err(anyhow::anyhow!("Only binary boolean operations supported"));
             }
 
             let op = match boolop.op {
@@ -296,20 +299,20 @@ fn lower_expr(expr: &Expr) -> Result<IRExpr> {
                 rustpython_parser::ast::Constant::Str(s) => {
                     Ok(IRExpr::Const(IRConstant::String(s.clone())))
                 }
-                _ => anyhow::bail!("Unsupported constant type"),
+                _ => Err(anyhow::anyhow!("Unsupported constant type")),
             }
         }
         Expr::Name(name) => Ok(IRExpr::Variable(name.id.to_string())),
         Expr::Call(call) => {
-            let function_name = match &*call.func {
+            let function_name = match call.func.as_ref() {
                 Expr::Name(name) => name.id.to_string(),
-                _ => anyhow::bail!("Only direct function calls supported"),
+                _ => return Err(anyhow::anyhow!("Only direct function calls supported")),
             };
 
             // Special handling for certain built-in functions
             if function_name == "int" {
                 if call.args.len() != 1 {
-                    anyhow::bail!("int() function expects exactly one argument");
+                    return Err(anyhow::anyhow!("int() function expects exactly one argument"));
                 }
 
                 // For 'int(x)', we'll treat it as a special case
@@ -328,6 +331,6 @@ fn lower_expr(expr: &Expr) -> Result<IRExpr> {
                 arguments,
             })
         }
-        _ => anyhow::bail!("Unsupported expression type"),
+        _ => Err(anyhow::anyhow!("Unsupported expression type")),
     }
 }

@@ -1,12 +1,11 @@
+use crate::ir::{
+    IRBody, IRBoolOp, IRCompareOp, IRConstant, IRExpr, IRFunction, IRModule, IROp, IRStatement,
+    IRUnaryOp,
+};
 use std::collections::HashMap;
 use wasm_encoder::{
     BlockType, CodeSection, ExportKind, ExportSection, Function, FunctionSection, Instruction,
     MemorySection, MemoryType, Module, TypeSection, ValType,
-};
-
-use crate::ir::{
-    IRBody, IRBoolOp, IRCompareOp, IRConstant, IRExpr, IRFunction, IRModule, IROp, IRStatement,
-    IRUnaryOp,
 };
 
 struct CompilationContext {
@@ -445,14 +444,10 @@ fn emit_expr(expr: &IRExpr, func: &mut Function, ctx: &CompilationContext) {
             if let Some(func_idx) = ctx.function_types.get(function_name.as_str()) {
                 func.instruction(&Instruction::Call(*func_idx));
             } else {
-                // Handle built-in functions or unknown functions
-                match function_name.as_str() {
-                    // We don't need special handling for "int" since we handle it in the IR conversion
-                    _ => {
-                        // For unknown functions, we'll just return 0 for now
-                        func.instruction(&Instruction::I32Const(0));
-                    }
-                }
+                // We don't need special handling for "int" since we handle it in the IR conversion
+                
+                // For unknown functions, we'll just return 0 for now
+                func.instruction(&Instruction::I32Const(0));
             }
         }
     }

@@ -65,7 +65,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // First try compiling with optimization if requested
     let mut result_wasm = Vec::new();
-    let mut success = false;
     let mut is_optimized = false;
 
     if optimize {
@@ -73,7 +72,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match compile_python_to_wasm_with_options(&source, true) {
             Ok(wasm) => {
                 result_wasm = wasm;
-                success = true;
                 is_optimized = true;
                 println!("Compilation with optimization successful!");
             }
@@ -85,13 +83,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // If optimization failed or wasn't requested, try without optimization
-    if !success {
+    if !is_optimized {
         println!("Compiling without optimization...");
         match compile_python_to_wasm_with_options(&source, false) {
             Ok(wasm) => {
                 result_wasm = wasm;
-                success = true;
-                is_optimized = false;
                 println!("Compilation without optimization successful!");
             }
             Err(err) => {
@@ -133,7 +129,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.contains(&"--html".to_string()) {
         let html_file = parent_dir.join(format!("{}_test.html", stem));
         let wasm_filename = output_file.file_name().unwrap().to_str().unwrap();
-        let html = generate_html_test_file(stem, wasm_filename, &function_count);
+        let html = generate_html_test_file(stem, wasm_filename, function_count);
         fs::write(&html_file, html)?;
         println!("Wrote test HTML to {}", html_file.display());
     }
@@ -142,7 +138,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.contains(&"--node".to_string()) {
         let js_file = parent_dir.join(format!("{}_test.js", stem));
         let wasm_filename = output_file.file_name().unwrap().to_str().unwrap();
-        let js = generate_node_test_file(stem, wasm_filename, &function_count);
+        let js = generate_node_test_file(stem, wasm_filename, function_count);
         fs::write(&js_file, js)?;
         println!("Wrote test Node.js file to {}", js_file.display());
     }
@@ -153,7 +149,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn generate_html_test_file(
     module_name: &str,
     wasm_filename: &str,
-    function_count: &usize,
+    function_count: usize,
 ) -> String {
     let mut html = format!(
         r#"<!DOCTYPE html>
@@ -187,7 +183,7 @@ fn generate_html_test_file(
     );
 
     // We'll add "function1", "function2", etc. placeholders
-    for i in 1..=*function_count {
+    for i in 1..=function_count {
         html.push_str(&format!(
             "                <option value=\"function{}\">{}</option>\n",
             i, i
@@ -210,7 +206,7 @@ fn generate_html_test_file(
                 const response = await fetch('"#,
     );
 
-    html.push_str(&wasm_filename);
+    html.push_str(wasm_filename);
 
     html.push_str(r#"');
                 const bytes = await response.arrayBuffer();
@@ -264,7 +260,7 @@ fn generate_html_test_file(
 fn generate_node_test_file(
     _module_name: &str,
     wasm_filename: &str,
-    _function_count: &usize,
+    _function_count: usize,
 ) -> String {
     format!(
         r#"const fs = require('fs');
