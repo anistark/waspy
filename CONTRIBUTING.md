@@ -53,8 +53,8 @@ chakrapy/
 ├── src/
 │   ├── lib.rs        - Main library entry point
 │   ├── parser.rs     - Python parsing using RustPython
-│   ├── ir.rs         - Intermediate representation
-│   ├── compiler.rs   - WASM generation using wasm-encoder
+│   ├── ir\           - Intermediate representation
+│   ├── compiler\     - WASM generation using wasm-encoder
 │   └── optimizer.rs  - WASM optimization using Binaryen
 ├── examples/
 │   └── ...           - All examples here

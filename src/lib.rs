@@ -17,10 +17,10 @@ pub fn compile_python_to_wasm_with_options(source: &str, optimize: bool) -> Resu
     let ast = parser::parse_python(source)?;
 
     // Lower AST to IR
-    let ir = ir::lower_ast_to_ir(&ast)?;
+    let ir_module = ir::lower_ast_to_ir(&ast)?;
 
     // Generate WASM binary
-    let raw_wasm = compiler::compile_ir(&ir);
+    let raw_wasm = compiler::compile_ir_module(&ir_module);
 
     // Optimize the WASM binary
     if optimize {

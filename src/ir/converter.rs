@@ -1,118 +1,6 @@
+use crate::ir::types::*;
 use anyhow::Result;
 use rustpython_parser::ast::{Expr, Stmt, Suite};
-
-/// Intermediate Representation (IR) for a module containing multiple functions
-pub struct IRModule {
-    pub functions: Vec<IRFunction>,
-}
-
-/// IR representation of a function
-pub struct IRFunction {
-    pub name: String,
-    pub params: Vec<String>,
-    pub body: IRBody,
-}
-
-/// IR representation of a function body, which can contain multiple statements
-pub struct IRBody {
-    pub statements: Vec<IRStatement>,
-}
-
-/// IR representation of statements
-pub enum IRStatement {
-    Return(Option<IRExpr>),
-    Assign {
-        target: String,
-        value: IRExpr,
-    },
-    If {
-        condition: IRExpr,
-        then_body: Box<IRBody>,
-        else_body: Option<Box<IRBody>>,
-    },
-    While {
-        condition: IRExpr,
-        body: Box<IRBody>,
-    },
-    Expression(IRExpr),
-}
-
-/// Expression types in the intermediate representation
-#[derive(Debug, Clone)]
-pub enum IRExpr {
-    Const(IRConstant),
-    BinaryOp {
-        left: Box<IRExpr>,
-        right: Box<IRExpr>,
-        op: IROp,
-    },
-    UnaryOp {
-        operand: Box<IRExpr>,
-        op: IRUnaryOp,
-    },
-    CompareOp {
-        left: Box<IRExpr>,
-        right: Box<IRExpr>,
-        op: IRCompareOp,
-    },
-    Param(String),
-    Variable(String),
-    FunctionCall {
-        function_name: String,
-        arguments: Vec<IRExpr>,
-    },
-    BoolOp {
-        left: Box<IRExpr>,
-        right: Box<IRExpr>,
-        op: IRBoolOp,
-    },
-}
-
-/// Constant value types supported in the IR
-#[derive(Debug, Clone)]
-pub enum IRConstant {
-    Int(i32),
-    Float(f64),
-    Bool(bool),
-    String(String),
-}
-
-/// Binary operators in the IR
-#[derive(Debug, Clone)]
-pub enum IROp {
-    Add,     // +
-    Sub,     // -
-    Mul,     // *
-    Div,     // /
-    Mod,     // %
-    FloorDiv, // //
-    Pow,     // **
-}
-
-/// Unary operators in the IR
-#[derive(Debug, Clone)]
-pub enum IRUnaryOp {
-    Neg, // -x
-    Not, // not x
-}
-
-/// Comparison operators in the IR
-#[derive(Debug, Clone)]
-pub enum IRCompareOp {
-    Eq,    // ==
-    NotEq, // !=
-    Lt,    // <
-    LtE,   // <=
-    Gt,    // >
-    GtE,   // >=
-}
-
-/// Boolean operators in the IR
-#[derive(Debug, Clone)]
-pub enum IRBoolOp {
-    And, // and
-    Or,  // or
-}
 
 /// Lower a Python AST (Suite) into our IR.
 pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
@@ -134,7 +22,9 @@ pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
             functions.push(IRFunction { name, params, body });
         } else {
             // For now, we only handle function definitions at the module level
-            return Err(anyhow::anyhow!("Only function definitions are supported at the module level"));
+            return Err(anyhow::anyhow!(
+                "Only function definitions are supported at the module level"
+            ));
         }
     }
 
@@ -211,7 +101,7 @@ fn lower_function_body(stmts: &[Stmt]) -> Result<IRBody> {
 }
 
 /// Lower a Python expression into an IR expression
-fn lower_expr(expr: &Expr) -> Result<IRExpr> {
+pub fn lower_expr(expr: &Expr) -> Result<IRExpr> {
     match expr {
         Expr::BinOp(binop) => {
             let op = match &binop.op {
@@ -312,7 +202,9 @@ fn lower_expr(expr: &Expr) -> Result<IRExpr> {
             // Special handling for certain built-in functions
             if function_name == "int" {
                 if call.args.len() != 1 {
-                    return Err(anyhow::anyhow!("int() function expects exactly one argument"));
+                    return Err(anyhow::anyhow!(
+                        "int() function expects exactly one argument"
+                    ));
                 }
 
                 // For 'int(x)', we'll treat it as a special case
