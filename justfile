@@ -22,10 +22,16 @@ build-examples:
 
 # Run all examples
 examples:
-    cargo run --example compiler
-    cargo run --example flexible_compiler -- examples/test_add.py
-    cargo run --example flexible_compiler -- examples/test_sub.py
-    cargo run --example flexible_compiler -- examples/test_mul.py
+    @echo "Running simple compiler example..."
+    cargo run --example simple_compiler
+    
+    @echo "\nRunning advanced compiler examples..."
+    cargo run --example advanced_compiler examples/basic_operations.py
+    cargo run --example advanced_compiler examples/control_flow.py --metadata
+    cargo run --example advanced_compiler examples/typed_demo.py --html
+    
+    @echo "\nRunning multi-file compiler example..."
+    cargo run --example multi_file_compiler examples/combined.wasm examples/basic_operations.py examples/calculator.py
 
 # Run tests
 test:
@@ -62,9 +68,7 @@ github-release title="":
     
     if command -v gh >/dev/null 2>&1; then
       echo "Creating GitHub release using the GitHub CLI..."
-      gh release create "v$VERSION" \
-        --title "$RELEASE_TITLE" \
-        --generate-notes
+      gh release create "v$VERSION"
     else
       ENCODED_TITLE=$(echo "$RELEASE_TITLE" | sed 's/ /%20/g')
       echo "GitHub CLI not found. Please install it or create the release manually at:"
@@ -79,6 +83,8 @@ publish: prepare-release
 # Clean the project
 clean:
     cargo clean
+    rm examples/*.wasm || true
+    rm examples/*.html || true
 
 # Generate documentation
 docs:
@@ -94,9 +100,13 @@ prepare-release: format lint build test check-publish
 
 # Compile a specific Python file to WebAssembly
 compile file:
-    cargo run --example flexible_compiler -- {{file}}
+    cargo run --example advanced_compiler {{file}}
 
 # Compile a specific Python file and show size optimization
 optimize file:
     @echo "Compiling {{file}} with optimization..."
-    @cargo run --example flexible_compiler -- {{file}}
+    @cargo run --example advanced_compiler {{file}} --metadata
+
+# Compile multiple Python files to a single WebAssembly module
+compile-multi output file1 file2:
+    cargo run --example multi_file_compiler {{output}} {{file1}} {{file2}}

@@ -1,6 +1,6 @@
 [package]
 name = "chakrapy"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 description = "A Python interpreter written in Rust, designed for WebAssembly."
 license = "MIT OR Apache-2.0"
@@ -15,6 +15,8 @@ rustpython-parser = "0.4.0"
 wasm-encoder = "0.229.0"
 anyhow = "1.0"
 binaryen = "0.12.0"
+thiserror = "1.0"
+log = "0.4"
 
 [lib]
 name = "chakrapy"
@@ -22,9 +24,13 @@ path = "src/lib.rs"
 
 # Examples
 [[example]]
-name = "compiler"
-path = "examples/compiler.rs"
+name = "simple_compiler"
+path = "examples/simple_compiler.rs"
 
 [[example]]
-name = "flexible_compiler"
-path = "examples/flexible_compiler.rs"
+name = "advanced_compiler"
+path = "examples/advanced_compiler.rs"
+
+[[example]]
+name = "multi_file_compiler"
+path = "examples/multi_file_compiler.rs"

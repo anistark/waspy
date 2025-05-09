@@ -5,6 +5,7 @@ pkg
 
 # testing
 examples/*.wasm
+examples/*.html
 
 # MacOS
 .DS_Store

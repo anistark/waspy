@@ -52,12 +52,27 @@ ChakraPy follows a modular structure:
 chakrapy/
 ├── src/
 │   ├── lib.rs        - Main library entry point
+│   ├── errors.rs     - Error handling
 │   ├── parser.rs     - Python parsing using RustPython
-│   ├── ir\           - Intermediate representation
-│   ├── compiler\     - WASM generation using wasm-encoder
+│   ├── ir/           - Intermediate representation
+│   │   ├── mod.rs    - IR module exports
+│   │   ├── types.rs  - IR data structures
+│   │   └── converter.rs - AST to IR conversion
+│   ├── compiler/     - WASM generation using wasm-encoder
+│   │   ├── mod.rs    - Compiler module exports
+│   │   ├── context.rs - Compilation context
+│   │   ├── expression.rs - Expression compilation
+│   │   ├── function.rs - Function compilation
+│   │   └── module.rs - Module compilation
 │   └── optimizer.rs  - WASM optimization using Binaryen
 ├── examples/
-│   └── ...           - All examples here
+│   ├── basic_operations.py  - Simple arithmetic operations
+│   ├── control_flow.py      - Control flow examples 
+│   ├── typed_demo.py        - Type system demonstration
+│   ├── calculator.py        - Calculator using basic_operations.py functions
+│   ├── simple_compiler.rs   - Basic compiler usage
+│   ├── advanced_compiler.rs - Advanced compiler with options
+│   └── multi_file_compiler.rs - Multi-file compilation
 └── Cargo.toml        - Project configuration
 ```
 
@@ -83,33 +98,40 @@ just build-examples
 
 ### Running Examples
 
-ChakraPy includes examples to demonstrate its functionality:
+ChakraPy includes several examples to demonstrate its functionality:
 
-#### Basic Example
+#### Simple Compiler Example
 
-Compiles a predefined addition function and compares optimized vs. unoptimized output:
+Compiles a basic operations Python file to WebAssembly:
 
 ```sh
-cargo run --example compiler
+cargo run --example simple_compiler
 ```
 
-#### Flexible Compiler
+#### Advanced Compiler Example
 
-Compiles any Python file you specify:
+A more flexible compiler with various options:
 
 ```sh
-# With optimization (default)
-cargo run --example flexible_compiler -- examples/test_add.py
+# Compile with optimization (default)
+cargo run --example advanced_compiler examples/typed_demo.py
 
 # Without optimization
-cargo run --example flexible_compiler -- examples/test_add.py --no-optimize
+cargo run --example advanced_compiler examples/typed_demo.py --no-optimize
+
+# Show function metadata
+cargo run --example advanced_compiler examples/typed_demo.py --metadata
+
+# Generate an HTML test harness
+cargo run --example advanced_compiler examples/typed_demo.py --html
 ```
 
-Other examples:
+#### Multi-File Compiler Example
+
+Compiles multiple Python files into a single WebAssembly module:
+
 ```sh
-cargo run --example flexible_compiler -- examples/test_sub.py
-cargo run --example flexible_compiler -- examples/test_mul.py
-cargo run --example flexible_compiler -- examples/test_control_flow.py
+cargo run --example multi_file_compiler combined.wasm examples/basic_operations.py examples/calculator.py
 ```
 
 You can also use the justfile to run all examples:
@@ -122,7 +144,7 @@ just examples
 Create a Python file with functions that use the supported features:
 
 ```python
-def factorial(n):
+def factorial(n: int) -> int:
     result = 1
     i = 1
     while i <= n:
@@ -130,7 +152,7 @@ def factorial(n):
         i = i + 1
     return result
 
-def max_num(a, b):
+def max_num(a: float, b: float) -> float:
     if a > b:
         return a
     else:
@@ -140,7 +162,7 @@ def max_num(a, b):
 Then compile it:
 
 ```sh
-cargo run --example flexible_compiler -- path/to/your_function.py
+cargo run --example advanced_compiler path/to/your_function.py
 ```
 
 Or use the justfile shortcut:
@@ -233,6 +255,11 @@ ChakraPy follows Rust's standard coding conventions:
    - Start with a short summary line
    - Use the imperative mood ("Add feature" not "Added feature")
 
+5. **Error Handling**
+   - Use the error handling system in `errors.rs`
+   - Include context information where possible
+   - Propagate errors using `?` operator with context
+
 ## Release Process
 
 Releases are handled by the maintainers. The process is:
@@ -267,36 +294,14 @@ To verify the generated WebAssembly, you can use:
      // Call the factorial function
      console.log(instance.exports.factorial(5)); // Should output 120
      
-     // Call the fibonacci function
-     console.log(instance.exports.fibonacci(10)); // Should output 55
-     
      // Call the max_num function
      console.log(instance.exports.max_num(42, 17)); // Should output 42
    });
    ```
 
 3. **Browser**:
-   ```html
-   <!DOCTYPE html>
-   <html>
-   <head>
-     <title>ChakraPy WASM Test</title>
-   </head>
-   <body>
-     <script>
-       (async () => {
-         const response = await fetch('your_file.wasm');
-         const bytes = await response.arrayBuffer();
-         const { instance } = await WebAssembly.instantiate(bytes);
-         
-         // Call the exported functions
-         console.log(instance.exports.factorial(5));
-         console.log(instance.exports.fibonacci(10));
-       })();
-     </script>
-   </body>
-   </html>
-   ```
+   You can use the HTML test files generated by the `advanced_compiler` or `multi_file_compiler` examples
+   with the `--html` flag, or create your own HTML harness following those examples.
 
 ## Community
 
