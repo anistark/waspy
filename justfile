@@ -32,6 +32,9 @@ examples:
     
     @echo "\nRunning multi-file compiler example..."
     cargo run --example multi_file_compiler examples/combined.wasm examples/basic_operations.py examples/calculator.py
+    
+    @echo "\nRunning project compilation example..."
+    cargo run --example compile_project
 
 # Run tests
 test:
@@ -110,3 +113,13 @@ optimize file:
 # Compile multiple Python files to a single WebAssembly module
 compile-multi output file1 file2:
     cargo run --example multi_file_compiler {{output}} {{file1}} {{file2}}
+
+# Compile a Python project directory to WebAssembly
+compile-project dir output="project.wasm":
+    @echo "Compiling project {{dir}} to {{output}}..."
+    @cargo run --example compile_project {{dir}} {{output}}
+
+# Run project metadata analysis without compilation
+project-info dir:
+    @echo "Analyzing project {{dir}}..."
+    @cargo run --example project_metadata {{dir}}

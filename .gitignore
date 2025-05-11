@@ -9,3 +9,6 @@ examples/*.html
 
 # MacOS
 .DS_Store
+
+# Custom
+NOTES.md

@@ -1,6 +1,6 @@
 [package]
 name = "chakrapy"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "A Python interpreter written in Rust, designed for WebAssembly."
 license = "MIT OR Apache-2.0"
@@ -34,3 +34,11 @@ path = "examples/advanced_compiler.rs"
 [[example]]
 name = "multi_file_compiler"
 path = "examples/multi_file_compiler.rs"
+
+[[example]]
+name = "compile_project"
+path = "examples/compile_project.rs"
+
+[[example]]
+name = "project_metadata"
+path = "examples/project_metadata.rs"
