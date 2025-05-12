@@ -1,6 +1,9 @@
 /// Intermediate Representation (IR) for a module containing multiple functions
 pub struct IRModule {
     pub functions: Vec<IRFunction>,
+    pub variables: Vec<IRVariable>, // New: Module-level variables
+    pub imports: Vec<IRImport>,     // New: Module-level imports
+    pub classes: Vec<IRClass>,      // New: Module-level classes
 }
 
 /// IR representation of a function
@@ -9,12 +12,14 @@ pub struct IRFunction {
     pub params: Vec<IRParam>,
     pub body: IRBody,
     pub return_type: IRType,
+    pub decorators: Vec<String>, // New: Function decorators
 }
 
 /// IR representation of a function parameter
 pub struct IRParam {
     pub name: String,
     pub param_type: IRType,
+    pub default_value: Option<IRExpr>, // New: Default parameter values
 }
 
 /// IR representation of a function body, which can contain multiple statements
@@ -40,6 +45,69 @@ pub enum IRStatement {
         body: Box<IRBody>,
     },
     Expression(IRExpr),
+    TryExcept {
+        try_body: Box<IRBody>,
+        except_handlers: Vec<IRExceptHandler>,
+        finally_body: Option<Box<IRBody>>,
+    },
+    For {
+        target: String,
+        iterable: IRExpr,
+        body: Box<IRBody>,
+        else_body: Option<Box<IRBody>>,
+    },
+    With {
+        context_expr: IRExpr,
+        optional_vars: Option<String>,
+        body: Box<IRBody>,
+    },
+    // New variants for object-oriented programming
+    AttributeAssign {
+        object: IRExpr,
+        attribute: String,
+        value: IRExpr,
+    },
+    AugAssign {
+        target: String,
+        value: IRExpr,
+        op: IROp,
+    },
+    AttributeAugAssign {
+        object: IRExpr,
+        attribute: String,
+        value: IRExpr,
+        op: IROp,
+    },
+}
+
+/// New: Except handler for try-except statements
+pub struct IRExceptHandler {
+    pub exception_type: Option<String>,
+    pub name: Option<String>,
+    pub body: IRBody,
+}
+
+/// New: Module-level variable
+pub struct IRVariable {
+    pub name: String,
+    pub value: IRExpr,
+    pub var_type: Option<IRType>,
+}
+
+/// New: Module-level import
+pub struct IRImport {
+    pub module: String,
+    pub name: Option<String>,
+    pub alias: Option<String>,
+    pub is_from_import: bool,
+}
+
+/// New: Class definition
+pub struct IRClass {
+    pub name: String,
+    pub bases: Vec<String>,
+    pub methods: Vec<IRFunction>,
+    pub class_vars: Vec<IRVariable>,
 }
 
 /// Expression types in the intermediate representation
@@ -83,6 +151,19 @@ pub enum IRExpr {
         object: Box<IRExpr>,
         attribute: String,
     },
+    // New expressions
+    ListComp {
+        // [expr for x in iterable]
+        expr: Box<IRExpr>,
+        var_name: String,
+        iterable: Box<IRExpr>,
+    },
+    MethodCall {
+        // object.method(args)
+        object: Box<IRExpr>,
+        method_name: String,
+        arguments: Vec<IRExpr>,
+    },
 }
 
 /// Constant value types supported in the IR
@@ -93,6 +174,10 @@ pub enum IRConstant {
     Bool(bool),
     String(String),
     None,
+    // New constants
+    List(Vec<IRConstant>),
+    Dict(Vec<(IRConstant, IRConstant)>),
+    Tuple(Vec<IRConstant>),
 }
 
 /// Type system for IR
@@ -107,6 +192,11 @@ pub enum IRType {
     Any,
     None,
     Unknown,
+    // New types
+    Tuple(Vec<IRType>),
+    Optional(Box<IRType>),
+    Union(Vec<IRType>),
+    Class(String),
 }
 
 /// Binary operators in the IR
@@ -119,6 +209,13 @@ pub enum IROp {
     Mod,      // %
     FloorDiv, // //
     Pow,      // **
+    // New operators
+    MatMul, // @
+    LShift, // <<
+    RShift, // >>
+    BitOr,  // |
+    BitXor, // ^
+    BitAnd, // &
 }
 
 /// Unary operators in the IR
@@ -126,6 +223,9 @@ pub enum IROp {
 pub enum IRUnaryOp {
     Neg, // -x
     Not, // not x
+    // New unary operators
+    Invert, // ~x
+    UAdd,   // +x
 }
 
 /// Comparison operators in the IR
@@ -137,6 +237,11 @@ pub enum IRCompareOp {
     LtE,   // <=
     Gt,    // >
     GtE,   // >=
+    // New comparison operators
+    In,    // in
+    NotIn, // not in
+    Is,    // is
+    IsNot, // is not
 }
 
 /// Boolean operators in the IR
@@ -180,5 +285,17 @@ impl MemoryLayout {
         self.next_string_offset += (s.len() + 1) as u32;
 
         offset
+    }
+}
+
+impl IRModule {
+    /// Create a new empty module
+    pub fn new() -> Self {
+        IRModule {
+            functions: Vec::new(),
+            variables: Vec::new(),
+            imports: Vec::new(),
+            classes: Vec::new(),
+        }
     }
 }

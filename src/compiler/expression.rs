@@ -47,6 +47,21 @@ pub fn emit_expr(
                     func.instruction(&Instruction::I32Const(0));
                     IRType::None
                 }
+                IRConstant::List(_) => {
+                    // Temporary implementation - return a default list
+                    func.instruction(&Instruction::I32Const(0));
+                    IRType::List(Box::new(IRType::Unknown))
+                }
+                IRConstant::Dict(_) => {
+                    // Temporary implementation - return a default dict
+                    func.instruction(&Instruction::I32Const(0));
+                    IRType::Dict(Box::new(IRType::Unknown), Box::new(IRType::Unknown))
+                }
+                IRConstant::Tuple(_) => {
+                    // Temporary implementation - return a default value
+                    func.instruction(&Instruction::I32Const(0));
+                    IRType::Tuple(vec![IRType::Unknown])
+                }
             }
         }
         IRExpr::Param(name) | IRExpr::Variable(name) => {
@@ -102,6 +117,15 @@ pub fn emit_expr(
                     IROp::Pow => {
                         emit_float_power_operation(func);
                     }
+                    // New operations - placeholder implementations
+                    IROp::MatMul => {
+                        // Matrix multiplication not supported yet for floats
+                        func.instruction(&Instruction::F64Const(0.0));
+                    }
+                    IROp::LShift | IROp::RShift | IROp::BitOr | IROp::BitXor | IROp::BitAnd => {
+                        // Bitwise operations not supported for floats
+                        func.instruction(&Instruction::F64Const(0.0));
+                    }
                 }
                 IRType::Float
             } else {
@@ -127,6 +151,26 @@ pub fn emit_expr(
                     }
                     IROp::Pow => {
                         emit_integer_power_operation(func);
+                    }
+                    // New operations
+                    IROp::MatMul => {
+                        // Not implemented yet for integers
+                        func.instruction(&Instruction::I32Const(0));
+                    }
+                    IROp::LShift => {
+                        func.instruction(&Instruction::I32Shl);
+                    }
+                    IROp::RShift => {
+                        func.instruction(&Instruction::I32ShrS);
+                    }
+                    IROp::BitOr => {
+                        func.instruction(&Instruction::I32Or);
+                    }
+                    IROp::BitXor => {
+                        func.instruction(&Instruction::I32Xor);
+                    }
+                    IROp::BitAnd => {
+                        func.instruction(&Instruction::I32And);
                     }
                 }
                 IRType::Int
@@ -164,6 +208,14 @@ pub fn emit_expr(
                             func.instruction(&Instruction::I32Const(1));
                             func.instruction(&Instruction::I32Xor);
                         }
+                        IRUnaryOp::Invert => {
+                            // Not meaningful for floats
+                            func.instruction(&Instruction::Drop);
+                            func.instruction(&Instruction::F64Const(0.0));
+                        }
+                        IRUnaryOp::UAdd => {
+                            // No-op for floats
+                        }
                     }
                     if matches!(op, IRUnaryOp::Not) {
                         IRType::Bool
@@ -188,6 +240,16 @@ pub fn emit_expr(
                             func.instruction(&Instruction::I32Const(1));
                             func.instruction(&Instruction::I32Xor);
                             IRType::Bool
+                        }
+                        IRUnaryOp::Invert => {
+                            // Bitwise NOT: ~x
+                            func.instruction(&Instruction::I32Const(-1));
+                            func.instruction(&Instruction::I32Xor);
+                            IRType::Int
+                        }
+                        IRUnaryOp::UAdd => {
+                            // No operation needed for unary +
+                            IRType::Int
                         }
                     }
                 }
@@ -230,6 +292,13 @@ pub fn emit_expr(
                     IRCompareOp::GtE => {
                         func.instruction(&Instruction::F64Ge);
                     }
+                    // New operations
+                    IRCompareOp::In | IRCompareOp::NotIn | IRCompareOp::Is | IRCompareOp::IsNot => {
+                        // These comparisons aren't directly supported for floats in WebAssembly
+                        func.instruction(&Instruction::Drop);
+                        func.instruction(&Instruction::Drop);
+                        func.instruction(&Instruction::I32Const(0));
+                    }
                 }
             } else {
                 // Integer comparisons
@@ -251,6 +320,13 @@ pub fn emit_expr(
                     }
                     IRCompareOp::GtE => {
                         func.instruction(&Instruction::I32GeS);
+                    }
+                    // New operations
+                    IRCompareOp::In | IRCompareOp::NotIn | IRCompareOp::Is | IRCompareOp::IsNot => {
+                        // These operations aren't directly supported in WebAssembly
+                        func.instruction(&Instruction::Drop);
+                        func.instruction(&Instruction::Drop);
+                        func.instruction(&Instruction::I32Const(0));
                     }
                 }
             }
@@ -387,11 +463,33 @@ pub fn emit_expr(
 
             IRType::Unknown
         }
+        IRExpr::ListComp {
+            expr,
+            var_name: _,
+            iterable: _,
+        } => {
+            // Temporary implementation for list comprehension
+            // For now, just evaluate the expression once and wrap it in a list
+            emit_expr(expr, func, ctx, memory_layout, None);
+            func.instruction(&Instruction::I32Const(1)); // Length 1 list
+            IRType::List(Box::new(IRType::Unknown))
+        }
+        IRExpr::MethodCall {
+            object,
+            method_name: _,
+            arguments: _,
+        } => {
+            // Temporary implementation - just evaluate the object and return null
+            emit_expr(object, func, ctx, memory_layout, None);
+            func.instruction(&Instruction::Drop);
+            func.instruction(&Instruction::I32Const(0));
+            IRType::Unknown
+        }
     }
 }
 
 /// Emit WebAssembly instructions for the integer power operation (a ** b)
-fn emit_integer_power_operation(func: &mut Function) {
+pub fn emit_integer_power_operation(func: &mut Function) {
     // Power operation: a ** b
 
     // Save the base value to a local
@@ -452,7 +550,7 @@ fn emit_integer_power_operation(func: &mut Function) {
 }
 
 /// Emit WebAssembly instructions for the float power operation (a ** b)
-fn emit_float_power_operation(func: &mut Function) {
+pub fn emit_float_power_operation(func: &mut Function) {
     // Float power operation
     // TODO: Improve using approximation or call to external function
 
@@ -494,7 +592,7 @@ fn emit_float_power_operation(func: &mut Function) {
 }
 
 /// Emit WebAssembly instructions for float modulo operation (a % b)
-fn emit_float_modulo_operation(func: &mut Function) {
+pub fn emit_float_modulo_operation(func: &mut Function) {
     // Float modulo: a % b = a - b * floor(a / b)
 
     // Stack starts with: a b

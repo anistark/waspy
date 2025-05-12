@@ -11,6 +11,9 @@ fn ir_type_to_wasm_type(ir_type: &IRType) -> ValType {
     match ir_type {
         IRType::Float => ValType::F64,
         IRType::Int | IRType::Bool | IRType::String => ValType::I32,
+        IRType::Class(_) => ValType::I32, // References to classes are pointers (i32)
+        IRType::List(_) | IRType::Dict(_, _) | IRType::Tuple(_) => ValType::I32, // Collections are pointers
+        IRType::Optional(_) | IRType::Union(_) => ValType::I32, // References to optionals/unions
         _ => ValType::I32,
     }
 }

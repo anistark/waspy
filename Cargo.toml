@@ -42,3 +42,11 @@ path = "examples/compile_project.rs"
 [[example]]
 name = "project_metadata"
 path = "examples/project_metadata.rs"
+
+[[example]]
+name = "extract_functions"
+path = "examples/extract_functions.rs"
+
+[[example]]
+name = "compile_module_level"
+path = "examples/compile_module_level.rs"

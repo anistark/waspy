@@ -20,10 +20,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("No Python modules found in the project.");
     } else {
         println!("\nModules and Functions:");
-        
+
         for (module_name, signatures) in project_metadata {
             println!("\n📦 {}", module_name);
-            
+
             if signatures.is_empty() {
                 println!("  No functions defined in this module.");
             } else {

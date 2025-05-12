@@ -34,7 +34,10 @@ examples:
     cargo run --example multi_file_compiler examples/combined.wasm examples/basic_operations.py examples/calculator.py
     
     @echo "\nRunning project compilation example..."
-    cargo run --example compile_project
+    cargo run --example compile_project examples/calculator_project
+    
+    @echo "\nRunning module-level code example..."
+    cargo run --example compile_module_level
 
 # Run tests
 test:
@@ -123,3 +126,18 @@ compile-project dir output="project.wasm":
 project-info dir:
     @echo "Analyzing project {{dir}}..."
     @cargo run --example project_metadata {{dir}}
+
+# Extract functions from Python files
+extract-functions dir output="extracted_functions.py":
+    @echo "Extracting functions from Python files in {{dir}}..."
+    @cargo run --example extract_functions {{dir}} {{output}}
+
+# Compile extracted functions to WebAssembly
+compile-extracted file output="extracted_functions.wasm":
+    @echo "Compiling extracted functions from {{file}}..."
+    @cargo run --example advanced_compiler {{file}} {{output}} --html
+
+# Compile module-level code example
+compile-module-level:
+    @echo "Compiling module-level code example..."
+    @cargo run --example compile_module_level

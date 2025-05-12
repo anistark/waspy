@@ -11,7 +11,7 @@ use std::time::Instant;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command-line arguments
     let args: Vec<String> = env::args().collect();
-    
+
     let (project_path, output_path) = if args.len() >= 3 {
         // Use command-line arguments
         (Path::new(&args[1]), Path::new(&args[2]))
@@ -32,8 +32,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Check if project directory exists
     if !project_path.exists() || !project_path.is_dir() {
-        eprintln!("Error: The project directory '{}' does not exist or is not a directory", 
-                 project_path.display());
+        eprintln!(
+            "Error: The project directory '{}' does not exist or is not a directory",
+            project_path.display()
+        );
         return Ok(());
     }
 
@@ -55,7 +57,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Write the WebAssembly to a file
     fs::write(output_path, &wasm_binary)?;
     println!("WebAssembly binary size: {} bytes", wasm_binary.len());
-    println!("Successfully wrote WebAssembly to {}", output_path.display());
+    println!(
+        "Successfully wrote WebAssembly to {}",
+        output_path.display()
+    );
 
     // Print the project structure
     println!("\nProject structure:");
@@ -68,13 +73,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Recursively print the directory structure for better visualization
 fn print_dir_structure(dir: &Path, indent: usize) -> Result<(), Box<dyn std::error::Error>> {
     let prefix = "  ".repeat(indent);
-    
-    println!("{}📂 {}", prefix, dir.file_name().unwrap_or_default().to_string_lossy());
-    
+
+    println!(
+        "{}📂 {}",
+        prefix,
+        dir.file_name().unwrap_or_default().to_string_lossy()
+    );
+
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        
+
         if path.is_dir() {
             // Skip __pycache__ and hidden directories
             let dir_name = path.file_name().unwrap_or_default().to_string_lossy();
@@ -89,6 +98,6 @@ fn print_dir_structure(dir: &Path, indent: usize) -> Result<(), Box<dyn std::err
             );
         }
     }
-    
+
     Ok(())
 }
