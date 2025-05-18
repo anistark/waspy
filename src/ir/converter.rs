@@ -18,9 +18,10 @@ pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
                 } else {
                     IRType::Unknown
                 };
-                
+
                 // Extract decorators if any
-                let decorators = fundef.decorator_list
+                let decorators = fundef
+                    .decorator_list
                     .iter()
                     .filter_map(|dec| {
                         if let Expr::Name(name) = dec {
@@ -30,9 +31,9 @@ pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
                         }
                     })
                     .collect();
-                
+
                 let body = lower_function_body(&fundef.body, &mut memory_layout)?;
-                
+
                 module.functions.push(IRFunction {
                     name,
                     params,
@@ -87,9 +88,10 @@ pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
 fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Result<IRClass> {
     if let Stmt::ClassDef(classdef) = stmt {
         let name = classdef.name.to_string();
-        
+
         // Extract base classes
-        let bases = classdef.bases
+        let bases = classdef
+            .bases
             .iter()
             .filter_map(|base| {
                 if let Expr::Name(name) = base {
@@ -99,10 +101,10 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
                 }
             })
             .collect();
-        
+
         let mut methods = Vec::new();
         let mut class_vars = Vec::new();
-        
+
         // Process class body
         for stmt in &classdef.body {
             match stmt {
@@ -115,8 +117,9 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
                     } else {
                         IRType::Unknown
                     };
-                    
-                    let decorators = method_def.decorator_list
+
+                    let decorators = method_def
+                        .decorator_list
                         .iter()
                         .filter_map(|dec| {
                             if let Expr::Name(name) = dec {
@@ -126,9 +129,9 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
                             }
                         })
                         .collect();
-                    
+
                     let body = lower_function_body(&method_def.body, memory_layout)?;
-                    
+
                     methods.push(IRFunction {
                         name: method_name,
                         params,
@@ -154,7 +157,7 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
                 }
             }
         }
-        
+
         Ok(IRClass {
             name,
             bases,
@@ -167,7 +170,10 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
 }
 
 /// Process a module-level assignment
-fn process_module_level_assign(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Result<Option<IRVariable>> {
+fn process_module_level_assign(
+    stmt: &Stmt,
+    memory_layout: &mut MemoryLayout,
+) -> Result<Option<IRVariable>> {
     if let Stmt::Assign(assign) = stmt {
         // Handle only simple assignments for now (single target)
         if assign.targets.len() != 1 {
@@ -192,7 +198,10 @@ fn process_module_level_assign(stmt: &Stmt, memory_layout: &mut MemoryLayout) ->
 }
 
 /// Process a module-level typed assignment
-fn process_module_level_ann_assign(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Result<Option<IRVariable>> {
+fn process_module_level_ann_assign(
+    stmt: &Stmt,
+    memory_layout: &mut MemoryLayout,
+) -> Result<Option<IRVariable>> {
     if let Stmt::AnnAssign(ann_assign) = stmt {
         let target = match &*ann_assign.target {
             Expr::Name(name) => name.id.to_string(),
@@ -230,11 +239,11 @@ fn process_module_level_ann_assign(stmt: &Stmt, memory_layout: &mut MemoryLayout
 fn process_import(stmt: &Stmt) -> Result<Vec<IRImport>> {
     if let Stmt::Import(import) = stmt {
         let mut imports = Vec::new();
-        
+
         for alias in &import.names {
             let module = alias.name.to_string();
             let alias = alias.asname.as_ref().map(|a| a.to_string());
-            
+
             imports.push(IRImport {
                 module,
                 name: None,
@@ -242,7 +251,7 @@ fn process_import(stmt: &Stmt) -> Result<Vec<IRImport>> {
                 is_from_import: false,
             });
         }
-        
+
         Ok(imports)
     } else {
         Ok(Vec::new())
@@ -253,16 +262,16 @@ fn process_import(stmt: &Stmt) -> Result<Vec<IRImport>> {
 fn process_import_from(stmt: &Stmt) -> Result<Vec<IRImport>> {
     if let Stmt::ImportFrom(import_from) = stmt {
         let mut imports = Vec::new();
-        
+
         let module = match &import_from.module {
             Some(module) => module.to_string(),
             None => return Ok(imports), // Skip relative imports for now
         };
-        
+
         for alias in &import_from.names {
             let name = alias.name.to_string();
             let alias = alias.asname.as_ref().map(|a| a.to_string());
-            
+
             imports.push(IRImport {
                 module: module.clone(),
                 name: Some(name),
@@ -270,7 +279,7 @@ fn process_import_from(stmt: &Stmt) -> Result<Vec<IRImport>> {
                 is_from_import: true,
             });
         }
-        
+
         Ok(imports)
     } else {
         Ok(Vec::new())
@@ -280,17 +289,15 @@ fn process_import_from(stmt: &Stmt) -> Result<Vec<IRImport>> {
 /// Convert type annotations to IR types
 fn type_annotation_to_ir_type(expr: &Expr) -> Result<IRType> {
     match expr {
-        Expr::Name(name) => {
-            match name.id.as_str() {
-                "int" => Ok(IRType::Int),
-                "float" => Ok(IRType::Float),
-                "bool" => Ok(IRType::Bool),
-                "str" => Ok(IRType::String),
-                "None" => Ok(IRType::None),
-                "Any" => Ok(IRType::Any),
-                _ => Ok(IRType::Class(name.id.to_string())),
-            }
-        }
+        Expr::Name(name) => match name.id.as_str() {
+            "int" => Ok(IRType::Int),
+            "float" => Ok(IRType::Float),
+            "bool" => Ok(IRType::Bool),
+            "str" => Ok(IRType::String),
+            "None" => Ok(IRType::None),
+            "Any" => Ok(IRType::Any),
+            _ => Ok(IRType::Class(name.id.to_string())),
+        },
         Expr::Subscript(subscript) => {
             // Handle generic types like List[int]
             if let Expr::Name(container) = &*subscript.value {
@@ -306,7 +313,9 @@ fn type_annotation_to_ir_type(expr: &Expr) -> Result<IRType> {
                                 let value_type = type_annotation_to_ir_type(&tuple.elts[1])?;
                                 Ok(IRType::Dict(Box::new(key_type), Box::new(value_type)))
                             } else {
-                                Err(anyhow!("Dict type annotation should have exactly 2 elements"))
+                                Err(anyhow!(
+                                    "Dict type annotation should have exactly 2 elements"
+                                ))
                             }
                         } else {
                             Err(anyhow!("Invalid Dict type annotation"))
@@ -324,7 +333,9 @@ fn type_annotation_to_ir_type(expr: &Expr) -> Result<IRType> {
                             }
                             Ok(IRType::Tuple(types))
                         } else {
-                            Ok(IRType::Tuple(vec![type_annotation_to_ir_type(&subscript.slice)?]))
+                            Ok(IRType::Tuple(vec![type_annotation_to_ir_type(
+                                &subscript.slice,
+                            )?]))
                         }
                     }
                     "Union" => {
@@ -361,7 +372,7 @@ fn process_function_params(args: &Arguments) -> Result<Vec<IRParam>> {
             } else {
                 IRType::Unknown
             };
-            
+
             // Check for default value
             let default_value = if let Some(default) = &arg_with_default.default {
                 let mut memory_layout = MemoryLayout::new();
@@ -370,8 +381,8 @@ fn process_function_params(args: &Arguments) -> Result<Vec<IRParam>> {
                 None
             };
 
-            Ok(IRParam { 
-                name, 
+            Ok(IRParam {
+                name,
                 param_type,
                 default_value,
             })
@@ -414,7 +425,7 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                         let object = lower_expr(&attr.value, memory_layout)?;
                         let attribute = attr.attr.to_string();
                         let value = lower_expr(&assign.value, memory_layout)?;
-                        
+
                         ir_statements.push(IRStatement::AttributeAssign {
                             object,
                             attribute,
@@ -471,31 +482,27 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                     rustpython_parser::ast::Operator::BitXor => IROp::BitXor,
                     rustpython_parser::ast::Operator::BitAnd => IROp::BitAnd,
                 };
-                
+
                 // Handle different types of targets
                 match &*aug_assign.target {
                     Expr::Name(name) => {
                         let target = name.id.to_string();
                         let value = lower_expr(&aug_assign.value, memory_layout)?;
-                        
-                        ir_statements.push(IRStatement::AugAssign {
-                            target,
-                            value,
-                            op,
-                        });
-                    },
+
+                        ir_statements.push(IRStatement::AugAssign { target, value, op });
+                    }
                     Expr::Attribute(attr) => {
                         let object = lower_expr(&attr.value, memory_layout)?;
                         let attribute = attr.attr.to_string();
                         let value = lower_expr(&aug_assign.value, memory_layout)?;
-                        
+
                         ir_statements.push(IRStatement::AttributeAugAssign {
                             object,
                             attribute,
                             value,
                             op,
                         });
-                    },
+                    }
                     _ => return Err(anyhow!("Unsupported augmented assignment target")),
                 }
             }
@@ -532,17 +539,24 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                 // Handle for loops (only simple variable target for now)
                 let target = match &*for_stmt.target {
                     Expr::Name(name) => name.id.to_string(),
-                    _ => return Err(anyhow!("Only simple variable targets supported in for loops")),
+                    _ => {
+                        return Err(anyhow!(
+                            "Only simple variable targets supported in for loops"
+                        ))
+                    }
                 };
-                
+
                 let iterable = lower_expr(&for_stmt.iter, memory_layout)?;
                 let body = Box::new(lower_function_body(&for_stmt.body, memory_layout)?);
                 let else_body = if !for_stmt.orelse.is_empty() {
-                    Some(Box::new(lower_function_body(&for_stmt.orelse, memory_layout)?))
+                    Some(Box::new(lower_function_body(
+                        &for_stmt.orelse,
+                        memory_layout,
+                    )?))
                 } else {
                     None
                 };
-                
+
                 ir_statements.push(IRStatement::For {
                     target,
                     iterable,
@@ -553,32 +567,37 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
             Stmt::Try(try_stmt) => {
                 // Handle try-except-finally statements
                 let try_body = Box::new(lower_function_body(&try_stmt.body, memory_layout)?);
-                
+
                 let mut except_handlers = Vec::new();
                 for _handler in &try_stmt.handlers {
                     // Since we don't know the exact structure of ExceptHandler in this version
                     // of rustpython_parser, we'll create a minimal handler with default values
-                    
+
                     // Default values for exception type and name
                     let exception_type = None;
                     let name = None;
-                    
+
                     // Create an empty body since we can't access the actual handler body
-                    let body = IRBody { statements: Vec::new() };
-                    
+                    let body = IRBody {
+                        statements: Vec::new(),
+                    };
+
                     except_handlers.push(IRExceptHandler {
                         exception_type,
                         name,
                         body,
                     });
                 }
-                
+
                 let finally_body = if !try_stmt.finalbody.is_empty() {
-                    Some(Box::new(lower_function_body(&try_stmt.finalbody, memory_layout)?))
+                    Some(Box::new(lower_function_body(
+                        &try_stmt.finalbody,
+                        memory_layout,
+                    )?))
                 } else {
                     None
                 };
-                
+
                 ir_statements.push(IRStatement::TryExcept {
                     try_body,
                     except_handlers,
@@ -590,10 +609,10 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                 if with_stmt.items.len() != 1 {
                     return Err(anyhow!("Only single context manager supported"));
                 }
-                
+
                 let context_item = &with_stmt.items[0];
                 let context_expr = lower_expr(&context_item.context_expr, memory_layout)?;
-                
+
                 // Handle the optional variable
                 let optional_vars = if let Some(var_expr) = &context_item.optional_vars {
                     match &**var_expr {
@@ -603,9 +622,9 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                 } else {
                     None
                 };
-                
+
                 let body = Box::new(lower_function_body(&with_stmt.body, memory_layout)?);
-                
+
                 ir_statements.push(IRStatement::With {
                     context_expr,
                     optional_vars,
@@ -729,23 +748,25 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                     for item in items {
                         match item {
                             rustpython_parser::ast::Constant::Int(i) => {
-                                let i32_value = i.to_string().parse::<i32>()
+                                let i32_value = i
+                                    .to_string()
+                                    .parse::<i32>()
                                     .context("Integer in tuple too large for i32")?;
                                 tuple_items.push(IRConstant::Int(i32_value));
-                            },
+                            }
                             rustpython_parser::ast::Constant::Float(f) => {
                                 tuple_items.push(IRConstant::Float(*f));
-                            },
+                            }
                             rustpython_parser::ast::Constant::Bool(b) => {
                                 tuple_items.push(IRConstant::Bool(*b));
-                            },
+                            }
                             rustpython_parser::ast::Constant::Str(s) => {
                                 memory_layout.add_string(s);
                                 tuple_items.push(IRConstant::String(s.clone()));
-                            },
+                            }
                             rustpython_parser::ast::Constant::None => {
                                 tuple_items.push(IRConstant::None);
-                            },
+                            }
                             _ => return Err(anyhow!("Unsupported constant type in tuple")),
                         }
                     }
@@ -760,7 +781,7 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                 Expr::Name(name) => {
                     // Direct function call like func()
                     let function_name = name.id.to_string();
-                    
+
                     // Type conversion functions like int, float, str
                     let type_conversions = ["int", "float", "str", "bool"];
                     if type_conversions.contains(&function_name.as_str()) {
@@ -771,12 +792,12 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                         }
                         return lower_expr(&call.args[0], memory_layout);
                     }
-                    
+
                     let mut arguments = Vec::new();
                     for arg in &call.args {
                         arguments.push(lower_expr(arg, memory_layout)?);
                     }
-                    
+
                     Ok(IRExpr::FunctionCall {
                         function_name,
                         arguments,
@@ -786,12 +807,12 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                     // Method call like obj.method()
                     let object = Box::new(lower_expr(&attr.value, memory_layout)?);
                     let method_name = attr.attr.to_string();
-                    
+
                     let mut arguments = Vec::new();
                     for arg in &call.args {
                         arguments.push(lower_expr(arg, memory_layout)?);
                     }
-                    
+
                     Ok(IRExpr::MethodCall {
                         object,
                         method_name,
@@ -831,20 +852,26 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
         Expr::ListComp(comp) => {
             // Basic list comprehension support
             if comp.generators.len() != 1 {
-                return Err(anyhow!("Only single generator list comprehensions supported"));
+                return Err(anyhow!(
+                    "Only single generator list comprehensions supported"
+                ));
             }
-            
+
             let generator = &comp.generators[0];
             if generator.ifs.len() > 0 {
                 return Err(anyhow!("List comprehension filters not supported yet"));
             }
-            
+
             // Get target name (only simple variable targets for now)
             let var_name = match &generator.target {
                 Expr::Name(name) => name.id.to_string(),
-                _ => return Err(anyhow!("Only simple variable targets supported in list comprehensions")),
+                _ => {
+                    return Err(anyhow!(
+                        "Only simple variable targets supported in list comprehensions"
+                    ))
+                }
             };
-            
+
             Ok(IRExpr::ListComp {
                 expr: Box::new(lower_expr(&comp.elt, memory_layout)?),
                 var_name,

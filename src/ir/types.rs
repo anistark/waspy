@@ -1,9 +1,10 @@
 /// Intermediate Representation (IR) for a module containing multiple functions
 pub struct IRModule {
     pub functions: Vec<IRFunction>,
-    pub variables: Vec<IRVariable>, // New: Module-level variables
-    pub imports: Vec<IRImport>,     // New: Module-level imports
-    pub classes: Vec<IRClass>,      // New: Module-level classes
+    pub variables: Vec<IRVariable>, // Module-level variables
+    pub imports: Vec<IRImport>,     // Module-level imports
+    pub classes: Vec<IRClass>,      // Module-level classes
+    pub metadata: std::collections::HashMap<String, String>, // Module metadata
 }
 
 /// IR representation of a function
@@ -12,14 +13,14 @@ pub struct IRFunction {
     pub params: Vec<IRParam>,
     pub body: IRBody,
     pub return_type: IRType,
-    pub decorators: Vec<String>, // New: Function decorators
+    pub decorators: Vec<String>, // Function decorators
 }
 
 /// IR representation of a function parameter
 pub struct IRParam {
     pub name: String,
     pub param_type: IRType,
-    pub default_value: Option<IRExpr>, // New: Default parameter values
+    pub default_value: Option<IRExpr>, // Default parameter values
 }
 
 /// IR representation of a function body, which can contain multiple statements
@@ -80,21 +81,21 @@ pub enum IRStatement {
     },
 }
 
-/// New: Except handler for try-except statements
+/// Except handler for try-except statements
 pub struct IRExceptHandler {
     pub exception_type: Option<String>,
     pub name: Option<String>,
     pub body: IRBody,
 }
 
-/// New: Module-level variable
+/// Module-level variable
 pub struct IRVariable {
     pub name: String,
     pub value: IRExpr,
     pub var_type: Option<IRType>,
 }
 
-/// New: Module-level import
+/// Module-level import
 pub struct IRImport {
     pub module: String,
     pub name: Option<String>,
@@ -102,7 +103,7 @@ pub struct IRImport {
     pub is_from_import: bool,
 }
 
-/// New: Class definition
+/// Class definition
 pub struct IRClass {
     pub name: String,
     pub bases: Vec<String>,
@@ -296,6 +297,7 @@ impl IRModule {
             variables: Vec::new(),
             imports: Vec::new(),
             classes: Vec::new(),
+            metadata: std::collections::HashMap::new(),
         }
     }
 }

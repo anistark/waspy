@@ -1,6 +1,6 @@
 use crate::compiler::context::CompilationContext;
-use crate::compiler::expression::{emit_expr, emit_integer_power_operation}; 
-use crate::ir::{IRBody, IRFunction, IRStatement, IRType, MemoryLayout, IROp};
+use crate::compiler::expression::{emit_expr, emit_integer_power_operation};
+use crate::ir::{IRBody, IRFunction, IROp, IRStatement, IRType, MemoryLayout};
 use wasm_encoder::{BlockType, Function, Instruction, ValType};
 
 /// Compile an IR function into a WebAssembly function
@@ -238,74 +238,70 @@ pub fn compile_body(
             }
             IRStatement::AttributeAssign {
                 object,
-                attribute: _,  // Ignore the attribute field for now
+                attribute: _, // Ignore the attribute field for now
                 value,
             } => {
                 // Emit code for the object (get reference)
                 emit_expr(object, func, ctx, memory_layout, None);
-                
+
                 // Store the object reference temporarily
                 func.instruction(&Instruction::LocalSet(ctx.temp_local));
-                
+
                 // Emit code for the value
                 emit_expr(value, func, ctx, memory_layout, None);
-                
+
                 // Store the value temporarily
                 func.instruction(&Instruction::LocalSet(ctx.temp_local + 1));
-                
+
                 // Load the object reference
                 func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                
+
                 // Load the value
                 func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
-                
+
                 // In a real implementation, you would need to:
                 // 1. Get the offset of the attribute in the object
                 // 2. Store the value at that offset
                 // For now, we'll just emit a fake store operation
-                
+
                 // This is a placeholder for actual attribute assignment
                 // TODO: Implement proper object attribute assignment
                 func.instruction(&Instruction::Drop); // Drop the value
                 func.instruction(&Instruction::Drop); // Drop the object reference
-            },
-            
-            IRStatement::AugAssign {
-                target,
-                value,
-                op,
-            } => {
+            }
+
+            IRStatement::AugAssign { target, value, op } => {
                 // Get the local index
                 if let Some(local_idx) = ctx.get_local_index(target) {
                     // Load the current value
                     func.instruction(&Instruction::LocalGet(local_idx));
-                    
+
                     // Emit code for the value to add/multiply/etc.
                     emit_expr(value, func, ctx, memory_layout, None);
-                    
+
                     // Apply the operation (add, multiply, etc.)
                     match op {
-                        IROp::Add => { 
+                        IROp::Add => {
                             func.instruction(&Instruction::I32Add);
-                        },
+                        }
                         IROp::Sub => {
                             func.instruction(&Instruction::I32Sub);
-                        },
+                        }
                         IROp::Mul => {
                             func.instruction(&Instruction::I32Mul);
-                        },
+                        }
                         IROp::Div => {
                             func.instruction(&Instruction::I32DivS);
-                        },
+                        }
                         IROp::Mod => {
                             func.instruction(&Instruction::I32RemS);
-                        },
+                        }
                         IROp::FloorDiv => {
                             func.instruction(&Instruction::I32DivS);
-                        },
+                        }
                         IROp::Pow => {
                             emit_integer_power_operation(func);
-                        },
+                        }
                         // Handle other operations with placeholder implementations
                         _ => {
                             // Default for unimplemented operations
@@ -314,98 +310,113 @@ pub fn compile_body(
                             func.instruction(&Instruction::I32Const(0));
                         }
                     }
-                    
+
                     // Store the result back
                     func.instruction(&Instruction::LocalSet(local_idx));
                 } else {
                     // Variable not found
                     panic!("Variable {} not found in context", target);
                 }
-            },
-            
+            }
+
             IRStatement::AttributeAugAssign {
                 object,
-                attribute: _,  // Ignore the attribute field for now
+                attribute: _, // Ignore the attribute field for now
                 value,
-                op: _,         // Ignore the operation for now
+                op: _, // Ignore the operation for now
             } => {
                 // This is a simplified implementation that doesn't actually perform the operation
                 // It's just a placeholder to get the code to compile
-                
+
                 // Emit code for the object (get reference)
                 emit_expr(object, func, ctx, memory_layout, None);
-                
+
                 // Emit code for the value
                 emit_expr(value, func, ctx, memory_layout, None);
-                
+
                 // For now, just drop the values - we don't have a proper object system
                 func.instruction(&Instruction::Drop);
                 func.instruction(&Instruction::Drop);
-            },
-            
-            IRStatement::For { target, iterable, body, else_body: _ } => {
+            }
+
+            IRStatement::For {
+                target,
+                iterable,
+                body,
+                else_body: _,
+            } => {
                 // This is a simplified implementation that doesn't fully implement Python's for loop
                 // We'll treat it similar to a while loop but we need to initialize the iterator
-                
+
                 // Evaluate the iterable and get its "length" (simplified)
                 emit_expr(iterable, func, ctx, memory_layout, None);
-                
+
                 // Save the iterable (simplified as just an integer count)
-                let local_idx = ctx.get_local_index(target).expect("Target variable not found");
+                let local_idx = ctx
+                    .get_local_index(target)
+                    .expect("Target variable not found");
                 func.instruction(&Instruction::LocalSet(local_idx));
-                
+
                 // Start a loop block
                 func.instruction(&Instruction::Block(BlockType::Empty));
                 func.instruction(&Instruction::Loop(BlockType::Empty));
-                
+
                 // Check if we've reached the end (simplified)
                 func.instruction(&Instruction::LocalGet(local_idx));
                 func.instruction(&Instruction::I32Const(0));
                 func.instruction(&Instruction::I32LeS); // Break if counter <= 0
                 func.instruction(&Instruction::BrIf(1));
-                
+
                 // Execute the loop body
                 compile_body(body, func, ctx, memory_layout);
-                
+
                 // Decrement the counter (simplified)
                 func.instruction(&Instruction::LocalGet(local_idx));
                 func.instruction(&Instruction::I32Const(1));
                 func.instruction(&Instruction::I32Sub);
                 func.instruction(&Instruction::LocalSet(local_idx));
-                
+
                 // Loop back
                 func.instruction(&Instruction::Br(0));
-                
+
                 // End of loop
                 func.instruction(&Instruction::End);
                 func.instruction(&Instruction::End);
-            },
-            
-            IRStatement::TryExcept { try_body, except_handlers: _, finally_body } => {
+            }
+
+            IRStatement::TryExcept {
+                try_body,
+                except_handlers: _,
+                finally_body,
+            } => {
                 // WebAssembly doesn't directly support exceptions yet
                 // So this is a simplified implementation that just executes the try block
                 // and ignores the exception handling
-                
+
                 // Execute the try block
                 compile_body(try_body, func, ctx, memory_layout);
-                
+
                 // If there's a finally block, always execute it
                 if let Some(finally_body) = finally_body {
                     compile_body(finally_body, func, ctx, memory_layout);
                 }
-            },
-            
-            IRStatement::With { context_expr, optional_vars: _, body } => {
+            }
+
+            IRStatement::With {
+                context_expr,
+                optional_vars: _,
+                body,
+            } => {
                 // Similar to try-except, WebAssembly doesn't have direct support for context managers
                 // We'll evaluate the context expression (which might have side effects)
                 // and then just execute the body
-                
+
                 emit_expr(context_expr, func, ctx, memory_layout, None);
                 func.instruction(&Instruction::Drop); // Discard the context manager result
-                
+
                 // Execute the body
                 compile_body(body, func, ctx, memory_layout);
-            },
+            }
         }
     }
 }

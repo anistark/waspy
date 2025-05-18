@@ -1,10 +1,12 @@
 pub mod compiler;
+pub mod config;
 pub mod errors;
 pub mod ir;
 pub mod optimizer;
 pub mod parser;
 pub mod project;
 
+use crate::config::{is_config_file, load_project_config, ProjectConfig};
 use anyhow::{anyhow, Context, Result};
 use std::collections::HashMap;
 use std::fs;
@@ -108,12 +110,136 @@ pub fn compile_multiple_python_files(sources: &[(&str, &str)], optimize: bool) -
     }
 }
 
+/// Compile multiple Python source files into a single WASM binary with config awareness.
+pub fn compile_multiple_python_files_with_config(
+    sources: &[(&str, &str)],
+    optimize: bool,
+    config: &ProjectConfig,
+) -> Result<Vec<u8>> {
+    // Parse and convert each Python source to IR
+    let mut combined_module = crate::ir::IRModule::new();
+    let mut function_names = std::collections::HashSet::new();
+
+    // Set project metadata if available
+    if !config.name.is_empty() {
+        combined_module
+            .metadata
+            .insert("project_name".to_string(), config.name.clone());
+        combined_module
+            .metadata
+            .insert("project_version".to_string(), config.version.clone());
+
+        if let Some(description) = &config.description {
+            combined_module
+                .metadata
+                .insert("project_description".to_string(), description.clone());
+        }
+
+        if let Some(author) = &config.author {
+            combined_module
+                .metadata
+                .insert("project_author".to_string(), author.clone());
+        }
+    }
+
+    for (filename, source) in sources {
+        // Skip incompatible files
+        if is_config_file(filename) {
+            println!("Skipping configuration file: {}", filename);
+            continue;
+        }
+
+        // Skip incompatible files
+        if is_special_python_file(filename) {
+            println!("Skipping special file: {}", filename);
+            continue;
+        }
+
+        // Parse Python to AST
+        let ast = match parser::parse_python(source) {
+            Ok(ast) => ast,
+            Err(e) => {
+                println!("Warning: Failed to parse {}: {}", filename, e);
+                continue;
+            }
+        };
+
+        // Lower AST to IR
+        let ir_module = match ir::lower_ast_to_ir(&ast) {
+            Ok(module) => module,
+            Err(e) => {
+                println!("Warning: Failed to convert {} to IR: {}", filename, e);
+                continue;
+            }
+        };
+
+        // Skip if no functions
+        if ir_module.functions.is_empty() {
+            println!("Skipping file with no functions: {}", filename);
+            continue;
+        }
+
+        // Check for duplicate function names and add functions
+        for func in ir_module.functions {
+            if !function_names.insert(func.name.clone()) {
+                println!(
+                    "Warning: Duplicate function '{}' found in file: {}",
+                    func.name, filename
+                );
+                // Skip the duplicate but continue processing
+            } else {
+                // Add the function
+                combined_module.functions.push(func);
+            }
+        }
+
+        // Add module-level variables and imports
+        combined_module.variables.extend(ir_module.variables);
+        combined_module.imports.extend(ir_module.imports);
+        combined_module.classes.extend(ir_module.classes);
+
+        // Add module-level metadata
+        for (key, value) in ir_module.metadata {
+            combined_module.metadata.insert(key, value);
+        }
+    }
+
+    if combined_module.functions.is_empty() {
+        return Err(anyhow!(
+            "No valid functions found in any of the provided files"
+        ));
+    }
+
+    // Generate WASM binary from the combined module
+    let raw_wasm = compiler::compile_ir_module(&combined_module);
+
+    // Optimize the WASM binary
+    if optimize {
+        optimizer::optimize_wasm(&raw_wasm).context("Failed to optimize WebAssembly binary")
+    } else {
+        Ok(raw_wasm)
+    }
+}
+
 /// Compile a Python project directory to WebAssembly
 pub fn compile_python_project<P: AsRef<Path>>(project_dir: P, optimize: bool) -> Result<Vec<u8>> {
     // Load and analyze the project
     let project_dir = project_dir.as_ref();
 
     println!("Analyzing project structure...");
+
+    // Load project configuration
+    let config = load_project_config(project_dir)?;
+
+    println!("Project Name: {}", config.name);
+    println!("Project Version: {}", config.version);
+    if let Some(description) = &config.description {
+        println!("Description: {}", description);
+    }
+    if let Some(author) = &config.author {
+        println!("Author: {}", author);
+    }
+
     let files = collect_compilable_python_files(project_dir)?;
 
     if files.is_empty() {
@@ -262,6 +388,7 @@ fn is_special_python_file(filename: &str) -> bool {
         || filename == "setup.py"
         || filename.contains("test")
         || filename.contains("config")
+        || is_config_file(&filename)
 }
 
 /// Check if a Python file contains function definitions
