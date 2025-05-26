@@ -1,9 +1,9 @@
 [package]
 name = "waspy"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2021"
 description = "A Python interpreter written in Rust, designed for WebAssembly."
-license = "MIT OR Apache-2.0"
+license = "MIT"
 repository = "https://github.com/anistark/waspy"
 keywords = ["python", "interpreter", "webassembly"]
 categories = ["compilers", "wasm", "web-programming"]
