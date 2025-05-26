@@ -2,31 +2,6 @@
 //!
 //! Waspy translates Python functions into WebAssembly, allowing Python code
 //! to run in browsers and other WebAssembly environments.
-//!
-//! # Overview
-//!
-//! The compiler follows a pipeline:
-//! 1. Parse Python source code into an AST using RustPython parser
-//! 2. Convert the AST to a custom Intermediate Representation (IR)
-//! 3. Generate WebAssembly code from the IR
-//! 4. Optionally optimize the WebAssembly binary
-//!
-//! # Example
-//!
-//! ```
-//! use waspy::compile_python_to_wasm;
-//!
-//! fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let python_code = r#"
-//!     def add(a: int, b: int) -> int:
-//!         return a + b
-//!     "#;
-//!     
-//!     let wasm = compile_python_to_wasm(python_code)?;
-//!     // Use the WebAssembly binary
-//!     Ok(())
-//! }
-//! ```
 
 pub mod analysis;
 pub mod compiler;
