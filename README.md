@@ -5,6 +5,8 @@ A Python to WebAssembly compiler written in Rust.
 [![Crates.io Version](https://img.shields.io/crates/v/waspy)
 ](https://crates.io/crates/waspy) [![Crates.io Downloads](https://img.shields.io/crates/d/waspy)](https://crates.io/crates/waspy) [![Crates.io Downloads (latest version)](https://img.shields.io/crates/dv/waspy)](https://crates.io/crates/waspy) [![Open Source](https://img.shields.io/badge/open-source-brightgreen)](https://github.com/anistark/waspy) [![Contributors](https://img.shields.io/github/contributors/anistark/waspy)](https://github.com/anistark/waspy/graphs/contributors) ![maintenance-status](https://img.shields.io/badge/maintenance-actively--developed-brightgreen.svg)
 
+![waspy](https://github.com/user-attachments/assets/6bf90045-41c8-45f4-a0c5-0a67bd0c3aa7)
+
 ## Overview
 
 Waspy translates Python functions into WebAssembly. The implementation supports basic arithmetic operations, control flow, and multiple functions with enhanced type support.
