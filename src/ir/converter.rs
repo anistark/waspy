@@ -858,7 +858,7 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
             }
 
             let generator = &comp.generators[0];
-            if generator.ifs.len() > 0 {
+            if !generator.ifs.is_empty() {
                 return Err(anyhow!("List comprehension filters not supported yet"));
             }
 

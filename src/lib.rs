@@ -1,5 +1,6 @@
 pub mod compiler;
 pub mod config;
+pub mod entry_points;
 pub mod errors;
 pub mod ir;
 pub mod optimizer;
@@ -7,6 +8,7 @@ pub mod parser;
 pub mod project;
 
 use crate::config::{is_config_file, load_project_config, ProjectConfig};
+use crate::entry_points::{add_entry_point_to_module, detect_entry_points, EntryPointInfo};
 use anyhow::{anyhow, Context, Result};
 use std::collections::HashMap;
 use std::fs;
@@ -23,7 +25,13 @@ pub fn compile_python_to_wasm_with_options(source: &str, optimize: bool) -> Resu
     let ast = parser::parse_python(source).context("Failed to parse Python code")?;
 
     // Lower AST to IR
-    let ir_module = ir::lower_ast_to_ir(&ast).context("Failed to convert Python AST to IR")?;
+    let mut ir_module = ir::lower_ast_to_ir(&ast).context("Failed to convert Python AST to IR")?;
+
+    // Check for entry points
+    if let Ok(Some(entry_point_info)) = detect_entry_points(source, None) {
+        // Add entry point support if detected
+        add_entry_point_to_module(&mut ir_module, &entry_point_info)?;
+    }
 
     // Generate WASM binary
     let raw_wasm = compiler::compile_ir_module(&ir_module);
@@ -41,12 +49,23 @@ pub fn compile_multiple_python_files(sources: &[(&str, &str)], optimize: bool) -
     // Parse and convert each Python source to IR
     let mut combined_module = crate::ir::IRModule::new();
     let mut function_names = std::collections::HashSet::new();
+    let mut has_entry_point = false;
+    let mut entry_point_info: Option<EntryPointInfo> = None;
 
     for (filename, source) in sources {
         // Skip incompatible files
         if is_special_python_file(filename) {
             println!("Skipping special file: {}", filename);
             continue;
+        }
+
+        // Check for entry points
+        if !has_entry_point {
+            if let Ok(Some(info)) = detect_entry_points(source, Some(Path::new(filename))) {
+                has_entry_point = true;
+                entry_point_info = Some(info);
+                println!("Detected entry point in file: {}", filename);
+            }
         }
 
         // Parse Python to AST
@@ -99,6 +118,13 @@ pub fn compile_multiple_python_files(sources: &[(&str, &str)], optimize: bool) -
         ));
     }
 
+    // Add entry point if one was detected
+    if has_entry_point {
+        if let Some(info) = entry_point_info {
+            add_entry_point_to_module(&mut combined_module, &info)?;
+        }
+    }
+
     // Generate WASM binary from the combined module
     let raw_wasm = compiler::compile_ir_module(&combined_module);
 
@@ -119,6 +145,8 @@ pub fn compile_multiple_python_files_with_config(
     // Parse and convert each Python source to IR
     let mut combined_module = crate::ir::IRModule::new();
     let mut function_names = std::collections::HashSet::new();
+    let mut has_entry_point = false;
+    let mut entry_point_info: Option<EntryPointInfo> = None;
 
     // Set project metadata if available
     if !config.name.is_empty() {
@@ -153,6 +181,15 @@ pub fn compile_multiple_python_files_with_config(
         if is_special_python_file(filename) {
             println!("Skipping special file: {}", filename);
             continue;
+        }
+
+        // Check for entry points
+        if !has_entry_point {
+            if let Ok(Some(info)) = detect_entry_points(source, Some(Path::new(filename))) {
+                has_entry_point = true;
+                entry_point_info = Some(info);
+                println!("Detected entry point in file: {}", filename);
+            }
         }
 
         // Parse Python to AST
@@ -210,6 +247,13 @@ pub fn compile_multiple_python_files_with_config(
         ));
     }
 
+    // Add entry point if one was detected
+    if has_entry_point {
+        if let Some(info) = entry_point_info {
+            add_entry_point_to_module(&mut combined_module, &info)?;
+        }
+    }
+
     // Generate WASM binary from the combined module
     let raw_wasm = compiler::compile_ir_module(&combined_module);
 
@@ -246,6 +290,36 @@ pub fn compile_python_project<P: AsRef<Path>>(project_dir: P, optimize: bool) ->
         return Err(anyhow!("No compilable Python files found in the project"));
     }
 
+    // Look for entry points in the project
+    let mut entry_point_file = None;
+    let mut entry_point_info = None;
+
+    // First, check for __main__.py
+    let main_py_path = project_dir.join("__main__.py");
+    if main_py_path.exists() && main_py_path.is_file() {
+        if let Ok(content) = fs::read_to_string(&main_py_path) {
+            if let Ok(Some(info)) = detect_entry_points(&content, Some(&main_py_path)) {
+                entry_point_file = Some("__main__.py".to_string());
+                entry_point_info = Some(info);
+            }
+        }
+    }
+
+    // If no __main__.py, check other files for entry points
+    if entry_point_info.is_none() {
+        for (path, content) in &files {
+            if let Ok(Some(info)) = detect_entry_points(content, Some(Path::new(path))) {
+                entry_point_file = Some(path.clone());
+                entry_point_info = Some(info);
+                break;
+            }
+        }
+    }
+
+    if let Some(file) = &entry_point_file {
+        println!("Found entry point in file: {}", file);
+    }
+
     println!("Found {} compilable Python files", files.len());
 
     // Convert to the format expected by compile_multiple_python_files
@@ -255,7 +329,15 @@ pub fn compile_python_project<P: AsRef<Path>>(project_dir: P, optimize: bool) ->
         .collect();
 
     // Compile all files together
-    compile_multiple_python_files(&sources, optimize).context("Failed to compile Python project")
+    let result = compile_multiple_python_files_with_config(&sources, optimize, &config)?;
+
+    // If we found an entry point, we might need to add special handling here
+    if entry_point_info.is_some() {
+        // We've already integrated this in compile_multiple_python_files_with_config
+        // But could add any additional entry point processing here
+    }
+
+    Ok(result)
 }
 
 /// Collect Python files that can be compiled to WebAssembly

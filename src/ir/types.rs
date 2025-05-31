@@ -289,6 +289,12 @@ impl MemoryLayout {
     }
 }
 
+impl Default for IRModule {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IRModule {
     /// Create a new empty module
     pub fn new() -> Self {

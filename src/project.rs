@@ -76,7 +76,7 @@ impl PythonProject {
                     if let Some(dep_module) = self.resolve_import(&import_info, module_path) {
                         self.dependencies
                             .entry(module_path.clone())
-                            .or_insert_with(HashSet::new)
+                            .or_default()
                             .insert(dep_module);
                     }
                 }

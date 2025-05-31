@@ -55,14 +55,9 @@ impl ProjectConfig {
         }
 
         let value_part = parts[1].trim();
-        if value_part.starts_with('"') && value_part.ends_with('"') {
-            // Remove quotes and trailing comma if present
-            Some(
-                value_part[1..value_part.len() - 1]
-                    .trim_end_matches(',')
-                    .to_string(),
-            )
-        } else if value_part.starts_with('\'') && value_part.ends_with('\'') {
+        if (value_part.starts_with('"') && value_part.ends_with('"'))
+            || (value_part.starts_with('\'') && value_part.ends_with('\''))
+        {
             // Remove quotes and trailing comma if present
             Some(
                 value_part[1..value_part.len() - 1]
