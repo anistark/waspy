@@ -79,6 +79,11 @@ pub enum IRStatement {
         value: IRExpr,
         op: IROp,
     },
+    // New statement for dynamic imports
+    DynamicImport {
+        target: String,
+        module_name: IRExpr,
+    },
 }
 
 /// Except handler for try-except statements
@@ -96,11 +101,17 @@ pub struct IRVariable {
 }
 
 /// Module-level import
+#[derive(Clone, Debug)]
 pub struct IRImport {
     pub module: String,
     pub name: Option<String>,
     pub alias: Option<String>,
     pub is_from_import: bool,
+    // New fields for enhanced import support
+    pub is_star_import: bool,               // from module import *
+    pub is_conditional: bool,               // in try-except block
+    pub is_dynamic: bool,                   // using importlib or __import__
+    pub conditional_fallbacks: Vec<String>, // Alternative imports in except blocks
 }
 
 /// Class definition
@@ -165,6 +176,11 @@ pub enum IRExpr {
         method_name: String,
         arguments: Vec<IRExpr>,
     },
+    // New expression for dynamic imports
+    DynamicImportExpr {
+        // __import__(module_name) or importlib.import_module(module_name)
+        module_name: Box<IRExpr>,
+    },
 }
 
 /// Constant value types supported in the IR
@@ -198,6 +214,8 @@ pub enum IRType {
     Optional(Box<IRType>),
     Union(Vec<IRType>),
     Class(String),
+    // New type for modules
+    Module(String),
 }
 
 /// Binary operators in the IR

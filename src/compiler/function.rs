@@ -157,7 +157,7 @@ pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
 pub fn compile_body(
     body: &IRBody,
     func: &mut Function,
-    ctx: &CompilationContext,
+    ctx: &mut CompilationContext,
     memory_layout: &MemoryLayout,
 ) {
     for stmt in &body.statements {
@@ -416,6 +416,22 @@ pub fn compile_body(
 
                 // Execute the body
                 compile_body(body, func, ctx, memory_layout);
+            }
+
+            IRStatement::DynamicImport {
+                target,
+                module_name,
+            } => {
+                // Emit code to evaluate the module name expression
+                emit_expr(module_name, func, ctx, memory_layout, None);
+
+                // Get the target local index or create one if it doesn't exist
+                let local_idx = ctx
+                    .get_local_index(target)
+                    .unwrap_or_else(|| ctx.add_local(target, IRType::Unknown));
+
+                // Store the result (currently just a placeholder) in the target variable
+                func.instruction(&Instruction::LocalSet(local_idx));
             }
         }
     }

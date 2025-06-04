@@ -711,6 +711,7 @@ fn type_to_string(ir_type: &crate::ir::IRType) -> String {
             format!("Union[{}]", inner)
         }
         crate::ir::IRType::Class(name) => name.clone(),
+        crate::ir::IRType::Module(name) => format!("Module[{}]", name), // Add handling for Module type
         crate::ir::IRType::None => "None".to_string(),
         crate::ir::IRType::Any => "Any".to_string(),
         crate::ir::IRType::Unknown => "unknown".to_string(),

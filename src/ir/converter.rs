@@ -1,11 +1,14 @@
 use crate::ir::types::*;
 use anyhow::{anyhow, Context, Result};
-use rustpython_parser::ast::{ArgWithDefault, Arguments, Expr, Stmt, Suite};
+use rustpython_parser::ast::{ArgWithDefault, Arguments, ExceptHandler, Expr, Stmt, Suite};
+use std::collections::HashSet;
 
 /// Lower a Python AST (Suite) into our IR.
 pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
     let mut module = IRModule::new();
     let mut memory_layout = MemoryLayout::new();
+    let mut in_try_block = false;
+    let mut conditional_fallbacks = Vec::new();
 
     for stmt in ast {
         match stmt {
@@ -61,19 +64,43 @@ pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
             }
             Stmt::Import(_) => {
                 // Process direct import
-                let imports = process_import(stmt)?;
+                let imports = process_import(stmt, in_try_block, &conditional_fallbacks)?;
                 module.imports.extend(imports);
             }
             Stmt::ImportFrom(_) => {
                 // Process from import
-                let imports = process_import_from(stmt)?;
+                let imports = process_import_from(stmt, in_try_block, &conditional_fallbacks)?;
                 module.imports.extend(imports);
             }
             Stmt::Expr(_) => {
                 // Skip module-level expressions like docstrings
+                // But check for dynamic imports
+                if let Some(dynamic_import) = process_dynamic_import(stmt, &mut memory_layout)? {
+                    module.imports.push(dynamic_import);
+                }
                 continue;
             }
+            Stmt::Try(_) => {
+                // Mark that we're entering a try block to track conditional imports
+                // in_try_block = true;
+
+                // Process try-except blocks for conditional imports
+                let (imports, fallbacks) = process_try_except_imports(stmt)?;
+
+                // Add imports from the try block
+                module.imports.extend(imports);
+
+                // Store fallbacks for except blocks
+                conditional_fallbacks = fallbacks;
+
+                // We're no longer in a try block after processing it
+                in_try_block = false;
+            }
             _ => {
+                // Reset try block state for other statements
+                in_try_block = false;
+                conditional_fallbacks.clear();
+
                 // Ignore other module-level statements for now
                 // But don't error out so we can compile more files
                 continue;
@@ -81,7 +108,185 @@ pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
         }
     }
 
+    // Process circular imports
+    process_circular_imports(&mut module);
+
     Ok(module)
+}
+
+/// Process a dynamic import expression (using __import__ or importlib)
+fn process_dynamic_import(
+    stmt: &Stmt,
+    _memory_layout: &mut MemoryLayout,
+) -> Result<Option<IRImport>> {
+    if let Stmt::Expr(expr_stmt) = stmt {
+        // Properly handle Box<Expr> by dereferencing it first
+        if let Expr::Call(call) = &*expr_stmt.value {
+            match &*call.func {
+                Expr::Name(name) if name.id.to_string() == "__import__" => {
+                    // Handle direct __import__ call
+                    if !call.args.is_empty() {
+                        if let Expr::Constant(constant) = &call.args[0] {
+                            if let rustpython_parser::ast::Constant::Str(module_name) =
+                                &constant.value
+                            {
+                                return Ok(Some(IRImport {
+                                    module: module_name.clone(),
+                                    name: None,
+                                    alias: None,
+                                    is_from_import: false,
+                                    is_star_import: false,
+                                    is_conditional: false,
+                                    is_dynamic: true,
+                                    conditional_fallbacks: Vec::new(),
+                                }));
+                            }
+                        }
+                    }
+                }
+                Expr::Attribute(attr) => {
+                    // Handle importlib.import_module
+                    if let Expr::Name(obj) = &*attr.value {
+                        if obj.id.to_string() == "importlib"
+                            && attr.attr.to_string() == "import_module"
+                            && !call.args.is_empty()
+                        {
+                            if let Expr::Constant(constant) = &call.args[0] {
+                                if let rustpython_parser::ast::Constant::Str(module_name) =
+                                    &constant.value
+                                {
+                                    return Ok(Some(IRImport {
+                                        module: module_name.clone(),
+                                        name: None,
+                                        alias: None,
+                                        is_from_import: false,
+                                        is_star_import: false,
+                                        is_conditional: false,
+                                        is_dynamic: true,
+                                        conditional_fallbacks: Vec::new(),
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Process try-except blocks that may contain conditional imports
+fn process_try_except_imports(stmt: &Stmt) -> Result<(Vec<IRImport>, Vec<String>)> {
+    let mut imports = Vec::new();
+    let mut fallbacks = Vec::new();
+
+    if let Stmt::Try(try_stmt) = stmt {
+        // Process imports in the try block
+        for try_stmt in &try_stmt.body {
+            match try_stmt {
+                Stmt::Import(_) => {
+                    let try_imports = process_import(try_stmt, true, &Vec::new())?;
+                    imports.extend(try_imports);
+                }
+                Stmt::ImportFrom(_) => {
+                    let try_imports = process_import_from(try_stmt, true, &Vec::new())?;
+                    imports.extend(try_imports);
+                }
+                _ => {}
+            }
+        }
+
+        // Collect potential fallback modules from except blocks
+        for handler in &try_stmt.handlers {
+            // Get the handler body - it's a tuple variant in this version
+            let ExceptHandler::ExceptHandler(handler_data) = handler;
+            let _typ = handler_data.type_.as_ref();
+            let _name = handler_data.name.as_ref().map(|n| n.to_string());
+            let body = &handler_data.body;
+            for except_stmt in body {
+                match except_stmt {
+                    Stmt::Import(import) => {
+                        // Only record the module names as fallbacks
+                        for alias in &import.names {
+                            fallbacks.push(alias.name.to_string());
+
+                            // Also add these imports as conditionals
+                            imports.push(IRImport {
+                                module: alias.name.to_string(),
+                                name: None,
+                                alias: alias.asname.as_ref().map(|a| a.to_string()),
+                                is_from_import: false,
+                                is_star_import: false,
+                                is_conditional: true,
+                                is_dynamic: false,
+                                conditional_fallbacks: Vec::new(),
+                            });
+                        }
+                    }
+                    Stmt::ImportFrom(import_from) => {
+                        // Only record the module names as fallbacks
+                        if let Some(module) = &import_from.module {
+                            fallbacks.push(module.to_string());
+
+                            // Also add these imports as conditionals
+                            for alias in &import_from.names {
+                                imports.push(IRImport {
+                                    module: module.to_string(),
+                                    name: Some(alias.name.to_string()),
+                                    alias: alias.asname.as_ref().map(|a| a.to_string()),
+                                    is_from_import: true,
+                                    is_star_import: alias.name.to_string() == "*",
+                                    is_conditional: true,
+                                    is_dynamic: false,
+                                    conditional_fallbacks: Vec::new(),
+                                });
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    Ok((imports, fallbacks))
+}
+
+/// Process circular imports
+fn process_circular_imports(module: &mut IRModule) {
+    let mut imported_modules = HashSet::new();
+    let mut potentially_circular = Vec::new();
+
+    // Collect all module names
+    for import in &module.imports {
+        imported_modules.insert(import.module.clone());
+    }
+
+    // Detect circular imports
+    for (idx, import) in module.imports.iter().enumerate() {
+        for other_import in &module.imports {
+            if import.module == other_import.module {
+                continue;
+            }
+
+            if imported_modules.contains(&other_import.module)
+                && other_import.module == import.module
+            {
+                potentially_circular.push((idx, import.module.clone()));
+                break;
+            }
+        }
+    }
+
+    for (_, module_name) in potentially_circular {
+        module.metadata.insert(
+            format!("circular_import_{}", module_name),
+            "true".to_string(),
+        );
+    }
 }
 
 /// Process a class definition
@@ -236,19 +441,27 @@ fn process_module_level_ann_assign(
 }
 
 /// Process an import statement
-fn process_import(stmt: &Stmt) -> Result<Vec<IRImport>> {
+fn process_import(
+    stmt: &Stmt,
+    is_conditional: bool,
+    conditional_fallbacks: &[String],
+) -> Result<Vec<IRImport>> {
     if let Stmt::Import(import) = stmt {
         let mut imports = Vec::new();
 
         for alias in &import.names {
             let module = alias.name.to_string();
-            let alias = alias.asname.as_ref().map(|a| a.to_string());
+            let alias_name = alias.asname.as_ref().map(|a| a.to_string());
 
             imports.push(IRImport {
                 module,
                 name: None,
-                alias,
+                alias: alias_name,
                 is_from_import: false,
+                is_star_import: false,
+                is_conditional,
+                is_dynamic: false,
+                conditional_fallbacks: conditional_fallbacks.to_vec(),
             });
         }
 
@@ -259,7 +472,11 @@ fn process_import(stmt: &Stmt) -> Result<Vec<IRImport>> {
 }
 
 /// Process a from-import statement
-fn process_import_from(stmt: &Stmt) -> Result<Vec<IRImport>> {
+fn process_import_from(
+    stmt: &Stmt,
+    is_conditional: bool,
+    conditional_fallbacks: &[String],
+) -> Result<Vec<IRImport>> {
     if let Stmt::ImportFrom(import_from) = stmt {
         let mut imports = Vec::new();
 
@@ -268,15 +485,42 @@ fn process_import_from(stmt: &Stmt) -> Result<Vec<IRImport>> {
             None => return Ok(imports), // Skip relative imports for now
         };
 
+        // Handle star imports (from module import *)
+        let _is_star_import = import_from
+            .names
+            .iter()
+            .any(|alias| alias.name.to_string() == "*");
+
         for alias in &import_from.names {
             let name = alias.name.to_string();
-            let alias = alias.asname.as_ref().map(|a| a.to_string());
+
+            // For star imports, we process differently
+            if name == "*" {
+                imports.push(IRImport {
+                    module: module.clone(),
+                    name: Some(name),
+                    alias: None,
+                    is_from_import: true,
+                    is_star_import: true,
+                    is_conditional,
+                    is_dynamic: false,
+                    conditional_fallbacks: conditional_fallbacks.to_vec(),
+                });
+                // Star import should be the only import in this statement
+                break;
+            }
+
+            let alias_name = alias.asname.as_ref().map(|a| a.to_string());
 
             imports.push(IRImport {
                 module: module.clone(),
                 name: Some(name),
-                alias,
+                alias: alias_name,
                 is_from_import: true,
+                is_star_import: false,
+                is_conditional,
+                is_dynamic: false,
+                conditional_fallbacks: conditional_fallbacks.to_vec(),
             });
         }
 
@@ -289,7 +533,7 @@ fn process_import_from(stmt: &Stmt) -> Result<Vec<IRImport>> {
 /// Convert type annotations to IR types
 fn type_annotation_to_ir_type(expr: &Expr) -> Result<IRType> {
     match expr {
-        Expr::Name(name) => match name.id.as_str() {
+        Expr::Name(name) => match name.id.to_string().as_str() {
             "int" => Ok(IRType::Int),
             "float" => Ok(IRType::Float),
             "bool" => Ok(IRType::Bool),
@@ -301,7 +545,7 @@ fn type_annotation_to_ir_type(expr: &Expr) -> Result<IRType> {
         Expr::Subscript(subscript) => {
             // Handle generic types like List[int]
             if let Expr::Name(container) = &*subscript.value {
-                match container.id.as_str() {
+                match container.id.to_string().as_str() {
                     "List" | "list" => {
                         let element_type = type_annotation_to_ir_type(&subscript.slice)?;
                         Ok(IRType::List(Box::new(element_type)))
@@ -532,8 +776,16 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                 ir_statements.push(IRStatement::While { condition, body });
             }
             Stmt::Expr(expr_stmt) => {
-                let expr = lower_expr(&expr_stmt.value, memory_layout)?;
-                ir_statements.push(IRStatement::Expression(expr));
+                // Check for dynamic imports in expressions
+                if let Some(dynamic_import) =
+                    check_for_dynamic_import_expr(&expr_stmt.value, memory_layout)?
+                {
+                    ir_statements.push(dynamic_import);
+                } else {
+                    // Regular expression statement
+                    let expr = lower_expr(&expr_stmt.value, memory_layout)?;
+                    ir_statements.push(IRStatement::Expression(expr));
+                }
             }
             Stmt::For(for_stmt) => {
                 // Handle for loops (only simple variable target for now)
@@ -569,23 +821,32 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                 let try_body = Box::new(lower_function_body(&try_stmt.body, memory_layout)?);
 
                 let mut except_handlers = Vec::new();
-                for _handler in &try_stmt.handlers {
-                    // Since we don't know the exact structure of ExceptHandler in this version
-                    // of rustpython_parser, we'll create a minimal handler with default values
-
-                    // Default values for exception type and name
-                    let exception_type = None;
-                    let name = None;
-
-                    // Create an empty body since we can't access the actual handler body
-                    let body = IRBody {
-                        statements: Vec::new(),
+                for handler in &try_stmt.handlers {
+                    // Get the handler fields using tuple variant pattern matching
+                    let ExceptHandler::ExceptHandler(handler_data) = handler;
+                    let typ = handler_data.type_.as_ref();
+                    let name = handler_data.name.as_ref().map(|n| n.to_string());
+                    let body = &handler_data.body;
+                    // Extract exception type from the type expression
+                    let exception_type = if let Some(typ) = typ {
+                        match &**typ {
+                            Expr::Name(name) => Some(name.id.to_string()),
+                            _ => None,
+                        }
+                    } else {
+                        None
                     };
+
+                    // Extract name if present
+                    let handler_name = name.as_ref().map(|n| n.to_string());
+
+                    // Process the body
+                    let handler_body = lower_function_body(body, memory_layout)?;
 
                     except_handlers.push(IRExceptHandler {
                         exception_type,
-                        name,
-                        body,
+                        name: handler_name,
+                        body: handler_body,
                     });
                 }
 
@@ -631,6 +892,39 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                     body,
                 });
             }
+            Stmt::Import(_) => {
+                // Handle inline imports within functions
+                if let Ok(imports) = process_import(stmt, false, &Vec::new()) {
+                    for import in imports {
+                        // Convert import to a DynamicImport statement
+                        ir_statements.push(IRStatement::DynamicImport {
+                            target: import.alias.unwrap_or_else(|| import.module.clone()),
+                            module_name: IRExpr::Const(IRConstant::String(import.module)),
+                        });
+                    }
+                }
+            }
+            Stmt::ImportFrom(_) => {
+                // Handle inline imports within functions
+                if let Ok(imports) = process_import_from(stmt, false, &Vec::new()) {
+                    for import in imports {
+                        // Only handle simple from imports in functions
+                        if !import.is_star_import && import.name.is_some() {
+                            let module_name = import.module;
+                            let name = import.name.unwrap();
+                            let target = import.alias.unwrap_or_else(|| name.clone());
+
+                            // Create qualified name
+                            let qualified_name = format!("{}.{}", module_name, name);
+
+                            ir_statements.push(IRStatement::DynamicImport {
+                                target,
+                                module_name: IRExpr::Const(IRConstant::String(qualified_name)),
+                            });
+                        }
+                    }
+                }
+            }
             _ => {
                 return Err(anyhow!("Unsupported statement type: {:?}", stmt));
             }
@@ -640,6 +934,50 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
     Ok(IRBody {
         statements: ir_statements,
     })
+}
+
+/// Check for dynamic imports in expressions
+fn check_for_dynamic_import_expr(
+    expr: &Expr,
+    memory_layout: &mut MemoryLayout,
+) -> Result<Option<IRStatement>> {
+    if let Expr::Call(call) = expr {
+        match &*call.func {
+            Expr::Name(name) if name.id.to_string() == "__import__" => {
+                // Handle direct __import__ call
+                if !call.args.is_empty() {
+                    let module_expr = lower_expr(&call.args[0], memory_layout)?;
+
+                    // Check for assignment to this import
+                    // For simplicity, we'll use a generic target name
+                    return Ok(Some(IRStatement::DynamicImport {
+                        target: "_dynamic_import".to_string(),
+                        module_name: module_expr,
+                    }));
+                }
+            }
+            Expr::Attribute(attr) => {
+                // Handle importlib.import_module
+                if let Expr::Name(obj) = &*attr.value {
+                    if obj.id.to_string() == "importlib"
+                        && attr.attr.to_string() == "import_module"
+                        && !call.args.is_empty()
+                    {
+                        let module_expr = lower_expr(&call.args[0], memory_layout)?;
+
+                        // For simplicity, we'll use a generic target name
+                        return Ok(Some(IRStatement::DynamicImport {
+                            target: "_dynamic_import".to_string(),
+                            module_name: module_expr,
+                        }));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(None)
 }
 
 /// Lower a Python expression into an IR expression
@@ -777,6 +1115,33 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
         }
         Expr::Name(name) => Ok(IRExpr::Variable(name.id.to_string())),
         Expr::Call(call) => {
+            // Check for dynamic imports
+            match &*call.func {
+                Expr::Name(name) if name.id.to_string() == "__import__" => {
+                    // Dynamic import using __import__
+                    if !call.args.is_empty() {
+                        return Ok(IRExpr::DynamicImportExpr {
+                            module_name: Box::new(lower_expr(&call.args[0], memory_layout)?),
+                        });
+                    }
+                }
+                Expr::Attribute(attr) => {
+                    // Check for importlib.import_module
+                    if let Expr::Name(obj) = &*attr.value {
+                        if obj.id.to_string() == "importlib"
+                            && attr.attr.to_string() == "import_module"
+                            && !call.args.is_empty()
+                        {
+                            return Ok(IRExpr::DynamicImportExpr {
+                                module_name: Box::new(lower_expr(&call.args[0], memory_layout)?),
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            }
+
+            // Regular function call
             match call.func.as_ref() {
                 Expr::Name(name) => {
                     // Direct function call like func()

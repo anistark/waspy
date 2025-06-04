@@ -485,6 +485,16 @@ pub fn emit_expr(
             func.instruction(&Instruction::I32Const(0));
             IRType::Unknown
         }
+        IRExpr::DynamicImportExpr { module_name } => {
+            // Emit code to evaluate the module name
+            emit_expr(module_name, func, ctx, memory_layout, None);
+
+            // TODO: dynamic imports requires more extensive runtime support
+            func.instruction(&Instruction::Drop); // Drop the module name
+            func.instruction(&Instruction::I32Const(0)); // Return a dummy value
+
+            IRType::Unknown
+        }
     }
 }
 
