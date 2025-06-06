@@ -1,6 +1,5 @@
 pub mod compiler;
 pub mod config;
-pub mod entry_points;
 pub mod errors;
 pub mod ir;
 pub mod optimizer;
@@ -8,7 +7,7 @@ pub mod parser;
 pub mod project;
 
 use crate::config::{is_config_file, load_project_config, ProjectConfig};
-use crate::entry_points::{add_entry_point_to_module, detect_entry_points, EntryPointInfo};
+use crate::ir::{add_entry_point_to_module, detect_entry_points, EntryPointInfo};
 use anyhow::{anyhow, Context, Result};
 use std::collections::HashMap;
 use std::fs;
@@ -26,6 +25,20 @@ pub fn compile_python_to_wasm_with_options(source: &str, optimize: bool) -> Resu
 
     // Lower AST to IR
     let mut ir_module = ir::lower_ast_to_ir(&ast).context("Failed to convert Python AST to IR")?;
+
+    // Process decorators
+    let decorator_registry = ir::DecoratorRegistry::new();
+    ir_module.functions = ir_module
+        .functions
+        .into_iter()
+        .map(|func| {
+            if !func.decorators.is_empty() {
+                decorator_registry.apply_decorators(func)
+            } else {
+                func
+            }
+        })
+        .collect();
 
     // Check for entry points
     if let Ok(Some(entry_point_info)) = detect_entry_points(source, None) {
@@ -117,6 +130,20 @@ pub fn compile_multiple_python_files(sources: &[(&str, &str)], optimize: bool) -
             "No valid functions found in any of the provided files"
         ));
     }
+
+    // Process decorators on the combined module
+    let decorator_registry = ir::DecoratorRegistry::new();
+    combined_module.functions = combined_module
+        .functions
+        .into_iter()
+        .map(|func| {
+            if !func.decorators.is_empty() {
+                decorator_registry.apply_decorators(func)
+            } else {
+                func
+            }
+        })
+        .collect();
 
     // Add entry point if one was detected
     if has_entry_point {

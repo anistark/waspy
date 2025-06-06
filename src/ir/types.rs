@@ -8,6 +8,7 @@ pub struct IRModule {
 }
 
 /// IR representation of a function
+#[derive(Debug, Clone)]
 pub struct IRFunction {
     pub name: String,
     pub params: Vec<IRParam>,
@@ -17,6 +18,7 @@ pub struct IRFunction {
 }
 
 /// IR representation of a function parameter
+#[derive(Debug, Clone)]
 pub struct IRParam {
     pub name: String,
     pub param_type: IRType,
@@ -24,11 +26,13 @@ pub struct IRParam {
 }
 
 /// IR representation of a function body, which can contain multiple statements
+#[derive(Debug, Clone)]
 pub struct IRBody {
     pub statements: Vec<IRStatement>,
 }
 
 /// IR representation of statements
+#[derive(Debug, Clone)]
 pub enum IRStatement {
     Return(Option<IRExpr>),
     Assign {
@@ -87,6 +91,7 @@ pub enum IRStatement {
 }
 
 /// Except handler for try-except statements
+#[derive(Debug, Clone)]
 pub struct IRExceptHandler {
     pub exception_type: Option<String>,
     pub name: Option<String>,
