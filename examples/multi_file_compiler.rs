@@ -1,4 +1,4 @@
-use chakrapy::compile_multiple_python_files;
+use waspy::compile_multiple_python_files;
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -113,7 +113,7 @@ fn generate_html_test_file(wasm_filename: &str) -> String {
         r#"<!DOCTYPE html>
 <html>
 <head>
-    <title>ChakraPy Multi-file Test</title>
+    <title>Waspy Multi-file Test</title>
     <style>
         body {{ font-family: sans-serif; margin: 20px; }}
         .result {{ margin-top: 10px; padding: 10px; background-color: #f0f0f0; }}
@@ -126,7 +126,7 @@ fn generate_html_test_file(wasm_filename: &str) -> String {
     </style>
 </head>
 <body>
-    <h1>ChakraPy Multi-file WebAssembly Test</h1>
+    <h1>Waspy Multi-file WebAssembly Test</h1>
     <p>Module: <code>{}</code></p>
     
     <h2>Available Functions</h2>

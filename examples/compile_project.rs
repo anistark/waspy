@@ -1,4 +1,4 @@
-use chakrapy::compile_python_project;
+use waspy::compile_python_project;
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -23,7 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     };
 
-    println!("ChakraPy Project Compilation Example");
+    println!("Waspy Project Compilation Example");
     println!("Project directory: {}", project_path.display());
     println!("Output file: {}", output_path.display());
 

@@ -1,4 +1,4 @@
-use chakrapy::get_python_project_metadata;
+use waspy::get_python_project_metadata;
 use std::path::Path;
 
 /// Example of extracting metadata from a Python project
@@ -8,7 +8,7 @@ use std::path::Path;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let project_path = Path::new("examples/calculator_project");
 
-    println!("ChakraPy Project Metadata Example");
+    println!("Waspy Project Metadata Example");
     println!("Project directory: {}", project_path.display());
 
     // Get metadata about the project

@@ -1,6 +1,6 @@
-# Contributing to ChakraPy
+# Contributing to Waspy
 
-Thank you for your interest in contributing to ChakraPy! This document provides guidelines and instructions for contributing to the project.
+Thank you for your interest in contributing to Waspy! This document provides guidelines and instructions for contributing to the project.
 
 ![Rust](https://img.shields.io/badge/rust-%23000000.svg?style=for-the-badge&logo=rust&logoColor=white) ![Python](https://img.shields.io/badge/python-3670A0?style=for-the-badge&logo=python&logoColor=ffdd54)
 
@@ -35,8 +35,8 @@ Thank you for your interest in contributing to ChakraPy! This document provides 
 
 2. **Clone the Repository**
    ```sh
-   git clone https://github.com/anistark/chakrapy.git
-   cd chakrapy
+   git clone https://github.com/anistark/waspy.git
+   cd waspy
    ```
 
 3. **Build the Project**
@@ -46,10 +46,10 @@ Thank you for your interest in contributing to ChakraPy! This document provides 
 
 ### Project Structure
 
-ChakraPy follows a modular structure:
+Waspy follows a modular structure:
 
 ```
-chakrapy/
+waspy/
 ├── src/
 │   ├── lib.rs        - Main library entry point
 │   ├── errors.rs     - Error handling
@@ -98,7 +98,7 @@ just build-examples
 
 ### Running Examples
 
-ChakraPy includes several examples to demonstrate its functionality:
+Waspy includes several examples to demonstrate its functionality:
 
 #### Simple Compiler Example
 
@@ -208,7 +208,7 @@ just compile path/to/your_function.py
 
 ### Using Justfile Commands
 
-ChakraPy uses a `justfile` to manage common development tasks:
+Waspy uses a `justfile` to manage common development tasks:
 
 - `just` - Show available commands
 - `just build` - Build the project
@@ -236,7 +236,7 @@ ChakraPy uses a `justfile` to manage common development tasks:
 
 ## Coding Standards
 
-ChakraPy follows Rust's standard coding conventions:
+Waspy follows Rust's standard coding conventions:
 
 1. **Code Formatting**
    - Use `cargo fmt` or `just format` to format your code
@@ -305,7 +305,7 @@ To verify the generated WebAssembly, you can use:
 
 ## Community
 
-- **Issues**: Use [GitHub Issues](https://github.com/anistark/chakrapy/issues) for bug reports and feature requests
-- **Discussions**: For questions and general discussion, use [GitHub Discussions](https://github.com/anistark/chakrapy/discussions)
+- **Issues**: Use [GitHub Issues](https://github.com/anistark/waspy/issues) for bug reports and feature requests
+- **Discussions**: For questions and general discussion, use [GitHub Discussions](https://github.com/anistark/waspy/discussions)
 
-Thank you for contributing to ChakraPy! 👋
+Thank you for contributing to Waspy! 👋

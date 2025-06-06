@@ -1,5 +1,5 @@
 """
-Control flow examples for ChakraPy.
+Control flow examples for Waspy.
 This demonstrates if/else statements and while loops.
 """
 

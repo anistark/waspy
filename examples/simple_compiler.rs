@@ -1,11 +1,11 @@
-use chakrapy::compile_python_to_wasm;
+use waspy::compile_python_to_wasm;
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
 /// Simple compiler example
 ///
-/// This example demonstrates the basic use of ChakraPy to compile
+/// This example demonstrates the basic use of Waspy to compile
 /// a Python file to WebAssembly.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let python_file = Path::new("examples/basic_operations.py");

@@ -1,5 +1,5 @@
 """
-Module-level demonstration for ChakraPy.
+Module-level demonstration for Waspy.
 This demonstrates support for module-level variables and simple classes.
 """
 

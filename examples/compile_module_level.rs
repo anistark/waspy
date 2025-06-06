@@ -1,18 +1,18 @@
-use chakrapy::{compile_python_to_wasm, get_python_file_metadata};
+use waspy::{compile_python_to_wasm, get_python_file_metadata};
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
 /// Example of compiling a file with module-level code
 ///
-/// This example demonstrates the enhanced capabilities of ChakraPy
+/// This example demonstrates the enhanced capabilities of Waspy
 /// to handle module-level variables and class definitions.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let python_file = Path::new("examples/module_level_demo.py");
     let output_path = Path::new("examples/module_level_demo.wasm");
     let html_path = Path::new("examples/module_level_demo.html");
 
-    println!("ChakraPy Module-Level Compilation Test");
+    println!("Waspy Module-Level Compilation Test");
     println!("Input file: {}", python_file.display());
     println!("Output file: {}", output_path.display());
 
@@ -66,7 +66,7 @@ fn generate_html_test_file(wasm_filename: &str) -> String {
         r#"<!DOCTYPE html>
 <html>
 <head>
-    <title>ChakraPy Module-Level Demo</title>
+    <title>Waspy Module-Level Demo</title>
     <style>
         body {{ font-family: system-ui, sans-serif; margin: 0; padding: 20px; line-height: 1.6; }}
         .container {{ max-width: 1200px; margin: 0 auto; }}
@@ -86,7 +86,7 @@ fn generate_html_test_file(wasm_filename: &str) -> String {
 </head>
 <body>
     <div class="container">
-        <h1>ChakraPy Module-Level Demo</h1>
+        <h1>Waspy Module-Level Demo</h1>
         
         <div class="card">
             <h2>Module-Level Variables Test</h2>

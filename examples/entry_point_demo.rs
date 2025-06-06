@@ -1,11 +1,11 @@
 // A minimal example to demonstrate entry point support
 
-use chakrapy::compile_python_to_wasm;
+use waspy::compile_python_to_wasm;
 use std::fs;
 use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("ChakraPy Minimal Entry Point Demo");
+    println!("Waspy Minimal Entry Point Demo");
     println!("--------------------------------");
 
     // Create a very minimal Python file that should parse and compile

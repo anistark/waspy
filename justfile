@@ -1,11 +1,11 @@
-# ChakraPy Justfile
+# Waspy Justfile
 # Install just with: cargo install just
 
 # Get version from Cargo.toml
 version := `grep -m 1 'version = ' Cargo.toml | cut -d '"' -f 2`
 
 # Repository information
-repo := `if git remote -v >/dev/null 2>&1; then git remote get-url origin | sed -E 's/.*github.com[:/]([^/]+)\/([^/.]+).*/\1\/\2/'; else echo "anistark/chakrapy"; fi`
+repo := `if git remote -v >/dev/null 2>&1; then git remote get-url origin | sed -E 's/.*github.com[:/]([^/]+)\/([^/.]+).*/\1\/\2/'; else echo "anistark/waspy"; fi`
 
 # Default recipe to display help information
 default:
@@ -66,7 +66,7 @@ github-release title="":
     
     VERSION="{{version}}"
     # Use provided title or default if none provided
-    RELEASE_TITLE="${title:-ChakraPy v$VERSION}"
+    RELEASE_TITLE="${title:-v$VERSION}"
     
     echo "Creating GitHub release for v$VERSION..."
     git tag -a "v$VERSION" -m "Release v$VERSION"

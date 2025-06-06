@@ -1,5 +1,5 @@
 """
-Basic arithmetic operations example for ChakraPy.
+Basic arithmetic operations example for Waspy.
 This demonstrates the core functionality of the compiler with simple functions.
 """
 

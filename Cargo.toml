@@ -1,10 +1,10 @@
 [package]
-name = "chakrapy"
-version = "0.4.0"
+name = "waspy"
+version = "0.5.0"
 edition = "2021"
 description = "A Python interpreter written in Rust, designed for WebAssembly."
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/anistark/chakrapy"
+repository = "https://github.com/anistark/waspy"
 keywords = ["python", "interpreter", "webassembly"]
 categories = ["compilers", "wasm", "web-programming"]
 readme = "README.md"
@@ -19,7 +19,7 @@ thiserror = "1.0"
 log = "0.4"
 
 [lib]
-name = "chakrapy"
+name = "waspy"
 path = "src/lib.rs"
 
 # Examples

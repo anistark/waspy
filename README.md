@@ -1,13 +1,13 @@
-# ChakraPy
+# Waspy
 
 A Python to WebAssembly compiler written in Rust.
 
-[![Crates.io Version](https://img.shields.io/crates/v/chakrapy)
-](https://crates.io/crates/chakrapy) [![Crates.io Downloads](https://img.shields.io/crates/d/chakrapy)](https://crates.io/crates/chakrapy) [![Crates.io Downloads (latest version)](https://img.shields.io/crates/dv/chakrapy)](https://crates.io/crates/chakrapy) [![Open Source](https://img.shields.io/badge/open-source-brightgreen)](https://github.com/anistark/chakrapy) [![Contributors](https://img.shields.io/github/contributors/anistark/chakrapy)](https://github.com/anistark/chakrapy/graphs/contributors) ![maintenance-status](https://img.shields.io/badge/maintenance-actively--developed-brightgreen.svg)
+[![Crates.io Version](https://img.shields.io/crates/v/waspy)
+](https://crates.io/crates/waspy) [![Crates.io Downloads](https://img.shields.io/crates/d/waspy)](https://crates.io/crates/waspy) [![Crates.io Downloads (latest version)](https://img.shields.io/crates/dv/waspy)](https://crates.io/crates/waspy) [![Open Source](https://img.shields.io/badge/open-source-brightgreen)](https://github.com/anistark/waspy) [![Contributors](https://img.shields.io/github/contributors/anistark/waspy)](https://github.com/anistark/waspy/graphs/contributors) ![maintenance-status](https://img.shields.io/badge/maintenance-actively--developed-brightgreen.svg)
 
 ## Overview
 
-ChakraPy translates Python functions into WebAssembly. The implementation supports basic arithmetic operations, control flow, and multiple functions with enhanced type support.
+Waspy translates Python functions into WebAssembly. The implementation supports basic arithmetic operations, control flow, and multiple functions with enhanced type support.
 
 ### Compilation Pipeline
 
@@ -53,7 +53,7 @@ ChakraPy translates Python functions into WebAssembly. The implementation suppor
 ## Installation
 
 ```sh
-cargo add chakrapy
+cargo add waspy
 ```
 
 ## Usage
@@ -61,7 +61,7 @@ cargo add chakrapy
 ### Using the Library
 
 ```rust
-use chakrapy::compile_python_to_wasm;
+use waspy::compile_python_to_wasm;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let python_code = r#"
@@ -92,7 +92,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 For multiple files compilation:
 
 ```rust
-use chakrapy::compile_multiple_python_files;
+use waspy::compile_multiple_python_files;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sources = vec![
@@ -109,7 +109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 For unoptimized WebAssembly (useful for debugging or further processing):
 
 ```rust
-use chakrapy::compile_python_to_wasm_with_options;
+use waspy::compile_python_to_wasm_with_options;
 
 let wasm = compile_python_to_wasm_with_options(python_code, false)?;
 ```
@@ -149,7 +149,7 @@ WebAssembly.instantiate(wasmBuffer).then(result => {
 
 ### Multiple Functions
 
-ChakraPy supports multiple function definitions:
+Waspy supports multiple function definitions:
 
 - Each function is compiled to a separate WebAssembly function
 - All functions are exported with their original names
@@ -178,7 +178,7 @@ The compiler supports basic control flow constructs:
 
 ### Variable Support
 
-ChakraPy handles variables through WebAssembly locals:
+Waspy handles variables through WebAssembly locals:
 
 - Local variables are allocated in the function's local variable space
 - Assignment statements modify these locals
@@ -195,7 +195,7 @@ Enhanced error reporting system:
 
 ## Examples
 
-ChakraPy includes several examples to demonstrate its functionality:
+Waspy includes several examples to demonstrate its functionality:
 
 ```sh
 # Basic compiler example

@@ -1,4 +1,4 @@
-use chakrapy::{compile_python_to_wasm_with_options, get_python_file_metadata, parser};
+use waspy::{compile_python_to_wasm_with_options, get_python_file_metadata, parser};
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -6,7 +6,7 @@ use std::time::Instant;
 
 /// Advanced compiler example with options
 ///
-/// This example demonstrates more advanced usage of ChakraPy,
+/// This example demonstrates more advanced usage of Waspy,
 /// including command-line options, metadata extraction, and
 /// optimization control.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -121,7 +121,7 @@ fn generate_html_test_file(module_name: &str, wasm_filename: &str) -> String {
         r#"<!DOCTYPE html>
 <html>
 <head>
-    <title>ChakraPy Test - {}</title>
+    <title>Waspy Test - {}</title>
     <style>
         body {{ font-family: sans-serif; margin: 20px; }}
         .result {{ margin-top: 10px; padding: 10px; background-color: #f0f0f0; }}
@@ -130,7 +130,7 @@ fn generate_html_test_file(module_name: &str, wasm_filename: &str) -> String {
     </style>
 </head>
 <body>
-    <h1>ChakraPy WebAssembly Test</h1>
+    <h1>Waspy WebAssembly Test</h1>
     <p>Module: {}</p>
     <div id="container">
         <h2>Function Tests</h2>

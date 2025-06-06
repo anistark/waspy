@@ -1,7 +1,7 @@
 use std::fmt;
 use thiserror::Error;
 
-/// Custom error types for ChakraPy
+/// Custom error types for Waspy
 #[derive(Error, Debug)]
 pub enum ChakraError {
     #[error("Python parsing error: {message}")]

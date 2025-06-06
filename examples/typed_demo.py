@@ -1,5 +1,5 @@
 """
-Type system demonstration for ChakraPy.
+Type system demonstration for Waspy.
 This file demonstrates various type annotations and type conversions.
 """
 

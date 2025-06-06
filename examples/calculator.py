@@ -1,5 +1,5 @@
 """
-Calculator implementation for ChakraPy multi-file demonstration.
+Calculator implementation for Waspy multi-file demonstration.
 This file uses functions from basic_operations.py to implement a calculator.
 """
 
