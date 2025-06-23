@@ -1,27 +1,84 @@
-pub mod compiler;
-pub mod config;
-pub mod errors;
-pub mod ir;
-pub mod optimizer;
-pub mod parser;
-pub mod project;
+//! Waspy: A Python to WebAssembly compiler written in Rust.
+//!
+//! Waspy translates Python functions into WebAssembly, allowing Python code
+//! to run in browsers and other WebAssembly environments.
+//!
+//! # Overview
+//!
+//! The compiler follows a pipeline:
+//! 1. Parse Python source code into an AST using RustPython parser
+//! 2. Convert the AST to a custom Intermediate Representation (IR)
+//! 3. Generate WebAssembly code from the IR
+//! 4. Optionally optimize the WebAssembly binary
+//!
+//! # Example
+//!
+//! ```
+//! use waspy::compile_python_to_wasm;
+//!
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let python_code = r#"
+//!     def add(a: int, b: int) -> int:
+//!         return a + b
+//!     "#;
+//!     
+//!     let wasm = compile_python_to_wasm(python_code)?;
+//!     // Use the WebAssembly binary
+//!     Ok(())
+//! }
+//! ```
 
-use crate::config::{is_config_file, load_project_config, ProjectConfig};
-use crate::ir::{add_entry_point_to_module, detect_entry_points, EntryPointInfo};
+pub mod analysis;
+pub mod compiler;
+pub mod core;
+pub mod ir;
+pub mod optimize;
+pub mod utils;
+
+use crate::core::config::ProjectConfig;
+pub use crate::core::options::CompilerOptions;
+use crate::ir::{EntryPointInfo, IRType};
 use anyhow::{anyhow, Context, Result};
-use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-/// Compile Python source code into a WASM binary.
+/// Compile Python source code into a WASM binary using default options.
+///
+/// # Arguments
+///
+/// * `source` - Python source code to compile
+///
+/// # Returns
+///
+/// WebAssembly binary as a byte vector
+///
+/// # Errors
+///
+/// Returns an error if parsing, IR conversion, or WebAssembly generation fails
 pub fn compile_python_to_wasm(source: &str) -> Result<Vec<u8>> {
-    compile_python_to_wasm_with_options(source, true)
+    compile_python_to_wasm_with_options(source, &CompilerOptions::default())
 }
 
-/// Compile Python source code into a WASM binary with options.
-pub fn compile_python_to_wasm_with_options(source: &str, optimize: bool) -> Result<Vec<u8>> {
+/// Compile Python source code into a WASM binary with specified options.
+///
+/// # Arguments
+///
+/// * `source` - Python source code to compile
+/// * `options` - Compiler options
+///
+/// # Returns
+///
+/// WebAssembly binary as a byte vector
+///
+/// # Errors
+///
+/// Returns an error if parsing, IR conversion, or WebAssembly generation fails
+pub fn compile_python_to_wasm_with_options(
+    source: &str,
+    options: &CompilerOptions,
+) -> Result<Vec<u8>> {
     // Parse Python to AST
-    let ast = parser::parse_python(source).context("Failed to parse Python code")?;
+    let ast = core::parser::parse_python(source).context("Failed to parse Python code")?;
 
     // Lower AST to IR
     let mut ir_module = ir::lower_ast_to_ir(&ast).context("Failed to convert Python AST to IR")?;
@@ -41,40 +98,79 @@ pub fn compile_python_to_wasm_with_options(source: &str, optimize: bool) -> Resu
         .collect();
 
     // Check for entry points
-    if let Ok(Some(entry_point_info)) = detect_entry_points(source, None) {
+    if let Ok(Some(entry_point_info)) = ir::detect_entry_points(source, None) {
         // Add entry point support if detected
-        add_entry_point_to_module(&mut ir_module, &entry_point_info)?;
+        ir::add_entry_point_to_module(&mut ir_module, &entry_point_info)?;
     }
 
     // Generate WASM binary
     let raw_wasm = compiler::compile_ir_module(&ir_module);
 
-    // Optimize the WASM binary
-    if optimize {
-        optimizer::optimize_wasm(&raw_wasm).context("Failed to optimize WebAssembly binary")
+    // Optimize the WASM binary if requested
+    if options.optimize {
+        optimize::optimize_wasm(&raw_wasm).context("Failed to optimize WebAssembly binary")
     } else {
         Ok(raw_wasm)
     }
 }
 
 /// Compile multiple Python source files into a single WASM binary.
+///
+/// # Arguments
+///
+/// * `sources` - Array of (filename, source code) pairs
+/// * `optimize` - Whether to optimize the output
+///
+/// # Returns
+///
+/// WebAssembly binary as a byte vector
+///
+/// # Errors
+///
+/// Returns an error if parsing, IR conversion, or WebAssembly generation fails
 pub fn compile_multiple_python_files(sources: &[(&str, &str)], optimize: bool) -> Result<Vec<u8>> {
+    let options = CompilerOptions {
+        optimize,
+        ..CompilerOptions::default()
+    };
+
+    compile_multiple_python_files_with_options(sources, &options)
+}
+
+/// Compile multiple Python source files with options.
+///
+/// # Arguments
+///
+/// * `sources` - Array of (filename, source code) pairs
+/// * `options` - Compiler options
+///
+/// # Returns
+///
+/// WebAssembly binary as a byte vector
+///
+/// # Errors
+///
+/// Returns an error if parsing, IR conversion, or WebAssembly generation fails
+pub fn compile_multiple_python_files_with_options(
+    sources: &[(&str, &str)],
+    options: &CompilerOptions,
+) -> Result<Vec<u8>> {
     // Parse and convert each Python source to IR
-    let mut combined_module = crate::ir::IRModule::new();
+    let mut combined_module = ir::IRModule::new();
     let mut function_names = std::collections::HashSet::new();
     let mut has_entry_point = false;
     let mut entry_point_info: Option<EntryPointInfo> = None;
 
     for (filename, source) in sources {
         // Skip incompatible files
-        if is_special_python_file(filename) {
+        if utils::is_special_python_file(filename) {
             println!("Skipping special file: {}", filename);
             continue;
         }
 
         // Check for entry points
         if !has_entry_point {
-            if let Ok(Some(info)) = detect_entry_points(source, Some(Path::new(filename))) {
+            if let Ok(Some(info)) = ir::detect_entry_points(source, Some(Path::new(filename))) {
                 has_entry_point = true;
                 entry_point_info = Some(info);
                 println!("Detected entry point in file: {}", filename);
@@ -82,7 +178,7 @@ pub fn compile_multiple_python_files(sources: &[(&str, &str)], optimize: bool) -
         }
 
         // Parse Python to AST
-        let ast = match parser::parse_python(source) {
+        let ast = match core::parser::parse_python(source) {
             Ok(ast) => ast,
             Err(e) => {
                 println!("Warning: Failed to parse {}: {}", filename, e);
@@ -148,7 +244,7 @@ pub fn compile_multiple_python_files(sources: &[(&str, &str)], optimize: bool) -
     // Add entry point if one was detected
     if has_entry_point {
         if let Some(info) = entry_point_info {
-            add_entry_point_to_module(&mut combined_module, &info)?;
+            ir::add_entry_point_to_module(&mut combined_module, &info)?;
         }
     }
 
@@ -156,21 +252,35 @@ pub fn compile_multiple_python_files(sources: &[(&str, &str)], optimize: bool) -
     let raw_wasm = compiler::compile_ir_module(&combined_module);
 
     // Optimize the WASM binary
-    if optimize {
-        optimizer::optimize_wasm(&raw_wasm).context("Failed to optimize WebAssembly binary")
+    if options.optimize {
+        optimize::optimize_wasm(&raw_wasm).context("Failed to optimize WebAssembly binary")
     } else {
         Ok(raw_wasm)
     }
 }
 
 /// Compile multiple Python source files into a single WASM binary with config awareness.
+///
+/// # Arguments
+///
+/// * `sources` - Array of (filename, source code) pairs
+/// * `optimize` - Whether to optimize the output
+/// * `config` - Project configuration
+///
+/// # Returns
+///
+/// WebAssembly binary as a byte vector
+///
+/// # Errors
+///
+/// Returns an error if parsing, IR conversion, or WebAssembly generation fails
 pub fn compile_multiple_python_files_with_config(
     sources: &[(&str, &str)],
     optimize: bool,
     config: &ProjectConfig,
 ) -> Result<Vec<u8>> {
     // Parse and convert each Python source to IR
-    let mut combined_module = crate::ir::IRModule::new();
+    let mut combined_module = ir::IRModule::new();
     let mut function_names = std::collections::HashSet::new();
     let mut has_entry_point = false;
     let mut entry_point_info: Option<EntryPointInfo> = None;
@@ -199,20 +309,20 @@ pub fn compile_multiple_python_files_with_config(
 
     for (filename, source) in sources {
         // Skip incompatible files
-        if is_config_file(filename) {
+        if core::config::is_config_file(filename) {
             println!("Skipping configuration file: {}", filename);
             continue;
         }
 
         // Skip incompatible files
-        if is_special_python_file(filename) {
+        if utils::is_special_python_file(filename) {
             println!("Skipping special file: {}", filename);
             continue;
         }
 
         // Check for entry points
         if !has_entry_point {
-            if let Ok(Some(info)) = detect_entry_points(source, Some(Path::new(filename))) {
+            if let Ok(Some(info)) = ir::detect_entry_points(source, Some(Path::new(filename))) {
                 has_entry_point = true;
                 entry_point_info = Some(info);
                 println!("Detected entry point in file: {}", filename);
@@ -220,7 +330,7 @@ pub fn compile_multiple_python_files_with_config(
         }
 
         // Parse Python to AST
-        let ast = match parser::parse_python(source) {
+        let ast = match core::parser::parse_python(source) {
             Ok(ast) => ast,
             Err(e) => {
                 println!("Warning: Failed to parse {}: {}", filename, e);
@@ -277,7 +387,7 @@ pub fn compile_multiple_python_files_with_config(
     // Add entry point if one was detected
     if has_entry_point {
         if let Some(info) = entry_point_info {
-            add_entry_point_to_module(&mut combined_module, &info)?;
+            ir::add_entry_point_to_module(&mut combined_module, &info)?;
         }
     }
 
@@ -286,21 +396,60 @@ pub fn compile_multiple_python_files_with_config(
 
     // Optimize the WASM binary
     if optimize {
-        optimizer::optimize_wasm(&raw_wasm).context("Failed to optimize WebAssembly binary")
+        optimize::optimize_wasm(&raw_wasm).context("Failed to optimize WebAssembly binary")
     } else {
         Ok(raw_wasm)
     }
 }
 
-/// Compile a Python project directory to WebAssembly
+/// Compile a Python project directory to WebAssembly.
+///
+/// # Arguments
+///
+/// * `project_dir` - Path to project directory
+/// * `optimize` - Whether to optimize the output
+///
+/// # Returns
+///
+/// WebAssembly binary as a byte vector
+///
+/// # Errors
+///
+/// Returns an error if parsing, IR conversion, or WebAssembly generation fails
 pub fn compile_python_project<P: AsRef<Path>>(project_dir: P, optimize: bool) -> Result<Vec<u8>> {
+    let options = CompilerOptions {
+        optimize,
+        ..CompilerOptions::default()
+    };
+
+    compile_python_project_with_options(project_dir, &options)
+}
+
+/// Compile a Python project with options.
+///
+/// # Arguments
+///
+/// * `project_dir` - Path to project directory
+/// * `options` - Compiler options
+///
+/// # Returns
+///
+/// WebAssembly binary as a byte vector
+///
+/// # Errors
+///
+/// Returns an error if parsing, IR conversion, or WebAssembly generation fails
+pub fn compile_python_project_with_options<P: AsRef<Path>>(
+    project_dir: P,
+    options: &CompilerOptions,
+) -> Result<Vec<u8>> {
     // Load and analyze the project
     let project_dir = project_dir.as_ref();
 
     println!("Analyzing project structure...");
 
     // Load project configuration
-    let config = load_project_config(project_dir)?;
+    let config = core::config::load_project_config(project_dir)?;
 
     println!("Project Name: {}", config.name);
     println!("Project Version: {}", config.version);
@@ -311,7 +460,7 @@ pub fn compile_python_project<P: AsRef<Path>>(project_dir: P, optimize: bool) ->
         println!("Author: {}", author);
     }
 
-    let files = collect_compilable_python_files(project_dir)?;
+    let files = utils::collect_compilable_python_files(project_dir)?;
 
     if files.is_empty() {
         return Err(anyhow!("No compilable Python files found in the project"));
@@ -325,7 +474,7 @@ pub fn compile_python_project<P: AsRef<Path>>(project_dir: P, optimize: bool) ->
     let main_py_path = project_dir.join("__main__.py");
     if main_py_path.exists() && main_py_path.is_file() {
         if let Ok(content) = fs::read_to_string(&main_py_path) {
-            if let Ok(Some(info)) = detect_entry_points(&content, Some(&main_py_path)) {
+            if let Ok(Some(info)) = ir::detect_entry_points(&content, Some(&main_py_path)) {
                 entry_point_file = Some("__main__.py".to_string());
                 entry_point_info = Some(info);
             }
@@ -335,7 +484,7 @@ pub fn compile_python_project<P: AsRef<Path>>(project_dir: P, optimize: bool) ->
     // If no __main__.py, check other files for entry points
     if entry_point_info.is_none() {
         for (path, content) in &files {
-            if let Ok(Some(info)) = detect_entry_points(content, Some(Path::new(path))) {
+            if let Ok(Some(info)) = ir::detect_entry_points(content, Some(Path::new(path))) {
                 entry_point_file = Some(path.clone());
                 entry_point_info = Some(info);
                 break;
@@ -356,7 +505,7 @@ pub fn compile_python_project<P: AsRef<Path>>(project_dir: P, optimize: bool) ->
         .collect();
 
     // Compile all files together
-    let result = compile_multiple_python_files_with_config(&sources, optimize, &config)?;
+    let result = compile_multiple_python_files_with_config(&sources, options.optimize, &config)?;
 
     // If we found an entry point, we might need to add special handling here
     if entry_point_info.is_some() {
@@ -367,297 +516,25 @@ pub fn compile_python_project<P: AsRef<Path>>(project_dir: P, optimize: bool) ->
     Ok(result)
 }
 
-/// Collect Python files that can be compiled to WebAssembly
-fn collect_compilable_python_files(dir: &Path) -> Result<HashMap<String, String>> {
-    let mut files = HashMap::new();
-
-    // Files to exclude
-    let exclude_files = vec![
-        "__init__.py",
-        "__about__.py",
-        "__version__.py",
-        "__main__.py",
-        "setup.py",
-    ];
-
-    // Directories to exclude
-    let exclude_dirs = vec![
-        "venv",
-        "env",
-        ".venv",
-        ".env",
-        ".git",
-        "__pycache__",
-        "node_modules",
-        "site-packages",
-        "dist",
-        "build",
-        "tests",
-        "docs",
-    ];
-
-    // Recursively collect Python files
-    collect_python_files_recursive(dir, dir, &mut files, &exclude_files, &exclude_dirs)?;
-
-    // Further filter files based on content
-    let mut compilable_files = HashMap::new();
-
-    for (path, content) in files {
-        // Skip files without function definitions
-        if !contains_function_definitions(&content) {
-            println!("Skipping {} (no functions)", path);
-            continue;
-        }
-
-        // Skip files with import errors or other issues
-        if has_complex_imports(&content) {
-            println!("Skipping {} (complex imports)", path);
-            continue;
-        }
-
-        // Check for module-level code
-        let has_module_level = has_module_level_code(&content);
-
-        // With new IR support, we can handle some module-level code
-        // but let's still skip complex cases
-        if has_module_level && has_complex_module_level_code(&content) {
-            println!("Skipping {} (complex module-level code)", path);
-            continue;
-        }
-
-        // Add compilable file
-        compilable_files.insert(path, content);
-    }
-
-    Ok(compilable_files)
-}
-
-/// Recursively collect Python files from a directory
-fn collect_python_files_recursive(
-    root_dir: &Path,
-    current_dir: &Path,
-    files: &mut HashMap<String, String>,
-    exclude_files: &[&str],
-    exclude_dirs: &[&str],
-) -> Result<()> {
-    for entry in fs::read_dir(current_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        if path.is_dir() {
-            // Check if directory should be excluded
-            if let Some(dir_name) = path.file_name() {
-                let dir_name = dir_name.to_string_lossy();
-                if exclude_dirs.iter().any(|&d| dir_name == d) || dir_name.starts_with('.') {
-                    continue;
-                }
-            }
-
-            // Recursively scan subdirectory
-            collect_python_files_recursive(root_dir, &path, files, exclude_files, exclude_dirs)?;
-        } else if path.is_file() && path.extension().map_or(false, |ext| ext == "py") {
-            // Check if file should be excluded
-            if let Some(file_name) = path.file_name() {
-                let file_name = file_name.to_string_lossy();
-                if exclude_files.iter().any(|&f| file_name == f) {
-                    continue;
-                }
-            }
-
-            // Read file content
-            match fs::read_to_string(&path) {
-                Ok(content) => {
-                    // Use relative path as key
-                    let rel_path = path
-                        .strip_prefix(root_dir)
-                        .unwrap_or(&path)
-                        .to_string_lossy()
-                        .to_string();
-
-                    files.insert(rel_path, content);
-                }
-                Err(e) => {
-                    println!("Warning: Failed to read {}: {}", path.display(), e);
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Check if a file is a special Python file that's not suitable for compilation
-fn is_special_python_file(filename: &str) -> bool {
-    let filename = Path::new(filename)
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
-
-    filename.starts_with("__")
-        || filename == "setup.py"
-        || filename.contains("test")
-        || filename.contains("config")
-        || is_config_file(&filename)
-}
-
-/// Check if a Python file contains function definitions
-fn contains_function_definitions(content: &str) -> bool {
-    for line in content.lines() {
-        if line.trim().starts_with("def ") {
-            return true;
-        }
-    }
-    false
-}
-
-/// Check if a Python file has complex imports that might not be supported
-fn has_complex_imports(content: &str) -> bool {
-    for line in content.lines().take(30) {
-        // Check first 30 lines
-        let line = line.trim();
-        if line.starts_with("import ") || line.starts_with("from ") {
-            // Complex import patterns
-            if line.contains("*")
-                || line.contains("(")
-                || line.contains(")")
-                || line.contains("try:")
-                || line.contains("except")
-            {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-/// Check if a Python file has module-level code (outside functions)
-fn has_module_level_code(content: &str) -> bool {
-    let mut in_function = false;
-    let mut in_docstring = false;
-    let mut last_line_blank = true;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-
-        // Skip empty lines and comments
-        if trimmed.is_empty() {
-            last_line_blank = true;
-            continue;
-        }
-        if trimmed.starts_with("#") {
-            continue;
-        }
-
-        // Check for docstrings
-        if trimmed.starts_with("\"\"\"") || trimmed.starts_with("'''") {
-            in_docstring = !in_docstring;
-            continue;
-        }
-
-        // Skip if in docstring
-        if in_docstring {
-            continue;
-        }
-
-        // Check for function definition
-        if trimmed.starts_with("def ") {
-            in_function = true;
-            last_line_blank = false;
-            continue;
-        }
-
-        // Check for class definition
-        if trimmed.starts_with("class ") {
-            in_function = false;
-            last_line_blank = false;
-            continue;
-        }
-
-        // Check for end of function/class
-        if last_line_blank && !trimmed.starts_with(" ") && !trimmed.starts_with("\t") {
-            in_function = false;
-        }
-
-        // Check for module-level code
-        if !in_function && !trimmed.starts_with("import ") && !trimmed.starts_with("from ") {
-            // Allow some common module-level declarations
-            if !trimmed.starts_with("__") && !trimmed.contains(" = ") {
-                return true;
-            }
-        }
-
-        last_line_blank = false;
-    }
-
-    false
-}
-
-/// Check if a Python file has complex module-level code that we can't handle
-fn has_complex_module_level_code(content: &str) -> bool {
-    let mut in_function = false;
-    let mut in_docstring = false;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-
-        // Skip empty lines and comments
-        if trimmed.is_empty() || trimmed.starts_with("#") {
-            continue;
-        }
-
-        // Check for docstrings
-        if trimmed.starts_with("\"\"\"") || trimmed.starts_with("'''") {
-            in_docstring = !in_docstring;
-            continue;
-        }
-
-        // Skip if in docstring
-        if in_docstring {
-            continue;
-        }
-
-        // Check for function/class start/end
-        if trimmed.starts_with("def ") || trimmed.starts_with("class ") {
-            in_function = true;
-            continue;
-        }
-
-        if trimmed.starts_with("return") && !in_function {
-            // Return statement outside of function
-            return true;
-        }
-
-        // Check for complex module-level code
-        if !in_function && !trimmed.starts_with("import ") && !trimmed.starts_with("from ") {
-            // These are module-level assignments/operations we can't handle yet
-            if trimmed.contains("if ")
-                || trimmed.contains("for ")
-                || trimmed.contains("while ")
-                || trimmed.contains("with ")
-                || trimmed.contains("try:")
-                || trimmed.contains("except ")
-                || trimmed.contains("lambda ")
-                || trimmed.contains("yield ")
-                || trimmed.contains("raise ")
-            {
-                return true;
-            }
-
-            // Function or method calls at module level
-            if trimmed.contains("(") && trimmed.contains(")") && !trimmed.contains(" = ") {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
 /// Get metadata about a Python source file without compiling to WASM.
 /// Returns a list of function signatures for documentation or analysis.
-pub fn get_python_file_metadata(source: &str) -> Result<Vec<FunctionSignature>> {
+///
+/// # Arguments
+///
+/// * `source` - Python source code
+///
+/// # Returns
+///
+/// List of function signatures
+///
+/// # Errors
+///
+/// Returns an error if parsing or IR conversion fails
+pub fn get_python_file_metadata(
+    source: &str,
+) -> Result<Vec<analysis::metadata::FunctionSignature>> {
     // Parse Python to AST
-    let ast = parser::parse_python(source).context("Failed to parse Python code")?;
+    let ast = core::parser::parse_python(source).context("Failed to parse Python code")?;
 
     // Lower AST to IR
     let ir_module = ir::lower_ast_to_ir(&ast).context("Failed to convert Python AST to IR")?;
@@ -671,7 +548,7 @@ pub fn get_python_file_metadata(source: &str) -> Result<Vec<FunctionSignature>> 
             .map(|p| format!("{}: {}", p.name, type_to_string(&p.param_type)))
             .collect();
 
-        signatures.push(FunctionSignature {
+        signatures.push(analysis::metadata::FunctionSignature {
             name: func.name.clone(),
             parameters: param_types,
             return_type: type_to_string(&func.return_type),
@@ -683,11 +560,23 @@ pub fn get_python_file_metadata(source: &str) -> Result<Vec<FunctionSignature>> 
 
 /// Get metadata about an entire Python project.
 /// Returns a list of function signatures for all files.
+///
+/// # Arguments
+///
+/// * `project_dir` - Path to project directory
+///
+/// # Returns
+///
+/// List of (file path, function signatures) pairs
+///
+/// # Errors
+///
+/// Returns an error if parsing or IR conversion fails
 pub fn get_python_project_metadata<P: AsRef<Path>>(
     project_dir: P,
-) -> Result<Vec<(String, Vec<FunctionSignature>)>> {
+) -> Result<Vec<(String, Vec<analysis::metadata::FunctionSignature>)>> {
     let project_dir = project_dir.as_ref();
-    let files = collect_compilable_python_files(project_dir)?;
+    let files = utils::collect_compilable_python_files(project_dir)?;
 
     let mut all_metadata = Vec::new();
 
@@ -708,19 +597,19 @@ pub fn get_python_project_metadata<P: AsRef<Path>>(
 }
 
 /// Convert IR type to string
-fn type_to_string(ir_type: &crate::ir::IRType) -> String {
+pub fn type_to_string(ir_type: &IRType) -> String {
     match ir_type {
-        crate::ir::IRType::Int => "int".to_string(),
-        crate::ir::IRType::Float => "float".to_string(),
-        crate::ir::IRType::Bool => "bool".to_string(),
-        crate::ir::IRType::String => "str".to_string(),
-        crate::ir::IRType::List(elem_type) => format!("List[{}]", type_to_string(elem_type)),
-        crate::ir::IRType::Dict(key_type, val_type) => format!(
+        IRType::Int => "int".to_string(),
+        IRType::Float => "float".to_string(),
+        IRType::Bool => "bool".to_string(),
+        IRType::String => "str".to_string(),
+        IRType::List(elem_type) => format!("List[{}]", type_to_string(elem_type)),
+        IRType::Dict(key_type, val_type) => format!(
             "Dict[{}, {}]",
             type_to_string(key_type),
             type_to_string(val_type)
         ),
-        crate::ir::IRType::Tuple(types) => {
+        IRType::Tuple(types) => {
             let inner = types
                 .iter()
                 .map(type_to_string)
@@ -728,8 +617,8 @@ fn type_to_string(ir_type: &crate::ir::IRType) -> String {
                 .join(", ");
             format!("Tuple[{}]", inner)
         }
-        crate::ir::IRType::Optional(inner) => format!("Optional[{}]", type_to_string(inner)),
-        crate::ir::IRType::Union(types) => {
+        IRType::Optional(inner) => format!("Optional[{}]", type_to_string(inner)),
+        IRType::Union(types) => {
             let inner = types
                 .iter()
                 .map(type_to_string)
@@ -737,17 +626,13 @@ fn type_to_string(ir_type: &crate::ir::IRType) -> String {
                 .join(" | ");
             format!("Union[{}]", inner)
         }
-        crate::ir::IRType::Class(name) => name.clone(),
-        crate::ir::IRType::Module(name) => format!("Module[{}]", name), // Add handling for Module type
-        crate::ir::IRType::None => "None".to_string(),
-        crate::ir::IRType::Any => "Any".to_string(),
-        crate::ir::IRType::Unknown => "unknown".to_string(),
+        IRType::Class(name) => name.clone(),
+        IRType::Module(name) => format!("Module[{}]", name), // Add handling for Module type
+        IRType::None => "None".to_string(),
+        IRType::Any => "Any".to_string(),
+        IRType::Unknown => "unknown".to_string(),
     }
 }
 
-/// Function's signature
-pub struct FunctionSignature {
-    pub name: String,
-    pub parameters: Vec<String>,
-    pub return_type: String,
-}
+pub use crate::analysis::metadata::FunctionSignature;
+pub use crate::core::parser;

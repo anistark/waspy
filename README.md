@@ -28,19 +28,20 @@ Waspy translates Python functions into WebAssembly. The implementation supports 
 ## Current Features
 
 - Compiles Python functions to WebAssembly
-- Supports multiple functions in a single file
-- Compile multiple files into a single WebAssembly module
-- Control flow with if/else and while loops
-- Variable declarations and assignments
-- Type annotations for function parameters and return values
-- Function parameters and return statements
-- Function calls between compiled functions
-- Expanded type system: integers, floats, booleans, strings (basic)
-- Arithmetic operations (`+`, `-`, `*`, `/`, `%`, `//`, `**`)
-- Comparison operators (`==`, `!=`, `<`, `<=`, `>`, `>=`)
-- Boolean operators (`and`, `or`)
-- Improved error handling with detailed error messages
-- Automatic WebAssembly optimization using Binaryen
+- Supports multiple functions in a single WebAssembly module
+- Compiles multiple files into a single module
+- Handles control flow with if/else and while loops
+- Processes variable declarations and assignments
+- Supports type annotations for function parameters and return values
+- Enables function calls between compiled functions
+- Includes an expanded type system: integers, floats, booleans, strings (basic)
+- Supports arithmetic operations (`+`, `-`, `*`, `/`, `%`, `//`, `**`)
+- Processes comparison operators (`==`, `!=`, `<`, `<=`, `>`, `>=`)
+- Handles boolean operators (`and`, `or`)
+- Provides improved error handling with detailed error messages
+- Performs automatic WebAssembly optimization using Binaryen
+- Detects and handles project structure and dependencies
+- Supports module-level variables and basic class definitions
 
 ## Limitations
 
@@ -56,7 +57,11 @@ Waspy translates Python functions into WebAssembly. The implementation supports 
 cargo add waspy
 ```
 
-## Usage
+# Or add to your Cargo.toml
+[dependencies]
+waspy = "0.5.0"
+
+## Quick Start
 
 ### Using the Library
 
@@ -81,12 +86,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             i = i + 1
         return b
     "#;
-    // You can also import your python file code and parse it here
     
     let wasm = compile_python_to_wasm(python_code)?;
     // Write to file or use the WebAssembly binary
+    std::fs::write("output.wasm", &wasm)?;
+    
     Ok(())
 }
+```
+
+With Compiler Options:
+
+```rust
+use waspy::{compile_python_to_wasm_with_options, CompilerOptions};
+
+let options = CompilerOptions {
+    optimize: true,
+    debug_info: true,
+    generate_html: true,
+    ..CompilerOptions::default()
+};
+
+let wasm = compile_python_to_wasm_with_options(python_code, &options)?;
 ```
 
 For multiple files compilation:
@@ -94,16 +115,12 @@ For multiple files compilation:
 ```rust
 use waspy::compile_multiple_python_files;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let sources = vec![
-        ("math.py", "def add(a: int, b: int) -> int:\n    return a + b"),
-        ("main.py", "def compute(x: int) -> int:\n    return add(x, 10)")
-    ];
-    
-    let wasm = compile_multiple_python_files(&sources, true)?;
-    // Write combined module to file
-    Ok(())
-}
+let sources = vec![
+    ("math.py", "def add(a: int, b: int) -> int:\n    return a + b"),
+    ("main.py", "def compute(x: int) -> int:\n    return add(x, 10)")
+];
+
+let wasm = compile_multiple_python_files(&sources, true)?;
 ```
 
 For unoptimized WebAssembly (useful for debugging or further processing):
@@ -112,6 +129,14 @@ For unoptimized WebAssembly (useful for debugging or further processing):
 use waspy::compile_python_to_wasm_with_options;
 
 let wasm = compile_python_to_wasm_with_options(python_code, false)?;
+```
+
+Compiling Projects:
+
+```rust
+use waspy::compile_python_project;
+
+let wasm = compile_python_project("./my_python_project", true)?;
 ```
 
 ### Example Python Code
@@ -199,16 +224,19 @@ Waspy includes several examples to demonstrate its functionality:
 
 ```sh
 # Basic compiler example
-cargo run --example compiler
+cargo run --example simple_compiler
 
-# Flexible compiler with type support
-cargo run --example flexible_compiler -- examples/typed_example.py
-
-# Type system demonstration
-cargo run --example type_demo -- examples/typed_example.py
+# Advanced compiler with options
+cargo run --example advanced_compiler examples/typed_demo.py --metadata --html
 
 # Multi-file compilation
-cargo run --example multi_function -- output.wasm examples/math_functions.py examples/calculator.py
+cargo run --example multi_file_compiler examples/output/combined.wasm examples/basic_operations.py examples/calculator.py
+
+# Project compilation
+cargo run --example project_compiler examples/calculator_project examples/output/project.wasm
+
+# Type system demonstration
+cargo run --example typed_demo
 ```
 
 ## Contributing

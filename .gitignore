@@ -4,6 +4,7 @@ debug
 pkg
 
 # testing
+examples/output/*
 examples/*.wasm
 examples/*.html
 

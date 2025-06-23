@@ -50,30 +50,43 @@ Waspy follows a modular structure:
 
 ```
 waspy/
+├── examples/            - Example programs and test files
+│   ├── output/          - Generated WebAssembly output
+│   ├── *.py             - Python example files
+│   └── *.rs             - Rust example programs
 ├── src/
-│   ├── lib.rs        - Main library entry point
-│   ├── errors.rs     - Error handling
-│   ├── parser.rs     - Python parsing using RustPython
-│   ├── ir/           - Intermediate representation
-│   │   ├── mod.rs    - IR module exports
-│   │   ├── types.rs  - IR data structures
-│   │   └── converter.rs - AST to IR conversion
-│   ├── compiler/     - WASM generation using wasm-encoder
-│   │   ├── mod.rs    - Compiler module exports
-│   │   ├── context.rs - Compilation context
+│   ├── analysis/        - Project analysis tools
+│   │   ├── imports.rs   - Import analysis
+│   │   ├── metadata.rs  - Project metadata extraction
+│   │   └── project.rs   - Project structure analysis
+│   ├── compiler/        - WASM generation using wasm-encoder
+│   │   ├── context.rs   - Compilation context
 │   │   ├── expression.rs - Expression compilation
-│   │   ├── function.rs - Function compilation
-│   │   └── module.rs - Module compilation
-│   └── optimizer.rs  - WASM optimization using Binaryen
-├── examples/
-│   ├── basic_operations.py  - Simple arithmetic operations
-│   ├── control_flow.py      - Control flow examples 
-│   ├── typed_demo.py        - Type system demonstration
-│   ├── calculator.py        - Calculator using basic_operations.py functions
-│   ├── simple_compiler.rs   - Basic compiler usage
-│   ├── advanced_compiler.rs - Advanced compiler with options
-│   └── multi_file_compiler.rs - Multi-file compilation
-└── Cargo.toml        - Project configuration
+│   │   ├── function.rs  - Function compilation
+│   │   └── module.rs    - Module compilation
+│   ├── core/            - Core functionality
+│   │   ├── config.rs    - Project configuration
+│   │   ├── errors.rs    - Error handling
+│   │   ├── options.rs   - Compiler options
+│   │   └── parser.rs    - Python parsing using RustPython
+│   ├── ir/              - Intermediate representation
+│   │   ├── converter.rs - AST to IR conversion
+│   │   ├── decorators.rs - Function decorators
+│   │   ├── entry_points.rs - Entry point detection
+│   │   └── types.rs     - IR data structures
+│   ├── optimize/        - Optimization tools
+│   │   └── wasm.rs      - WASM optimization using Binaryen
+│   ├── utils/           - Utility functions
+│   │   ├── fs.rs        - File system utilities
+│   │   ├── logging.rs   - Logging utilities
+│   │   └── paths.rs     - Path utilities
+│   └── lib.rs           - Main library entry point
+├── tests/               - Test suite
+│   ├── integration/     - Integration tests
+│   └── unit/            - Unit tests
+├── Cargo.toml           - Project configuration
+├── justfile             - Command runner configuration
+└── README.md            - Project documentation
 ```
 
 ## Building and Running Examples
@@ -116,10 +129,7 @@ A more flexible compiler with various options:
 # Compile with optimization (default)
 cargo run --example advanced_compiler examples/typed_demo.py
 
-# Without optimization
-cargo run --example advanced_compiler examples/typed_demo.py --no-optimize
-
-# Show function metadata
+# With metadata information
 cargo run --example advanced_compiler examples/typed_demo.py --metadata
 
 # Generate an HTML test harness
@@ -131,7 +141,15 @@ cargo run --example advanced_compiler examples/typed_demo.py --html
 Compiles multiple Python files into a single WebAssembly module:
 
 ```sh
-cargo run --example multi_file_compiler combined.wasm examples/basic_operations.py examples/calculator.py
+cargo run --example multi_file_compiler examples/output/combined.wasm examples/basic_operations.py examples/calculator.py
+```
+
+#### Project Compiler Example
+
+Compiles an entire Python project:
+
+```sh
+cargo run --example project_compiler examples/calculator_project examples/output/project.wasm
 ```
 
 You can also use the justfile to run all examples:

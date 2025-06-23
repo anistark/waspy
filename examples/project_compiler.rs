@@ -1,126 +1,123 @@
-//! Multi-file Waspy Compiler Example
+//! Python Project Waspy Compiler
 //!
-//! This example demonstrates how to compile multiple Python files
-//! into a single WebAssembly module, allowing for cross-file function calls.
+//! This example demonstrates how to compile an entire Python project
+//! with multiple files and dependencies into a single WebAssembly module.
 
 use std::env;
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
-use waspy::{compile_multiple_python_files_with_options, CompilerOptions};
+use waspy::{compile_python_project_with_options, CompilerOptions};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Get arguments from command line
+    // Parse command-line arguments
     let args: Vec<String> = env::args().collect();
 
-    if args.len() < 3 {
-        print_usage(&args[0]);
-        return Ok(());
-    }
+    let (project_path, output_path) = if args.len() >= 3 {
+        // Use command-line arguments
+        (Path::new(&args[1]), Path::new(&args[2]))
+    } else {
+        // Default to example project
+        (
+            Path::new("examples/calculator_project"),
+            Path::new("examples/output/calculator_project.wasm"),
+        )
+    };
 
-    let output_path = &args[1];
-    let input_files = &args[2..];
-
-    println!("\nWaspy Multi-file Compiler");
-    println!("========================\n");
-    println!("Output file: {}", output_path);
-    println!("Input files:");
-    for (idx, file) in input_files.iter().enumerate() {
-        println!("  {}. {}", idx + 1, file);
-    }
-
-    // Create output directory if needed
-    if let Some(parent) = Path::new(output_path).parent() {
-        if !parent.exists() {
-            fs::create_dir_all(parent)?;
-        }
-    }
-
-    // Read all Python source files
-    let mut file_data: Vec<(String, String)> = Vec::new();
-
-    for file_path in input_files {
-        let path_str = file_path.to_string();
-        match fs::read_to_string(file_path) {
-            Ok(source) => {
-                file_data.push((path_str.clone(), source));
-                println!("Successfully read {}", path_str);
-            }
-            Err(err) => {
-                eprintln!("Error reading {}: {}", path_str, err);
-                return Err(Box::new(err));
-            }
-        }
-    }
-
-    // Create the sources vector with references
-    let sources: Vec<(&str, &str)> = file_data
-        .iter()
-        .map(|(path, content)| (path.as_str(), content.as_str()))
-        .collect();
+    println!("Waspy Project Compiler");
+    println!("=====================\n");
+    println!("Project directory: {}", project_path.display());
+    println!("Output file: {}", output_path.display());
 
     // Set compiler options
     let options = CompilerOptions {
         optimize: true,
         debug_info: true,
         generate_html: true,
+        include_metadata: true,
         ..CompilerOptions::default()
     };
 
-    // Compile all files into a single WASM module
-    println!(
-        "\nCompiling {} files into a single WebAssembly module...",
-        sources.len()
-    );
+    // Start timing
     let start_time = Instant::now();
 
-    let wasm_binary = compile_multiple_python_files_with_options(&sources, &options)?;
+    // Check if project directory exists
+    if !project_path.exists() || !project_path.is_dir() {
+        eprintln!(
+            "Error: The project directory '{}' does not exist or is not a directory",
+            project_path.display()
+        );
+        return Ok(());
+    }
+
+    // Compile the Python project to WebAssembly
+    println!("\nAnalyzing project structure...");
+    println!("Compiling project files...");
+    let wasm_binary = compile_python_project_with_options(project_path, &options)?;
+
+    // Report compilation time
     let duration = start_time.elapsed();
+    println!("\n✅ Compilation completed in {:.2?}", duration);
 
-    // Ensure output filename has .wasm extension
-    let final_output = if !output_path.ends_with(".wasm") {
-        format!("{}.wasm", output_path)
-    } else {
-        output_path.to_string()
-    };
+    // Create parent directories if needed
+    if let Some(parent) = output_path.parent() {
+        if !parent.exists() {
+            fs::create_dir_all(parent)?;
+        }
+    }
 
-    fs::write(&final_output, &wasm_binary)?;
-
-    println!("\n✅ Compilation Results");
-    println!("---------------------");
-    println!("Compilation completed in {:.2?}", duration);
-    println!("Output file: {}", final_output);
+    // Write the WebAssembly to a file
+    fs::write(output_path, &wasm_binary)?;
     println!("WebAssembly binary size: {} bytes", wasm_binary.len());
+    println!("Output file: {}", output_path.display());
 
-    // Generate HTML test file
-    let parent = Path::new(&final_output).parent().unwrap_or(Path::new("."));
-    let stem = Path::new(&final_output)
-        .file_stem()
-        .unwrap()
-        .to_str()
-        .unwrap();
-    let html_path = parent.join(format!("{}_test.html", stem));
+    // Generate HTML test file if requested
+    if options.generate_html {
+        let html_file = output_path.with_extension("html");
+        let wasm_name = output_path.file_name().unwrap().to_str().unwrap();
+        let html = generate_html_test_file(wasm_name);
+        fs::write(&html_file, html)?;
+        println!("HTML test file: {}", html_file.display());
+    }
 
-    let wasm_name = Path::new(&final_output)
-        .file_name()
-        .unwrap()
-        .to_str()
-        .unwrap();
-    let html = generate_html_test_file(wasm_name);
+    // Print the project structure
+    println!("\nProject structure:");
+    print_dir_structure(project_path, 0)?;
 
-    fs::write(&html_path, html)?;
-    println!("HTML test file: {}", html_path.display());
-
-    println!("\nMulti-file compilation successful!");
+    println!("\nProject compilation successful!");
     Ok(())
 }
 
-fn print_usage(program_name: &str) {
-    eprintln!(
-        "Usage: {} <output_file> <python_file1> [python_file2] ...",
-        program_name
+/// Recursively print the directory structure for better visualization
+fn print_dir_structure(dir: &Path, indent: usize) -> Result<(), Box<dyn std::error::Error>> {
+    let prefix = "  ".repeat(indent);
+
+    println!(
+        "{}📂 {}",
+        prefix,
+        dir.file_name().unwrap_or_default().to_string_lossy()
     );
-    eprintln!("Example: {} examples/output/combined.wasm examples/basic_operations.py examples/calculator.py", program_name);
+
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        if path.is_dir() {
+            // Skip __pycache__ and hidden directories
+            let dir_name = path.file_name().unwrap_or_default().to_string_lossy();
+            if !dir_name.starts_with("__pycache__") && !dir_name.starts_with('.') {
+                print_dir_structure(&path, indent + 1)?;
+            }
+        } else if path.is_file() && path.extension().map_or(false, |ext| ext == "py") {
+            println!(
+                "{}📄 {}",
+                "  ".repeat(indent + 1),
+                path.file_name().unwrap_or_default().to_string_lossy()
+            );
+        }
+    }
+
+    Ok(())
 }
 
 fn generate_html_test_file(wasm_filename: &str) -> String {
@@ -128,12 +125,11 @@ fn generate_html_test_file(wasm_filename: &str) -> String {
         r#"<!DOCTYPE html>
 <html>
 <head>
-    <title>Waspy Multi-file Test</title>
+    <title>Waspy Project Test</title>
     <style>
         body {{ font-family: system-ui, sans-serif; margin: 0; padding: 20px; line-height: 1.5; max-width: 800px; margin: 0 auto; }}
         .result {{ margin-top: 10px; padding: 10px; background-color: #f0f0f0; border-radius: 4px; font-family: monospace; white-space: pre-wrap; }}
         .function-test {{ margin-bottom: 20px; }}
-        pre {{ background-color: #f8f8f8; padding: 10px; border-radius: 4px; overflow-x: auto; }}
         h2 {{ margin-top: 30px; color: #2b6cb0; }}
         table {{ border-collapse: collapse; width: 100%; margin: 20px 0; }}
         th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
@@ -144,11 +140,11 @@ fn generate_html_test_file(wasm_filename: &str) -> String {
     </style>
 </head>
 <body>
-    <h1>Waspy Multi-file WebAssembly Test</h1>
-    <p>Module: <code>{}</code></p>
+    <h1>Waspy Project Test</h1>
+    <p>WebAssembly Module: <code>{}</code></p>
     
     <h2>Available Functions</h2>
-    <div id="function-list">Loading...</div>
+    <div id="function-list">Loading functions...</div>
     
     <h2>Function Tester</h2>
     <div class="function-test">
@@ -217,7 +213,7 @@ fn generate_html_test_file(wasm_filename: &str) -> String {
                     functionSelect.appendChild(option);
                 }});
                 
-                // Generic function test
+                // Function test handler
                 document.getElementById('run-test').addEventListener('click', () => {{
                     const functionName = functionSelect.value;
                     const argsString = document.getElementById('arguments').value;

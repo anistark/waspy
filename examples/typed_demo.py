@@ -1,7 +1,15 @@
 """
 Type system demonstration for Waspy.
-This file demonstrates various type annotations and type conversions.
+
+This file demonstrates various type annotations and type conversions
+in Waspy's Python to WebAssembly compiler.
 """
+
+# Module-level constants with type annotations
+PI: float = 3.14159
+MAX_VALUE: int = 100
+DEBUG: bool = False
+MESSAGE: str = "Hello from typed demo"
 
 def add_integers(a: int, b: int) -> int:
     """Add two integers and return an integer."""
@@ -12,16 +20,26 @@ def add_floats(a: float, b: float) -> float:
     return a + b
 
 def mixed_types(a: int, b: float) -> float:
-    """Demonstrate automatic type conversion."""
+    """Demonstrate automatic type conversion.
+    
+    The integer 'a' is automatically converted to float
+    when added to the float 'b'.
+    """
     return a + b
 
 def bool_operations(a: bool, b: bool) -> bool:
-    """Demonstrate boolean operations."""
-    return a and b
+    """Demonstrate boolean operations.
+    
+    Returns (a AND b) OR (NOT a)
+    """
+    return (a and b) or (not a)
 
 def comparisons(a: int, b: int) -> bool:
-    """Demonstrate comparison operators."""
-    return (a > b) and (a >= b) or (a < b) or (a <= b) or (a == b) or (a != b)
+    """Demonstrate comparison operators.
+    
+    Returns true if a > b and a != b
+    """
+    return (a > b) and (a != b)
 
 def int_to_float(a: int) -> float:
     """Convert an integer to a float."""
@@ -45,3 +63,19 @@ def power_calculation(base: float, exponent: int) -> float:
         i = i + 1
         
     return result
+
+def calculate_circle_area(radius: float) -> float:
+    """Calculate the area of a circle using PI."""
+    return PI * radius * radius
+
+def calculate_circle_circumference(radius: float) -> float:
+    """Calculate the circumference of a circle using PI."""
+    return 2 * PI * radius
+
+def is_debug_mode() -> bool:
+    """Check if debug mode is enabled."""
+    return DEBUG
+
+def get_message() -> str:
+    """Return the module-level message."""
+    return MESSAGE
