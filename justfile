@@ -26,18 +26,18 @@ examples:
     cargo run --example simple_compiler
     
     @echo "\nRunning advanced compiler examples..."
-    cargo run --example advanced_compiler examples/basic_operations.py
-    cargo run --example advanced_compiler examples/control_flow.py --metadata
+    cargo run --example advanced_compiler examples/typed_demo.py
+    cargo run --example advanced_compiler examples/typed_demo.py --metadata
     cargo run --example advanced_compiler examples/typed_demo.py --html
     
     @echo "\nRunning multi-file compiler example..."
-    cargo run --example multi_file_compiler examples/combined.wasm examples/basic_operations.py examples/calculator.py
+    cargo run --example multi_file_compiler examples/output/combined.wasm examples/basic_operations.py examples/calculator.py
     
-    @echo "\nRunning project compilation example..."
-    cargo run --example compile_project examples/calculator_project
+    @echo "\nRunning project compiler example..."
+    cargo run --example project_compiler examples/calculator_project examples/output/project.wasm
     
-    @echo "\nRunning module-level code example..."
-    cargo run --example compile_module_level
+    @echo "\nRunning type system demo..."
+    cargo run --example typed_demo
 
 # Run tests
 test:
@@ -89,8 +89,7 @@ publish: prepare-release
 # Clean the project
 clean:
     cargo clean
-    rm examples/*.wasm || true
-    rm examples/*.html || true
+    rm -rf examples/output || true
 
 # Generate documentation
 docs:
@@ -106,38 +105,37 @@ prepare-release: format lint build test check-publish
 
 # Compile a specific Python file to WebAssembly
 compile file:
+    @mkdir -p examples/output
     cargo run --example advanced_compiler {{file}}
 
 # Compile a specific Python file and show size optimization
 optimize file:
+    @mkdir -p examples/output
     @echo "Compiling {{file}} with optimization..."
     @cargo run --example advanced_compiler {{file}} --metadata
 
 # Compile multiple Python files to a single WebAssembly module
 compile-multi output file1 file2:
+    @mkdir -p examples/output
     cargo run --example multi_file_compiler {{output}} {{file1}} {{file2}}
 
 # Compile a Python project directory to WebAssembly
-compile-project dir output="project.wasm":
+compile-project dir output="examples/output/project.wasm":
+    @mkdir -p examples/output
     @echo "Compiling project {{dir}} to {{output}}..."
-    @cargo run --example compile_project {{dir}} {{output}}
+    @cargo run --example project_compiler {{dir}} {{output}}
 
-# Run project metadata analysis without compilation
-project-info dir:
-    @echo "Analyzing project {{dir}}..."
-    @cargo run --example project_metadata {{dir}}
+# Run the type system demo
+run-typed-demo:
+    @mkdir -p examples/output
+    @echo "Running type system demo..."
+    @cargo run --example typed_demo
 
-# Extract functions from Python files
-extract-functions dir output="extracted_functions.py":
-    @echo "Extracting functions from Python files in {{dir}}..."
-    @cargo run --example extract_functions {{dir}} {{output}}
-
-# Compile extracted functions to WebAssembly
-compile-extracted file output="extracted_functions.wasm":
-    @echo "Compiling extracted functions from {{file}}..."
-    @cargo run --example advanced_compiler {{file}} {{output}} --html
-
-# Compile module-level code example
-compile-module-level:
-    @echo "Compiling module-level code example..."
-    @cargo run --example compile_module_level
+# Create necessary directory structure for a new example
+setup-example name:
+    @mkdir -p examples/output
+    @echo "Setting up a new example: {{name}}"
+    @touch examples/{{name}}.rs
+    @touch examples/{{name}}.py
+    @echo "Created example files:\n- examples/{{name}}.rs\n- examples/{{name}}.py"
+    @echo "Don't forget to update the justfile and README.md with the new example!"

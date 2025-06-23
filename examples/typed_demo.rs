@@ -5,7 +5,7 @@
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
-use waspy::{compile_python_to_wasm_with_options, CompilerOptions, FunctionSignature};
+use waspy::{compile_python_to_wasm_with_options, CompilerOptions};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Waspy Type System Demo");
