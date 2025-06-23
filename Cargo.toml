@@ -36,17 +36,9 @@ name = "multi_file_compiler"
 path = "examples/multi_file_compiler.rs"
 
 [[example]]
-name = "compile_project"
-path = "examples/compile_project.rs"
+name = "project_compiler"
+path = "examples/project_compiler.rs"
 
 [[example]]
-name = "project_metadata"
-path = "examples/project_metadata.rs"
-
-[[example]]
-name = "extract_functions"
-path = "examples/extract_functions.rs"
-
-[[example]]
-name = "compile_module_level"
-path = "examples/compile_module_level.rs"
+name = "typed_demo"
+path = "examples/typed_demo.rs"

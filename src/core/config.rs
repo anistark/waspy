@@ -488,7 +488,7 @@ fn collect_python_files_recursive(
     root_dir: &Path,
     current_dir: &Path,
     files: &mut HashMap<String, (PathBuf, String)>,
-    config: &ProjectConfig,
+    _config: &ProjectConfig,
 ) -> Result<()> {
     for entry in fs::read_dir(current_dir)? {
         let entry = entry?;
@@ -501,7 +501,7 @@ fn collect_python_files_recursive(
             }
 
             // Recursively scan subdirectory
-            collect_python_files_recursive(root_dir, &path, files, config)?;
+            collect_python_files_recursive(root_dir, &path, files, _config)?;
         } else if path.is_file() && path.extension().map_or(false, |ext| ext == "py") {
             // Skip configuration files
             if let Some(file_name) = path.file_name() {

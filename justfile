@@ -45,7 +45,8 @@ test:
 
 # Format the code
 format:
-    cargo fmt --all
+    @echo "Formatting code..."
+    @cargo fmt
 
 # Run clippy linter with fix suggestions
 lint:

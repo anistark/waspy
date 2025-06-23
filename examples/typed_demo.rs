@@ -70,7 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Write the WebAssembly to a file
     let output_file = Path::new("examples/output/typed_demo.wasm");
-    fs::write(&output_file, &wasm)?;
+    fs::write(output_file, &wasm)?;
 
     // Generate HTML test file
     let html_file = output_file.with_extension("html");

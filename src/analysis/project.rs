@@ -459,6 +459,7 @@ impl PythonProject {
     }
 
     /// Collect all Python files in a directory recursively
+    #[allow(clippy::only_used_in_recursion)]
     fn collect_python_files(&self, dir: &Path) -> Result<Vec<PathBuf>> {
         let mut python_files = Vec::new();
 
