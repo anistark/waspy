@@ -1,0 +1,618 @@
+:root {
+    --primary-color: #9333ea;
+    --secondary-color: #fbbf24;
+    --accent-color: #1f2937;
+    --bg-color: #ffffff;
+    --bg-gradient: #ffffff;
+    --text-primary: #1e293b;
+    --text-secondary: #64748b;
+    --border-color: rgba(0, 0, 0, 0.1);
+    --glass-bg: rgba(255, 255, 255, 0.8);
+    --glass-border: rgba(0, 0, 0, 0.1);
+    --shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+    --radius: 16px;
+    
+    /* Status colors */
+    --done-bg: rgba(34, 197, 94, 0.1);
+    --done-border: rgba(34, 197, 94, 0.2);
+    --done-text: #15803d;
+    
+    --progress-bg: rgba(251, 191, 36, 0.1);
+    --progress-border: rgba(251, 191, 36, 0.2);
+    --progress-text: #d97706;
+    
+    --todo-bg: rgba(59, 130, 246, 0.1);
+    --todo-border: rgba(59, 130, 246, 0.2);
+    --todo-text: #2563eb;
+}
+
+[data-theme="dark"] {
+    --bg-color: #0f172a;
+    --bg-gradient: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+    --text-primary: #f1f5f9;
+    --text-secondary: #94a3b8;
+    --glass-bg: rgba(30, 41, 59, 0.8);
+    --glass-border: rgba(255, 255, 255, 0.1);
+    --shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+    
+    --done-bg: rgba(34, 197, 94, 0.15);
+    --done-border: rgba(34, 197, 94, 0.3);
+    --done-text: #4ade80;
+    
+    --progress-bg: rgba(251, 191, 36, 0.15);
+    --progress-border: rgba(251, 191, 36, 0.3);
+    --progress-text: #fbbf24;
+    
+    --todo-bg: rgba(59, 130, 246, 0.15);
+    --todo-border: rgba(59, 130, 246, 0.3);
+    --todo-text: #60a5fa;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg-gradient);
+    color: var(--text-primary);
+    line-height: 1.6;
+    transition: all 0.3s ease;
+    min-height: 100vh;
+    overflow-x: auto;
+}
+
+.container {
+    /* padding: 2rem; */
+    width: 100%;
+    min-width: 1200px;
+}
+
+/* Header */
+.header {
+    text-align: center;
+    margin: 3rem;
+}
+
+.title {
+    font-size: 3rem;
+    font-weight: 800;
+    margin-bottom: 0.5rem;
+    background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    text-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+}
+
+.subtitle {
+    color: var(--text-secondary);
+    font-size: 1.2rem;
+    font-weight: 500;
+}
+
+/* Theme Toggle */
+.controls {
+    position: fixed;
+    top: 2rem;
+    right: 2rem;
+    display: flex;
+    gap: 1rem;
+    z-index: 100;
+}
+
+.control-btn {
+    background: var(--glass-bg);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius);
+    padding: 0.75rem;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    backdrop-filter: blur(20px);
+    font-size: 1.2rem;
+    box-shadow: var(--shadow);
+    color: var(--text-primary);
+    text-decoration: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 48px;
+    min-height: 48px;
+}
+
+.control-btn:hover {
+    background: var(--primary-color);
+    color: white;
+    transform: scale(1.05);
+}
+
+.download-btn {
+    font-size: 1rem;
+}
+
+.download-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
+}
+
+.download-btn:disabled:hover {
+    background: var(--glass-bg);
+    color: var(--text-primary);
+}
+
+/* Stats */
+.stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 2rem;
+    margin: 4rem;
+    max-width: 1200px;
+    margin-left: auto;
+    margin-right: auto;
+}
+
+.stat-card {
+    background: var(--glass-bg);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius);
+    padding: 2rem;
+    text-align: center;
+    transition: all 0.3s ease;
+    backdrop-filter: blur(20px);
+    box-shadow: var(--shadow);
+}
+
+.stat-card:hover {
+    transform: translateY(-8px);
+    box-shadow: 0 12px 40px rgba(31, 38, 135, 0.2);
+}
+
+.stat-number {
+    font-size: 2.5rem;
+    font-weight: 800;
+    margin-bottom: 0.5rem;
+}
+
+.stat-number.done { color: var(--done-text); }
+.stat-number.progress { color: var(--progress-text); }
+.stat-number.todo { color: var(--todo-text); }
+.stat-number.total { color: var(--primary-color); }
+
+.stat-label {
+    color: var(--text-secondary);
+    font-size: 1rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+/* Kanban Board */
+.kanban-board {
+    display: grid;
+    margin: 2rem;
+    grid-template-columns: 1fr 1fr 2fr;
+    gap: 2rem;
+    min-height: 70vh;
+}
+
+/* Snapshot mode for landscape layout */
+.snapshot-mode .kanban-board {
+    grid-template-columns: 2fr 2fr 3fr;
+    gap: 1.5rem;
+    min-height: auto;
+}
+
+.snapshot-mode .container {
+    min-width: 1600px;
+    max-width: 1800px;
+    margin: 0 auto;
+    padding: 1.5rem;
+}
+
+.snapshot-mode .header {
+    margin-bottom: 2rem;
+}
+
+.snapshot-mode .title {
+    font-size: 2.5rem;
+}
+
+.snapshot-mode .subtitle {
+    font-size: 1rem;
+}
+
+.snapshot-mode .stats {
+    margin-bottom: 2.5rem;
+    gap: 1.5rem;
+}
+
+.snapshot-mode .stat-card {
+    padding: 1.5rem;
+}
+
+.snapshot-mode .stat-number {
+    font-size: 2rem;
+}
+
+.snapshot-mode .column-header {
+    padding: 1.5rem;
+}
+
+.snapshot-mode .column-title {
+    font-size: 1.3rem;
+}
+
+.snapshot-mode .column-content {
+    padding: 1.5rem;
+    gap: 1.25rem;
+}
+
+.snapshot-mode .column-done .column-content {
+    grid-template-columns: repeat(2, 1fr);
+}
+
+.snapshot-mode .column-progress .column-content {
+    grid-template-columns: repeat(2, 1fr);
+}
+
+.snapshot-mode .column-todo .column-content {
+    grid-template-columns: repeat(3, 1fr);
+}
+
+.snapshot-mode .module-card {
+    padding: 1.25rem;
+}
+
+.snapshot-mode .card-title {
+    font-size: 1rem;
+}
+
+.snapshot-mode .feature-item {
+    font-size: 0.8rem;
+    padding: 0.35rem 0;
+}
+
+.snapshot-mode .card-status {
+    padding: 0.3rem 0.6rem;
+    font-size: 0.7rem;
+}
+
+.snapshot-mode .footer {
+    margin-top: 3rem;
+    padding: 2rem;
+}
+
+.kanban-column {
+    background: var(--glass-bg);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius);
+    backdrop-filter: blur(20px);
+    box-shadow: var(--shadow);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.column-header {
+    padding: 2rem;
+    text-align: center;
+    border-bottom: 1px solid var(--glass-border);
+    position: sticky;
+    top: 0;
+    background: var(--glass-bg);
+    backdrop-filter: blur(20px);
+    z-index: 10;
+}
+
+.column-title {
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin-bottom: 0.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+}
+
+.column-count {
+    background: var(--glass-border);
+    color: var(--text-primary);
+    padding: 0.25rem 0.75rem;
+    border-radius: 20px;
+    font-size: 0.9rem;
+    font-weight: 600;
+}
+
+.column-subtitle {
+    color: var(--text-secondary);
+    font-size: 0.95rem;
+    font-weight: 500;
+}
+
+.column-done .column-title { color: var(--done-text); }
+.column-progress .column-title { color: var(--progress-text); }
+.column-todo .column-title { color: var(--todo-text); }
+
+.column-done .column-count { 
+    background: var(--done-bg); 
+    color: var(--done-text);
+    border: 1px solid var(--done-border);
+}
+.column-progress .column-count { 
+    background: var(--progress-bg); 
+    color: var(--progress-text);
+    border: 1px solid var(--progress-border);
+}
+.column-todo .column-count { 
+    background: var(--todo-bg); 
+    color: var(--todo-text);
+    border: 1px solid var(--todo-border);
+}
+
+.column-content {
+    flex: 1;
+    padding: 2rem;
+    overflow-y: auto;
+    display: grid;
+    gap: 1.5rem;
+    align-content: start;
+}
+
+.column-done .column-content,
+.column-progress .column-content {
+    grid-template-columns: 1fr;
+}
+
+.column-todo .column-content {
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
+/* Module Cards */
+.module-card {
+    border-radius: var(--radius);
+    padding: 1.5rem;
+    transition: all 0.3s ease;
+    backdrop-filter: blur(20px);
+    box-shadow: var(--shadow);
+    border: 1px solid;
+    opacity: 0;
+    transform: translateY(20px);
+    cursor: pointer;
+}
+
+.module-card.visible {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.module-card:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 12px 32px rgba(31, 38, 135, 0.2);
+}
+
+.module-card.done {
+    background: var(--done-bg);
+    border-color: var(--done-border);
+}
+
+.module-card.progress {
+    background: var(--progress-bg);
+    border-color: var(--progress-border);
+}
+
+.module-card.todo {
+    background: var(--todo-bg);
+    border-color: var(--todo-border);
+}
+
+.card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--glass-border);
+}
+
+.card-title {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.card-status {
+    padding: 0.4rem 0.8rem;
+    border-radius: 20px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.module-card.done .card-status {
+    background: var(--done-text);
+    color: white;
+}
+
+.module-card.progress .card-status {
+    background: var(--progress-text);
+    color: white;
+}
+
+.module-card.todo .card-status {
+    background: var(--todo-text);
+    color: white;
+}
+
+.feature-list {
+    list-style: none;
+}
+
+.feature-item {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem 0;
+    font-size: 0.9rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.feature-item:last-child {
+    border-bottom: none;
+}
+
+.feature-status {
+    font-size: 1rem;
+    min-width: 20px;
+}
+
+.feature-text {
+    font-weight: 500;
+    flex: 1;
+}
+
+.progress-indicator {
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--glass-border);
+}
+
+.progress-bar {
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 10px;
+    height: 8px;
+    overflow: hidden;
+    margin-bottom: 0.5rem;
+}
+
+.progress-fill {
+    height: 100%;
+    border-radius: 10px;
+    transition: width 1s ease;
+}
+
+.module-card.done .progress-fill {
+    background: var(--done-text);
+}
+
+.module-card.progress .progress-fill {
+    background: var(--progress-text);
+}
+
+.module-card.todo .progress-fill {
+    background: var(--todo-text);
+}
+
+.progress-text {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    text-align: center;
+    font-weight: 600;
+}
+
+/* Footer */
+.footer {
+    margin-top: 6rem;
+    padding: 3rem 2rem;
+    text-align: center;
+    background: var(--glass-bg);
+    border: 1px solid var(--glass-border);
+    /* border-radius: var(--radius); */
+    backdrop-filter: blur(20px);
+    box-shadow: var(--shadow);
+    width: 100%;
+    margin-left: auto;
+    margin-right: auto;
+}
+
+.footer-links {
+    display: flex;
+    justify-content: center;
+    gap: 3rem;
+    margin-bottom: 2rem;
+    flex-wrap: wrap;
+}
+
+.footer-link {
+    color: var(--primary-color);
+    text-decoration: none;
+    font-weight: 600;
+    transition: all 0.3s ease;
+    padding: 0.5rem 1rem;
+    border-radius: 8px;
+}
+
+.footer-link:hover {
+    color: var(--secondary-color);
+    background: var(--glass-bg);
+    transform: translateY(-2px);
+}
+
+.footer-text {
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+/* Responsive */
+@media (max-width: 1400px) {
+    .container {
+        min-width: 100%;
+        padding: 1rem;
+    }
+    
+    .kanban-board {
+        grid-template-columns: 1fr;
+        gap: 1.5rem;
+    }
+    
+    .column-todo .column-content {
+        grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    }
+}
+
+    @media (max-width: 768px) {
+    .title {
+        font-size: 2.5rem;
+    }
+
+    .controls {
+        top: 1rem;
+        right: 1rem;
+        flex-direction: column;
+    }
+
+    .control-btn {
+        padding: 0.5rem;
+        font-size: 1rem;
+    }
+
+    .stats {
+        grid-template-columns: repeat(2, 1fr);
+        gap: 1rem;
+    }
+
+    .stat-card {
+        padding: 1.5rem;
+    }
+
+    .stat-number {
+        font-size: 2rem;
+    }
+
+    .column-content {
+        padding: 1rem;
+    }
+
+    .column-todo .column-content {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 480px) {
+    .stats {
+        grid-template-columns: 1fr;
+    }
+}

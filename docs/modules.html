@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Waspy Module Development Board</title>
+    <link rel="stylesheet" href="modules-style.css">
+</head>
+<body>
+    <div class="controls">
+        <button class="control-btn download-btn" onclick="downloadPNG()" title="Download PNG" id="download-btn">📸</button>
+        <button class="control-btn theme-toggle" onclick="toggleTheme()" title="Toggle Dark Mode">🌙</button>
+    </div>
+
+    <div class="container">
+        <header class="header">
+            <h1 class="title">Waspy Development Board</h1>
+            <p class="subtitle">Python to WebAssembly Compiler - Module Development Status</p>
+        </header>
+
+        <div class="stats" id="stats"></div>
+
+        <div class="kanban-board">
+            <div class="kanban-column column-done">
+                <div class="column-header">
+                    <div class="column-title">
+                        ✅ Completed
+                        <span class="column-count" id="done-count-badge">0</span>
+                    </div>
+                    <div class="column-subtitle">Fully implemented and working</div>
+                </div>
+                <div class="column-content" id="done-column"></div>
+            </div>
+
+            <div class="kanban-column column-progress">
+                <div class="column-header">
+                    <div class="column-title">
+                        🔄 In Progress
+                        <span class="column-count" id="progress-count-badge">0</span>
+                    </div>
+                    <div class="column-subtitle">Partially implemented features</div>
+                </div>
+                <div class="column-content" id="progress-column"></div>
+            </div>
+
+            <div class="kanban-column column-todo">
+                <div class="column-header">
+                    <div class="column-title">
+                        📋 Todo
+                        <span class="column-count" id="todo-count-badge">0</span>
+                    </div>
+                    <div class="column-subtitle">Planned for future development</div>
+                </div>
+                <div class="column-content" id="todo-column"></div>
+            </div>
+        </div>
+
+        <footer class="footer">
+            <div class="footer-links">
+                <a href="https://github.com/anistark/waspy" class="footer-link">GitHub Repository</a>
+                <!-- <a href="#" class="footer-link">Documentation</a> -->
+                <a href="https://github.com/anistark/waspy/blob/main/CONTRIBUTING.md" class="footer-link">Contributing Guide</a>
+                <a href="https://github.com/anistark/waspy/issues" class="footer-link">Issue Tracker</a>
+            </div>
+            <p class="footer-text">© 2025 Waspy Project. Built with ❤️ for the Python community.</p>
+        </footer>
+    </div>
+
+    <script>
+        // Module data
+        const moduleData = {
+            // ✅ FULLY COMPLETED MODULES
+            arithmetic: {
+                title: "ARITHMETIC",
+                status: "done",
+                features: [
+                    { name: "All operators (+, -, *, /, %, //, **)", status: "done" },
+                    { name: "Type coercion (int/float)", status: "done" },
+                    { name: "Bitwise operations (&, |, ^, <<, >>, ~)", status: "done" },
+                    { name: "Unary operations (-, +, not)", status: "done" }
+                ]
+            },
+            controlFlow: {
+                title: "CONTROL FLOW",
+                status: "done",
+                features: [
+                    { name: "if/elif/else statements", status: "done" },
+                    { name: "while loops", status: "done" },
+                    { name: "Comparison operations (==, !=, <, <=, >, >=)", status: "done" },
+                    { name: "Boolean logic (and, or, not) with short-circuit", status: "done" }
+                ]
+            },
+            functions: {
+                title: "FUNCTIONS",
+                status: "done",
+                features: [
+                    { name: "Function definitions with parameters", status: "done" },
+                    { name: "Type annotations (params & return types)", status: "done" },
+                    { name: "Function calls between compiled functions", status: "done" },
+                    { name: "Multiple functions per module", status: "done" }
+                ]
+            },
+            typeSystem: {
+                title: "TYPE SYSTEM",
+                status: "done",
+                features: [
+                    { name: "Basic types (int, float, bool)", status: "done" },
+                    { name: "Generic types (List[T], Dict[K,V], Tuple[T,...])", status: "done" },
+                    { name: "Union/Optional types", status: "done" },
+                    { name: "Custom class type annotations", status: "done" }
+                ]
+            },
+            variables: {
+                title: "VARIABLES & ASSIGNMENT",
+                status: "done",
+                features: [
+                    { name: "Variable declarations and assignments", status: "done" },
+                    { name: "Augmented assignment (+=, -=, *=, etc.)", status: "done" },
+                    { name: "Attribute assignment (obj.attr = value)", status: "done" },
+                    { name: "Type inference from usage", status: "done" }
+                ]
+            },
+            decorators: {
+                title: "DECORATORS",
+                status: "done",
+                features: [
+                    { name: "@memoize decorator (caching)", status: "done" },
+                    { name: "@debug decorator (logging)", status: "done" },
+                    { name: "@timer decorator (performance)", status: "done" },
+                    { name: "Custom decorator registration", status: "done" }
+                ]
+            },
+            projectMgmt: {
+                title: "PROJECT MANAGEMENT",
+                status: "done",
+                features: [
+                    { name: "Multi-file compilation to single WASM", status: "done" },
+                    { name: "Dependency analysis & circular detection", status: "done" },
+                    { name: "Entry point detection (__main__.py)", status: "done" },
+                    { name: "Config parsing (setup.py, pyproject.toml)", status: "done" }
+                ]
+            },
+            optimization: {
+                title: "OPTIMIZATION",
+                status: "done",
+                features: [
+                    { name: "WebAssembly optimization (Binaryen)", status: "done" },
+                    { name: "Compiler options & configuration", status: "done" },
+                    { name: "Error handling with detailed messages", status: "done" },
+                    { name: "Memory layout optimization", status: "done" }
+                ]
+            },
+
+            // 🔄 PARTIALLY IMPLEMENTED MODULES
+            strings: {
+                title: "STRINGS",
+                status: "progress",
+                features: [
+                    { name: "String literals and constants", status: "done" },
+                    { name: "String indexing (returns bytes, not char)", status: "progress" },
+                    { name: "String methods (.upper(), .lower(), .split())", status: "todo" },
+                    { name: "String concatenation (+) & slicing", status: "todo" }
+                ]
+            },
+            collections: {
+                title: "COLLECTIONS",
+                status: "progress",
+                features: [
+                    { name: "List literals ([1, 2, 3]) - parsing only", status: "done" },
+                    { name: "Dict literals ({'key': 'value'}) - parsing only", status: "done" },
+                    { name: "List/Dict indexing & operations", status: "todo" },
+                    { name: "Dynamic resizing & memory management", status: "todo" }
+                ]
+            },
+            classes: {
+                title: "CLASSES & OOP",
+                status: "progress",
+                features: [
+                    { name: "Class definitions & method parsing", status: "done" },
+                    { name: "Basic inheritance (base class tracking)", status: "done" },
+                    { name: "Object instantiation & method calls", status: "todo" },
+                    { name: "Special methods (__init__, __str__, etc.)", status: "todo" }
+                ]
+            },
+            advancedFlow: {
+                title: "ADVANCED CONTROL FLOW",
+                status: "progress",
+                features: [
+                    { name: "for loops (syntax parsing only)", status: "progress" },
+                    { name: "try/except (syntax parsing only)", status: "progress" },
+                    { name: "with statements (syntax parsing only)", status: "progress" },
+                    { name: "Actual iteration & exception handling", status: "todo" }
+                ]
+            },
+            builtins: {
+                title: "BUILT-IN FUNCTIONS",
+                status: "progress",
+                features: [
+                    { name: "Type conversions (int(), float(), str(), bool())", status: "done" },
+                    { name: "len() - recognized but not implemented", status: "progress" },
+                    { name: "print() - recognized but no actual output", status: "progress" },
+                    { name: "min(), max(), sum(), abs(), round()", status: "todo" }
+                ]
+            },
+            imports: {
+                title: "IMPORT SYSTEM",
+                status: "progress",
+                features: [
+                    { name: "Import syntax parsing (all types)", status: "done" },
+                    { name: "Conditional imports (try/except)", status: "done" },
+                    { name: "Dynamic imports (__import__, importlib)", status: "done" },
+                    { name: "Actual module loading & execution", status: "todo" }
+                ]
+            },
+
+            // ❌ NOT YET IMPLEMENTED
+            webInterop: {
+                title: "WEB INTEROP",
+                status: "todo",
+                features: [
+                    { name: "JavaScript bridge & value conversion", status: "todo" },
+                    { name: "DOM manipulation APIs", status: "todo" },
+                    { name: "Event handling system", status: "todo" },
+                    { name: "HTTP requests (fetch API)", status: "todo" }
+                ]
+            },
+            async: {
+                title: "ASYNC/AWAIT",
+                status: "todo",
+                features: [
+                    { name: "Promise object representation", status: "todo" },
+                    { name: "async/await syntax support", status: "todo" },
+                    { name: "Asynchronous function execution", status: "todo" },
+                    { name: "Concurrent task management", status: "todo" }
+                ]
+            },
+            stdlib: {
+                title: "STANDARD LIBRARY",
+                status: "todo",
+                features: [
+                    { name: "sys module (system parameters)", status: "todo" },
+                    { name: "os module (operating system interface)", status: "todo" },
+                    { name: "math module (mathematical functions)", status: "todo" },
+                    { name: "json module (JSON encoding/decoding)", status: "todo" }
+                ]
+            },
+            comprehensions: {
+                title: "COMPREHENSIONS",
+                status: "todo",
+                features: [
+                    { name: "List comprehensions ([x for x in list])", status: "todo" },
+                    { name: "Dict comprehensions ({k: v for k, v in items})", status: "todo" },
+                    { name: "Set comprehensions ({x for x in list})", status: "todo" },
+                    { name: "Generator expressions (x for x in list)", status: "todo" }
+                ]
+            },
+            generators: {
+                title: "GENERATORS & ITERATORS",
+                status: "todo",
+                features: [
+                    { name: "yield statement & generator functions", status: "todo" },
+                    { name: "Iterator protocol (__iter__, __next__)", status: "todo" },
+                    { name: "range() function implementation", status: "todo" },
+                    { name: "for loop iteration over collections", status: "todo" }
+                ]
+            },
+            errorHandling: {
+                title: "EXCEPTION HANDLING",
+                status: "todo",
+                features: [
+                    { name: "Exception throwing (raise statements)", status: "todo" },
+                    { name: "Exception catching by type", status: "todo" },
+                    { name: "Built-in exception types", status: "todo" },
+                    { name: "Exception propagation & finally blocks", status: "todo" }
+                ]
+            },
+            advancedTypes: {
+                title: "ADVANCED DATA TYPES",
+                status: "todo",
+                features: [
+                    { name: "Set type ({1, 2, 3}) & operations", status: "todo" },
+                    { name: "Tuple operations & unpacking", status: "todo" },
+                    { name: "String formatting (f-strings, .format())", status: "todo" },
+                    { name: "Bytes type & binary data handling", status: "todo" }
+                ]
+            },
+            advancedOOP: {
+                title: "ADVANCED OOP",
+                status: "todo",
+                features: [
+                    { name: "Multiple inheritance & method resolution", status: "todo" },
+                    { name: "Metaclasses & class creation", status: "todo" },
+                    { name: "Property decorators (@property, @setter)", status: "todo" },
+                    { name: "Static methods (@staticmethod, @classmethod)", status: "todo" }
+                ]
+            },
+            memory: {
+                title: "MEMORY MANAGEMENT",
+                status: "todo",
+                features: [
+                    { name: "Garbage collection system", status: "todo" },
+                    { name: "Reference counting & leak prevention", status: "todo" },
+                    { name: "Memory pools for efficient allocation", status: "todo" },
+                    { name: "WASM memory optimization", status: "todo" }
+                ]
+            },
+            graphics: {
+                title: "GRAPHICS & CANVAS",
+                status: "todo",
+                features: [
+                    { name: "Canvas API (2D drawing)", status: "todo" },
+                    { name: "WebGL support (3D graphics)", status: "todo" },
+                    { name: "Animation & rendering loops", status: "todo" },
+                    { name: "Image manipulation & processing", status: "todo" }
+                ]
+            }
+        };
+
+        // UI State
+        let isDarkMode = localStorage.getItem('darkMode') === 'true';
+
+        // Initialize theme
+        function initTheme() {
+            if (isDarkMode) {
+                document.documentElement.setAttribute('data-theme', 'dark');
+                document.querySelector('.theme-toggle').textContent = '☀️';
+            }
+        }
+
+        // Toggle theme
+        function toggleTheme() {
+            isDarkMode = !isDarkMode;
+            localStorage.setItem('darkMode', isDarkMode);
+            
+            if (isDarkMode) {
+                document.documentElement.setAttribute('data-theme', 'dark');
+                document.querySelector('.theme-toggle').textContent = '☀️';
+            } else {
+                document.documentElement.removeAttribute('data-theme');
+                document.querySelector('.theme-toggle').textContent = '🌙';
+            }
+        }
+
+        // Download PNG function
+        async function downloadPNG() {
+            const downloadBtn = document.getElementById('download-btn');
+            const originalText = downloadBtn.textContent;
+            
+            try {
+                // Disable button and show loading state
+                downloadBtn.disabled = true;
+                downloadBtn.textContent = '⏳';
+                
+                // Import html2canvas dynamically
+                const script = document.createElement('script');
+                script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+                document.head.appendChild(script);
+                
+                await new Promise((resolve, reject) => {
+                    script.onload = resolve;
+                    script.onerror = reject;
+                });
+
+                // Apply snapshot mode for landscape layout
+                document.body.classList.add('snapshot-mode');
+                
+                // Hide controls temporarily for cleaner screenshot
+                const controls = document.querySelector('.controls');
+                controls.style.display = 'none';
+                
+                // Wait for layout to settle and animations to complete
+                await new Promise(resolve => setTimeout(resolve, 800));
+                
+                // Force all cards to be visible for snapshot
+                const cards = document.querySelectorAll('.module-card');
+                cards.forEach(card => {
+                    card.classList.add('visible');
+                    const progressFill = card.querySelector('.progress-fill');
+                    if (progressFill && progressFill.dataset.width) {
+                        progressFill.style.width = progressFill.dataset.width;
+                    }
+                });
+                
+                // Calculate optimal dimensions for landscape
+                const container = document.querySelector('.container');
+                const containerRect = container.getBoundingClientRect();
+                
+                // Capture the screenshot with landscape-optimized settings
+                const canvas = await html2canvas(container, {
+                    backgroundColor: isDarkMode ? '#0f172a' : '#ffffff',
+                    scale: 1.5, // Good quality without being too large
+                    useCORS: true,
+                    allowTaint: true,
+                    width: Math.max(1600, containerRect.width),
+                    height: containerRect.height,
+                    scrollX: 0,
+                    scrollY: 0,
+                    removeContainer: false
+                });
+                
+                // Remove snapshot mode and show controls again
+                document.body.classList.remove('snapshot-mode');
+                controls.style.display = 'flex';
+                
+                // Create download link
+                const link = document.createElement('a');
+                const timestamp = new Date().toISOString().split('T')[0];
+                const theme = isDarkMode ? 'dark' : 'light';
+                link.download = `waspy-kanban-board-${timestamp}-${theme}.png`;
+                link.href = canvas.toDataURL('image/png', 0.9);
+                
+                // Trigger download
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                
+                // Success feedback
+                downloadBtn.textContent = '✅';
+                setTimeout(() => {
+                    downloadBtn.textContent = originalText;
+                    downloadBtn.disabled = false;
+                }, 1500);
+                
+            } catch (error) {
+                console.error('Download failed:', error);
+                
+                // Clean up on error
+                document.body.classList.remove('snapshot-mode');
+                const controls = document.querySelector('.controls');
+                controls.style.display = 'flex';
+                
+                // Error feedback
+                downloadBtn.textContent = '❌';
+                setTimeout(() => {
+                    downloadBtn.textContent = originalText;
+                    downloadBtn.disabled = false;
+                }, 1500);
+            }
+        }
+
+        // Calculate statistics
+        function calculateStats() {
+            let done = 0, progress = 0, todo = 0;
+            
+            Object.values(moduleData).forEach(module => {
+                switch(module.status) {
+                    case 'done': done++; break;
+                    case 'progress': progress++; break;
+                    case 'todo': todo++; break;
+                }
+            });
+
+            const total = done + progress + todo;
+            const completionRate = Math.round((done / total) * 100);
+
+            return { done, progress, todo, total, completionRate };
+        }
+
+        // Render statistics
+        function renderStats() {
+            const stats = calculateStats();
+            const statsContainer = document.getElementById('stats');
+            
+            statsContainer.innerHTML = `
+                <div class="stat-card">
+                    <div class="stat-number done" id="done-count">0</div>
+                    <div class="stat-label">Completed</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number progress" id="progress-count">0</div>
+                    <div class="stat-label">In Progress</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number todo" id="todo-count">0</div>
+                    <div class="stat-label">Todo</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number total" id="completion-rate">0%</div>
+                    <div class="stat-label">Complete</div>
+                </div>
+            `;
+
+            // Update column badges
+            document.getElementById('done-count-badge').textContent = stats.done;
+            document.getElementById('progress-count-badge').textContent = stats.progress;
+            document.getElementById('todo-count-badge').textContent = stats.todo;
+
+            // Animate counters
+            setTimeout(() => {
+                animateCounter('done-count', stats.done);
+                animateCounter('progress-count', stats.progress);
+                animateCounter('todo-count', stats.todo);
+                animateCounter('completion-rate', stats.completionRate, '%');
+            }, 300);
+        }
+
+        // Animate counter
+        function animateCounter(elementId, targetValue, suffix = '') {
+            const element = document.getElementById(elementId);
+            if (!element) return;
+            
+            const startValue = 0;
+            const duration = 1000;
+            const startTime = performance.now();
+
+            function updateCounter(currentTime) {
+                const elapsed = currentTime - startTime;
+                const progress = Math.min(elapsed / duration, 1);
+                const easeOut = 1 - Math.pow(1 - progress, 3);
+                const currentValue = Math.round(startValue + (targetValue - startValue) * easeOut);
+                
+                element.textContent = currentValue + suffix;
+
+                if (progress < 1) {
+                    requestAnimationFrame(updateCounter);
+                }
+            }
+
+            requestAnimationFrame(updateCounter);
+        }
+
+        // Get status icon
+        function getStatusIcon(status) {
+            switch(status) {
+                case 'done': return '✅';
+                case 'progress': return '🔄';
+                case 'todo': return '❌';
+                default: return '❓';
+            }
+        }
+
+        // Get status label
+        function getStatusLabel(status) {
+            switch(status) {
+                case 'done': return 'Completed';
+                case 'progress': return 'In Progress';
+                case 'todo': return 'Todo';
+                default: return 'Unknown';
+            }
+        }
+
+        // Calculate module progress percentage
+        function calculateModuleProgress(module) {
+            const total = module.features.length;
+            let completed = 0;
+            let partial = 0;
+
+            module.features.forEach(feature => {
+                if (feature.status === 'done') {
+                    completed++;
+                } else if (feature.status === 'progress') {
+                    partial += 0.5;
+                }
+            });
+
+            return Math.round(((completed + partial) / total) * 100);
+        }
+
+        // Create module card
+        function createModuleCard(moduleKey, module) {
+            const progress = calculateModuleProgress(module);
+            
+            return `
+                <div class="module-card ${module.status}" data-module="${moduleKey}">
+                    <div class="card-header">
+                        <span class="card-title">${module.title}</span>
+                        <span class="card-status">${getStatusLabel(module.status)}</span>
+                    </div>
+                    <ul class="feature-list">
+                        ${module.features.map(feature => `
+                            <li class="feature-item">
+                                <span class="feature-status">${getStatusIcon(feature.status)}</span>
+                                <span class="feature-text">${feature.name}</span>
+                            </li>
+                        `).join('')}
+                    </ul>
+                    ${module.status !== 'done' ? `
+                        <div class="progress-indicator">
+                            <div class="progress-bar">
+                                <div class="progress-fill" style="width: 0%" data-width="${progress}%"></div>
+                            </div>
+                            <div class="progress-text">${progress}% Complete</div>
+                        </div>
+                    ` : ''}
+                </div>
+            `;
+        }
+
+        // Render kanban board
+        function renderKanbanBoard() {
+            const doneColumn = document.getElementById('done-column');
+            const progressColumn = document.getElementById('progress-column');
+            const todoColumn = document.getElementById('todo-column');
+
+            if (!doneColumn || !progressColumn || !todoColumn) return;
+
+            // Clear columns
+            doneColumn.innerHTML = '';
+            progressColumn.innerHTML = '';
+            todoColumn.innerHTML = '';
+
+            // Group modules by status
+            Object.entries(moduleData).forEach(([key, module]) => {
+                const card = createModuleCard(key, module);
+                
+                switch(module.status) {
+                    case 'done':
+                        doneColumn.innerHTML += card;
+                        break;
+                    case 'progress':
+                        progressColumn.innerHTML += card;
+                        break;
+                    case 'todo':
+                        todoColumn.innerHTML += card;
+                        break;
+                }
+            });
+
+            // Animate cards and progress bars
+            setTimeout(() => {
+                const cards = document.querySelectorAll('.module-card');
+                cards.forEach((card, index) => {
+                    setTimeout(() => {
+                        card.classList.add('visible');
+                        
+                        // Animate progress bars
+                        const progressFill = card.querySelector('.progress-fill');
+                        if (progressFill) {
+                            setTimeout(() => {
+                                progressFill.style.width = progressFill.dataset.width;
+                            }, 300);
+                        }
+                    }, index * 100);
+                });
+            }, 200);
+        }
+
+        // Initialize the application
+        function init() {
+            initTheme();
+            renderStats();
+            renderKanbanBoard();
+        }
+
+        // Start the app when DOM is loaded
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', init);
+        } else {
+            init();
+        }
+    </script>
+</body>
+</html>

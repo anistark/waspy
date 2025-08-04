@@ -13,18 +13,18 @@ Waspy translates Python functions into WebAssembly. The implementation supports 
 
 ### Compilation Pipeline
 
-```
+## Overview
+
+```sh
 [Python Source Code]
-         ↓ (rustpython_parser)
-[Python AST]
-         ↓ (ir module)
-[Custom IR (functions, ops)]
-         ↓ (wasm-encoder)
-[Raw WASM binary]
-         ↓ (binaryen optimizer)
-[Optimized .wasm]
-         ↓
-[Run/test in browser or server]
+       ↓ 
+Parse & Analyze
+       ↓
+[Intermediate Representation]
+       ↓
+Generate & Optimize
+       ↓
+[WebAssembly Binary]
 ```
 
 ## Current Features
