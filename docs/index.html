@@ -1,0 +1,1328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Waspy - Python to WebAssembly Compiler</title>
+    
+    <!-- Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    
+    <!-- Prism.js for code highlighting -->
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet">
+    
+    <style>
+        :root {
+            --bg-primary: #0d1117;
+            --bg-secondary: rgba(22, 27, 34, 0.8);
+            --bg-tertiary: rgba(33, 38, 45, 0.6);
+            --bg-glass: rgba(22, 27, 34, 0.4);
+            --text-primary: #f0f6fc;
+            --text-secondary: #8b949e;
+            --text-muted: #656d76;
+            --accent-python: #3776ab;
+            --accent-wasm: #654ff0;
+            --accent-success: #238636;
+            --accent-warning: #d29922;
+            --border-color: rgba(48, 54, 61, 0.8);
+            --shadow-light: rgba(0, 0, 0, 0.1);
+            --shadow-heavy: rgba(0, 0, 0, 0.3);
+            --glass-border: rgba(255, 255, 255, 0.1);
+        }
+
+        [data-theme="light"] {
+            --bg-primary: #ffffff;
+            --bg-secondary: rgba(248, 249, 250, 0.8);
+            --bg-tertiary: rgba(241, 243, 244, 0.6);
+            --bg-glass: rgba(255, 255, 255, 0.4);
+            --text-primary: #24292f;
+            --text-secondary: #656d76;
+            --text-muted: #8b949e;
+            --accent-python: #3776ab;
+            --accent-wasm: #654ff0;
+            --accent-success: #238636;
+            --accent-warning: #d29922;
+            --border-color: rgba(208, 215, 222, 0.8);
+            --shadow-light: rgba(0, 0, 0, 0.05);
+            --shadow-heavy: rgba(0, 0, 0, 0.15);
+            --glass-border: rgba(0, 0, 0, 0.1);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.6;
+            overflow-x: hidden;
+            position: relative;
+        }
+
+        /* Background pattern */
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: 
+                radial-gradient(circle at 20% 50%, rgba(55, 118, 171, 0.1) 0%, transparent 50%),
+                radial-gradient(circle at 80% 20%, rgba(101, 79, 240, 0.1) 0%, transparent 50%),
+                radial-gradient(circle at 40% 80%, rgba(35, 134, 54, 0.05) 0%, transparent 50%);
+            pointer-events: none;
+            z-index: -1;
+            transition: opacity 0.3s ease;
+        }
+
+        [data-theme="light"] body::before {
+            background: 
+                radial-gradient(circle at 20% 50%, rgba(55, 118, 171, 0.05) 0%, transparent 50%),
+                radial-gradient(circle at 80% 20%, rgba(101, 79, 240, 0.05) 0%, transparent 50%),
+                radial-gradient(circle at 40% 80%, rgba(35, 134, 54, 0.03) 0%, transparent 50%);
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 20px;
+        }
+
+        .glass {
+            background: var(--bg-glass);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--glass-border);
+            border-radius: 12px;
+        }
+
+        /* Header */
+        header {
+            position: fixed;
+            top: 0;
+            width: 100%;
+            background: rgba(13, 17, 23, 0.6);
+            backdrop-filter: blur(16px);
+            z-index: 1000;
+            border-bottom: 1px solid var(--glass-border);
+        }
+
+        nav {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1rem 0;
+        }
+
+        .nav-right {
+            display: flex;
+            align-items: center;
+            gap: 2rem;
+        }
+
+        /* Theme Toggle */
+        .theme-toggle {
+            background: var(--bg-glass);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--glass-border);
+            border-radius: 20px;
+            padding: 0.25rem;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            transition: all 0.3s ease;
+            position: relative;
+            width: 60px;
+            height: 32px;
+        }
+
+        .theme-toggle:hover {
+            border-color: var(--accent-python);
+        }
+
+        .theme-icon {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background: var(--accent-python);
+            color: white;
+            font-size: 12px;
+            transition: all 0.3s ease;
+            position: absolute;
+            top: 3px;
+            left: 3px;
+        }
+
+        [data-theme="light"] .theme-icon {
+            transform: translateX(28px);
+        }
+
+        .theme-icon svg {
+            width: 14px;
+            height: 14px;
+        }
+
+        .logo-container {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .logo-img {
+            width: 32px;
+            height: 32px;
+            border-radius: 6px;
+        }
+
+        .logo {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1.5rem;
+            font-weight: 600;
+            background: linear-gradient(135deg, var(--accent-python), var(--accent-wasm));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 2rem;
+            list-style: none;
+        }
+
+        .nav-links a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-weight: 500;
+            transition: color 0.3s ease;
+            position: relative;
+        }
+
+        .nav-links a:hover {
+            color: var(--text-primary);
+        }
+
+        .nav-links a::after {
+            content: '';
+            position: absolute;
+            bottom: -4px;
+            left: 0;
+            width: 0;
+            height: 2px;
+            background: var(--accent-python);
+            transition: width 0.3s ease;
+        }
+
+        .nav-links a:hover::after {
+            width: 100%;
+        }
+
+        /* Hero Section */
+        .hero {
+            padding: 8rem 0 4rem;
+            text-align: center;
+            position: relative;
+        }
+
+        .hero h1 {
+            font-size: clamp(2.5rem, 5vw, 4rem);
+            font-weight: 700;
+            margin-bottom: 1.5rem;
+            background: linear-gradient(135deg, var(--text-primary), var(--text-secondary));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .hero .subtitle {
+            font-size: 1.25rem;
+            color: var(--text-secondary);
+            margin-bottom: 2rem;
+            max-width: 600px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        .cta-buttons {
+            display: flex;
+            gap: 1rem;
+            justify-content: center;
+            flex-wrap: wrap;
+            margin-bottom: 3rem;
+        }
+
+        .btn {
+            padding: 0.75rem 1.5rem;
+            border: none;
+            border-radius: 8px;
+            font-weight: 600;
+            text-decoration: none;
+            transition: all 0.3s ease;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            backdrop-filter: blur(12px);
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--accent-python), #2d5f8f);
+            color: white;
+            border: 1px solid rgba(55, 118, 171, 0.3);
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(55, 118, 171, 0.4);
+        }
+
+        .btn-secondary {
+            background: var(--bg-glass);
+            color: var(--text-primary);
+            border: 1px solid var(--glass-border);
+        }
+
+        .btn-secondary:hover {
+            background: var(--bg-tertiary);
+            border-color: var(--text-secondary);
+        }
+
+        /* Status Badge */
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            background: var(--bg-glass);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--glass-border);
+            padding: 0.5rem 1rem;
+            border-radius: 20px;
+            margin-bottom: 2rem;
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            background: var(--accent-success);
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        /* Code Demo */
+        .code-demo {
+            background: var(--bg-glass);
+            backdrop-filter: blur(12px);
+            border-radius: 12px;
+            padding: 2rem;
+            margin: 2rem 0;
+            border: 1px solid var(--glass-border);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .code-demo::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: linear-gradient(90deg, var(--accent-python), var(--accent-wasm));
+        }
+
+        .code-tabs {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+            border-bottom: 1px solid var(--glass-border);
+        }
+
+        .code-tab {
+            padding: 0.5rem 1rem;
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9rem;
+            border-bottom: 2px solid transparent;
+            transition: all 0.3s ease;
+        }
+
+        .code-tab.active {
+            color: var(--text-primary);
+            border-bottom-color: var(--accent-python);
+        }
+
+        .code-content {
+            position: relative;
+        }
+
+        .code-panel {
+            display: none;
+        }
+
+        .code-panel.active {
+            display: block;
+        }
+
+        pre {
+            margin: 0;
+            background: rgba(33, 38, 45, 0.8) !important;
+            border-radius: 8px;
+            overflow-x: auto;
+            border: 1px solid var(--glass-border);
+            transition: background-color 0.3s ease;
+        }
+
+        [data-theme="light"] pre {
+            background: rgba(248, 249, 250, 0.8) !important;
+        }
+
+        code {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9rem;
+        }
+
+        /* How It Works */
+        .how-it-works {
+            padding: 4rem 0;
+        }
+
+        .how-it-works h2 {
+            text-align: center;
+            margin-bottom: 3rem;
+            font-size: 2.5rem;
+            font-weight: 600;
+        }
+
+        .pipeline {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 2rem;
+            margin: 3rem 0;
+            flex-wrap: wrap;
+        }
+
+        .pipeline-step {
+            background: var(--bg-glass);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--glass-border);
+            padding: 1.5rem;
+            border-radius: 12px;
+            text-align: center;
+            min-width: 150px;
+            transition: all 0.3s ease;
+        }
+
+        .pipeline-step:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 12px 24px var(--shadow-heavy);
+        }
+
+        .pipeline-step .icon {
+            font-size: 2rem;
+            margin-bottom: 1rem;
+            display: block;
+        }
+
+        .pipeline-arrow {
+            font-size: 1.5rem;
+            color: var(--accent-python);
+        }
+
+        /* Comparison Table */
+        .comparison {
+            padding: 4rem 0;
+            background: var(--bg-glass);
+            backdrop-filter: blur(12px);
+            border-radius: 12px;
+            margin: 2rem 0;
+            border: 1px solid var(--glass-border);
+        }
+
+        .comparison h2 {
+            text-align: center;
+            margin-bottom: 3rem;
+            font-size: 2rem;
+            font-weight: 600;
+        }
+
+        .comparison-table {
+            overflow-x: auto;
+            border-radius: 8px;
+            border: 1px solid var(--glass-border);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: var(--bg-tertiary);
+            backdrop-filter: blur(12px);
+        }
+
+        th, td {
+            padding: 1rem;
+            text-align: left;
+            border-bottom: 1px solid var(--glass-border);
+        }
+
+        th {
+            background: var(--bg-glass);
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        td {
+            color: var(--text-secondary);
+        }
+
+        .feature-check {
+            color: var(--accent-success);
+            font-weight: bold;
+        }
+
+        .feature-partial {
+            color: var(--accent-warning);
+            font-weight: bold;
+        }
+
+        .feature-no {
+            color: var(--text-muted);
+            font-weight: bold;
+        }
+
+        /* Features Grid */
+        .features {
+            padding: 4rem 0;
+        }
+
+        .features h2 {
+            text-align: center;
+            margin-bottom: 3rem;
+            font-size: 2.5rem;
+            font-weight: 600;
+        }
+
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+        }
+
+        .feature-card {
+            background: var(--bg-glass);
+            backdrop-filter: blur(12px);
+            padding: 2rem;
+            border-radius: 12px;
+            border: 1px solid var(--glass-border);
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .feature-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: var(--accent-python);
+            transform: scaleX(0);
+            transform-origin: left;
+            transition: transform 0.3s ease;
+        }
+
+        .feature-card:hover::before {
+            transform: scaleX(1);
+        }
+
+        .feature-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 12px 24px var(--shadow-heavy);
+        }
+
+        .feature-icon {
+            font-size: 2rem;
+            margin-bottom: 1rem;
+            display: block;
+        }
+
+        .feature-card h3 {
+            margin-bottom: 1rem;
+            font-size: 1.25rem;
+            font-weight: 600;
+        }
+
+        .feature-card p {
+            color: var(--text-secondary);
+            line-height: 1.6;
+        }
+
+        /* Installation */
+        .installation {
+            padding: 4rem 0;
+            background: var(--bg-glass);
+            backdrop-filter: blur(12px);
+            border-radius: 12px;
+            border: 1px solid var(--glass-border);
+            margin: 2rem 0;
+        }
+
+        .installation h2 {
+            text-align: center;
+            margin-bottom: 2rem;
+            font-size: 2rem;
+            font-weight: 600;
+        }
+
+        .install-steps {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        .install-step {
+            margin-bottom: 2rem;
+            background: var(--bg-tertiary);
+            backdrop-filter: blur(12px);
+            padding: 1.5rem;
+            border-radius: 8px;
+            border: 1px solid var(--glass-border);
+            border-left: 4px solid var(--accent-python);
+        }
+
+        .install-step h3 {
+            margin-bottom: 0.5rem;
+            font-size: 1.1rem;
+            font-weight: 600;
+        }
+
+        .install-command {
+            background: rgba(13, 17, 23, 0.8);
+            backdrop-filter: blur(12px);
+            padding: 1rem;
+            border-radius: 6px;
+            font-family: 'JetBrains Mono', monospace;
+            margin: 1rem 0;
+            border: 1px solid var(--glass-border);
+            position: relative;
+        }
+
+        .copy-btn {
+            position: absolute;
+            top: 0.5rem;
+            right: 0.5rem;
+            background: var(--bg-tertiary);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--glass-border);
+            color: var(--text-secondary);
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .copy-btn:hover {
+            color: var(--text-primary);
+            background: var(--bg-secondary);
+        }
+
+        /* Footer */
+        footer {
+            background: var(--bg-glass);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--glass-border);
+            border-radius: 12px;
+            margin: 2rem 0;
+            padding: 3rem 0;
+        }
+
+        .footer-content {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 2rem;
+            margin-bottom: 2rem;
+        }
+
+        .footer-section h3 {
+            margin-bottom: 1rem;
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .footer-section p, .footer-section a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            line-height: 1.6;
+        }
+
+        .footer-section a:hover {
+            color: var(--accent-python);
+        }
+
+        .social-links {
+            display: flex;
+            gap: 1rem;
+            margin-top: 1rem;
+        }
+
+        .social-link {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 40px;
+            height: 40px;
+            background: var(--bg-tertiary);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--glass-border);
+            border-radius: 8px;
+            color: var(--text-secondary);
+            text-decoration: none;
+            transition: all 0.3s ease;
+        }
+
+        .social-link:hover {
+            color: var(--text-primary);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px var(--shadow-heavy);
+        }
+
+        .footer-bottom {
+            text-align: center;
+            padding-top: 2rem;
+            border-top: 1px solid var(--glass-border);
+            color: var(--text-muted);
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .nav-right {
+                gap: 1rem;
+            }
+            
+            .nav-links {
+                display: none;
+            }
+            
+            .theme-toggle {
+                width: 50px;
+                height: 28px;
+            }
+
+            .theme-icon {
+                width: 20px;
+                height: 20px;
+                top: 3px;
+                left: 3px;
+            }
+
+            [data-theme="light"] .theme-icon {
+                transform: translateX(22px);
+            }
+            
+            .hero {
+                padding: 6rem 0 3rem;
+            }
+            
+            .cta-buttons {
+                flex-direction: column;
+                align-items: center;
+            }
+            
+            .code-demo {
+                padding: 1rem;
+            }
+            
+            .features-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .pipeline {
+                flex-direction: column;
+            }
+
+            .pipeline-arrow {
+                transform: rotate(90deg);
+            }
+        }
+
+        /* Animations */
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(30px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .fade-in-up {
+            animation: fadeInUp 0.6s ease forwards;
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: var(--bg-secondary);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--border-color);
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--text-muted);
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <nav class="container">
+            <div class="logo-container">
+                <img src="https://github.com/user-attachments/assets/6bf90045-41c8-45f4-a0c5-0a67bd0c3aa7" alt="Waspy Logo" class="logo-img">
+                <div class="logo">waspy</div>
+            </div>
+            <div class="nav-right">
+                <ul class="nav-links">
+                    <li><a href="#how-it-works">How It Works</a></li>
+                    <li><a href="#features">Features</a></li>
+                    <li><a href="#install">Install</a></li>
+                    <li><a href="/modules">Modules</a></li>
+                    <li><a href="https://github.com/anistark/waspy">GitHub</a></li>
+                </ul>
+                
+                <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">
+                    <div class="theme-icon">
+                        <svg class="sun-icon" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M12 2.25a.75.75 0 01.75.75v2.25a.75.75 0 01-1.5 0V3a.75.75 0 01.75-.75zM7.5 12a4.5 4.5 0 119 0 4.5 4.5 0 01-9 0zM18.894 6.166a.75.75 0 00-1.06-1.06l-1.591 1.59a.75.75 0 101.06 1.061l1.591-1.59zM21.75 12a.75.75 0 01-.75.75h-2.25a.75.75 0 010-1.5H21a.75.75 0 01.75.75zM17.834 18.894a.75.75 0 001.06-1.06l-1.59-1.591a.75.75 0 10-1.061 1.06l1.59 1.591zM12 18a.75.75 0 01.75.75V21a.75.75 0 01-1.5 0v-2.25A.75.75 0 0112 18zM7.758 17.303a.75.75 0 00-1.061-1.06l-1.591 1.59a.75.75 0 001.06 1.061l1.591-1.59zM6 12a.75.75 0 01-.75.75H3a.75.75 0 010-1.5h2.25A.75.75 0 016 12zM6.697 7.757a.75.75 0 001.06-1.06l-1.59-1.591a.75.75 0 00-1.061 1.06l1.59 1.591z"/>
+                        </svg>
+                        <svg class="moon-icon" viewBox="0 0 24 24" fill="currentColor" style="display: none;">
+                            <path d="M9.528 1.718a.75.75 0 01.162.819A8.97 8.97 0 009 6a9 9 0 009 9 8.97 8.97 0 003.463-.69.75.75 0 01.981.98 10.503 10.503 0 01-9.694 6.46c-5.799 0-10.5-4.701-10.5-10.5 0-4.368 2.667-8.112 6.46-9.694a.75.75 0 01.818.162z"/>
+                        </svg>
+                    </div>
+                </button>
+            </div>
+        </nav>
+    </header>
+
+    <main>
+        <section class="hero">
+            <div class="container fade-in-up">
+                <div class="status-badge">
+                    <span class="status-dot"></span>
+                    <span>v0.5.2 • Actively Developed • <a href="/modules" style="color: var(--accent-python);">View Modules</a></span>
+                </div>
+                
+                <h1>Python → WebAssembly</h1>
+                <p class="subtitle">
+                    Compile Python functions to WebAssembly with ease. 
+                    Built in Rust for performance and reliability.
+                </p>
+                
+                <div class="cta-buttons">
+                    <a href="#install" class="btn btn-primary">
+                        🚀 Get Started
+                    </a>
+                    <a href="https://github.com/anistark/waspy" class="btn btn-secondary">
+                        📖 View Docs
+                    </a>
+                </div>
+
+                <div class="code-demo glass">
+                    <div class="code-tabs">
+                        <button class="code-tab active" data-tab="python">Python</button>
+                        <button class="code-tab" data-tab="rust">Rust</button>
+                        <button class="code-tab" data-tab="js">JavaScript</button>
+                    </div>
+                    
+                    <div class="code-content">
+                        <div class="code-panel active" id="python">
+                            <pre><code class="language-python"># fibonacci.py
+def fibonacci(n: int) -> int:
+    if n <= 1:
+        return n
+    a, b = 0, 1
+    for i in range(2, n + 1):
+        a, b = b, a + b
+    return b
+
+def factorial(n: int) -> int:
+    result = 1
+    for i in range(1, n + 1):
+        result *= i
+    return result</code></pre>
+                        </div>
+                        
+                        <div class="code-panel" id="rust">
+                            <pre><code class="language-rust">use waspy::compile_python_to_wasm;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let python_code = std::fs::read_to_string("fibonacci.py")?;
+    let wasm = compile_python_to_wasm(&python_code)?;
+    std::fs::write("fibonacci.wasm", &wasm)?;
+    println!("✅ Compiled to WebAssembly!");
+    Ok(())
+}</code></pre>
+                        </div>
+                        
+                        <div class="code-panel" id="js">
+                            <pre><code class="language-javascript">// Run the compiled WebAssembly
+WebAssembly.instantiate(wasmBuffer).then(result => {
+    const { fibonacci, factorial } = result.instance.exports;
+    
+    console.log(fibonacci(10)); // 55
+    console.log(factorial(5));  // 120
+    
+    // Blazing fast execution! 🔥
+});</code></pre>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="how-it-works" id="how-it-works">
+            <div class="container">
+                <h2>How Waspy Works</h2>
+                
+                <div class="pipeline fade-in-up">
+                    <div class="pipeline-step">
+                        <span class="icon">🐍</span>
+                        <h3>Python AST</h3>
+                        <p>Parse with RustPython</p>
+                    </div>
+                    <span class="pipeline-arrow">→</span>
+                    <div class="pipeline-step">
+                        <span class="icon">⚙️</span>
+                        <h3>Custom IR</h3>
+                        <p>Intermediate Rep.</p>
+                    </div>
+                    <span class="pipeline-arrow">→</span>
+                    <div class="pipeline-step">
+                        <span class="icon">🔧</span>
+                        <h3>WASM Binary</h3>
+                        <p>wasm-encoder</p>
+                    </div>
+                    <span class="pipeline-arrow">→</span>
+                    <div class="pipeline-step">
+                        <span class="icon">⚡</span>
+                        <h3>Optimized</h3>
+                        <p>Binaryen</p>
+                    </div>
+                </div>
+
+                <div class="comparison glass">
+                    <h2>Waspy vs Other Python Implementations</h2>
+                    <div class="comparison-table">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Feature</th>
+                                    <th>Waspy</th>
+                                    <th>CPython</th>
+                                    <th>MicroPython</th>
+                                    <th>PyPy</th>
+                                    <th>HPy</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td><strong>Target</strong></td>
+                                    <td>WebAssembly</td>
+                                    <td>Native/VM</td>
+                                    <td>Microcontrollers</td>
+                                    <td>JIT Compilation</td>
+                                    <td>C Extensions</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Performance</strong></td>
+                                    <td class="feature-check">Near-native WASM</td>
+                                    <td class="feature-partial">Interpreted</td>
+                                    <td class="feature-partial">Optimized for size</td>
+                                    <td class="feature-check">JIT optimized</td>
+                                    <td class="feature-check">Native speed</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Type Safety</strong></td>
+                                    <td class="feature-check">Compile-time</td>
+                                    <td class="feature-no">Runtime only</td>
+                                    <td class="feature-no">Runtime only</td>
+                                    <td class="feature-partial">JIT inference</td>
+                                    <td class="feature-no">Runtime only</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Universal Runtime</strong></td>
+                                    <td class="feature-check">Browser/Server/Edge</td>
+                                    <td class="feature-partial">OS dependent</td>
+                                    <td class="feature-no">Hardware specific</td>
+                                    <td class="feature-partial">OS dependent</td>
+                                    <td class="feature-partial">OS dependent</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Startup Time</strong></td>
+                                    <td class="feature-check">Instant</td>
+                                    <td class="feature-partial">Module loading</td>
+                                    <td class="feature-check">Fast</td>
+                                    <td class="feature-no">JIT warmup</td>
+                                    <td class="feature-partial">Import overhead</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Memory Usage</strong></td>
+                                    <td class="feature-check">Minimal</td>
+                                    <td class="feature-partial">Standard</td>
+                                    <td class="feature-check">Ultra-low</td>
+                                    <td class="feature-no">Higher (JIT)</td>
+                                    <td class="feature-partial">Standard</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Standard Library</strong></td>
+                                    <td class="feature-partial">Basic support</td>
+                                    <td class="feature-check">Complete</td>
+                                    <td class="feature-partial">Subset</td>
+                                    <td class="feature-check">Complete</td>
+                                    <td class="feature-check">Complete</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Security</strong></td>
+                                    <td class="feature-check">Sandboxed WASM</td>
+                                    <td class="feature-no">Full system access</td>
+                                    <td class="feature-partial">Hardware limited</td>
+                                    <td class="feature-no">Full system access</td>
+                                    <td class="feature-no">Full system access</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Use Case</strong></td>
+                                    <td>Web apps, serverless</td>
+                                    <td>General purpose</td>
+                                    <td>IoT, embedded</td>
+                                    <td>CPU-intensive apps</td>
+                                    <td>C extension API</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="features" id="features">
+            <div class="container">
+                <h2>Why Waspy?</h2>
+                <div class="features-grid">
+                    <div class="feature-card glass fade-in-up">
+                        <span class="feature-icon">🚀</span>
+                        <h3>Fast Compilation</h3>
+                        <p>Built in Rust for blazing-fast compilation times. Transform your Python functions to optimized WebAssembly in milliseconds.</p>
+                    </div>
+                    
+                    <div class="feature-card glass fade-in-up">
+                        <span class="feature-icon">🎯</span>
+                        <h3>Type Safety</h3>
+                        <p>Full support for Python type annotations. Get compile-time type checking and better WebAssembly optimization.</p>
+                    </div>
+                    
+                    <div class="feature-card glass fade-in-up">
+                        <span class="feature-icon">⚡</span>
+                        <h3>High Performance</h3>
+                        <p>Optimized WebAssembly output with Binaryen. Your Python functions run at near-native speed in any environment.</p>
+                    </div>
+                    
+                    <div class="feature-card glass fade-in-up">
+                        <span class="feature-icon">🔧</span>
+                        <h3>Easy Integration</h3>
+                        <p>Simple API that works with your existing Python code. No need to rewrite - just compile and deploy.</p>
+                    </div>
+                    
+                    <div class="feature-card glass fade-in-up">
+                        <span class="feature-icon">🌐</span>
+                        <h3>Universal Runtime</h3>
+                        <p>Run anywhere WebAssembly is supported: browsers, Node.js, serverless, edge computing, and more.</p>
+                    </div>
+                    
+                    <div class="feature-card glass fade-in-up">
+                        <span class="feature-icon">🛠️</span>
+                        <h3>Rich Features</h3>
+                        <p>Control flow, function calls, decorators, classes, and more. Comprehensive Python language support.</p>
+                    </div>
+                    
+                    <div class="feature-card glass fade-in-up">
+                        <span class="feature-icon">📦</span>
+                        <h3>Multi-File Support</h3>
+                        <p>Compile entire Python projects with multiple files, dependencies, and entry points into single WASM modules.</p>
+                    </div>
+                    
+                    <div class="feature-card glass fade-in-up">
+                        <span class="feature-icon">🔍</span>
+                        <h3>Project Analysis</h3>
+                        <p>Built-in import analysis, circular dependency detection, and project structure understanding.</p>
+                    </div>
+                    
+                    <div class="feature-card glass fade-in-up">
+                        <span class="feature-icon">🎨</span>
+                        <h3>Decorator Support</h3>
+                        <p>Function decorators including memoization, debugging, timing, and custom decorator registry.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="installation glass" id="install">
+            <div class="container">
+                <h2>Get Started in Minutes</h2>
+                
+                <div class="install-steps">
+                    <div class="install-step fade-in-up">
+                        <h3>1. Install Waspy</h3>
+                        <p>Add Waspy to your Rust project:</p>
+                        <div class="install-command">
+                            <code>cargo add waspy</code>
+                            <button class="copy-btn" onclick="copyToClipboard('cargo add waspy')">Copy</button>
+                        </div>
+                    </div>
+                    
+                    <div class="install-step fade-in-up">
+                        <h3>2. Compile Python to WASM</h3>
+                        <p>Use the simple API to compile your Python functions:</p>
+                        <div class="install-command">
+                            <code>let wasm = waspy::compile_python_to_wasm(python_code)?;</code>
+                            <button class="copy-btn" onclick="copyToClipboard('let wasm = waspy::compile_python_to_wasm(python_code)?;')">Copy</button>
+                        </div>
+                    </div>
+                    
+                    <div class="install-step fade-in-up">
+                        <h3>3. Advanced Features</h3>
+                        <p>Compile entire projects with options:</p>
+                        <div class="install-command">
+                            <code>let wasm = waspy::compile_python_project("./my_project", true)?;</code>
+                            <button class="copy-btn" onclick="copyToClipboard('let wasm = waspy::compile_python_project(\"./my_project\", true)?;')">Copy</button>
+                        </div>
+                    </div>
+                    
+                    <div class="install-step fade-in-up">
+                        <h3>4. Run Anywhere</h3>
+                        <p>Execute your compiled WebAssembly in any environment:</p>
+                        <div class="install-command">
+                            <code>WebAssembly.instantiate(wasm).then(instance => { /* magic */ });</code>
+                            <button class="copy-btn" onclick="copyToClipboard('WebAssembly.instantiate(wasm).then(instance => { /* magic */ });')">Copy</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer class="glass">
+        <div class="container">
+            <div class="footer-content">
+                <div class="footer-section">
+                    <h3>Waspy</h3>
+                    <p>A Python to WebAssembly compiler written in Rust, designed for performance and simplicity.</p>
+                    <div class="social-links">
+                        <a href="https://github.com/anistark/waspy" class="social-link" title="GitHub">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M12 0C5.374 0 0 5.373 0 12 0 17.302 3.438 21.8 8.207 23.387c.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.509 11.509 0 0112 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z"/>
+                            </svg>
+                        </a>
+                        <a href="https://crates.io/crates/waspy" class="social-link" title="Crates.io">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M12 0L1.608 6v12L12 24l10.392-6V6L12 0zm-1.601 8.4l-2.4 1.385v2.77l2.4 1.385 2.4-1.385v-2.77L10.399 8.4zm3.601 0l-2.4 1.385v2.77l2.4 1.385 2.4-1.385v-2.77L14 8.4z"/>
+                            </svg>
+                        </a>
+                        <a href="https://twitter.com/anistark" class="social-link" title="Twitter">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M23.953 4.57a10 10 0 01-2.825.775 4.958 4.958 0 002.163-2.723c-.951.555-2.005.959-3.127 1.184a4.92 4.92 0 00-8.384 4.482C7.69 8.095 4.067 6.13 1.64 3.162a4.822 4.822 0 00-.666 2.475c0 1.71.87 3.213 2.188 4.096a4.904 4.904 0 01-2.228-.616v.06a4.923 4.923 0 003.946 4.827 4.996 4.996 0 01-2.212.085 4.936 4.936 0 004.604 3.417 9.867 9.867 0 01-6.102 2.105c-.39 0-.779-.023-1.17-.067a13.995 13.995 0 007.557 2.209c9.053 0 13.998-7.496 13.998-13.985 0-.21 0-.42-.015-.63A9.935 9.935 0 0024 4.59z"/>
+                            </svg>
+                        </a>
+                        <a href="https://linkedin.com/in/anistark" class="social-link" title="LinkedIn">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
+                            </svg>
+                        </a>
+                    </div>
+                </div>
+                
+                <div class="footer-section">
+                    <h3>Resources</h3>
+                    <p><a href="https://github.com/anistark/waspy">Documentation</a></p>
+                    <p><a href="https://github.com/anistark/waspy/tree/main/examples">Examples</a></p>
+                    <p><a href="/modules">Module Reference</a></p>
+                    <p><a href="https://github.com/anistark/waspy/blob/main/CONTRIBUTING.md">Contributing</a></p>
+                </div>
+                
+                <div class="footer-section">
+                    <h3>Community</h3>
+                    <p><a href="https://github.com/anistark/waspy/issues">Issues</a></p>
+                    <p><a href="https://github.com/anistark/waspy/discussions">Discussions</a></p>
+                    <p><a href="https://crates.io/crates/waspy">Crates.io</a></p>
+                    <p><a href="https://github.com/anistark/waspy/releases">Releases</a></p>
+                </div>
+                
+                <div class="footer-section">
+                    <h3>Technology</h3>
+                    <p>Built with Rust 🦀</p>
+                    <p>WebAssembly Target</p>
+                    <p>RustPython Parser</p>
+                    <p>Binaryen Optimizer</p>
+                </div>
+            </div>
+            
+            <div class="footer-bottom">
+                <p>&copy; 2024 Waspy. Made with ❤️ by <a href="https://github.com/anistark" style="color: var(--accent-python);">Kumar Anirudha</a></p>
+                <p>MIT License • v0.5.2 • Actively Developed</p>
+            </div>
+        </div>
+    </footer>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+    
+    <script>
+        // Theme functionality
+        function toggleTheme() {
+            const html = document.documentElement;
+            const currentTheme = html.getAttribute('data-theme');
+            const newTheme = currentTheme === 'light' ? 'dark' : 'light';
+            
+            html.setAttribute('data-theme', newTheme);
+            localStorage.setItem('theme', newTheme);
+            
+            // Update theme toggle icons
+            const sunIcon = document.querySelector('.sun-icon');
+            const moonIcon = document.querySelector('.moon-icon');
+            
+            if (newTheme === 'light') {
+                sunIcon.style.display = 'none';
+                moonIcon.style.display = 'block';
+            } else {
+                sunIcon.style.display = 'block';
+                moonIcon.style.display = 'none';
+            }
+        }
+
+        // Initialize theme
+        function initTheme() {
+            const savedTheme = localStorage.getItem('theme');
+            const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            const theme = savedTheme || (prefersDark ? 'dark' : 'light');
+            
+            document.documentElement.setAttribute('data-theme', theme);
+            
+            // Update theme toggle icons
+            const sunIcon = document.querySelector('.sun-icon');
+            const moonIcon = document.querySelector('.moon-icon');
+            
+            if (theme === 'light') {
+                sunIcon.style.display = 'none';
+                moonIcon.style.display = 'block';
+            } else {
+                sunIcon.style.display = 'block';
+                moonIcon.style.display = 'none';
+            }
+        }
+
+        // Initialize theme on page load
+        document.addEventListener('DOMContentLoaded', initTheme);
+
+        // Tab functionality
+        document.querySelectorAll('.code-tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                // Remove active class from all tabs and panels
+                document.querySelectorAll('.code-tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.code-panel').forEach(p => p.classList.remove('active'));
+                
+                // Add active class to clicked tab and corresponding panel
+                tab.classList.add('active');
+                document.getElementById(tab.dataset.tab).classList.add('active');
+            });
+        });
+
+        // Copy to clipboard functionality
+        function copyToClipboard(text) {
+            navigator.clipboard.writeText(text).then(() => {
+                // Show feedback
+                const btn = event.target;
+                const originalText = btn.textContent;
+                btn.textContent = 'Copied!';
+                btn.style.color = 'var(--accent-success)';
+                
+                setTimeout(() => {
+                    btn.textContent = originalText;
+                    btn.style.color = '';
+                }, 2000);
+            });
+        }
+
+        // Smooth scrolling for anchor links
+        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+            anchor.addEventListener('click', function (e) {
+                e.preventDefault();
+                const target = document.querySelector(this.getAttribute('href'));
+                if (target) {
+                    target.scrollIntoView({
+                        behavior: 'smooth',
+                        block: 'start'
+                    });
+                }
+            });
+        });
+
+        // Add fade-in animation on scroll
+        const observerOptions = {
+            threshold: 0.1,
+            rootMargin: '0px 0px -50px 0px'
+        };
+
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target.style.opacity = '1';
+                    entry.target.style.transform = 'translateY(0)';
+                }
+            });
+        }, observerOptions);
+
+        // Observe all fade-in-up elements
+        document.querySelectorAll('.fade-in-up').forEach(el => {
+            el.style.opacity = '0';
+            el.style.transform = 'translateY(30px)';
+            el.style.transition = 'opacity 0.6s ease, transform 0.6s ease';
+            observer.observe(el);
+        });
+
+        // Add parallax effect to background
+        window.addEventListener('scroll', () => {
+            const scrolled = window.pageYOffset;
+            const parallax = document.querySelector('body::before');
+            if (parallax) {
+                const speed = scrolled * 0.5;
+                parallax.style.transform = `translateY(${speed}px)`;
+            }
+        });
+    </script>
+</body>
+</html>
