@@ -10,6 +10,13 @@ pub mod ir;
 pub mod optimize;
 pub mod utils;
 
+// WASM plugin integration
+#[cfg(feature = "wasm-plugin")]
+pub mod wasmrun;
+
+#[cfg(feature = "wasm-plugin")]
+pub use wasmrun::{WaspyPlugin, WaspyBuilder};
+
 use crate::core::config::ProjectConfig;
 pub use crate::core::options::CompilerOptions;
 use crate::ir::{EntryPointInfo, IRType};
