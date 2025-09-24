@@ -1,6 +1,6 @@
 [package]
 name = "waspy"
-version = "0.5.2"
+version = "0.6.0"
 edition = "2021"
 description = "A Python interpreter written in Rust, designed for WebAssembly."
 license = "MIT"
@@ -10,6 +10,10 @@ categories = ["compilers", "wasm", "web-programming"]
 readme = "README.md"
 authors = ["Kumar Anirudha <hi@anirudha.dev>"]
 
+[features]
+default = []
+wasm-plugin = ["serde"]
+
 [dependencies]
 rustpython-parser = "0.4.0"
 wasm-encoder = "0.229.0"
@@ -17,9 +21,11 @@ anyhow = "1.0"
 binaryen = "0.13.0"
 thiserror = "1.0"
 log = "0.4"
+serde = { version = "1.0", features = ["derive"], optional = true }
 
 [lib]
 name = "waspy"
+crate-type = ["cdylib", "rlib"]  # Add cdylib for plugin support
 path = "src/lib.rs"
 
 # Examples
@@ -42,3 +48,35 @@ path = "examples/project_compiler.rs"
 [[example]]
 name = "typed_demo"
 path = "examples/typed_demo.rs"
+
+[[example]]
+name = "plugin_test"
+path = "examples/plugin_test.rs"
+required-features = ["wasm-plugin"]
+
+[[example]]
+name = "html_test"
+path = "examples/html_test.rs"
+required-features = ["wasm-plugin"]
+
+# Plugin metadata following wasmrust pattern
+[package.metadata.wasm_plugin]
+name = "python"
+extensions = ["py"]
+entry_files = ["main.py", "__main__.py", "app.py", "src/main.py"]
+
+[package.metadata.wasm_plugin.capabilities]
+supported_languages = ["python"]
+compile_wasm = true
+compile_webapp = false
+live_reload = false
+optimization = true
+custom_targets = ["wasm"]
+html_generation = true
+
+[package.metadata.wasm_plugin.dependencies]
+tools = []  # Self-contained!
+optional_tools = []
+
+[package.metadata.wasm_plugin.exports]
+plugin_create = "wasmrun_plugin_create"
