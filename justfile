@@ -41,14 +41,19 @@ examples:
 
 # Run tests
 test:
-    cargo test
+    cargo test --all-features
 
 # Format the code
 format:
     @echo "Formatting code..."
-    @cargo fmt
+    @cargo fmt --all
 
-# Run clippy linter with fix suggestions
+# Check formatting without making changes
+format-check:
+    @echo "Checking code formatting..."
+    @cargo fmt --all -- --check
+
+# Run clippy linter
 lint:
     cargo clippy --all-targets --all-features -- -D warnings
 
@@ -92,16 +97,24 @@ clean:
     cargo clean
     rm -rf examples/output || true
 
-# Generate documentation
+# Generate documentation and open in browser
 docs:
-    cargo doc --no-deps --open
+    cargo doc --all-features --no-deps --open
+
+# Check documentation build
+docs-check:
+    RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
 
 # Complete development workflow: format, lint, build, and test
-dev: format lint build test
+dev: format format-check lint build test
     @echo "Development checks completed successfully!"
 
+# CI check - runs exactly what CI runs (format-check, lint, test)
+ci: format-check lint test
+    @echo "CI checks completed successfully!"
+
 # Prepare for release: format, lint, build, test, and check if ready to publish
-prepare-release: format lint build test check-publish
+prepare-release: format format-check lint build test check-publish
     @echo "Release preparation completed successfully!"
 
 # Compile a specific Python file to WebAssembly
