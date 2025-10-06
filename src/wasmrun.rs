@@ -526,3 +526,190 @@ pub extern "C" fn wasmrun_plugin_create() -> *mut std::ffi::c_void {
 pub fn create_plugin() -> Box<dyn Plugin> {
     Box::new(WaspyPlugin::new())
 }
+
+// ============================================================================
+// FFI Compilation Functions
+// ============================================================================
+
+use std::ffi::{CStr, CString};
+use std::os::raw::{c_char, c_int};
+
+/// FFI-safe result structure for compilation
+#[repr(C)]
+pub struct WaspyCompileResult {
+    pub success: bool,
+    pub wasm_data: *mut u8,
+    pub wasm_len: usize,
+    pub error_message: *mut c_char,
+}
+
+/// Compile Python source code to WASM via FFI
+///
+/// # Safety
+/// - `source_ptr` must be a valid null-terminated C string
+/// - `optimize` should be 0 for debug, 1 for release
+/// - Caller must free the returned wasm_data using `waspy_free_wasm_data`
+/// - Caller must free error_message using `waspy_free_error_message`
+#[no_mangle]
+pub unsafe extern "C" fn waspy_compile_python(
+    source_ptr: *const c_char,
+    optimize: c_int,
+) -> WaspyCompileResult {
+    // Validate input
+    if source_ptr.is_null() {
+        return WaspyCompileResult {
+            success: false,
+            wasm_data: std::ptr::null_mut(),
+            wasm_len: 0,
+            error_message: CString::new("Source pointer is null").unwrap().into_raw(),
+        };
+    }
+
+    // Convert C string to Rust string
+    let source = match CStr::from_ptr(source_ptr).to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            return WaspyCompileResult {
+                success: false,
+                wasm_data: std::ptr::null_mut(),
+                wasm_len: 0,
+                error_message: CString::new(format!("Invalid UTF-8 in source: {e}"))
+                    .unwrap()
+                    .into_raw(),
+            };
+        }
+    };
+
+    // Set up compiler options
+    let options = crate::CompilerOptions {
+        optimize: optimize != 0,
+        debug_info: optimize == 0,
+        generate_html: false,
+        include_metadata: true,
+        ..crate::CompilerOptions::default()
+    };
+
+    // Compile the Python source
+    match crate::compile_python_to_wasm_with_options(source, &options) {
+        Ok(wasm_bytes) => {
+            let len = wasm_bytes.len();
+            let mut boxed_data = wasm_bytes.into_boxed_slice();
+            let ptr = boxed_data.as_mut_ptr();
+            std::mem::forget(boxed_data); // Prevent deallocation
+
+            WaspyCompileResult {
+                success: true,
+                wasm_data: ptr,
+                wasm_len: len,
+                error_message: std::ptr::null_mut(),
+            }
+        }
+        Err(e) => WaspyCompileResult {
+            success: false,
+            wasm_data: std::ptr::null_mut(),
+            wasm_len: 0,
+            error_message: CString::new(format!("Compilation failed: {e}"))
+                .unwrap()
+                .into_raw(),
+        },
+    }
+}
+
+/// Compile a Python project directory to WASM via FFI
+///
+/// # Safety
+/// - `project_path_ptr` must be a valid null-terminated C string
+/// - `optimize` should be 0 for debug, 1 for release
+/// - Caller must free the returned wasm_data using `waspy_free_wasm_data`
+/// - Caller must free error_message using `waspy_free_error_message`
+#[no_mangle]
+pub unsafe extern "C" fn waspy_compile_project(
+    project_path_ptr: *const c_char,
+    optimize: c_int,
+) -> WaspyCompileResult {
+    // Validate input
+    if project_path_ptr.is_null() {
+        return WaspyCompileResult {
+            success: false,
+            wasm_data: std::ptr::null_mut(),
+            wasm_len: 0,
+            error_message: CString::new("Project path pointer is null")
+                .unwrap()
+                .into_raw(),
+        };
+    }
+
+    // Convert C string to Rust string
+    let project_path = match CStr::from_ptr(project_path_ptr).to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            return WaspyCompileResult {
+                success: false,
+                wasm_data: std::ptr::null_mut(),
+                wasm_len: 0,
+                error_message: CString::new(format!("Invalid UTF-8 in path: {e}"))
+                    .unwrap()
+                    .into_raw(),
+            };
+        }
+    };
+
+    // Set up compiler options
+    let options = crate::CompilerOptions {
+        optimize: optimize != 0,
+        debug_info: optimize == 0,
+        generate_html: false,
+        include_metadata: true,
+        ..crate::CompilerOptions::default()
+    };
+
+    // Compile the Python project
+    match crate::compile_python_project_with_options(project_path, &options) {
+        Ok(wasm_bytes) => {
+            let len = wasm_bytes.len();
+            let mut boxed_data = wasm_bytes.into_boxed_slice();
+            let ptr = boxed_data.as_mut_ptr();
+            std::mem::forget(boxed_data); // Prevent deallocation
+
+            WaspyCompileResult {
+                success: true,
+                wasm_data: ptr,
+                wasm_len: len,
+                error_message: std::ptr::null_mut(),
+            }
+        }
+        Err(e) => WaspyCompileResult {
+            success: false,
+            wasm_data: std::ptr::null_mut(),
+            wasm_len: 0,
+            error_message: CString::new(format!("Project compilation failed: {e}"))
+                .unwrap()
+                .into_raw(),
+        },
+    }
+}
+
+/// Free WASM data allocated by waspy_compile_python or waspy_compile_project
+///
+/// # Safety
+/// - `data` must be a pointer previously returned by a waspy_compile_* function
+/// - `len` must be the length previously returned by a waspy_compile_* function
+/// - Must only be called once per allocation
+#[no_mangle]
+pub unsafe extern "C" fn waspy_free_wasm_data(data: *mut u8, len: usize) {
+    if !data.is_null() && len > 0 {
+        let _ = Box::from_raw(std::slice::from_raw_parts_mut(data, len));
+    }
+}
+
+/// Free error message allocated by waspy compilation functions
+///
+/// # Safety
+/// - `error_message` must be a pointer previously returned by a waspy_compile_* function
+/// - Must only be called once per allocation
+#[no_mangle]
+pub unsafe extern "C" fn waspy_free_error_message(error_message: *mut c_char) {
+    if !error_message.is_null() {
+        let _ = CString::from_raw(error_message);
+    }
+}
