@@ -95,66 +95,44 @@ waspy/
 
 Build the main project:
 ```sh
-cargo build --release
+just build
 ```
 
 Build the examples:
 ```sh
-cargo build --examples
-```
-
-Or use the justfile shortcuts:
-```sh
-just build
 just build-examples
 ```
 
 ### Running Examples
 
-Waspy includes several examples to demonstrate its functionality:
+Waspy includes several examples to demonstrate its functionality.
 
-#### Simple Compiler Example
+#### Run All Examples
 
-Compiles a basic operations Python file to WebAssembly:
-
-```sh
-cargo run --example simple_compiler
-```
-
-#### Advanced Compiler Example
-
-A more flexible compiler with various options:
-
-```sh
-# Compile with optimization (default)
-cargo run --example advanced_compiler examples/typed_demo.py
-
-# With metadata information
-cargo run --example advanced_compiler examples/typed_demo.py --metadata
-
-# Generate an HTML test harness
-cargo run --example advanced_compiler examples/typed_demo.py --html
-```
-
-#### Multi-File Compiler Example
-
-Compiles multiple Python files into a single WebAssembly module:
-
-```sh
-cargo run --example multi_file_compiler examples/output/combined.wasm examples/basic_operations.py examples/calculator.py
-```
-
-#### Project Compiler Example
-
-Compiles an entire Python project:
-
-```sh
-cargo run --example project_compiler examples/calculator_project examples/output/project.wasm
-```
-
-You can also use the justfile to run all examples:
 ```sh
 just examples
+```
+
+#### Compile Specific Python Files
+
+```sh
+# Compile a single Python file
+just compile examples/typed_demo.py
+
+# Compile with optimization and metadata
+just optimize examples/typed_demo.py
+
+# Compile multiple files into one module
+just compile-multi examples/output/combined.wasm examples/basic_operations.py examples/calculator.py
+
+# Compile an entire project directory
+just compile-project examples/calculator_project
+```
+
+#### Run Type System Demo
+
+```sh
+just run-typed-demo
 ```
 
 ### Creating and Running Your Own Examples
@@ -179,11 +157,6 @@ def max_num(a: float, b: float) -> float:
 
 Then compile it:
 
-```sh
-cargo run --example advanced_compiler path/to/your_function.py
-```
-
-Or use the justfile shortcut:
 ```sh
 just compile path/to/your_function.py
 ```
@@ -237,6 +210,26 @@ Waspy uses a `justfile` to manage common development tasks:
 - `just compile <file>` - Compile a Python file to WebAssembly
 - `just optimize <file>` - Compile a Python file with optimization
 
+### CI Quality Checks
+
+Before submitting a pull request, ensure your code passes all CI checks:
+
+```sh
+# Format your code
+just format
+
+# Run linting
+just lint
+
+# Run tests
+just test
+
+# Run the full development workflow (format + lint + build + test)
+just dev
+```
+
+All these checks run automatically on every pull request via GitHub Actions.
+
 ## Pull Request Process
 
 1. **Create a Pull Request**
@@ -257,11 +250,11 @@ Waspy uses a `justfile` to manage common development tasks:
 Waspy follows Rust's standard coding conventions:
 
 1. **Code Formatting**
-   - Use `cargo fmt` or `just format` to format your code
+   - Use `just format` to format your code
    - Follow the [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/)
 
 2. **Linting**
-   - Run `cargo clippy` or `just lint` to check for common issues
+   - Run `just lint` to check for common issues
    - Address all clippy warnings unless there's a good reason not to
 
 3. **Documentation**

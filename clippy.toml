@@ -1,0 +1,20 @@
+# Clippy configuration for waspy
+# See https://doc.rust-lang.org/clippy/lint_configuration.html
+
+# Warn on missing docs in public items
+missing-docs-in-crate-items = false
+
+# Maximum allowed complexity for a function
+cognitive-complexity-threshold = 25
+
+# Maximum allowed lines for a function
+too-many-lines-threshold = 100
+
+# Don't warn about large error types
+type-complexity-threshold = 250
+
+# Single character binding names that are allowed
+single-char-binding-names-threshold = 4
+
+# Allowed prefixes for boolean variable names
+allowed-idents-below-min-chars = ["i", "j", "k", "x", "y", "z", "e"]
