@@ -9,7 +9,9 @@ pub fn compile_function(
     ctx: &mut CompilationContext,
     memory_layout: &MemoryLayout,
 ) -> Function {
-    // Track function parameters as locals
+    ctx.locals_map.clear();
+    ctx.local_count = 0;
+
     for param in &ir_func.params {
         ctx.add_local(&param.name, param.param_type.clone());
     }

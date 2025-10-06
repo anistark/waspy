@@ -57,8 +57,21 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
     }
     module.section(&functions);
 
-    // Export section
+    // Memory section
+    let mut memories = MemorySection::new();
+    memories.memory(MemoryType {
+        minimum: 1,
+        maximum: Some(2),
+        memory64: false,
+        shared: false,
+        page_size_log2: None,
+    });
+    module.section(&memories);
+
+    // Export section - export both functions and memory
     let mut exports = ExportSection::new();
+
+    // Register and export functions
     for (idx, func) in ir_module.functions.iter().enumerate() {
         // Register function in context
         let param_types = func.params.iter().map(|p| p.param_type.clone()).collect();
@@ -73,23 +86,11 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
         // Export the function
         exports.export(&func.name, wasm_encoder::ExportKind::Func, idx as u32);
     }
+
+    // Export memory
+    exports.export("memory", wasm_encoder::ExportKind::Memory, 0);
+
     module.section(&exports);
-
-    // Memory section
-    let mut memories = MemorySection::new();
-    memories.memory(MemoryType {
-        minimum: 1,
-        maximum: Some(2),
-        memory64: false,
-        shared: false,
-        page_size_log2: None,
-    });
-    module.section(&memories);
-
-    // Memory export
-    let mut memory_exports = ExportSection::new();
-    memory_exports.export("memory", wasm_encoder::ExportKind::Memory, 0);
-    module.section(&memory_exports);
 
     // Data section for string constants
     let mut data = DataSection::new();
