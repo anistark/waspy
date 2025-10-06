@@ -1,0 +1,44 @@
+# Rustfmt configuration for waspy
+# See https://rust-lang.github.io/rustfmt/ for all options
+
+edition = "2021"
+
+# Maximum line width
+max_width = 100
+
+# Use Unix line endings
+newline_style = "Unix"
+
+# Format strings
+format_strings = true
+
+# Merge imports
+imports_granularity = "Crate"
+
+# Group imports
+group_imports = "StdExternalCrate"
+
+# Reorder imports
+reorder_imports = true
+
+# Reorder modules
+reorder_modules = true
+
+# Use field init shorthand
+use_field_init_shorthand = true
+
+# Use try shorthand
+use_try_shorthand = true
+
+# Format code in doc comments
+format_code_in_doc_comments = true
+
+# Normalize comments
+normalize_comments = true
+
+# Wrap comments
+wrap_comments = true
+comment_width = 80
+
+# Chain formatting
+chain_width = 60
