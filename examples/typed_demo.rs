@@ -50,7 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Err(err) => {
-            eprintln!("Error extracting metadata: {}", err);
+            eprintln!("Error extracting metadata: {err}");
         }
     }
 
@@ -80,7 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n✅ Compilation Results");
     println!("---------------------");
-    println!("Compilation completed in {:.2?}", duration);
+    println!("Compilation completed in {duration:.2?}");
     println!("WebAssembly binary size: {} bytes", wasm.len());
     println!("Output file: {}", output_file.display());
     println!("HTML test file: {}", html_file.display());
@@ -111,7 +111,7 @@ fn generate_html_test_file(title: &str, wasm_filename: &str) -> String {
         r#"<!DOCTYPE html>
 <html>
 <head>
-    <title>{} - Waspy</title>
+    <title>{title} - Waspy</title>
     <style>
         body {{ font-family: system-ui, sans-serif; margin: 0; padding: 20px; line-height: 1.5; max-width: 800px; margin: 0 auto; }}
         .result {{ margin-top: 10px; padding: 10px; background-color: #f0f0f0; border-radius: 4px; font-family: monospace; white-space: pre-wrap; }}
@@ -125,7 +125,7 @@ fn generate_html_test_file(title: &str, wasm_filename: &str) -> String {
     </style>
 </head>
 <body>
-    <h1>{}</h1>
+    <h1>{title}</h1>
     <p>This demonstration showcases Waspy's type system capabilities.</p>
     
     <div class="card">
@@ -176,7 +176,7 @@ fn generate_html_test_file(title: &str, wasm_filename: &str) -> String {
         
         async function loadWasm() {{
             try {{
-                const response = await fetch('{}');
+                const response = await fetch('{wasm_filename}');
                 const bytes = await response.arrayBuffer();
                 const result = await WebAssembly.instantiate(bytes);
                 instance = result.instance;
@@ -266,7 +266,6 @@ fn generate_html_test_file(title: &str, wasm_filename: &str) -> String {
     </script>
 </body>
 </html>
-"#,
-        title, title, wasm_filename
+"#
     )
 }

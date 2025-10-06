@@ -283,7 +283,7 @@ fn process_circular_imports(module: &mut IRModule) {
 
     for (_, module_name) in potentially_circular {
         module.metadata.insert(
-            format!("circular_import_{}", module_name),
+            format!("circular_import_{module_name}"),
             "true".to_string(),
         );
     }
@@ -915,7 +915,7 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                             let target = import.alias.unwrap_or_else(|| name.clone());
 
                             // Create qualified name
-                            let qualified_name = format!("{}.{}", module_name, name);
+                            let qualified_name = format!("{module_name}.{name}");
 
                             ir_statements.push(IRStatement::DynamicImport {
                                 target,

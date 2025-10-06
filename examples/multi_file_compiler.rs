@@ -23,10 +23,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\nWaspy Multi-file Compiler");
     println!("========================\n");
-    println!("Output file: {}", output_path);
+    println!("Output file: {output_path}");
     println!("Input files:");
     for (idx, file) in input_files.iter().enumerate() {
-        println!("  {}. {}", idx + 1, file);
+        let num = idx + 1;
+        println!("  {num}. {file}");
     }
 
     // Create output directory if needed
@@ -44,10 +45,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match fs::read_to_string(file_path) {
             Ok(source) => {
                 file_data.push((path_str.clone(), source));
-                println!("Successfully read {}", path_str);
+                println!("Successfully read {path_str}");
             }
             Err(err) => {
-                eprintln!("Error reading {}: {}", path_str, err);
+                eprintln!("Error reading {path_str}: {err}");
                 return Err(Box::new(err));
             }
         }
@@ -68,10 +69,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Compile all files into a single WASM module
-    println!(
-        "\nCompiling {} files into a single WebAssembly module...",
-        sources.len()
-    );
+    let num_sources = sources.len();
+    println!("\nCompiling {num_sources} files into a single WebAssembly module...");
     let start_time = Instant::now();
 
     let wasm_binary = compile_multiple_python_files_with_options(&sources, &options)?;
@@ -79,7 +78,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Ensure output filename has .wasm extension
     let final_output = if !output_path.ends_with(".wasm") {
-        format!("{}.wasm", output_path)
+        format!("{output_path}.wasm")
     } else {
         output_path.to_string()
     };
@@ -88,8 +87,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n✅ Compilation Results");
     println!("---------------------");
-    println!("Compilation completed in {:.2?}", duration);
-    println!("Output file: {}", final_output);
+    println!("Compilation completed in {duration:.2?}");
+    println!("Output file: {final_output}");
     println!("WebAssembly binary size: {} bytes", wasm_binary.len());
 
     // Generate HTML test file
@@ -99,7 +98,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap()
         .to_str()
         .unwrap();
-    let html_path = parent.join(format!("{}_test.html", stem));
+    let html_path = parent.join(format!("{stem}_test.html"));
 
     let wasm_name = Path::new(&final_output)
         .file_name()
@@ -116,11 +115,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn print_usage(program_name: &str) {
-    eprintln!(
-        "Usage: {} <output_file> <python_file1> [python_file2] ...",
-        program_name
-    );
-    eprintln!("Example: {} examples/output/combined.wasm examples/basic_operations.py examples/calculator.py", program_name);
+    eprintln!("Usage: {program_name} <output_file> <python_file1> [python_file2] ...");
+    eprintln!("Example: {program_name} examples/output/combined.wasm examples/basic_operations.py examples/calculator.py");
 }
 
 fn generate_html_test_file(wasm_filename: &str) -> String {
@@ -145,7 +141,7 @@ fn generate_html_test_file(wasm_filename: &str) -> String {
 </head>
 <body>
     <h1>Waspy Multi-file WebAssembly Test</h1>
-    <p>Module: <code>{}</code></p>
+    <p>Module: <code>{wasm_filename}</code></p>
     
     <h2>Available Functions</h2>
     <div id="function-list">Loading...</div>
@@ -168,7 +164,7 @@ fn generate_html_test_file(wasm_filename: &str) -> String {
         // Load the WebAssembly module
         (async () => {{
             try {{
-                const response = await fetch('{}');
+                const response = await fetch('{wasm_filename}');
                 const bytes = await response.arrayBuffer();
                 const {{ instance }} = await WebAssembly.instantiate(bytes);
                 
@@ -257,7 +253,6 @@ fn generate_html_test_file(wasm_filename: &str) -> String {
     </script>
 </body>
 </html>
-"#,
-        wasm_filename, wasm_filename
+"#
     )
 }

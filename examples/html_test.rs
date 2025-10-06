@@ -4,8 +4,8 @@
 
 #[cfg(feature = "wasm-plugin")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use waspy::wasmrun::{WaspyPlugin, OptimizationLevel, BuildConfig};
     use waspy::wasmrun::Plugin;
+    use waspy::wasmrun::{BuildConfig, OptimizationLevel, WaspyPlugin};
 
     println!("🌐 Testing Waspy HTML Generation");
     println!("=================================\n");
@@ -40,8 +40,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     // Show first few lines of HTML
                     if let Ok(html_content) = std::fs::read_to_string(&html_path) {
+                        let preview = &html_content[..html_content.len().min(300)];
                         println!("\nHTML Preview (first 300 chars):");
-                        println!("  {}", &html_content[..html_content.len().min(300)]);
+                        println!("  {preview}");
                         if html_content.len() > 300 {
                             println!("  ... (truncated)");
                         }
@@ -55,7 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("   Or serve with: python -m http.server 8000");
             }
             Err(e) => {
-                println!("❌ HTML generation failed: {}", e);
+                println!("❌ HTML generation failed: {e}");
             }
         }
     } else {

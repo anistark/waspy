@@ -128,7 +128,7 @@ impl WasmBuilder for WaspyBuilder {
 
         // Single Python file
         if path.is_file() {
-            return path.extension().map_or(false, |ext| ext == "py");
+            return path.extension().is_some_and(|ext| ext == "py");
         }
 
         // Directory with Python files
@@ -159,20 +159,26 @@ impl WasmBuilder for WaspyBuilder {
         if !self.can_handle_project(project_path) {
             return Err(CompilationError::BuildFailed {
                 language: "python".to_string(),
-                reason: format!("No Python files found in '{}'", project_path),
+                reason: format!("No Python files found in '{project_path}'"),
             });
         }
         Ok(())
     }
 
     fn build(&self, config: &BuildConfig) -> CompilationResult<BuildResult> {
-        use crate::{compile_python_to_wasm_with_options, compile_python_project_with_options, CompilerOptions};
+        use crate::{
+            compile_python_project_with_options, compile_python_to_wasm_with_options,
+            CompilerOptions,
+        };
 
         let start_time = std::time::Instant::now();
 
         // Convert BuildConfig to CompilerOptions
         let compiler_options = CompilerOptions {
-            optimize: matches!(config.optimization, OptimizationLevel::Release | OptimizationLevel::Size),
+            optimize: matches!(
+                config.optimization,
+                OptimizationLevel::Release | OptimizationLevel::Size
+            ),
             debug_info: config.verbose,
             generate_html: config.target_type == "html",
             include_metadata: true,
@@ -184,17 +190,19 @@ impl WasmBuilder for WaspyBuilder {
 
         let wasm_bytes = if input_path.is_file() {
             // Single Python file
-            let source = std::fs::read_to_string(&config.input)
-                .map_err(|e| CompilationError::BuildFailed {
+            let source = std::fs::read_to_string(&config.input).map_err(|e| {
+                CompilationError::BuildFailed {
                     language: "python".to_string(),
-                    reason: format!("Failed to read file: {}", e),
-                })?;
+                    reason: format!("Failed to read file: {e}"),
+                }
+            })?;
 
             compile_python_to_wasm_with_options(&source, &compiler_options)
         } else {
             // Python project directory
             compile_python_project_with_options(&config.input, &compiler_options)
-        }.map_err(|e| CompilationError::BuildFailed {
+        }
+        .map_err(|e| CompilationError::BuildFailed {
             language: "python".to_string(),
             reason: e.to_string(),
         })?;
@@ -204,7 +212,8 @@ impl WasmBuilder for WaspyBuilder {
             .file_stem()
             .unwrap_or_default()
             .to_string_lossy()
-            .to_string() + ".wasm";
+            .to_string()
+            + ".wasm";
 
         let output_path = std::path::Path::new(&config.output_dir).join(output_name);
 
@@ -212,14 +221,14 @@ impl WasmBuilder for WaspyBuilder {
         if let Some(parent) = output_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| CompilationError::BuildFailed {
                 language: "python".to_string(),
-                reason: format!("Failed to create output directory: {}", e),
+                reason: format!("Failed to create output directory: {e}"),
             })?;
         }
 
         // Write WASM file
         std::fs::write(&output_path, &wasm_bytes).map_err(|e| CompilationError::BuildFailed {
             language: "python".to_string(),
-            reason: format!("Failed to write output file: {}", e),
+            reason: format!("Failed to write output file: {e}"),
         })?;
 
         // Generate HTML file if html target
@@ -227,9 +236,11 @@ impl WasmBuilder for WaspyBuilder {
             let html_file = output_path.with_extension("html");
             let wasm_name = output_path.file_name().unwrap().to_str().unwrap();
             let html_content = generate_html_test_file(wasm_name);
-            std::fs::write(&html_file, html_content).map_err(|e| CompilationError::BuildFailed {
-                language: "python".to_string(),
-                reason: format!("Failed to write HTML file: {}", e),
+            std::fs::write(&html_file, html_content).map_err(|e| {
+                CompilationError::BuildFailed {
+                    language: "python".to_string(),
+                    reason: format!("Failed to write HTML file: {e}"),
+                }
             })?;
         }
 
@@ -265,7 +276,7 @@ impl WasmBuilder for WaspyBuilder {
                 if let Some(extension) = path.extension() {
                     if extension == "wasm" || extension == "html" {
                         if let Err(e) = std::fs::remove_file(&path) {
-                            eprintln!("Warning: Failed to clean {}: {}", path.display(), e);
+                            eprintln!("Warning: Failed to clean {}: {e}", path.display());
                         }
                     }
                 }
@@ -290,14 +301,15 @@ impl WaspyPlugin {
             info: PluginInfo {
                 name: "waspy".to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
-                description: "Python to WebAssembly compiler with advanced type support".to_string(),
+                description: "Python to WebAssembly compiler with advanced type support"
+                    .to_string(),
                 author: "Kumar Anirudha".to_string(),
                 extensions: vec!["py".to_string()],
                 entry_files: vec![
                     "main.py".to_string(),
                     "__main__.py".to_string(),
                     "app.py".to_string(),
-                    "src/main.py".to_string()
+                    "src/main.py".to_string(),
                 ],
                 plugin_type: PluginType::External,
                 source: Some(PluginSource::CratesIo {
@@ -340,8 +352,7 @@ impl Plugin for WaspyPlugin {
 
 /// Generate HTML test file for webapp targets
 fn generate_html_test_file(wasm_filename: &str) -> String {
-    format!(
-        r#"<!DOCTYPE html>
+    let html = r#"<!DOCTYPE html>
 <html>
 <head>
     <title>Waspy Python WebAssembly</title>
@@ -362,7 +373,7 @@ fn generate_html_test_file(wasm_filename: &str) -> String {
 </head>
 <body>
     <h1>🐍 Waspy Python → WebAssembly</h1>
-    <p>WebAssembly Module: <code>{}</code></p>
+    <p>WebAssembly Module: <code>{wasm_filename}</code></p>
     <p class="success">✅ Compiled with Waspy - Python to WebAssembly compiler</p>
 
     <h2>Available Functions</h2>
@@ -397,7 +408,7 @@ fn generate_html_test_file(wasm_filename: &str) -> String {
         // Load the WebAssembly module
         (async () => {{
             try {{
-                const response = await fetch('{}');
+                const response = await fetch('{wasm_filename}');
                 const bytes = await response.arrayBuffer();
                 const {{ instance }} = await WebAssembly.instantiate(bytes);
 
@@ -499,9 +510,9 @@ fn generate_html_test_file(wasm_filename: &str) -> String {
     </script>
 </body>
 </html>
-"#,
-        wasm_filename, wasm_filename
-    )
+"#;
+
+    html.replace("{wasm_filename}", wasm_filename)
 }
 
 // Plugin entry point for wasmrun

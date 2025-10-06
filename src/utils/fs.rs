@@ -44,13 +44,13 @@ pub fn collect_compilable_python_files(dir: &Path) -> Result<HashMap<String, Str
     for (path, content) in files {
         // Skip files without function definitions
         if !contains_function_definitions(&content) {
-            println!("Skipping {} (no functions)", path);
+            println!("Skipping {path} (no functions)");
             continue;
         }
 
         // Skip files with import errors or other issues
         if has_complex_imports(&content) {
-            println!("Skipping {} (complex imports)", path);
+            println!("Skipping {path} (complex imports)");
             continue;
         }
 
@@ -60,7 +60,7 @@ pub fn collect_compilable_python_files(dir: &Path) -> Result<HashMap<String, Str
         // With new IR support, we can handle some module-level code
         // but let's still skip complex cases
         if has_module_level && has_complex_module_level_code(&content) {
-            println!("Skipping {} (complex module-level code)", path);
+            println!("Skipping {path} (complex module-level code)");
             continue;
         }
 
@@ -94,7 +94,7 @@ pub fn collect_python_files_recursive(
 
             // Recursively scan subdirectory
             collect_python_files_recursive(root_dir, &path, files, exclude_files, exclude_dirs)?;
-        } else if path.is_file() && path.extension().map_or(false, |ext| ext == "py") {
+        } else if path.is_file() && path.extension().is_some_and(|ext| ext == "py") {
             // Check if file should be excluded
             if let Some(file_name) = path.file_name() {
                 let file_name = file_name.to_string_lossy();

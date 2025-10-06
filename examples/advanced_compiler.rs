@@ -29,7 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Waspy Advanced Compiler");
     println!("======================\n");
-    println!("Input file: {}", python_file);
+    println!("Input file: {python_file}");
 
     // Read the Python source file
     let source = fs::read_to_string(python_file)?;
@@ -66,12 +66,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let wasm = compile_python_to_wasm_with_options(&source, &options)?;
     let duration = start.elapsed();
 
-    println!("\n✅ Compilation completed in {:.2?}", duration);
+    println!("\n✅ Compilation completed in {duration:.2?}");
 
     // Generate output filename
     let path = Path::new(python_file);
     let stem = path.file_stem().unwrap().to_str().unwrap();
-    let output_file = Path::new("examples/output").join(format!("{}.wasm", stem));
+    let output_file = Path::new("examples/output").join(format!("{stem}.wasm"));
 
     // Write the WebAssembly to a file
     fs::write(&output_file, &wasm)?;
@@ -92,7 +92,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn print_usage(program_name: &str) {
-    eprintln!("Usage: {} <python_file> [options]", program_name);
+    eprintln!("Usage: {program_name} <python_file> [options]");
     eprintln!("Options:");
     eprintln!("  --no-optimize     Disable WebAssembly optimization");
     eprintln!("  --debug-info      Include debug information");
@@ -100,10 +100,7 @@ fn print_usage(program_name: &str) {
     eprintln!("  --html            Generate an HTML test harness");
     eprintln!("  --entry-point=NAME Set a specific entry point function");
     eprintln!("\nExample:");
-    eprintln!(
-        "  {} examples/typed_demo.py --metadata --html",
-        program_name
-    );
+    eprintln!("  {program_name} examples/typed_demo.py --metadata --html");
 }
 
 fn parse_options(args: &[String]) -> CompilerOptions {
@@ -147,7 +144,7 @@ fn display_function_metadata(source: &str) -> Result<(), Box<dyn std::error::Err
             println!();
         }
         Err(err) => {
-            eprintln!("Error extracting metadata: {}", err);
+            eprintln!("Error extracting metadata: {err}");
         }
     }
 
@@ -156,14 +153,15 @@ fn display_function_metadata(source: &str) -> Result<(), Box<dyn std::error::Err
         Ok(ast) => {
             println!("AST Structure:");
             println!("-------------");
-            println!("• Found {} top-level statements", ast.len());
+            let ast_len = ast.len();
+            println!("• Found {ast_len} top-level statements");
 
             let function_count = ast
                 .iter()
                 .filter(|stmt| matches!(stmt, rustpython_parser::ast::Stmt::FunctionDef(_)))
                 .count();
 
-            println!("• Found {} function definitions", function_count);
+            println!("• Found {function_count} function definitions");
 
             // Count class definitions
             let class_count = ast
@@ -172,13 +170,13 @@ fn display_function_metadata(source: &str) -> Result<(), Box<dyn std::error::Err
                 .count();
 
             if class_count > 0 {
-                println!("• Found {} class definitions", class_count);
+                println!("• Found {class_count} class definitions");
             }
 
             println!();
         }
         Err(err) => {
-            eprintln!("Error parsing Python: {}", err);
+            eprintln!("Error parsing Python: {err}");
         }
     }
 
@@ -190,7 +188,7 @@ fn generate_html_test_file(module_name: &str, wasm_filename: &str) -> String {
         r#"<!DOCTYPE html>
 <html>
 <head>
-    <title>Waspy Test - {}</title>
+    <title>Waspy Test - {module_name}</title>
     <style>
         body {{ font-family: system-ui, sans-serif; margin: 0; padding: 20px; line-height: 1.5; max-width: 800px; margin: 0 auto; }}
         .result {{ margin-top: 10px; padding: 10px; background-color: #f0f0f0; border-radius: 4px; font-family: monospace; white-space: pre-wrap; }}
@@ -203,7 +201,7 @@ fn generate_html_test_file(module_name: &str, wasm_filename: &str) -> String {
 </head>
 <body>
     <h1>Waspy WebAssembly Test</h1>
-    <p>Module: <code>{}</code></p>
+    <p>Module: <code>{wasm_filename}</code></p>
     <div id="container">
         <h2>Function Tests</h2>
         <div class="function-test">
@@ -225,7 +223,7 @@ fn generate_html_test_file(module_name: &str, wasm_filename: &str) -> String {
         // Load the WebAssembly module
         (async () => {{
             try {{
-                const response = await fetch('{}');
+                const response = await fetch('{wasm_filename}');
                 const bytes = await response.arrayBuffer();
                 const {{ instance }} = await WebAssembly.instantiate(bytes);
                 
@@ -283,7 +281,6 @@ fn generate_html_test_file(module_name: &str, wasm_filename: &str) -> String {
     </script>
 </body>
 </html>
-"#,
-        module_name, wasm_filename, wasm_filename
+"#
     )
 }
