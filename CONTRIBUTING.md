@@ -205,7 +205,11 @@ Waspy uses a `justfile` to manage common development tasks:
 - `just build` - Build the project
 - `just test` - Run tests
 - `just format` - Format the code
+- `just format-check` - Check formatting without changes
 - `just lint` - Run linter
+- `just docs` - Generate and open documentation
+- `just docs-check` - Check documentation
+- `just ci` - Run all CI checks locally
 - `just dev` - Run the full development workflow
 - `just compile <file>` - Compile a Python file to WebAssembly
 - `just optimize <file>` - Compile a Python file with optimization
@@ -218,13 +222,22 @@ Before submitting a pull request, ensure your code passes all CI checks:
 # Format your code
 just format
 
+# Check formatting
+just format-check
+
 # Run linting
 just lint
 
 # Run tests
 just test
 
-# Run the full development workflow (format + lint + build + test)
+# Check documentation
+just docs-check
+
+# Run all CI checks locally
+just ci
+
+# Or run the full development workflow
 just dev
 ```
 

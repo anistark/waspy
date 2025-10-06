@@ -282,10 +282,9 @@ fn process_circular_imports(module: &mut IRModule) {
     }
 
     for (_, module_name) in potentially_circular {
-        module.metadata.insert(
-            format!("circular_import_{module_name}"),
-            "true".to_string(),
-        );
+        module
+            .metadata
+            .insert(format!("circular_import_{module_name}"), "true".to_string());
     }
 }
 
