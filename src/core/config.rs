@@ -246,7 +246,7 @@ impl ProjectConfig {
                     if parts.len() == 2 {
                         let package = parts[0].trim();
                         let version = parts[1].trim();
-                        self.dependencies.push(format!("{} {}", package, version));
+                        self.dependencies.push(format!("{package} {version}"));
                     }
                 }
             }
@@ -292,7 +292,7 @@ pub fn load_project_config<P: AsRef<Path>>(project_dir: P) -> Result<ProjectConf
                     .context("Failed to parse setup.py")?;
             }
             Err(e) => {
-                println!("Warning: Could not read setup.py: {}", e);
+                println!("Warning: Could not read setup.py: {e}");
             }
         }
     }
@@ -305,10 +305,10 @@ pub fn load_project_config<P: AsRef<Path>>(project_dir: P) -> Result<ProjectConf
                 Ok(content) => {
                     config
                         .parse_version_file(&content)
-                        .context(format!("Failed to parse {}", version_file))?;
+                        .context(format!("Failed to parse {version_file}"))?;
                 }
                 Err(e) => {
-                    println!("Warning: Could not read {}: {}", version_file, e);
+                    println!("Warning: Could not read {version_file}: {e}");
                 }
             }
         }
@@ -324,7 +324,7 @@ pub fn load_project_config<P: AsRef<Path>>(project_dir: P) -> Result<ProjectConf
                     .context("Failed to parse pyproject.toml")?;
             }
             Err(e) => {
-                println!("Warning: Could not read pyproject.toml: {}", e);
+                println!("Warning: Could not read pyproject.toml: {e}");
             }
         }
     }
@@ -502,7 +502,7 @@ fn collect_python_files_recursive(
 
             // Recursively scan subdirectory
             collect_python_files_recursive(root_dir, &path, files, _config)?;
-        } else if path.is_file() && path.extension().map_or(false, |ext| ext == "py") {
+        } else if path.is_file() && path.extension().is_some_and(|ext| ext == "py") {
             // Skip configuration files
             if let Some(file_name) = path.file_name() {
                 let file_name = file_name.to_string_lossy();

@@ -87,7 +87,7 @@ impl PythonProject {
         for path in python_files {
             // Read file content
             let content = fs::read_to_string(&path)
-                .with_context(|| format!("Failed to read Python file: {:?}", path))?;
+                .with_context(|| format!("Failed to read Python file: {path:?}"))?;
 
             // Determine module path
             let rel_path = path.strip_prefix(&self.root_dir).unwrap_or(&path);
@@ -187,7 +187,7 @@ impl PythonProject {
                                 // Track import aliases if present
                                 if let Some(name) = &import_info.name {
                                     if let Some(alias) = &import_info.alias {
-                                        let qualified_name = format!("{}.{}", module, name);
+                                        let qualified_name = format!("{module}.{name}");
                                         self.import_aliases
                                             .entry(module_path.clone())
                                             .or_default()
@@ -356,7 +356,7 @@ impl PythonProject {
         // Perform topological sort on module dependencies
         let ordered_modules = self
             .topological_sort()
-            .map_err(|e| ChakraError::Other(format!("Dependency cycle detected: {}", e)))?;
+            .map_err(|e| ChakraError::Other(format!("Dependency cycle detected: {e}")))?;
 
         // Map modules back to file paths and contents
         let mut ordered_files = Vec::new();
@@ -434,7 +434,7 @@ impl PythonProject {
         }
 
         if temp_mark.contains(node) {
-            return Err(format!("Cycle detected with module {}", node));
+            return Err(format!("Cycle detected with module {node}"));
         }
 
         if unmarked.contains(node) {
@@ -464,7 +464,7 @@ impl PythonProject {
         let mut python_files = Vec::new();
 
         for entry in
-            fs::read_dir(dir).with_context(|| format!("Failed to read directory: {:?}", dir))?
+            fs::read_dir(dir).with_context(|| format!("Failed to read directory: {dir:?}"))?
         {
             let entry = entry?;
             let path = entry.path();
@@ -479,7 +479,7 @@ impl PythonProject {
 
                 let mut subdir_files = self.collect_python_files(&path)?;
                 python_files.append(&mut subdir_files);
-            } else if path.is_file() && path.extension().map_or(false, |ext| ext == "py") {
+            } else if path.is_file() && path.extension().is_some_and(|ext| ext == "py") {
                 python_files.push(path);
             }
         }

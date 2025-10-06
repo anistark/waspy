@@ -5,8 +5,8 @@
 
 #[cfg(feature = "wasm-plugin")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use waspy::wasmrun::{WaspyPlugin, OptimizationLevel, BuildConfig};
     use waspy::wasmrun::Plugin;
+    use waspy::wasmrun::{BuildConfig, OptimizationLevel, WaspyPlugin};
 
     println!("🧪 Testing Waspy Plugin Integration");
     println!("===================================\n");
@@ -28,7 +28,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("    - Compile WebApp: {}", info.capabilities.compile_webapp);
     println!("    - Live Reload: {}", info.capabilities.live_reload);
     println!("    - Optimization: {}", info.capabilities.optimization);
-    println!("    - Custom Targets: {:?}", info.capabilities.custom_targets);
+    println!(
+        "    - Custom Targets: {:?}",
+        info.capabilities.custom_targets
+    );
     println!();
 
     // Test can_handle_project
@@ -38,15 +41,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("examples/basic_operations.py", true),
         ("examples/control_flow.py", true),
         ("examples/typed_demo.py", true),
-        ("examples/", true),  // Directory with Python files
-        ("Cargo.toml", false),  // Non-Python file
-        ("nonexistent.py", false),  // Non-existent file
+        ("examples/", true),       // Directory with Python files
+        ("Cargo.toml", false),     // Non-Python file
+        ("nonexistent.py", false), // Non-existent file
     ];
 
     for (path, expected) in test_cases {
         let result = plugin.can_handle_project(path);
         let status = if result == expected { "✅" } else { "❌" };
-        println!("  {} {}: {} (expected: {})", status, path, result, expected);
+        println!("  {status} {path}: {result} (expected: {expected})");
     }
     println!();
 
@@ -89,7 +92,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Err(e) => {
-                println!("  ❌ Build failed: {}", e);
+                println!("  ❌ Build failed: {e}");
             }
         }
     } else {

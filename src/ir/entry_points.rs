@@ -27,7 +27,7 @@ pub fn detect_entry_points(
     if let Some(path) = file_path {
         if path
             .file_name()
-            .map_or(false, |name| name.to_string_lossy() == "__main__.py")
+            .is_some_and(|name| name.to_string_lossy() == "__main__.py")
         {
             return Ok(Some(EntryPointInfo {
                 main_function_name: "main".to_string(),

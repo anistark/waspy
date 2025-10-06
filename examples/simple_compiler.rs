@@ -19,7 +19,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Display the Python code
     println!("Compiling Python code:");
     println!("---------------------");
-    println!("{}", python_code);
+    println!("{python_code}");
     println!("---------------------\n");
 
     // Compile with timing
@@ -43,7 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("---------------------");
     println!("Output file: {}", output_path.display());
     println!("Output size: {} bytes", wasm.len());
-    println!("Compilation time: {:?}", compile_time);
+    println!("Compilation time: {compile_time:?}");
 
     println!("\nThe WebAssembly module contains these functions:");
     println!("• add(a: int, b: int) -> int");

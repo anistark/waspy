@@ -15,7 +15,7 @@ pub mod utils;
 pub mod wasmrun;
 
 #[cfg(feature = "wasm-plugin")]
-pub use wasmrun::{WaspyPlugin, WaspyBuilder};
+pub use wasmrun::{WaspyBuilder, WaspyPlugin};
 
 use crate::core::config::ProjectConfig;
 pub use crate::core::options::CompilerOptions;
@@ -146,7 +146,7 @@ pub fn compile_multiple_python_files_with_options(
     for (filename, source) in sources {
         // Skip incompatible files
         if utils::is_special_python_file(filename) {
-            println!("Skipping special file: {}", filename);
+            println!("Skipping special file: {filename}");
             continue;
         }
 
@@ -155,7 +155,7 @@ pub fn compile_multiple_python_files_with_options(
             if let Ok(Some(info)) = ir::detect_entry_points(source, Some(Path::new(filename))) {
                 has_entry_point = true;
                 entry_point_info = Some(info);
-                println!("Detected entry point in file: {}", filename);
+                println!("Detected entry point in file: {filename}");
             }
         }
 
@@ -163,7 +163,7 @@ pub fn compile_multiple_python_files_with_options(
         let ast = match core::parser::parse_python(source) {
             Ok(ast) => ast,
             Err(e) => {
-                println!("Warning: Failed to parse {}: {}", filename, e);
+                println!("Warning: Failed to parse {filename}: {e}");
                 continue;
             }
         };
@@ -172,14 +172,14 @@ pub fn compile_multiple_python_files_with_options(
         let ir_module = match ir::lower_ast_to_ir(&ast) {
             Ok(module) => module,
             Err(e) => {
-                println!("Warning: Failed to convert {} to IR: {}", filename, e);
+                println!("Warning: Failed to convert {filename} to IR: {e}");
                 continue;
             }
         };
 
         // Skip if no functions
         if ir_module.functions.is_empty() {
-            println!("Skipping file with no functions: {}", filename);
+            println!("Skipping file with no functions: {filename}");
             continue;
         }
 
@@ -292,13 +292,13 @@ pub fn compile_multiple_python_files_with_config(
     for (filename, source) in sources {
         // Skip incompatible files
         if core::config::is_config_file(filename) {
-            println!("Skipping configuration file: {}", filename);
+            println!("Skipping configuration file: {filename}");
             continue;
         }
 
         // Skip incompatible files
         if utils::is_special_python_file(filename) {
-            println!("Skipping special file: {}", filename);
+            println!("Skipping special file: {filename}");
             continue;
         }
 
@@ -307,7 +307,7 @@ pub fn compile_multiple_python_files_with_config(
             if let Ok(Some(info)) = ir::detect_entry_points(source, Some(Path::new(filename))) {
                 has_entry_point = true;
                 entry_point_info = Some(info);
-                println!("Detected entry point in file: {}", filename);
+                println!("Detected entry point in file: {filename}");
             }
         }
 
@@ -315,7 +315,7 @@ pub fn compile_multiple_python_files_with_config(
         let ast = match core::parser::parse_python(source) {
             Ok(ast) => ast,
             Err(e) => {
-                println!("Warning: Failed to parse {}: {}", filename, e);
+                println!("Warning: Failed to parse {filename}: {e}");
                 continue;
             }
         };
@@ -324,14 +324,14 @@ pub fn compile_multiple_python_files_with_config(
         let ir_module = match ir::lower_ast_to_ir(&ast) {
             Ok(module) => module,
             Err(e) => {
-                println!("Warning: Failed to convert {} to IR: {}", filename, e);
+                println!("Warning: Failed to convert {filename} to IR: {e}");
                 continue;
             }
         };
 
         // Skip if no functions
         if ir_module.functions.is_empty() {
-            println!("Skipping file with no functions: {}", filename);
+            println!("Skipping file with no functions: {filename}");
             continue;
         }
 
@@ -436,10 +436,10 @@ pub fn compile_python_project_with_options<P: AsRef<Path>>(
     println!("Project Name: {}", config.name);
     println!("Project Version: {}", config.version);
     if let Some(description) = &config.description {
-        println!("Description: {}", description);
+        println!("Description: {description}");
     }
     if let Some(author) = &config.author {
-        println!("Author: {}", author);
+        println!("Author: {author}");
     }
 
     let files = utils::collect_compilable_python_files(project_dir)?;
@@ -475,7 +475,7 @@ pub fn compile_python_project_with_options<P: AsRef<Path>>(
     }
 
     if let Some(file) = &entry_point_file {
-        println!("Found entry point in file: {}", file);
+        println!("Found entry point in file: {file}");
     }
 
     println!("Found {} compilable Python files", files.len());
@@ -570,7 +570,7 @@ pub fn get_python_project_metadata<P: AsRef<Path>>(
                 }
             }
             Err(e) => {
-                println!("Warning: Failed to extract metadata from {}: {}", path, e);
+                println!("Warning: Failed to extract metadata from {path}: {e}");
             }
         }
     }
@@ -597,7 +597,7 @@ pub fn type_to_string(ir_type: &IRType) -> String {
                 .map(type_to_string)
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("Tuple[{}]", inner)
+            format!("Tuple[{inner}]")
         }
         IRType::Optional(inner) => format!("Optional[{}]", type_to_string(inner)),
         IRType::Union(types) => {
@@ -606,10 +606,10 @@ pub fn type_to_string(ir_type: &IRType) -> String {
                 .map(type_to_string)
                 .collect::<Vec<_>>()
                 .join(" | ");
-            format!("Union[{}]", inner)
+            format!("Union[{inner}]")
         }
         IRType::Class(name) => name.clone(),
-        IRType::Module(name) => format!("Module[{}]", name), // Add handling for Module type
+        IRType::Module(name) => format!("Module[{name}]"), // Add handling for Module type
         IRType::None => "None".to_string(),
         IRType::Any => "Any".to_string(),
         IRType::Unknown => "unknown".to_string(),

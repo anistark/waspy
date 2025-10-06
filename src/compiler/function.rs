@@ -188,7 +188,7 @@ pub fn compile_body(
                     func.instruction(&Instruction::LocalSet(local_idx));
                 } else {
                     // Handle the case where the variable is not found in the context
-                    panic!("Variable {} not found in context", target);
+                    panic!("Variable {target} not found in context");
                 }
             }
             IRStatement::If {
@@ -315,7 +315,7 @@ pub fn compile_body(
                     func.instruction(&Instruction::LocalSet(local_idx));
                 } else {
                     // Variable not found
-                    panic!("Variable {} not found in context", target);
+                    panic!("Variable {target} not found in context");
                 }
             }
 

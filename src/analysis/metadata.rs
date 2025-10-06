@@ -87,7 +87,7 @@ pub fn get_python_project_metadata<P: AsRef<Path>>(
                 }
             }
             Err(e) => {
-                println!("Warning: Failed to extract metadata from {}: {}", path, e);
+                println!("Warning: Failed to extract metadata from {path}: {e}");
             }
         }
     }
@@ -114,7 +114,7 @@ fn type_to_string(ir_type: &ir::IRType) -> String {
                 .map(type_to_string)
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("Tuple[{}]", inner)
+            format!("Tuple[{inner}]")
         }
         ir::IRType::Optional(inner) => format!("Optional[{}]", type_to_string(inner)),
         ir::IRType::Union(types) => {
@@ -123,10 +123,10 @@ fn type_to_string(ir_type: &ir::IRType) -> String {
                 .map(type_to_string)
                 .collect::<Vec<_>>()
                 .join(" | ");
-            format!("Union[{}]", inner)
+            format!("Union[{inner}]")
         }
         ir::IRType::Class(name) => name.clone(),
-        ir::IRType::Module(name) => format!("Module[{}]", name),
+        ir::IRType::Module(name) => format!("Module[{name}]"),
         ir::IRType::None => "None".to_string(),
         ir::IRType::Any => "Any".to_string(),
         ir::IRType::Unknown => "unknown".to_string(),

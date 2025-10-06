@@ -54,17 +54,17 @@ pub struct ErrorLocation {
 impl fmt::Display for ErrorLocation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(file) = &self.file {
-            write!(f, "in file {} ", file)?;
+            write!(f, "in file {file} ")?;
         }
 
         write!(f, "at line {}", self.line)?;
 
         if let Some(column) = self.column {
-            write!(f, ", column {}", column)?;
+            write!(f, ", column {column}")?;
         }
 
         if let Some(function) = &self.function {
-            write!(f, " (in function '{}')", function)?;
+            write!(f, " (in function '{function}')")?;
         }
 
         Ok(())
@@ -94,7 +94,7 @@ impl fmt::Display for Warning {
         write!(f, "{} warning: {}", self.warning_type, self.message)?;
 
         if let Some(location) = &self.location {
-            write!(f, " ({})", location)?;
+            write!(f, " ({location})")?;
         }
 
         Ok(())

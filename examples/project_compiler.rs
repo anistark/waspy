@@ -57,7 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Report compilation time
     let duration = start_time.elapsed();
-    println!("\n✅ Compilation completed in {:.2?}", duration);
+    println!("\n✅ Compilation completed in {duration:.2?}");
 
     // Create parent directories if needed
     if let Some(parent) = output_path.parent() {
@@ -108,7 +108,7 @@ fn print_dir_structure(dir: &Path, indent: usize) -> Result<(), Box<dyn std::err
             if !dir_name.starts_with("__pycache__") && !dir_name.starts_with('.') {
                 print_dir_structure(&path, indent + 1)?;
             }
-        } else if path.is_file() && path.extension().map_or(false, |ext| ext == "py") {
+        } else if path.is_file() && path.extension().is_some_and(|ext| ext == "py") {
             println!(
                 "{}📄 {}",
                 "  ".repeat(indent + 1),
@@ -141,7 +141,7 @@ fn generate_html_test_file(wasm_filename: &str) -> String {
 </head>
 <body>
     <h1>Waspy Project Test</h1>
-    <p>WebAssembly Module: <code>{}</code></p>
+    <p>WebAssembly Module: <code>{wasm_filename}</code></p>
     
     <h2>Available Functions</h2>
     <div id="function-list">Loading functions...</div>
@@ -164,7 +164,7 @@ fn generate_html_test_file(wasm_filename: &str) -> String {
         // Load the WebAssembly module
         (async () => {{
             try {{
-                const response = await fetch('{}');
+                const response = await fetch('{wasm_filename}');
                 const bytes = await response.arrayBuffer();
                 const {{ instance }} = await WebAssembly.instantiate(bytes);
                 
@@ -253,7 +253,6 @@ fn generate_html_test_file(wasm_filename: &str) -> String {
     </script>
 </body>
 </html>
-"#,
-        wasm_filename, wasm_filename
+"#
     )
 }
