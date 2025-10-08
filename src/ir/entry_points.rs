@@ -3,6 +3,7 @@ use anyhow::Result;
 use std::path::Path;
 
 /// Entry points
+#[derive(Debug)]
 pub struct EntryPointInfo {
     pub main_function_name: String,
     pub detected_type: EntryPointType,

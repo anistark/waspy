@@ -18,7 +18,7 @@ pub mod wasmrun;
 pub use wasmrun::{WaspyBuilder, WaspyPlugin};
 
 use crate::core::config::ProjectConfig;
-pub use crate::core::options::CompilerOptions;
+pub use crate::core::options::{CompilerOptions, Verbosity};
 use crate::ir::{EntryPointInfo, IRType};
 use anyhow::{anyhow, Context, Result};
 use std::fs;
@@ -59,19 +59,30 @@ pub fn compile_python_to_wasm_with_options(
     source: &str,
     options: &CompilerOptions,
 ) -> Result<Vec<u8>> {
+    // Initialize logging with the specified verbosity
+    utils::logging::init(options.verbosity);
+
+    log_debug!("Starting compilation with options: {:?}", options);
+
     // Parse Python to AST
+    log_verbose!("Parsing Python source code...");
     let ast = core::parser::parse_python(source).context("Failed to parse Python code")?;
+    log_debug!("Successfully parsed Python AST");
 
     // Lower AST to IR
+    log_verbose!("Converting AST to intermediate representation...");
     let mut ir_module = ir::lower_ast_to_ir(&ast).context("Failed to convert Python AST to IR")?;
+    log_debug!("Generated IR module with {} functions", ir_module.functions.len());
 
     // Process decorators
+    log_verbose!("Processing decorators...");
     let decorator_registry = ir::DecoratorRegistry::new();
     ir_module.functions = ir_module
         .functions
         .into_iter()
         .map(|func| {
             if !func.decorators.is_empty() {
+                log_debug!("Applying decorators to function: {}", func.name);
                 decorator_registry.apply_decorators(func)
             } else {
                 func
@@ -80,18 +91,27 @@ pub fn compile_python_to_wasm_with_options(
         .collect();
 
     // Check for entry points
+    log_verbose!("Detecting entry points...");
     if let Ok(Some(entry_point_info)) = ir::detect_entry_points(source, None) {
+        log_debug!("Found entry point: {:?}", entry_point_info);
         // Add entry point support if detected
         ir::add_entry_point_to_module(&mut ir_module, &entry_point_info)?;
     }
 
     // Generate WASM binary
+    log_verbose!("Generating WebAssembly binary...");
     let raw_wasm = compiler::compile_ir_module(&ir_module);
+    log_debug!("Generated WASM binary: {} bytes", raw_wasm.len());
 
     // Optimize the WASM binary if requested
     if options.optimize {
-        optimize::optimize_wasm(&raw_wasm).context("Failed to optimize WebAssembly binary")
+        log_verbose!("Optimizing WebAssembly binary...");
+        let optimized = optimize::optimize_wasm(&raw_wasm).context("Failed to optimize WebAssembly binary")?;
+        log_debug!("Optimized WASM binary: {} bytes (saved {} bytes)",
+                   optimized.len(), raw_wasm.len() as i64 - optimized.len() as i64);
+        Ok(optimized)
     } else {
+        log_debug!("Skipping optimization");
         Ok(raw_wasm)
     }
 }
@@ -146,7 +166,7 @@ pub fn compile_multiple_python_files_with_options(
     for (filename, source) in sources {
         // Skip incompatible files
         if utils::is_special_python_file(filename) {
-            println!("Skipping special file: {filename}");
+            log_verbose!("Skipping special file: {filename}");
             continue;
         }
 
@@ -155,15 +175,17 @@ pub fn compile_multiple_python_files_with_options(
             if let Ok(Some(info)) = ir::detect_entry_points(source, Some(Path::new(filename))) {
                 has_entry_point = true;
                 entry_point_info = Some(info);
-                println!("Detected entry point in file: {filename}");
+                log_debug!("Detected entry point in file: {filename}");
             }
         }
+
+        log_debug!("Processing file: {filename}");
 
         // Parse Python to AST
         let ast = match core::parser::parse_python(source) {
             Ok(ast) => ast,
             Err(e) => {
-                println!("Warning: Failed to parse {filename}: {e}");
+                log_warn!("Failed to parse {filename}: {e}");
                 continue;
             }
         };
@@ -172,26 +194,29 @@ pub fn compile_multiple_python_files_with_options(
         let ir_module = match ir::lower_ast_to_ir(&ast) {
             Ok(module) => module,
             Err(e) => {
-                println!("Warning: Failed to convert {filename} to IR: {e}");
+                log_warn!("Failed to convert {filename} to IR: {e}");
                 continue;
             }
         };
 
         // Skip if no functions
         if ir_module.functions.is_empty() {
-            println!("Skipping file with no functions: {filename}");
+            log_verbose!("Skipping file with no functions: {filename}");
             continue;
         }
+
+        log_debug!("Found {} functions in {filename}", ir_module.functions.len());
 
         // Check for duplicate function names and add functions
         for func in ir_module.functions {
             if !function_names.insert(func.name.clone()) {
-                println!(
-                    "Warning: Duplicate function '{}' found in file: {}",
+                log_warn!(
+                    "Duplicate function '{}' found in file: {}",
                     func.name, filename
                 );
                 // Skip the duplicate but continue processing
             } else {
+                log_debug!("Adding function: {}", func.name);
                 // Add the function
                 combined_module.functions.push(func);
             }
@@ -292,13 +317,13 @@ pub fn compile_multiple_python_files_with_config(
     for (filename, source) in sources {
         // Skip incompatible files
         if core::config::is_config_file(filename) {
-            println!("Skipping configuration file: {filename}");
+            log_verbose!("Skipping configuration file: {filename}");
             continue;
         }
 
         // Skip incompatible files
         if utils::is_special_python_file(filename) {
-            println!("Skipping special file: {filename}");
+            log_verbose!("Skipping special file: {filename}");
             continue;
         }
 
@@ -307,15 +332,17 @@ pub fn compile_multiple_python_files_with_config(
             if let Ok(Some(info)) = ir::detect_entry_points(source, Some(Path::new(filename))) {
                 has_entry_point = true;
                 entry_point_info = Some(info);
-                println!("Detected entry point in file: {filename}");
+                log_debug!("Detected entry point in file: {filename}");
             }
         }
+
+        log_debug!("Processing file: {filename}");
 
         // Parse Python to AST
         let ast = match core::parser::parse_python(source) {
             Ok(ast) => ast,
             Err(e) => {
-                println!("Warning: Failed to parse {filename}: {e}");
+                log_warn!("Failed to parse {filename}: {e}");
                 continue;
             }
         };
@@ -324,26 +351,29 @@ pub fn compile_multiple_python_files_with_config(
         let ir_module = match ir::lower_ast_to_ir(&ast) {
             Ok(module) => module,
             Err(e) => {
-                println!("Warning: Failed to convert {filename} to IR: {e}");
+                log_warn!("Failed to convert {filename} to IR: {e}");
                 continue;
             }
         };
 
         // Skip if no functions
         if ir_module.functions.is_empty() {
-            println!("Skipping file with no functions: {filename}");
+            log_verbose!("Skipping file with no functions: {filename}");
             continue;
         }
+
+        log_debug!("Found {} functions in {filename}", ir_module.functions.len());
 
         // Check for duplicate function names and add functions
         for func in ir_module.functions {
             if !function_names.insert(func.name.clone()) {
-                println!(
-                    "Warning: Duplicate function '{}' found in file: {}",
+                log_warn!(
+                    "Duplicate function '{}' found in file: {}",
                     func.name, filename
                 );
                 // Skip the duplicate but continue processing
             } else {
+                log_debug!("Adding function: {}", func.name);
                 // Add the function
                 combined_module.functions.push(func);
             }
@@ -425,21 +455,25 @@ pub fn compile_python_project_with_options<P: AsRef<Path>>(
     project_dir: P,
     options: &CompilerOptions,
 ) -> Result<Vec<u8>> {
+    // Initialize logging with the specified verbosity
+    utils::logging::init(options.verbosity);
+
     // Load and analyze the project
     let project_dir = project_dir.as_ref();
 
-    println!("Analyzing project structure...");
+    log_info!("Analyzing project structure...");
+    log_debug!("Project directory: {}", project_dir.display());
 
     // Load project configuration
     let config = core::config::load_project_config(project_dir)?;
 
-    println!("Project Name: {}", config.name);
-    println!("Project Version: {}", config.version);
+    log_info!("Project Name: {}", config.name);
+    log_info!("Project Version: {}", config.version);
     if let Some(description) = &config.description {
-        println!("Description: {description}");
+        log_verbose!("Description: {description}");
     }
     if let Some(author) = &config.author {
-        println!("Author: {author}");
+        log_verbose!("Author: {author}");
     }
 
     let files = utils::collect_compilable_python_files(project_dir)?;
@@ -452,9 +486,11 @@ pub fn compile_python_project_with_options<P: AsRef<Path>>(
     let mut entry_point_file = None;
     let mut entry_point_info = None;
 
+    log_verbose!("Searching for entry points...");
     // First, check for __main__.py
     let main_py_path = project_dir.join("__main__.py");
     if main_py_path.exists() && main_py_path.is_file() {
+        log_debug!("Checking __main__.py for entry point");
         if let Ok(content) = fs::read_to_string(&main_py_path) {
             if let Ok(Some(info)) = ir::detect_entry_points(&content, Some(&main_py_path)) {
                 entry_point_file = Some("__main__.py".to_string());
@@ -466,6 +502,7 @@ pub fn compile_python_project_with_options<P: AsRef<Path>>(
     // If no __main__.py, check other files for entry points
     if entry_point_info.is_none() {
         for (path, content) in &files {
+            log_debug!("Checking {} for entry point", path);
             if let Ok(Some(info)) = ir::detect_entry_points(content, Some(Path::new(path))) {
                 entry_point_file = Some(path.clone());
                 entry_point_info = Some(info);
@@ -475,10 +512,13 @@ pub fn compile_python_project_with_options<P: AsRef<Path>>(
     }
 
     if let Some(file) = &entry_point_file {
-        println!("Found entry point in file: {file}");
+        log_info!("Found entry point in file: {file}");
+    } else {
+        log_debug!("No entry point detected");
     }
 
-    println!("Found {} compilable Python files", files.len());
+    log_info!("Found {} compilable Python files", files.len());
+    log_debug!("Files: {:?}", files.keys().collect::<Vec<_>>());
 
     // Convert to the format expected by compile_multiple_python_files
     let sources: Vec<(&str, &str)> = files
