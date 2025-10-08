@@ -2,6 +2,12 @@ use crate::compiler::context::CompilationContext;
 use crate::ir::{IRBoolOp, IRCompareOp, IRConstant, IRExpr, IROp, IRType, IRUnaryOp, MemoryLayout};
 use wasm_encoder::{BlockType, Function, Instruction, MemArg};
 
+// Helper to convert f64 to Ieee64
+#[inline]
+fn f64_const(value: f64) -> wasm_encoder::Ieee64 {
+    value.into()
+}
+
 /// Emit WebAssembly instructions for an IR expression
 pub fn emit_expr(
     expr: &IRExpr,
@@ -18,7 +24,7 @@ pub fn emit_expr(
                     IRType::Int
                 }
                 IRConstant::Float(f) => {
-                    func.instruction(&Instruction::F64Const(*f));
+                    func.instruction(&Instruction::F64Const(f64_const(*f)));
 
                     // Cast to i32 if an integer is expected
                     if let Some(IRType::Int) = expected_type {
@@ -120,11 +126,11 @@ pub fn emit_expr(
                     // New operations - placeholder implementations
                     IROp::MatMul => {
                         // Matrix multiplication not supported yet for floats
-                        func.instruction(&Instruction::F64Const(0.0));
+                        func.instruction(&Instruction::F64Const(f64_const(0.0)));
                     }
                     IROp::LShift | IROp::RShift | IROp::BitOr | IROp::BitXor | IROp::BitAnd => {
                         // Bitwise operations not supported for floats
-                        func.instruction(&Instruction::F64Const(0.0));
+                        func.instruction(&Instruction::F64Const(f64_const(0.0)));
                     }
                 }
                 IRType::Float
@@ -197,12 +203,12 @@ pub fn emit_expr(
                     match op {
                         IRUnaryOp::Neg => {
                             // Negate float: -x
-                            func.instruction(&Instruction::F64Const(-1.0));
+                            func.instruction(&Instruction::F64Const(f64_const(-1.0)));
                             func.instruction(&Instruction::F64Mul);
                         }
                         IRUnaryOp::Not => {
                             // Logical not for float: convert to bool first
-                            func.instruction(&Instruction::F64Const(0.0));
+                            func.instruction(&Instruction::F64Const(f64_const(0.0)));
                             func.instruction(&Instruction::F64Eq);
                             // Invert (1->0, 0->1)
                             func.instruction(&Instruction::I32Const(1));
@@ -211,7 +217,7 @@ pub fn emit_expr(
                         IRUnaryOp::Invert => {
                             // Not meaningful for floats
                             func.instruction(&Instruction::Drop);
-                            func.instruction(&Instruction::F64Const(0.0));
+                            func.instruction(&Instruction::F64Const(f64_const(0.0)));
                         }
                         IRUnaryOp::UAdd => {
                             // No-op for floats
@@ -568,17 +574,17 @@ pub fn emit_float_power_operation(func: &mut Function) {
 
     // Handle special case: base ** 0 = 1
     func.instruction(&Instruction::LocalGet(0));
-    func.instruction(&Instruction::F64Const(0.0));
+    func.instruction(&Instruction::F64Const(f64_const(0.0)));
     func.instruction(&Instruction::F64Eq);
     func.instruction(&Instruction::If(BlockType::Empty));
     func.instruction(&Instruction::Drop);
-    func.instruction(&Instruction::F64Const(1.0));
+    func.instruction(&Instruction::F64Const(f64_const(1.0)));
     func.instruction(&Instruction::Br(1));
     func.instruction(&Instruction::End);
 
     // Handle special case: base ** 1 = base
     func.instruction(&Instruction::LocalGet(0));
-    func.instruction(&Instruction::F64Const(1.0));
+    func.instruction(&Instruction::F64Const(f64_const(1.0)));
     func.instruction(&Instruction::F64Eq);
     func.instruction(&Instruction::If(BlockType::Empty));
     func.instruction(&Instruction::Br(1));
@@ -586,7 +592,7 @@ pub fn emit_float_power_operation(func: &mut Function) {
 
     // Handle special case: base ** 2 = base * base
     func.instruction(&Instruction::LocalGet(0));
-    func.instruction(&Instruction::F64Const(2.0));
+    func.instruction(&Instruction::F64Const(f64_const(2.0)));
     func.instruction(&Instruction::F64Eq);
     func.instruction(&Instruction::If(BlockType::Empty));
     func.instruction(&Instruction::LocalTee(1));
@@ -598,7 +604,7 @@ pub fn emit_float_power_operation(func: &mut Function) {
     // For all other exponents, return 0 for now
     // TODO: Implement a proper power function
     func.instruction(&Instruction::Drop);
-    func.instruction(&Instruction::F64Const(0.0));
+    func.instruction(&Instruction::F64Const(f64_const(0.0)));
 }
 
 /// Emit WebAssembly instructions for float modulo operation (a % b)

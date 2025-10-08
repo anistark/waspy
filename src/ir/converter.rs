@@ -925,7 +925,7 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                 }
             }
             _ => {
-                return Err(anyhow!("Unsupported statement type: {:?}", stmt));
+                return Err(anyhow!("Unsupported statement type: {stmt:?}"));
             }
         }
     }
@@ -1242,6 +1242,6 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                 iterable: Box::new(lower_expr(&generator.iter, memory_layout)?),
             })
         }
-        _ => Err(anyhow!("Unsupported expression type: {:?}", expr)),
+        _ => Err(anyhow!("Unsupported expression type: {expr:?}")),
     }
 }

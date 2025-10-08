@@ -51,7 +51,7 @@ pub fn compile_function(
     // Add default return value if no explicit return
     match ir_func.return_type {
         IRType::Float => {
-            func.instruction(&Instruction::F64Const(0.0));
+            func.instruction(&Instruction::F64Const(0.0_f64.into()));
         }
         IRType::None => {
             func.instruction(&Instruction::I32Const(0));
