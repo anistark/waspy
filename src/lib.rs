@@ -72,7 +72,10 @@ pub fn compile_python_to_wasm_with_options(
     // Lower AST to IR
     log_verbose!("Converting AST to intermediate representation...");
     let mut ir_module = ir::lower_ast_to_ir(&ast).context("Failed to convert Python AST to IR")?;
-    log_debug!("Generated IR module with {} functions", ir_module.functions.len());
+    log_debug!(
+        "Generated IR module with {} functions",
+        ir_module.functions.len()
+    );
 
     // Process decorators
     log_verbose!("Processing decorators...");
@@ -106,9 +109,13 @@ pub fn compile_python_to_wasm_with_options(
     // Optimize the WASM binary if requested
     if options.optimize {
         log_verbose!("Optimizing WebAssembly binary...");
-        let optimized = optimize::optimize_wasm(&raw_wasm).context("Failed to optimize WebAssembly binary")?;
-        log_debug!("Optimized WASM binary: {} bytes (saved {} bytes)",
-                   optimized.len(), raw_wasm.len() as i64 - optimized.len() as i64);
+        let optimized =
+            optimize::optimize_wasm(&raw_wasm).context("Failed to optimize WebAssembly binary")?;
+        log_debug!(
+            "Optimized WASM binary: {} bytes (saved {} bytes)",
+            optimized.len(),
+            raw_wasm.len() as i64 - optimized.len() as i64
+        );
         Ok(optimized)
     } else {
         log_debug!("Skipping optimization");
@@ -205,14 +212,18 @@ pub fn compile_multiple_python_files_with_options(
             continue;
         }
 
-        log_debug!("Found {} functions in {filename}", ir_module.functions.len());
+        log_debug!(
+            "Found {} functions in {filename}",
+            ir_module.functions.len()
+        );
 
         // Check for duplicate function names and add functions
         for func in ir_module.functions {
             if !function_names.insert(func.name.clone()) {
                 log_warn!(
                     "Duplicate function '{}' found in file: {}",
-                    func.name, filename
+                    func.name,
+                    filename
                 );
                 // Skip the duplicate but continue processing
             } else {
@@ -362,14 +373,18 @@ pub fn compile_multiple_python_files_with_config(
             continue;
         }
 
-        log_debug!("Found {} functions in {filename}", ir_module.functions.len());
+        log_debug!(
+            "Found {} functions in {filename}",
+            ir_module.functions.len()
+        );
 
         // Check for duplicate function names and add functions
         for func in ir_module.functions {
             if !function_names.insert(func.name.clone()) {
                 log_warn!(
                     "Duplicate function '{}' found in file: {}",
-                    func.name, filename
+                    func.name,
+                    filename
                 );
                 // Skip the duplicate but continue processing
             } else {

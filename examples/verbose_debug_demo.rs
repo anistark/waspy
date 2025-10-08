@@ -1,5 +1,5 @@
-use waspy::{compile_python_to_wasm_with_options, CompilerOptions};
 use waspy::core::options::Verbosity;
+use waspy::{compile_python_to_wasm_with_options, CompilerOptions};
 
 fn main() -> anyhow::Result<()> {
     let python_source = r#"
