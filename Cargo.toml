@@ -2,14 +2,22 @@
 name = "waspy"
 version = "0.6.2"
 edition = "2021"
-rust-version = "1.70"
+rust-version = "1.70.0"
 description = "A Python interpreter written in Rust, designed for WebAssembly."
 license = "MIT"
 repository = "https://github.com/anistark/waspy"
-keywords = ["python", "interpreter", "webassembly"]
-categories = ["compilers", "wasm", "web-programming"]
+keywords = ["python", "interpreter", "webassembly", "wasm", "compiler"]
+categories = ["compilers", "wasm", "web-programming", "development-tools"]
 readme = "README.md"
+documentation = "https://docs.rs/wasmrun"
 authors = ["Kumar Anirudha <hi@anirudha.dev>"]
+include = [
+    "src/**/*.rs",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE",
+    "CONTRIBUTING.md",
+]
 
 [features]
 default = []
@@ -17,12 +25,12 @@ wasm-plugin = ["serde"]
 
 [dependencies]
 rustpython-parser = "0.4.0"
-wasm-encoder = "0.229.0"
-anyhow = "1.0"
+wasm-encoder = "0.240.0"
+anyhow = "1.0.100"
 binaryen = "0.13.0"
 thiserror = "1.0"
-log = "0.4"
-serde = { version = "1.0", features = ["derive"], optional = true }
+log = "0.4.28"
+serde = { version = "1.0.228", features = ["derive"], optional = true }
 
 [lib]
 name = "waspy"
