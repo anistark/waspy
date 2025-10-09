@@ -8,7 +8,7 @@ use std::env;
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
-use waspy::{compile_python_to_wasm_with_options, parser, CompilerOptions};
+use waspy::{compile_python_to_wasm_with_options, parser, CompilerOptions, Verbosity};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
@@ -98,13 +98,17 @@ fn print_usage(program_name: &str) {
     eprintln!("  --debug-info      Include debug information");
     eprintln!("  --metadata        Show function signatures and metadata");
     eprintln!("  --html            Generate an HTML test harness");
+    eprintln!("  --verbose         Enable verbose logging (including AST output)");
+    eprintln!("  --debug           Enable debug logging (most detailed)");
     eprintln!("  --entry-point=NAME Set a specific entry point function");
     eprintln!("\nExample:");
-    eprintln!("  {program_name} examples/typed_demo.py --metadata --html");
+    eprintln!("  {program_name} examples/typed_demo.py --metadata --html --verbose");
 }
 
 fn parse_options(args: &[String]) -> CompilerOptions {
     let mut options = CompilerOptions::default();
+    let mut verbose = false;
+    let mut debug = false;
 
     for arg in args.iter().skip(1) {
         match arg.as_str() {
@@ -112,6 +116,8 @@ fn parse_options(args: &[String]) -> CompilerOptions {
             "--debug-info" => options.debug_info = true,
             "--metadata" => options.include_metadata = true,
             "--html" => options.generate_html = true,
+            "--verbose" => verbose = true,
+            "--debug" => debug = true,
             _ => {
                 // Check for --entry-point=NAME format
                 if arg.starts_with("--entry-point=") {
@@ -122,6 +128,9 @@ fn parse_options(args: &[String]) -> CompilerOptions {
             }
         }
     }
+
+    // Set verbosity level based on flags
+    options.verbosity = Verbosity::from_flags(verbose, debug);
 
     options
 }
