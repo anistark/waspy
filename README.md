@@ -100,16 +100,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 With Compiler Options:
 
 ```rust
-use waspy::{compile_python_to_wasm_with_options, CompilerOptions};
+use waspy::{compile_python_to_wasm_with_options, CompilerOptions, Verbosity};
 
 let options = CompilerOptions {
     optimize: true,
     debug_info: true,
     generate_html: true,
+    verbosity: Verbosity::Verbose,  // or Verbosity::Debug
     ..CompilerOptions::default()
 };
 
 let wasm = compile_python_to_wasm_with_options(python_code, &options)?;
+```
+
+### Verbosity Levels
+
+Waspy supports different verbosity levels for logging output:
+
+- **`Verbosity::Quiet`** - Minimal output (errors only)
+- **`Verbosity::Normal`** - Standard output (default)
+- **`Verbosity::Verbose`** - Detailed output
+- **`Verbosity::Debug`** - Detail for debugging
+
+If your project has `--verbose` or `--debug` flags, use the `from_flags` helper:
+
+```rust
+use waspy::{CompilerOptions, Verbosity};
+
+// Map CLI flags to verbosity level
+let options = CompilerOptions {
+    verbosity: Verbosity::from_flags(verbose_flag, debug_flag),
+    ..CompilerOptions::default()
+};
 ```
 
 For multiple files compilation:
