@@ -45,6 +45,9 @@ pub enum IRStatement {
         then_body: Box<IRBody>,
         else_body: Option<Box<IRBody>>,
     },
+    Raise {
+        exception: Option<IRExpr>,
+    },
     While {
         condition: IRExpr,
         body: Box<IRBody>,
