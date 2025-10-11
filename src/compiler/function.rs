@@ -215,6 +215,19 @@ pub fn compile_body(
 
                 func.instruction(&Instruction::End);
             }
+
+            // TODO: Implement more specific exceptions
+            IRStatement::Raise { exception } => {
+                if let Some(exc_expr) = exception {
+                    // print!("Emitting raise for exception expression: {:?}\n", exc_expr);
+                    emit_expr(exc_expr, func, ctx, memory_layout, None);
+                } else {
+                    // If no exception is provided, raise a generic exception
+                    func.instruction(&Instruction::I32Const(0)); // Placeholder for generic exception
+                    func.instruction(&Instruction::Unreachable);
+                }
+            }
+
             IRStatement::While { condition, body } => {
                 // Loop block
                 func.instruction(&Instruction::Block(BlockType::Empty));
