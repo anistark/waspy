@@ -92,7 +92,7 @@ pub fn compile_python_to_wasm_with_options(
             }
         })
         .collect();
-
+    log_verbose!("{:#?}", ir_module);
     // Check for entry points
     log_verbose!("Detecting entry points...");
     if let Ok(Some(entry_point_info)) = ir::detect_entry_points(source, None) {

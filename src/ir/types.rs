@@ -1,4 +1,5 @@
 /// Intermediate Representation (IR) for a module containing multiple functions
+#[derive(Debug)]
 pub struct IRModule {
     pub functions: Vec<IRFunction>,
     pub variables: Vec<IRVariable>, // Module-level variables
@@ -102,6 +103,7 @@ pub struct IRExceptHandler {
 }
 
 /// Module-level variable
+#[derive(Debug)]
 pub struct IRVariable {
     pub name: String,
     pub value: IRExpr,
@@ -123,6 +125,7 @@ pub struct IRImport {
 }
 
 /// Class definition
+#[derive(Debug)]
 pub struct IRClass {
     pub name: String,
     pub bases: Vec<String>,
