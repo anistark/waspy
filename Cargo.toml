@@ -68,6 +68,10 @@ name = "html_test"
 path = "examples/html_test.rs"
 required-features = ["wasm-plugin"]
 
+[[example]]
+name = "verbose_debug_demo"
+path = "examples/verbose_debug_demo.rs"
+
 # Plugin metadata following wasmrust pattern
 [package.metadata.wasm_plugin]
 name = "python"
