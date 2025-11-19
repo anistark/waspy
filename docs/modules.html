@@ -151,17 +151,22 @@
                 ]
             },
 
-            // 🔄 PARTIALLY IMPLEMENTED MODULES
             strings: {
                 title: "STRINGS",
-                status: "progress",
+                status: "done",
                 features: [
-                    { name: "String literals and constants", status: "done" },
-                    { name: "String indexing (returns bytes, not char)", status: "progress" },
-                    { name: "String methods (.upper(), .lower(), .split())", status: "todo" },
-                    { name: "String concatenation (+) & slicing", status: "todo" }
+                    { name: "String literals, indexing, slicing, concatenation", status: "done" },
+                    { name: "Case conversion (upper, lower, capitalize, title)", status: "done" },
+                    { name: "Test methods (isdigit, isalpha, isspace, etc.) - compile-time optimized", status: "done" },
+                    { name: "Search methods (.find, .count, .startswith, .endswith)", status: "done" },
+                    { name: "Transform methods (.split, .join, .replace)", status: "done" },
+                    { name: "Layout methods (.ljust, .rjust, .center)", status: "done" },
+                    { name: ".format() and % formatting - compile-time for constants", status: "done" },
+                    { name: "F-strings with JoinedStr - constant & dynamic interpolation", status: "done" }
                 ]
             },
+
+            // 🔄 PARTIALLY IMPLEMENTED MODULES
             collections: {
                 title: "COLLECTIONS",
                 status: "progress",
@@ -276,11 +281,11 @@
             },
             advancedTypes: {
                 title: "ADVANCED DATA TYPES",
-                status: "todo",
+                status: "progress",
                 features: [
                     { name: "Set type ({1, 2, 3}) & operations", status: "todo" },
                     { name: "Tuple operations & unpacking", status: "todo" },
-                    { name: "String formatting (f-strings, .format())", status: "todo" },
+                    { name: "String formatting (.format() & % & f-strings)", status: "done" },
                     { name: "Bytes type & binary data handling", status: "todo" }
                 ]
             },

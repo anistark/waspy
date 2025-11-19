@@ -36,7 +36,8 @@ Generate & Optimize
 - Processes variable declarations and assignments
 - Supports type annotations for function parameters and return values
 - Enables function calls between compiled functions
-- Includes an expanded type system: integers, floats, booleans, strings (basic)
+- Includes an expanded type system: integers, floats, booleans, strings
+- Complete string operations support (slicing, concatenation, 20+ methods, formatting)
 - Supports arithmetic operations (`+`, `-`, `*`, `/`, `%`, `//`, `**`)
 - Processes comparison operators (`==`, `!=`, `<`, `<=`, `>`, `>=`)
 - Handles boolean operators (`and`, `or`)
@@ -213,7 +214,7 @@ The type system now includes:
 - **Integers**: Mapped to WebAssembly's `i32` type
 - **Floats**: Supported as `f64` with conversion to `i32` when necessary
 - **Booleans**: Represented as `i32` (`0` for `false`, `1` for `true`)
-- **Strings**: Basic support for string literals (memory-based)
+- **Strings**: Support for string operations with compile-time optimization
 - **Type Coercion**: Automatic conversion between compatible types when needed
 
 ### Control Flow
