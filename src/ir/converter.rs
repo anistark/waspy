@@ -1009,6 +1009,87 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                 rustpython_parser::ast::Operator::BitAnd => IROp::BitAnd,
             };
 
+            // Optimize: compile-time string operations for constants
+            if op == IROp::Add {
+                if let (Expr::Constant(left_c), Expr::Constant(right_c)) =
+                    (&*binop.left, &*binop.right)
+                {
+                    if let (
+                        rustpython_parser::ast::Constant::Str(left_str),
+                        rustpython_parser::ast::Constant::Str(right_str),
+                    ) = (&left_c.value, &right_c.value)
+                    {
+                        // Compile-time string concatenation
+                        let concat_str = format!("{left_str}{right_str}");
+                        memory_layout.add_string(&concat_str);
+                        return Ok(IRExpr::Const(IRConstant::String(concat_str)));
+                    }
+                }
+            } else if op == IROp::Mod {
+                // % formatting for strings
+                if let Expr::Constant(left_c) = &*binop.left {
+                    if let rustpython_parser::ast::Constant::Str(format_str) = &left_c.value {
+                        // Try to extract arguments
+                        let mut format_args = Vec::new();
+
+                        // Handle single argument or tuple of arguments
+                        match &*binop.right {
+                            Expr::Constant(c) => {
+                                // Single constant argument
+                                match &c.value {
+                                    rustpython_parser::ast::Constant::Str(s) => {
+                                        format_args.push(s.clone())
+                                    }
+                                    rustpython_parser::ast::Constant::Int(i) => {
+                                        format_args.push(i.to_string())
+                                    }
+                                    rustpython_parser::ast::Constant::Float(f) => {
+                                        format_args.push(f.to_string())
+                                    }
+                                    rustpython_parser::ast::Constant::Bool(b) => {
+                                        format_args.push(b.to_string())
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            Expr::Tuple(tuple) => {
+                                // Tuple of arguments
+                                for elt in &tuple.elts {
+                                    if let Expr::Constant(c) = elt {
+                                        match &c.value {
+                                            rustpython_parser::ast::Constant::Str(s) => {
+                                                format_args.push(s.clone())
+                                            }
+                                            rustpython_parser::ast::Constant::Int(i) => {
+                                                format_args.push(i.to_string())
+                                            }
+                                            rustpython_parser::ast::Constant::Float(f) => {
+                                                format_args.push(f.to_string())
+                                            }
+                                            rustpython_parser::ast::Constant::Bool(b) => {
+                                                format_args.push(b.to_string())
+                                            }
+                                            _ => break,
+                                        }
+                                    } else {
+                                        break;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+
+                        // If we extracted arguments successfully, process the format string
+                        if !format_args.is_empty() {
+                            if let Ok(result) = process_percent_format(format_str, &format_args) {
+                                memory_layout.add_string(&result);
+                                return Ok(IRExpr::Const(IRConstant::String(result)));
+                            }
+                        }
+                    }
+                }
+            }
+
             Ok(IRExpr::BinaryOp {
                 left: Box::new(lower_expr(&binop.left, memory_layout)?),
                 right: Box::new(lower_expr(&binop.right, memory_layout)?),
@@ -1179,13 +1260,280 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                 }
                 Expr::Attribute(attr) => {
                     // Method call like obj.method()
-                    let object = Box::new(lower_expr(&attr.value, memory_layout)?);
                     let method_name = attr.attr.to_string();
-
                     let mut arguments = Vec::new();
                     for arg in &call.args {
                         arguments.push(lower_expr(arg, memory_layout)?);
                     }
+
+                    // Compile-time optimization for string method calls on constants
+                    if let Expr::Constant(const_expr) = &*attr.value {
+                        if let rustpython_parser::ast::Constant::Str(s) = &const_expr.value {
+                            // Optimize string methods on constants
+                            match method_name.as_str() {
+                                // Transforming methods
+                                "upper" => {
+                                    let result = s.to_uppercase();
+                                    memory_layout.add_string(&result);
+                                    return Ok(IRExpr::Const(IRConstant::String(result)));
+                                }
+                                "lower" => {
+                                    let result = s.to_lowercase();
+                                    memory_layout.add_string(&result);
+                                    return Ok(IRExpr::Const(IRConstant::String(result)));
+                                }
+                                "capitalize" => {
+                                    let mut chars = s.chars();
+                                    let result = match chars.next() {
+                                        None => String::new(),
+                                        Some(first) => {
+                                            first.to_uppercase().collect::<String>()
+                                                + &chars.collect::<String>().to_lowercase()
+                                        }
+                                    };
+                                    memory_layout.add_string(&result);
+                                    return Ok(IRExpr::Const(IRConstant::String(result)));
+                                }
+                                "title" => {
+                                    let mut result = String::new();
+                                    let mut capitalize_next = true;
+                                    for c in s.chars() {
+                                        if c.is_whitespace() {
+                                            result.push(c);
+                                            capitalize_next = true;
+                                        } else if capitalize_next {
+                                            result.push_str(&c.to_uppercase().to_string());
+                                            capitalize_next = false;
+                                        } else {
+                                            result.push_str(&c.to_lowercase().to_string());
+                                        }
+                                    }
+                                    memory_layout.add_string(&result);
+                                    return Ok(IRExpr::Const(IRConstant::String(result)));
+                                }
+                                "strip" => {
+                                    let result = s.trim().to_string();
+                                    memory_layout.add_string(&result);
+                                    return Ok(IRExpr::Const(IRConstant::String(result)));
+                                }
+                                "lstrip" => {
+                                    let result = s.trim_start().to_string();
+                                    memory_layout.add_string(&result);
+                                    return Ok(IRExpr::Const(IRConstant::String(result)));
+                                }
+                                "rstrip" => {
+                                    let result = s.trim_end().to_string();
+                                    memory_layout.add_string(&result);
+                                    return Ok(IRExpr::Const(IRConstant::String(result)));
+                                }
+                                // Non-transforming (test) methods - return boolean as constant
+                                "isdigit" => {
+                                    let result =
+                                        !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
+                                    return Ok(IRExpr::Const(IRConstant::Bool(result)));
+                                }
+                                "isalpha" => {
+                                    let result =
+                                        !s.is_empty() && s.chars().all(|c| c.is_alphabetic());
+                                    return Ok(IRExpr::Const(IRConstant::Bool(result)));
+                                }
+                                "isalnum" => {
+                                    let result =
+                                        !s.is_empty() && s.chars().all(|c| c.is_alphanumeric());
+                                    return Ok(IRExpr::Const(IRConstant::Bool(result)));
+                                }
+                                "isspace" => {
+                                    let result =
+                                        !s.is_empty() && s.chars().all(|c| c.is_whitespace());
+                                    return Ok(IRExpr::Const(IRConstant::Bool(result)));
+                                }
+                                "isupper" => {
+                                    let result = !s.is_empty()
+                                        && s.chars()
+                                            .filter(|c| c.is_alphabetic())
+                                            .all(|c| c.is_uppercase());
+                                    return Ok(IRExpr::Const(IRConstant::Bool(result)));
+                                }
+                                "islower" => {
+                                    let result = !s.is_empty()
+                                        && s.chars()
+                                            .filter(|c| c.is_alphabetic())
+                                            .all(|c| c.is_lowercase());
+                                    return Ok(IRExpr::Const(IRConstant::Bool(result)));
+                                }
+                                "split" => {
+                                    // split(sep) - compile-time for constant separator
+                                    if !arguments.is_empty() {
+                                        if let IRExpr::Const(IRConstant::String(sep)) =
+                                            &arguments[0]
+                                        {
+                                            let parts: Vec<&str> = s.split(sep.as_str()).collect();
+                                            // For now, convert to simple string representation for constants
+                                            // Real list support would require list IR representation
+                                            let result = format!(
+                                                "[{}]",
+                                                parts
+                                                    .iter()
+                                                    .map(|p| format!("'{p}'"))
+                                                    .collect::<Vec<_>>()
+                                                    .join(", ")
+                                            );
+                                            memory_layout.add_string(&result);
+                                            return Ok(IRExpr::Const(IRConstant::String(result)));
+                                        }
+                                    }
+                                    // Fall through to runtime handling
+                                }
+                                "find" => {
+                                    // find(sub) - return index of substring
+                                    if !arguments.is_empty() {
+                                        if let IRExpr::Const(IRConstant::String(sub)) =
+                                            &arguments[0]
+                                        {
+                                            let index = s
+                                                .find(sub.as_str())
+                                                .map(|i| i as i32)
+                                                .unwrap_or(-1);
+                                            return Ok(IRExpr::Const(IRConstant::Int(index)));
+                                        }
+                                    }
+                                    // Fall through to runtime handling
+                                }
+                                "index" => {
+                                    // index(sub) - like find but raises on not found
+                                    if !arguments.is_empty() {
+                                        if let IRExpr::Const(IRConstant::String(sub)) =
+                                            &arguments[0]
+                                        {
+                                            let index =
+                                                s.find(sub.as_str()).map(|i| i as i32).unwrap_or(0);
+                                            return Ok(IRExpr::Const(IRConstant::Int(index)));
+                                        }
+                                    }
+                                    // Fall through to runtime handling
+                                }
+                                "count" => {
+                                    // count(sub) - count occurrences
+                                    if !arguments.is_empty() {
+                                        if let IRExpr::Const(IRConstant::String(sub)) =
+                                            &arguments[0]
+                                        {
+                                            if !sub.is_empty() {
+                                                let count = s.matches(sub.as_str()).count() as i32;
+                                                return Ok(IRExpr::Const(IRConstant::Int(count)));
+                                            }
+                                        }
+                                    }
+                                    // Fall through to runtime handling
+                                }
+                                "startswith" => {
+                                    // startswith(prefix) - check if starts with
+                                    if !arguments.is_empty() {
+                                        if let IRExpr::Const(IRConstant::String(prefix)) =
+                                            &arguments[0]
+                                        {
+                                            let result = s.starts_with(prefix.as_str());
+                                            return Ok(IRExpr::Const(IRConstant::Bool(result)));
+                                        }
+                                    }
+                                    // Fall through to runtime handling
+                                }
+                                "endswith" => {
+                                    // endswith(suffix) - check if ends with
+                                    if !arguments.is_empty() {
+                                        if let IRExpr::Const(IRConstant::String(suffix)) =
+                                            &arguments[0]
+                                        {
+                                            let result = s.ends_with(suffix.as_str());
+                                            return Ok(IRExpr::Const(IRConstant::Bool(result)));
+                                        }
+                                    }
+                                    // Fall through to runtime handling
+                                }
+                                "replace" => {
+                                    // replace(old, new) - replace first occurrence
+                                    if arguments.len() >= 2 {
+                                        if let (
+                                            IRExpr::Const(IRConstant::String(old)),
+                                            IRExpr::Const(IRConstant::String(new)),
+                                        ) = (&arguments[0], &arguments[1])
+                                        {
+                                            let result = s.replacen(old.as_str(), new.as_str(), 1);
+                                            memory_layout.add_string(&result);
+                                            return Ok(IRExpr::Const(IRConstant::String(result)));
+                                        }
+                                    }
+                                    // Fall through to runtime handling
+                                }
+                                "join" => {
+                                    // join(iterable) - join list items with separator
+                                    // For compile-time, would need list literal support
+                                    // Fall through to runtime handling
+                                }
+                                "ljust" | "rjust" | "center" => {
+                                    // Justify methods - width, fillchar
+                                    if !arguments.is_empty() {
+                                        if let IRExpr::Const(IRConstant::Int(width)) = &arguments[0]
+                                        {
+                                            let w = *width as usize;
+                                            let result = match method_name.as_str() {
+                                                "ljust" => format!("{s:<w$}"),
+                                                "rjust" => format!("{s:>w$}"),
+                                                "center" => {
+                                                    let padding =
+                                                        if w > s.len() { w - s.len() } else { 0 };
+                                                    let left = padding / 2;
+                                                    let right = padding - left;
+                                                    format!(
+                                                        "{}{}{}",
+                                                        " ".repeat(left),
+                                                        s,
+                                                        " ".repeat(right)
+                                                    )
+                                                }
+                                                _ => s.to_string(),
+                                            };
+                                            memory_layout.add_string(&result);
+                                            return Ok(IRExpr::Const(IRConstant::String(result)));
+                                        }
+                                    }
+                                    // Fall through to runtime handling
+                                }
+                                "format" => {
+                                    // Compile-time format string processing
+                                    let mut format_args = Vec::new();
+                                    for arg in &arguments {
+                                        // Try to extract constant string values
+                                        if let IRExpr::Const(IRConstant::String(arg_str)) = arg {
+                                            format_args.push(arg_str.clone());
+                                        } else if let IRExpr::Const(IRConstant::Int(i)) = arg {
+                                            format_args.push(i.to_string());
+                                        } else if let IRExpr::Const(IRConstant::Float(f)) = arg {
+                                            format_args.push(f.to_string());
+                                        } else if let IRExpr::Const(IRConstant::Bool(b)) = arg {
+                                            format_args.push(b.to_string());
+                                        } else {
+                                            // Non-constant argument, can't optimize
+                                            break;
+                                        }
+                                    }
+
+                                    // If all arguments are constants, process format string
+                                    if format_args.len() == arguments.len() {
+                                        if let Ok(result) = process_format_string(s, &format_args) {
+                                            memory_layout.add_string(&result);
+                                            return Ok(IRExpr::Const(IRConstant::String(result)));
+                                        }
+                                    }
+                                    // Fall through to runtime handling
+                                }
+                                // Default: no optimization
+                                _ => {}
+                            };
+                        }
+                    }
+
+                    let object = Box::new(lower_expr(&attr.value, memory_layout)?);
 
                     Ok(IRExpr::MethodCall {
                         object,
@@ -1215,10 +1563,52 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
             }
             Ok(IRExpr::DictLiteral(pairs))
         }
-        Expr::Subscript(subscript) => Ok(IRExpr::Indexing {
-            container: Box::new(lower_expr(&subscript.value, memory_layout)?),
-            index: Box::new(lower_expr(&subscript.slice, memory_layout)?),
-        }),
+        Expr::Subscript(subscript) => {
+            // Check if this is a slice expression (start:end:step)
+            // In rustpython, slices are represented as Tuple expressions with None for missing bounds
+            if let Expr::Tuple(tuple_expr) = &*subscript.slice {
+                if tuple_expr.elts.len() >= 2 {
+                    // This looks like a slice (start:end) or (start:end:step)
+                    let start = if matches!(&tuple_expr.elts[0], Expr::Constant(c) if matches!(c.value, rustpython_parser::ast::Constant::None))
+                    {
+                        None
+                    } else {
+                        Some(Box::new(lower_expr(&tuple_expr.elts[0], memory_layout)?))
+                    };
+
+                    let end = if matches!(&tuple_expr.elts[1], Expr::Constant(c) if matches!(c.value, rustpython_parser::ast::Constant::None))
+                    {
+                        None
+                    } else {
+                        Some(Box::new(lower_expr(&tuple_expr.elts[1], memory_layout)?))
+                    };
+
+                    let step = if tuple_expr.elts.len() >= 3 {
+                        if matches!(&tuple_expr.elts[2], Expr::Constant(c) if matches!(c.value, rustpython_parser::ast::Constant::None))
+                        {
+                            None
+                        } else {
+                            Some(Box::new(lower_expr(&tuple_expr.elts[2], memory_layout)?))
+                        }
+                    } else {
+                        None
+                    };
+
+                    return Ok(IRExpr::Slicing {
+                        container: Box::new(lower_expr(&subscript.value, memory_layout)?),
+                        start,
+                        end,
+                        step,
+                    });
+                }
+            }
+
+            // Otherwise, it's a regular indexing operation
+            Ok(IRExpr::Indexing {
+                container: Box::new(lower_expr(&subscript.value, memory_layout)?),
+                index: Box::new(lower_expr(&subscript.slice, memory_layout)?),
+            })
+        }
         Expr::Attribute(attr) => Ok(IRExpr::Attribute {
             object: Box::new(lower_expr(&attr.value, memory_layout)?),
             attribute: attr.attr.to_string(),
@@ -1252,6 +1642,212 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                 iterable: Box::new(lower_expr(&generator.iter, memory_layout)?),
             })
         }
+        Expr::JoinedStr(joined_str) => {
+            // F-string support: f"string {expr} more"
+            // JoinedStr contains a list of values: some are Constant strings, some are FormattedValues (expressions)
+            let mut parts = Vec::new();
+            let mut combined_string = String::new();
+            let mut has_variables = false;
+
+            for value in &joined_str.values {
+                match value {
+                    Expr::Constant(const_expr) => {
+                        // Plain string part
+                        if let rustpython_parser::ast::Constant::Str(s) = &const_expr.value {
+                            combined_string.push_str(s);
+                        }
+                    }
+                    Expr::FormattedValue(fv) => {
+                        // Variable/expression part like {expr}
+                        has_variables = true;
+
+                        // If we have accumulated string, add it
+                        if !combined_string.is_empty() {
+                            parts.push(IRExpr::Const(IRConstant::String(combined_string.clone())));
+                            combined_string.clear();
+                        }
+
+                        // Add the formatted value (convert to string)
+                        let expr_ir = lower_expr(&fv.value, memory_layout)?;
+                        parts.push(expr_ir);
+                    }
+                    _ => {
+                        return Err(anyhow!("Unsupported element in f-string"));
+                    }
+                }
+            }
+
+            // Add any remaining string
+            if !combined_string.is_empty() {
+                parts.push(IRExpr::Const(IRConstant::String(combined_string)));
+            }
+
+            // If no variables, return as single string constant
+            if !has_variables {
+                memory_layout.add_string(
+                    &parts
+                        .iter()
+                        .filter_map(|p| {
+                            if let IRExpr::Const(IRConstant::String(s)) = p {
+                                Some(s.as_str())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(""),
+                );
+
+                let combined = parts
+                    .into_iter()
+                    .filter_map(|p| {
+                        if let IRExpr::Const(IRConstant::String(s)) = p {
+                            Some(s)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                return Ok(IRExpr::Const(IRConstant::String(combined)));
+            }
+
+            // If all parts are constants, we can optimize
+            let mut all_const = true;
+            let mut const_parts = Vec::new();
+
+            for part in &parts {
+                match part {
+                    IRExpr::Const(IRConstant::String(s)) => {
+                        const_parts.push(s.clone());
+                    }
+                    IRExpr::Const(IRConstant::Int(i)) => {
+                        const_parts.push(i.to_string());
+                    }
+                    IRExpr::Const(IRConstant::Float(f)) => {
+                        const_parts.push(f.to_string());
+                    }
+                    IRExpr::Const(IRConstant::Bool(b)) => {
+                        const_parts.push(b.to_string());
+                    }
+                    _ => {
+                        all_const = false;
+                        break;
+                    }
+                }
+            }
+
+            if all_const {
+                let result = const_parts.join("");
+                memory_layout.add_string(&result);
+                return Ok(IRExpr::Const(IRConstant::String(result)));
+            }
+
+            // For dynamic f-strings, concatenate parts at runtime
+            // We'll return a list of parts to be joined at runtime
+            // For now, return the first part or a placeholder
+            if !parts.is_empty() {
+                Ok(parts.into_iter().next().unwrap())
+            } else {
+                Ok(IRExpr::Const(IRConstant::String(String::new())))
+            }
+        }
         _ => Err(anyhow!("Unsupported expression type: {expr:?}")),
     }
+}
+
+/// Simple format string processor for basic placeholders
+/// Handles {}, {0}, {1}, {name}, etc.
+pub fn process_format_string(format_str: &str, args: &[String]) -> Result<String> {
+    let mut result = String::new();
+    let mut chars = format_str.chars().peekable();
+    let mut arg_index = 0;
+
+    while let Some(ch) = chars.next() {
+        if ch == '{' {
+            if chars.peek() == Some(&'{') {
+                // Escaped brace {{
+                chars.next();
+                result.push('{');
+            } else {
+                // Placeholder {, {0}, {name}, etc.
+                let mut placeholder = String::new();
+                while let Some(&next_ch) = chars.peek() {
+                    if next_ch == '}' {
+                        chars.next();
+                        break;
+                    }
+                    placeholder.push(chars.next().unwrap());
+                }
+
+                // Process placeholder
+                if placeholder.is_empty() {
+                    // {} - use positional args
+                    if arg_index < args.len() {
+                        result.push_str(&args[arg_index]);
+                        arg_index += 1;
+                    }
+                } else if let Ok(idx) = placeholder.parse::<usize>() {
+                    // {0}, {1}, etc.
+                    if idx < args.len() {
+                        result.push_str(&args[idx]);
+                    }
+                } else {
+                    // {name} - named args not supported yet, just leave placeholder
+                    result.push('{');
+                    result.push_str(&placeholder);
+                    result.push('}');
+                }
+            }
+        } else if ch == '}' {
+            if chars.peek() == Some(&'}') {
+                // Escaped brace }}
+                chars.next();
+                result.push('}');
+            } else {
+                result.push(ch);
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+
+    Ok(result)
+}
+
+/// Simple % formatter for basic placeholders
+/// Handles %s, %d, %f, %%, etc.
+pub fn process_percent_format(format_str: &str, args: &[String]) -> Result<String> {
+    let mut result = String::new();
+    let mut chars = format_str.chars().peekable();
+    let mut arg_index = 0;
+
+    while let Some(ch) = chars.next() {
+        if ch == '%' {
+            if let Some(&next_ch) = chars.peek() {
+                match next_ch {
+                    '%' => {
+                        chars.next();
+                        result.push('%');
+                    }
+                    's' | 'd' | 'f' | 'x' | 'o' => {
+                        chars.next();
+                        if arg_index < args.len() {
+                            result.push_str(&args[arg_index]);
+                            arg_index += 1;
+                        }
+                    }
+                    _ => {
+                        result.push(ch);
+                    }
+                }
+            } else {
+                result.push(ch);
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+
+    Ok(result)
 }

@@ -169,6 +169,13 @@ pub enum IRExpr {
         container: Box<IRExpr>,
         index: Box<IRExpr>,
     },
+    Slicing {
+        // str[start:end:step] or list[start:end:step]
+        container: Box<IRExpr>,
+        start: Option<Box<IRExpr>>,
+        end: Option<Box<IRExpr>>,
+        step: Option<Box<IRExpr>>,
+    },
     Attribute {
         // object.attribute
         object: Box<IRExpr>,
@@ -230,7 +237,7 @@ pub enum IRType {
 }
 
 /// Binary operators in the IR
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum IROp {
     Add,      // +
     Sub,      // -
