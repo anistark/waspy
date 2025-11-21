@@ -1,6 +1,6 @@
 use crate::compiler::context::CompilationContext;
 use crate::ir::{IRBoolOp, IRCompareOp, IRConstant, IRExpr, IROp, IRType, IRUnaryOp, MemoryLayout};
-use wasm_encoder::{BlockType, Function, Instruction};
+use wasm_encoder::{BlockType, Function, Instruction, MemArg};
 
 // Helper to convert f64 to Ieee64
 #[inline]
