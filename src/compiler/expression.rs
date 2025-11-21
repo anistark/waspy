@@ -1097,16 +1097,14 @@ pub fn emit_expr(
                         }
                     }
                 }
-                IRType::List(_element_type) => {
-                    emit_list_method_call(
-                        func,
-                        ctx,
-                        memory_layout,
-                        method_name,
-                        arguments,
-                        &object_type,
-                    )
-                }
+                IRType::List(_element_type) => emit_list_method_call(
+                    func,
+                    ctx,
+                    memory_layout,
+                    method_name,
+                    arguments,
+                    &object_type,
+                ),
                 _ => {
                     // Non-string/list methods not yet supported
                     func.instruction(&Instruction::Drop);
