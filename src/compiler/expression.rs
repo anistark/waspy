@@ -485,7 +485,7 @@ pub fn emit_expr(
             }
 
             // Use a fixed allocation address for simplicity
-            let list_ptr = 10000 + ((ctx.local_count as u32) * 100);
+            let list_ptr = 10000 + (ctx.local_count * 100);
 
             // Store length at the beginning
             func.instruction(&Instruction::I32Const(list_ptr as i32));
@@ -545,7 +545,7 @@ pub fn emit_expr(
         IRExpr::DictLiteral(pairs) => {
             // Dict layout in memory: [num_entries:i32][key0:i32][val0:i32][key1:i32][val1:i32]...
             // Allocate dict at a fixed offset (after lists)
-            let dict_ptr = 50000 + ((ctx.local_count as u32) * 100);
+            let dict_ptr = 50000 + (ctx.local_count * 100);
 
             // Store number of entries
             func.instruction(&Instruction::I32Const(dict_ptr as i32));
