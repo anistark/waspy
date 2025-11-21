@@ -474,6 +474,26 @@ body {
     flex: 1;
 }
 
+.feature-version {
+    display: inline-block;
+    font-size: 0.75rem;
+    padding: 0.2rem 0.5rem;
+    border-radius: 1rem;
+    background: rgba(100, 200, 255, 0.2);
+    color: rgba(100, 200, 255, 0.9);
+    border: 1px solid rgba(100, 200, 255, 0.3);
+    margin-left: auto;
+    white-space: nowrap;
+    font-family: 'Courier New', monospace;
+    font-weight: 600;
+}
+
+.dark-mode .feature-version {
+    background: rgba(100, 200, 255, 0.15);
+    color: rgba(150, 220, 255, 0.95);
+    border: 1px solid rgba(100, 200, 255, 0.4);
+}
+
 .progress-indicator {
     margin-top: 1rem;
     padding-top: 1rem;
