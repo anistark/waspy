@@ -687,7 +687,11 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                             value,
                         });
                     }
-                    _ => return Err(anyhow!("Only variable, attribute, or subscript assignment supported")),
+                    _ => {
+                        return Err(anyhow!(
+                            "Only variable, attribute, or subscript assignment supported"
+                        ))
+                    }
                 }
             }
             Stmt::AnnAssign(ann_assign) => {
