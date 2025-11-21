@@ -92,6 +92,12 @@ pub enum IRStatement {
         target: String,
         module_name: IRExpr,
     },
+    // Index assignment like list[index] = value or dict[key] = value
+    IndexAssign {
+        container: IRExpr,
+        index: IRExpr,
+        value: IRExpr,
+    },
 }
 
 /// Except handler for try-except statements

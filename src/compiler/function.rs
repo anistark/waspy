@@ -1,7 +1,7 @@
 use crate::compiler::context::CompilationContext;
 use crate::compiler::expression::{emit_expr, emit_integer_power_operation};
 use crate::ir::{IRBody, IRFunction, IROp, IRStatement, IRType, MemoryLayout};
-use wasm_encoder::{BlockType, Function, Instruction, ValType};
+use wasm_encoder::{BlockType, Function, Instruction, MemArg, ValType};
 
 /// Compile an IR function into a WebAssembly function
 pub fn compile_function(
@@ -447,6 +447,85 @@ pub fn compile_body(
 
                 // Store the result (currently just a placeholder) in the target variable
                 func.instruction(&Instruction::LocalSet(local_idx));
+            }
+
+            IRStatement::IndexAssign {
+                container,
+                index,
+                value,
+            } => {
+                // Get container type to determine storage strategy
+                let container_type = emit_expr(container, func, ctx, memory_layout, None);
+
+                // Save container pointer
+                func.instruction(&Instruction::LocalSet(ctx.temp_local));
+
+                // Emit index expression
+                emit_expr(index, func, ctx, memory_layout, Some(&IRType::Int));
+
+                // Save index
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 1));
+
+                // Emit value expression
+                let value_type = emit_expr(value, func, ctx, memory_layout, None);
+
+                // Save value
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 2));
+
+                match container_type {
+                    IRType::List(_) => {
+                        // Calculate address: container_ptr + 4 + (index * 4)
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local)); // container_ptr
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 1)); // index
+                        func.instruction(&Instruction::I32Const(4));
+                        func.instruction(&Instruction::I32Mul); // index * 4
+                        func.instruction(&Instruction::I32Const(4)); // skip length field
+                        func.instruction(&Instruction::I32Add); // + 4
+                        func.instruction(&Instruction::I32Add); // container_ptr + 4 + (index * 4)
+
+                        // Restore value
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
+
+                        // Store based on value type
+                        match value_type {
+                            IRType::Float => {
+                                func.instruction(&Instruction::F64Store(MemArg {
+                                    offset: 0,
+                                    align: 3,
+                                    memory_index: 0,
+                                }));
+                            }
+                            _ => {
+                                func.instruction(&Instruction::I32Store(MemArg {
+                                    offset: 0,
+                                    align: 2,
+                                    memory_index: 0,
+                                }));
+                            }
+                        }
+                    }
+                    IRType::Dict(_key_type, _value_type) => {
+                        // Dictionary assignment (linear search and update)
+                        // For now, just store at a fixed offset after the entries
+                        // TODO: Implement proper hash table or linear probe storage
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local)); // dict_ptr
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 1)); // key
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 2)); // value
+
+                        // Just drop the values for now - proper implementation would search/update
+                        func.instruction(&Instruction::Drop);
+                        func.instruction(&Instruction::Drop);
+                        func.instruction(&Instruction::Drop);
+                    }
+                    IRType::String => {
+                        // String indexing is read-only in Python, assignment not directly supported
+                        func.instruction(&Instruction::Drop);
+                    }
+                    _ => {
+                        // Unknown container type
+                        func.instruction(&Instruction::Drop);
+                    }
+                }
             }
         }
     }

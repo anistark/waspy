@@ -675,7 +675,19 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                             value,
                         });
                     }
-                    _ => return Err(anyhow!("Only variable or attribute assignment supported")),
+                    Expr::Subscript(subscript) => {
+                        // Handle subscript assignment like "list[0] = value" or "dict[key] = value"
+                        let container = lower_expr(&subscript.value, memory_layout)?;
+                        let index = lower_expr(&subscript.slice, memory_layout)?;
+                        let value = lower_expr(&assign.value, memory_layout)?;
+
+                        ir_statements.push(IRStatement::IndexAssign {
+                            container,
+                            index,
+                            value,
+                        });
+                    }
+                    _ => return Err(anyhow!("Only variable, attribute, or subscript assignment supported")),
                 }
             }
             Stmt::AnnAssign(ann_assign) => {

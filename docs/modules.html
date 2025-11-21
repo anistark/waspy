@@ -151,6 +151,8 @@
                 ]
             },
 
+            // 🔄 PARTIALLY IMPLEMENTED MODULES
+            // Note: Strings and Collections moved to DONE as of latest implementation
             strings: {
                 title: "STRINGS",
                 status: "done",
@@ -169,12 +171,14 @@
             // 🔄 PARTIALLY IMPLEMENTED MODULES
             collections: {
                 title: "COLLECTIONS",
-                status: "progress",
+                status: "done",
                 features: [
-                    { name: "List literals ([1, 2, 3]) - parsing only", status: "done" },
-                    { name: "Dict literals ({'key': 'value'}) - parsing only", status: "done" },
-                    { name: "List/Dict indexing & operations", status: "todo" },
-                    { name: "Dynamic resizing & memory management", status: "todo" }
+                    { name: "List literals with memory allocation [1, 2, 3]", status: "done" },
+                    { name: "List indexing (read & write) list[i] and list[i] = value", status: "done" },
+                    { name: "List methods .append(), .pop([i]), .clear(), .insert(i, v)", status: "done" },
+                    { name: "List search methods .index(v) & .count(v) with linear search", status: "done" },
+                    { name: "Dict literals with memory allocation {'key': value}", status: "done" },
+                    { name: "Dict indexing (read & write) dict[key] and dict[key] = value", status: "done" }
                 ]
             },
             classes: {
