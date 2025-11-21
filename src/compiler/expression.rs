@@ -1414,9 +1414,120 @@ pub fn emit_list_method_call(
         }
         "extend" => {
             // list.extend(iterable)
-            // For now, just a placeholder
-            // Would need to iterate over the iterable and append each element
-            func.instruction(&Instruction::Drop); // Drop the list_ptr
+            // Appends all items from iterable to the list
+            // Stack: list_ptr, iterable
+
+            if !arguments.is_empty() {
+                // Save list_ptr
+                func.instruction(&Instruction::LocalSet(ctx.temp_local));
+
+                // Emit the iterable
+                let iterable_type = emit_expr(&arguments[0], func, ctx, memory_layout, None);
+
+                match iterable_type {
+                    IRType::List(_) => {
+                        // Save iterable_ptr
+                        func.instruction(&Instruction::LocalSet(ctx.temp_local + 1));
+
+                        // Load iterable length
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
+                        func.instruction(&Instruction::I32Load(MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                        func.instruction(&Instruction::LocalSet(ctx.temp_local + 2)); // iterable_len
+
+                        // Load list length
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                        func.instruction(&Instruction::I32Load(MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                        func.instruction(&Instruction::LocalSet(ctx.temp_local + 3)); // list_len
+
+                        // Initialize loop counter
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::LocalSet(ctx.temp_local + 4)); // i = 0
+
+                        // Loop: for i in range(iterable_len)
+                        func.instruction(&Instruction::Block(BlockType::Empty));
+                        func.instruction(&Instruction::Loop(BlockType::Empty));
+
+                        // Check if i >= iterable_len
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 4)); // i
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 2)); // iterable_len
+                        func.instruction(&Instruction::I32GeS);
+                        func.instruction(&Instruction::BrIf(1)); // Exit loop if done
+
+                        // Load element from iterable at index i
+                        // Address: iterable_ptr + 4 + (i * 4)
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 1)); // iterable_ptr
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 4)); // i
+                        func.instruction(&Instruction::I32Const(4));
+                        func.instruction(&Instruction::I32Mul); // i * 4
+                        func.instruction(&Instruction::I32Const(4));
+                        func.instruction(&Instruction::I32Add); // + 4
+                        func.instruction(&Instruction::I32Add); // address
+                        func.instruction(&Instruction::I32Load(MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                        func.instruction(&Instruction::LocalSet(ctx.temp_local + 5)); // element
+
+                        // Calculate offset in list: 4 + (list_len * 4)
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local)); // list_ptr
+                        func.instruction(&Instruction::I32Const(4));
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 3)); // list_len
+                        func.instruction(&Instruction::I32Const(4));
+                        func.instruction(&Instruction::I32Mul);
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::I32Add);
+
+                        // Store element
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 5));
+                        func.instruction(&Instruction::I32Store(MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+
+                        // Increment list_len
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
+                        func.instruction(&Instruction::I32Const(1));
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::LocalSet(ctx.temp_local + 3));
+
+                        // Increment i
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
+                        func.instruction(&Instruction::I32Const(1));
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::LocalSet(ctx.temp_local + 4));
+
+                        // Loop back
+                        func.instruction(&Instruction::Br(0));
+
+                        // End loop
+                        func.instruction(&Instruction::End);
+                        func.instruction(&Instruction::End);
+
+                        // Update list length
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local)); // list_ptr
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 3)); // new length
+                        func.instruction(&Instruction::I32Store(MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                    }
+                    _ => {
+                        // For non-list iterables, just drop
+                        func.instruction(&Instruction::Drop);
+                    }
+                }
+            }
             IRType::None
         }
         "insert" => {
@@ -1483,8 +1594,154 @@ pub fn emit_list_method_call(
         "remove" => {
             // list.remove(value)
             // Find and remove first occurrence of value
-            // For now, placeholder
-            func.instruction(&Instruction::Drop); // Drop list_ptr
+            // Stack: list_ptr, value
+
+            if !arguments.is_empty() {
+                // Save list_ptr
+                func.instruction(&Instruction::LocalSet(ctx.temp_local));
+
+                // Emit the value to remove
+                emit_expr(&arguments[0], func, ctx, memory_layout, None);
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 1)); // value
+
+                // Load current length
+                func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                func.instruction(&Instruction::I32Load(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 2)); // length
+
+                // Initialize index to 0
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 3)); // i = 0
+
+                // Loop: find the value
+                func.instruction(&Instruction::Block(BlockType::Empty));
+                func.instruction(&Instruction::Loop(BlockType::Empty));
+
+                // Check if i >= length
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3)); // i
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 2)); // length
+                func.instruction(&Instruction::I32GeS);
+                func.instruction(&Instruction::BrIf(1)); // Exit loop if done
+
+                // Load element at index i
+                // Address: list_ptr + 4 + (i * 4)
+                func.instruction(&Instruction::LocalGet(ctx.temp_local)); // list_ptr
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3)); // i
+                func.instruction(&Instruction::I32Const(4));
+                func.instruction(&Instruction::I32Mul); // i * 4
+                func.instruction(&Instruction::I32Const(4));
+                func.instruction(&Instruction::I32Add); // + 4
+                func.instruction(&Instruction::I32Add);
+
+                func.instruction(&Instruction::I32Load(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+
+                // Compare with search_value
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 1)); // value
+                func.instruction(&Instruction::I32Eq);
+
+                // If equal, shift remaining elements and decrement length
+                func.instruction(&Instruction::If(BlockType::Empty));
+
+                // Found the element at index i, now shift everything after it
+                // Initialize shift counter j = i
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3)); // i
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 4)); // j = i
+
+                // Shift loop: move elements from j+1 to j
+                func.instruction(&Instruction::Block(BlockType::Empty));
+                func.instruction(&Instruction::Loop(BlockType::Empty));
+
+                // Check if j + 1 >= length
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 4)); // j
+                func.instruction(&Instruction::I32Const(1));
+                func.instruction(&Instruction::I32Add); // j + 1
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 2)); // length
+                func.instruction(&Instruction::I32GeS);
+                func.instruction(&Instruction::BrIf(1)); // Exit shift loop if done
+
+                // Load element at j + 1
+                func.instruction(&Instruction::LocalGet(ctx.temp_local)); // list_ptr
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 4)); // j
+                func.instruction(&Instruction::I32Const(1));
+                func.instruction(&Instruction::I32Add); // j + 1
+                func.instruction(&Instruction::I32Const(4));
+                func.instruction(&Instruction::I32Mul);
+                func.instruction(&Instruction::I32Const(4));
+                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::I32Add);
+
+                func.instruction(&Instruction::I32Load(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 5)); // elem
+
+                // Store element at j
+                func.instruction(&Instruction::LocalGet(ctx.temp_local)); // list_ptr
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 4)); // j
+                func.instruction(&Instruction::I32Const(4));
+                func.instruction(&Instruction::I32Mul);
+                func.instruction(&Instruction::I32Const(4));
+                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::I32Add);
+
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 5)); // elem
+                func.instruction(&Instruction::I32Store(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+
+                // Increment j
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
+                func.instruction(&Instruction::I32Const(1));
+                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 4));
+
+                // Loop back
+                func.instruction(&Instruction::Br(0));
+
+                // End shift loop
+                func.instruction(&Instruction::End);
+                func.instruction(&Instruction::End);
+
+                // Decrement length
+                func.instruction(&Instruction::LocalGet(ctx.temp_local)); // list_ptr
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 2)); // length
+                func.instruction(&Instruction::I32Const(1));
+                func.instruction(&Instruction::I32Sub); // length - 1
+                func.instruction(&Instruction::I32Store(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+
+                // Exit search loop
+                func.instruction(&Instruction::Br(2));
+                func.instruction(&Instruction::End); // End if
+
+                // Increment i
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
+                func.instruction(&Instruction::I32Const(1));
+                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 3));
+
+                // Loop back
+                func.instruction(&Instruction::Br(0));
+
+                // End search loop
+                func.instruction(&Instruction::End);
+                func.instruction(&Instruction::End);
+            }
             IRType::None
         }
         "index" => {
