@@ -454,16 +454,145 @@ pub fn emit_expr(
                 // Built-in functions
                 match function_name.as_str() {
                     "len" => {
-                        // For strings: return length
-                        // TODO: For lists/dicts revisit this
-                        IRType::Int
+                        if arg_types.len() != 1 {
+                            return IRType::Unknown;
+                        }
+                        match &arg_types[0] {
+                            IRType::String => {
+                                // String is (offset, length) on stack; pop offset, keep length
+                                func.instruction(&Instruction::Drop);
+                                IRType::Int
+                            }
+                            IRType::List(_) => {
+                                // List is a pointer; load length from first 4 bytes
+                                func.instruction(&Instruction::I32Load(MemArg {
+                                    offset: 0,
+                                    align: 2,
+                                    memory_index: 0,
+                                }));
+                                IRType::Int
+                            }
+                            IRType::Dict(_, _) => {
+                                // Dict is a pointer; load length from first 4 bytes
+                                func.instruction(&Instruction::I32Load(MemArg {
+                                    offset: 0,
+                                    align: 2,
+                                    memory_index: 0,
+                                }));
+                                IRType::Int
+                            }
+                            _ => {
+                                // Unknown type, return 0
+                                func.instruction(&Instruction::I32Const(0));
+                                IRType::Int
+                            }
+                        }
                     }
                     "print" => {
                         // Pop the arguments off the stack
-                        for _ in 0..arguments.len() {
-                            func.instruction(&Instruction::Drop);
+                        for arg_type in &arg_types {
+                            match arg_type {
+                                IRType::String => {
+                                    // Strings are (offset, length), drop both
+                                    func.instruction(&Instruction::Drop);
+                                    func.instruction(&Instruction::Drop);
+                                }
+                                _ => {
+                                    // All other types are single values
+                                    func.instruction(&Instruction::Drop);
+                                }
+                            }
                         }
                         IRType::None
+                    }
+                    "min" => {
+                        if arg_types.is_empty() {
+                            return IRType::Unknown;
+                        }
+                        if arg_types.len() == 1 {
+                            // min(iterable) - not yet supported, requires iteration
+                            // For now, just pop the argument and return 0
+                            func.instruction(&Instruction::Drop);
+                            return IRType::Int;
+                        }
+                        // min(a, b, ...) - multiple arguments
+                        let result_type = arg_types[0].clone();
+                        // Stack after emit_expr: arg0, arg1, arg2, ...
+                        // Compare pairs and keep minimum
+                        for _ in 1..arg_types.len() {
+                            // Stack: ..., min_so_far, next_val
+                            // Save next_val, then compare
+                            func.instruction(&Instruction::LocalSet(ctx.temp_local));
+                            // Stack: ..., min_so_far
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                            // Stack: ..., min_so_far, next_val
+                            func.instruction(&Instruction::I32LtS);
+                            func.instruction(&Instruction::If(BlockType::Empty));
+                            // next_val < min_so_far, so pop min_so_far and keep next_val
+                            func.instruction(&Instruction::Drop);
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                            func.instruction(&Instruction::Else);
+                            // min_so_far <= next_val, drop next_val and keep min_so_far
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                            func.instruction(&Instruction::Drop);
+                            func.instruction(&Instruction::End);
+                        }
+                        result_type
+                    }
+                    "max" => {
+                        if arg_types.is_empty() {
+                            return IRType::Unknown;
+                        }
+                        if arg_types.len() == 1 {
+                            // max(iterable) - not yet supported, requires iteration
+                            // For now, just pop the argument and return 0
+                            func.instruction(&Instruction::Drop);
+                            return IRType::Int;
+                        }
+                        // max(a, b, ...) - multiple arguments
+                        let result_type = arg_types[0].clone();
+                        // Stack after emit_expr: arg0, arg1, arg2, ...
+                        // Compare pairs and keep maximum
+                        for _ in 1..arg_types.len() {
+                            // Stack: ..., max_so_far, next_val
+                            // Save next_val, then compare
+                            func.instruction(&Instruction::LocalSet(ctx.temp_local));
+                            // Stack: ..., max_so_far
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                            // Stack: ..., max_so_far, next_val
+                            func.instruction(&Instruction::I32GtS);
+                            func.instruction(&Instruction::If(BlockType::Empty));
+                            // max_so_far > next_val, keep max_so_far
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                            func.instruction(&Instruction::Drop);
+                            func.instruction(&Instruction::Else);
+                            // max_so_far <= next_val, so pop max_so_far and keep next_val
+                            func.instruction(&Instruction::Drop);
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                            func.instruction(&Instruction::End);
+                        }
+                        result_type
+                    }
+                    "sum" => {
+                        if arg_types.is_empty() {
+                            return IRType::Unknown;
+                        }
+                        if arg_types.len() == 1 {
+                            // sum(iterable) or sum(iterable, start)
+                            match &arg_types[0] {
+                                IRType::List(_elem_type) => {
+                                    // For now, return a dummy value; proper implementation requires iteration
+                                    func.instruction(&Instruction::I32Const(0));
+                                    IRType::Int
+                                }
+                                _ => IRType::Unknown,
+                            }
+                        } else {
+                            // sum(iterable, start)
+                            // Pop the iterable, keep the start value as result
+                            func.instruction(&Instruction::Drop);
+                            arg_types[1].clone()
+                        }
                     }
                     _ => {
                         // Unknown function, return default value
