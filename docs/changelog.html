@@ -436,7 +436,7 @@
         // Fetch and render changelog
         async function loadChangelog() {
             try {
-                const response = await fetch('https://raw.githubusercontent.com/anistark/waspy/refs/heads/feat/collections/CHANGELOG.md');
+                const response = await fetch('https://raw.githubusercontent.com/anistark/waspy/refs/heads/main/CHANGELOG.md');
                 if (!response.ok) throw new Error('Failed to fetch changelog');
                 const markdown = await response.text();
 
