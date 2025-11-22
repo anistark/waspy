@@ -14,6 +14,11 @@
 
     <div class="container">
         <header class="header">
+            <nav class="header-nav" style="margin-bottom: 20px; display: flex; gap: 24px; font-size: 14px;">
+                <a href="index.html" style="color: #8b949e; text-decoration: none;">Home</a>
+                <a href="modules.html" style="color: #79c0ff; text-decoration: none; font-weight: 500;">Modules</a>
+                <a href="changelog.html" style="color: #8b949e; text-decoration: none;">Changelog</a>
+            </nav>
             <h1 class="title">Waspy Development Board</h1>
             <p class="subtitle">Python to WebAssembly Compiler - Module Development Status</p>
         </header>
@@ -73,148 +78,166 @@
             arithmetic: {
                 title: "ARITHMETIC",
                 status: "done",
+                version: "0.1.0",
                 features: [
-                    { name: "All operators (+, -, *, /, %, //, **)", status: "done" },
-                    { name: "Type coercion (int/float)", status: "done" },
-                    { name: "Bitwise operations (&, |, ^, <<, >>, ~)", status: "done" },
-                    { name: "Unary operations (-, +, not)", status: "done" }
+                    { name: "All operators (+, -, *, /, %, //, **)", status: "done", version: "0.1.0" },
+                    { name: "Type coercion (int/float)", status: "done", version: "0.1.0" },
+                    { name: "Bitwise operations (&, |, ^, <<, >>, ~)", status: "done", version: "0.1.0" },
+                    { name: "Unary operations (-, +, not)", status: "done", version: "0.1.0" }
                 ]
             },
             controlFlow: {
                 title: "CONTROL FLOW",
                 status: "done",
+                version: "0.1.0",
                 features: [
-                    { name: "if/elif/else statements", status: "done" },
-                    { name: "while loops", status: "done" },
-                    { name: "Comparison operations (==, !=, <, <=, >, >=)", status: "done" },
-                    { name: "Boolean logic (and, or, not) with short-circuit", status: "done" }
+                    { name: "if/elif/else statements", status: "done", version: "0.1.0" },
+                    { name: "while loops", status: "done", version: "0.1.0" },
+                    { name: "Comparison operations (==, !=, <, <=, >, >=)", status: "done", version: "0.1.0" },
+                    { name: "Boolean logic (and, or, not) with short-circuit", status: "done", version: "0.1.0" }
                 ]
             },
             functions: {
                 title: "FUNCTIONS",
                 status: "done",
+                version: "0.1.0",
                 features: [
-                    { name: "Function definitions with parameters", status: "done" },
-                    { name: "Type annotations (params & return types)", status: "done" },
-                    { name: "Function calls between compiled functions", status: "done" },
-                    { name: "Multiple functions per module", status: "done" }
+                    { name: "Function definitions with parameters", status: "done", version: "0.1.0" },
+                    { name: "Type annotations (params & return types)", status: "done", version: "0.1.0" },
+                    { name: "Function calls between compiled functions", status: "done", version: "0.1.0" },
+                    { name: "Multiple functions per module", status: "done", version: "0.1.0" }
                 ]
             },
             typeSystem: {
                 title: "TYPE SYSTEM",
                 status: "done",
+                version: "0.1.0",
                 features: [
-                    { name: "Basic types (int, float, bool)", status: "done" },
-                    { name: "Generic types (List[T], Dict[K,V], Tuple[T,...])", status: "done" },
-                    { name: "Union/Optional types", status: "done" },
-                    { name: "Custom class type annotations", status: "done" }
+                    { name: "Basic types (int, float, bool)", status: "done", version: "0.1.0" },
+                    { name: "Generic types (List[T], Dict[K,V], Tuple[T,...])", status: "done", version: "0.1.0" },
+                    { name: "Union/Optional types", status: "done", version: "0.1.0" },
+                    { name: "Custom class type annotations", status: "done", version: "0.1.0" }
                 ]
             },
             variables: {
                 title: "VARIABLES & ASSIGNMENT",
                 status: "done",
+                version: "0.1.0",
                 features: [
-                    { name: "Variable declarations and assignments", status: "done" },
-                    { name: "Augmented assignment (+=, -=, *=, etc.)", status: "done" },
-                    { name: "Attribute assignment (obj.attr = value)", status: "done" },
-                    { name: "Type inference from usage", status: "done" }
+                    { name: "Variable declarations and assignments", status: "done", version: "0.1.0" },
+                    { name: "Augmented assignment (+=, -=, *=, etc.)", status: "done", version: "0.1.0" },
+                    { name: "Attribute assignment (obj.attr = value)", status: "done", version: "0.1.0" },
+                    { name: "Type inference from usage", status: "done", version: "0.1.0" }
                 ]
             },
             decorators: {
                 title: "DECORATORS",
                 status: "done",
+                version: "0.6.0",
                 features: [
-                    { name: "@memoize decorator (caching)", status: "done" },
-                    { name: "@debug decorator (logging)", status: "done" },
-                    { name: "@timer decorator (performance)", status: "done" },
-                    { name: "Custom decorator registration", status: "done" }
+                    { name: "@memoize decorator (caching)", status: "done", version: "0.6.0" },
+                    { name: "@debug decorator (logging)", status: "done", version: "0.6.0" },
+                    { name: "@timer decorator (performance)", status: "done", version: "0.6.0" },
+                    { name: "Custom decorator registration", status: "done", version: "0.6.0" }
                 ]
             },
             projectMgmt: {
                 title: "PROJECT MANAGEMENT",
                 status: "done",
+                version: "0.5.0",
                 features: [
-                    { name: "Multi-file compilation to single WASM", status: "done" },
-                    { name: "Dependency analysis & circular detection", status: "done" },
-                    { name: "Entry point detection (__main__.py)", status: "done" },
-                    { name: "Config parsing (setup.py, pyproject.toml)", status: "done" }
+                    { name: "Multi-file compilation to single WASM", status: "done", version: "0.5.0" },
+                    { name: "Dependency analysis & circular detection", status: "done", version: "0.5.0" },
+                    { name: "Entry point detection (__main__.py)", status: "done", version: "0.5.0" },
+                    { name: "Config parsing (setup.py, pyproject.toml)", status: "done", version: "0.5.0" }
                 ]
             },
             optimization: {
                 title: "OPTIMIZATION",
                 status: "done",
+                version: "0.1.0",
                 features: [
-                    { name: "WebAssembly optimization (Binaryen)", status: "done" },
-                    { name: "Compiler options & configuration", status: "done" },
-                    { name: "Error handling with detailed messages", status: "done" },
-                    { name: "Memory layout optimization", status: "done" }
+                    { name: "WebAssembly optimization (Binaryen)", status: "done", version: "0.1.0" },
+                    { name: "Compiler options & configuration", status: "done", version: "0.1.0" },
+                    { name: "Error handling with detailed messages", status: "done", version: "0.1.0" },
+                    { name: "Memory layout optimization", status: "done", version: "0.1.0" }
                 ]
             },
 
+            // 🔄 PARTIALLY IMPLEMENTED MODULES
+            // Note: Strings and Collections moved to DONE as of latest implementation
             strings: {
                 title: "STRINGS",
                 status: "done",
+                version: "0.3.0",
                 features: [
-                    { name: "String literals, indexing, slicing, concatenation", status: "done" },
-                    { name: "Case conversion (upper, lower, capitalize, title)", status: "done" },
-                    { name: "Test methods (isdigit, isalpha, isspace, etc.) - compile-time optimized", status: "done" },
-                    { name: "Search methods (.find, .count, .startswith, .endswith)", status: "done" },
-                    { name: "Transform methods (.split, .join, .replace)", status: "done" },
-                    { name: "Layout methods (.ljust, .rjust, .center)", status: "done" },
-                    { name: ".format() and % formatting - compile-time for constants", status: "done" },
-                    { name: "F-strings with JoinedStr - constant & dynamic interpolation", status: "done" }
+                    { name: "String literals, indexing, slicing, concatenation", status: "done", version: "0.3.0" },
+                    { name: "Case conversion (upper, lower, capitalize, title)", status: "done", version: "0.3.0" },
+                    { name: "Test methods (isdigit, isalpha, isspace, etc.) - compile-time optimized", status: "done", version: "0.3.0" },
+                    { name: "Search methods (.find, .count, .startswith, .endswith)", status: "done", version: "0.3.0" },
+                    { name: "Transform methods (.split, .join, .replace)", status: "done", version: "0.3.0" },
+                    { name: "Layout methods (.ljust, .rjust, .center)", status: "done", version: "0.3.0" },
+                    { name: ".format() and % formatting - compile-time for constants", status: "done", version: "0.3.0" },
+                    { name: "F-strings with JoinedStr - constant & dynamic interpolation", status: "done", version: "0.3.0" }
                 ]
             },
 
             // 🔄 PARTIALLY IMPLEMENTED MODULES
             collections: {
                 title: "COLLECTIONS",
-                status: "progress",
+                status: "done",
+                version: "Unreleased",
                 features: [
-                    { name: "List literals ([1, 2, 3]) - parsing only", status: "done" },
-                    { name: "Dict literals ({'key': 'value'}) - parsing only", status: "done" },
-                    { name: "List/Dict indexing & operations", status: "todo" },
-                    { name: "Dynamic resizing & memory management", status: "todo" }
+                    { name: "List literals with memory allocation [1, 2, 3]", status: "done", version: "Unreleased" },
+                    { name: "List indexing (read & write) list[i] and list[i] = value", status: "done", version: "Unreleased" },
+                    { name: "List methods .append(), .pop([i]), .clear(), .insert(i, v)", status: "done", version: "Unreleased" },
+                    { name: "List search methods .index(v) & .count(v) with linear search", status: "done", version: "Unreleased" },
+                    { name: "Dict literals with memory allocation {'key': value}", status: "done", version: "Unreleased" },
+                    { name: "Dict indexing (read & write) dict[key] and dict[key] = value", status: "done", version: "Unreleased" }
                 ]
             },
             classes: {
                 title: "CLASSES & OOP",
                 status: "progress",
+                version: "0.5.0",
                 features: [
-                    { name: "Class definitions & method parsing", status: "done" },
-                    { name: "Basic inheritance (base class tracking)", status: "done" },
-                    { name: "Object instantiation & method calls", status: "todo" },
-                    { name: "Special methods (__init__, __str__, etc.)", status: "todo" }
+                    { name: "Class definitions & method parsing", status: "done", version: "0.5.0" },
+                    { name: "Basic inheritance (base class tracking)", status: "done", version: "0.5.0" },
+                    { name: "Object instantiation & method calls", status: "todo", version: "todo" },
+                    { name: "Special methods (__init__, __str__, etc.)", status: "todo", version: "todo" }
                 ]
             },
             advancedFlow: {
                 title: "ADVANCED CONTROL FLOW",
                 status: "progress",
+                version: "0.5.0",
                 features: [
-                    { name: "for loops (syntax parsing only)", status: "progress" },
-                    { name: "try/except (syntax parsing only)", status: "progress" },
-                    { name: "with statements (syntax parsing only)", status: "progress" },
-                    { name: "Actual iteration & exception handling", status: "todo" }
+                    { name: "for loops (syntax parsing only)", status: "progress", version: "0.5.0" },
+                    { name: "try/except (syntax parsing only)", status: "progress", version: "0.6.0" },
+                    { name: "with statements (syntax parsing only)", status: "progress", version: "0.5.0" },
+                    { name: "Actual iteration & exception handling", status: "todo", version: "todo" }
                 ]
             },
             builtins: {
                 title: "BUILT-IN FUNCTIONS",
                 status: "progress",
+                version: "0.4.0",
                 features: [
-                    { name: "Type conversions (int(), float(), str(), bool())", status: "done" },
-                    { name: "len() - recognized but not implemented", status: "progress" },
-                    { name: "print() - recognized but no actual output", status: "progress" },
-                    { name: "min(), max(), sum(), abs(), round()", status: "todo" }
+                    { name: "Type conversions (int(), float(), str(), bool())", status: "done", version: "0.4.0" },
+                    { name: "len() - recognized but not implemented", status: "progress", version: "0.4.0" },
+                    { name: "print() - recognized but no actual output", status: "progress", version: "0.4.0" },
+                    { name: "min(), max(), sum(), abs(), round()", status: "todo", version: "todo" }
                 ]
             },
             imports: {
                 title: "IMPORT SYSTEM",
                 status: "progress",
+                version: "0.5.0",
                 features: [
-                    { name: "Import syntax parsing (all types)", status: "done" },
-                    { name: "Conditional imports (try/except)", status: "done" },
-                    { name: "Dynamic imports (__import__, importlib)", status: "done" },
-                    { name: "Actual module loading & execution", status: "todo" }
+                    { name: "Import syntax parsing (all types)", status: "done", version: "0.5.0" },
+                    { name: "Conditional imports (try/except)", status: "done", version: "0.5.0" },
+                    { name: "Dynamic imports (__import__, importlib)", status: "done", version: "0.5.0" },
+                    { name: "Actual module loading & execution", status: "todo", version: "todo" }
                 ]
             },
 
@@ -576,6 +599,7 @@
                             <li class="feature-item">
                                 <span class="feature-status">${getStatusIcon(feature.status)}</span>
                                 <span class="feature-text">${feature.name}</span>
+                                ${feature.version && feature.version !== 'todo' ? `<span class="feature-version" title="Version introduced">${feature.version === 'Unreleased' ? 'upcoming' : feature.version}</span>` : ''}
                             </li>
                         `).join('')}
                     </ul>
