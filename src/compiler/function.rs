@@ -219,9 +219,11 @@ pub fn compile_body(
             IRStatement::Raise { exception } => {
                 // Mark exception as raised by setting exception flag
                 // Try to get existing exception flag variable if in a try block
-                let exception_flag_idx = ctx.get_local_index("__exception_flag")
+                let exception_flag_idx = ctx
+                    .get_local_index("__exception_flag")
                     .unwrap_or_else(|| ctx.add_local("__exception_flag", IRType::Int));
-                let exception_type_idx = ctx.get_local_index("__exception_type")
+                let exception_type_idx = ctx
+                    .get_local_index("__exception_type")
                     .unwrap_or_else(|| ctx.add_local("__exception_type", IRType::Int));
 
                 if let Some(exc_expr) = exception {
@@ -516,7 +518,8 @@ pub fn compile_body(
                     if handler.exception_type.is_none() {
                         // Bare except: catches all exceptions
                         if let Some(var_name) = &handler.name {
-                            let handler_var_idx = ctx.get_local_index(var_name)
+                            let handler_var_idx = ctx
+                                .get_local_index(var_name)
                                 .unwrap_or_else(|| ctx.add_local(var_name, IRType::Unknown));
                             // Store exception type in the handler variable
                             func.instruction(&Instruction::LocalGet(exception_type_idx));
@@ -553,7 +556,8 @@ pub fn compile_body(
                         func.instruction(&Instruction::BrIf(0)); // Branch to next handler if no match
 
                         if let Some(var_name) = &handler.name {
-                            let handler_var_idx = ctx.get_local_index(var_name)
+                            let handler_var_idx = ctx
+                                .get_local_index(var_name)
                                 .unwrap_or_else(|| ctx.add_local(var_name, IRType::Unknown));
                             func.instruction(&Instruction::LocalGet(exception_type_idx));
                             func.instruction(&Instruction::LocalSet(handler_var_idx));
@@ -597,7 +601,8 @@ pub fn compile_body(
                 // This requires calling __enter__ on the context manager and __exit__ after
 
                 let context_var_idx = ctx.add_local("__context_mgr", IRType::Unknown);
-                let exception_flag_idx = ctx.get_local_index("__exception_flag")
+                let exception_flag_idx = ctx
+                    .get_local_index("__exception_flag")
                     .unwrap_or_else(|| ctx.add_local("__exception_flag", IRType::Int));
 
                 // Evaluate context expression
@@ -608,7 +613,8 @@ pub fn compile_body(
 
                 // If optional_vars is provided, assign it the context manager value
                 if let Some(var_name) = optional_vars {
-                    let var_idx = ctx.get_local_index(var_name)
+                    let var_idx = ctx
+                        .get_local_index(var_name)
                         .unwrap_or_else(|| ctx.add_local(var_name, ctx_type));
                     func.instruction(&Instruction::LocalGet(context_var_idx));
                     func.instruction(&Instruction::LocalSet(var_idx));
