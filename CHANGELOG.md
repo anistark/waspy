@@ -8,7 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Collections Support (Complete Implementation)**
+- **Built-In Functions Implementation**
+  - `len()` function: Full support for strings, lists, and dictionaries
+    - For strings: Returns length from stack (offset, length) pair
+    - For lists/dicts: Loads length from first 4 bytes in memory
+  - `print()` function: Proper argument handling with type-aware stack cleanup
+    - Handles string pairs (offset, length) separately from scalar types
+  - `min()` and `max()` functions: Multiple argument support
+    - Iterative comparison with conditional branch logic
+    - Stack-based implementation with temporary local variables
+  - `sum()` function: Partial implementation with iterable and start value support
+  - Comprehensive test file: `examples/builtins.py` demonstrating all functions
+
+- **Collections Support**
   - List literals with memory allocation: `[1, 2, 3]`
   - List indexing (read & write): `list[i]` and `list[i] = value`
   - List methods: `.append(value)`, `.pop([index])`, `.clear()`, `.insert(index, value)`
