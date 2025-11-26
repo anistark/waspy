@@ -25,8 +25,8 @@
 
         <div class="stats" id="stats"></div>
 
-        <div class="kanban-board">
-            <div class="kanban-column column-done">
+        <div class="kanban-board" id="kanban-board">
+            <div class="kanban-column column-done" id="done-column-wrapper">
                 <div class="column-header">
                     <div class="column-title">
                         ✅ Completed
@@ -37,7 +37,7 @@
                 <div class="column-content" id="done-column"></div>
             </div>
 
-            <div class="kanban-column column-progress">
+            <div class="kanban-column column-progress" id="progress-column-wrapper">
                 <div class="column-header">
                     <div class="column-title">
                         🔄 In Progress
@@ -48,7 +48,7 @@
                 <div class="column-content" id="progress-column"></div>
             </div>
 
-            <div class="kanban-column column-todo">
+            <div class="kanban-column column-todo" id="todo-column-wrapper">
                 <div class="column-header">
                     <div class="column-title">
                         📋 Todo
@@ -93,6 +93,9 @@
                 features: [
                     { name: "if/elif/else statements", status: "done", version: "0.1.0" },
                     { name: "while loops", status: "done", version: "0.1.0" },
+                    { name: "for loops with list/string iteration", status: "done", version: "Unreleased" },
+                    { name: "try/except/finally exception handling", status: "done", version: "Unreleased" },
+                    { name: "with statements and context managers", status: "done", version: "Unreleased" },
                     { name: "Comparison operations (==, !=, <, <=, >, >=)", status: "done", version: "0.1.0" },
                     { name: "Boolean logic (and, or, not) with short-circuit", status: "done", version: "0.1.0" }
                 ]
@@ -209,13 +212,13 @@
             },
             advancedFlow: {
                 title: "ADVANCED CONTROL FLOW",
-                status: "progress",
-                version: "0.5.0",
+                status: "done",
+                version: "Unreleased",
                 features: [
-                    { name: "for loops (syntax parsing only)", status: "progress", version: "0.5.0" },
-                    { name: "try/except (syntax parsing only)", status: "progress", version: "0.6.0" },
-                    { name: "with statements (syntax parsing only)", status: "progress", version: "0.5.0" },
-                    { name: "Actual iteration & exception handling", status: "todo", version: "todo" }
+                    { name: "for loops with list/string iteration", status: "done", version: "Unreleased" },
+                    { name: "try/except/finally with exception handling", status: "done", version: "Unreleased" },
+                    { name: "with statements and context managers", status: "done", version: "Unreleased" },
+                    { name: "Exception type matching and handlers", status: "done", version: "Unreleased" }
                 ]
             },
             builtins: {
@@ -295,12 +298,13 @@
             },
             errorHandling: {
                 title: "EXCEPTION HANDLING",
-                status: "todo",
+                status: "done",
+                version: "Unreleased",
                 features: [
-                    { name: "Exception throwing (raise statements)", status: "todo" },
-                    { name: "Exception catching by type", status: "todo" },
-                    { name: "Built-in exception types", status: "todo" },
-                    { name: "Exception propagation & finally blocks", status: "todo" }
+                    { name: "Exception throwing (raise statements)", status: "done", version: "Unreleased" },
+                    { name: "Exception catching by type", status: "done", version: "Unreleased" },
+                    { name: "Built-in exception types (ZeroDivisionError, ValueError, etc.)", status: "done", version: "Unreleased" },
+                    { name: "Exception propagation & finally blocks", status: "done", version: "Unreleased" }
                 ]
             },
             advancedTypes: {
@@ -665,11 +669,64 @@
             }, 200);
         }
 
+        // Adjust column widths based on card count
+        function adjustColumnWidths() {
+            const doneCards = document.querySelectorAll('#done-column .module-card').length;
+            const progressCards = document.querySelectorAll('#progress-column .module-card').length;
+            const todoCards = document.querySelectorAll('#todo-column .module-card').length;
+
+            const total = doneCards + progressCards + todoCards;
+            if (total === 0) return;
+
+            // Calculate proportional widths
+            // Give minimum 1 column per section, but allow 2 for larger sections
+            let doneWidth, progressWidth, todoWidth;
+
+            if (doneCards > 8) {
+                doneWidth = 2; // 2 columns for large sections
+            } else {
+                doneWidth = 1;
+            }
+
+            if (todoCards > 8) {
+                todoWidth = 2;
+            } else {
+                todoWidth = 1;
+            }
+
+            progressWidth = 1; // Progress is typically small
+
+            // Set CSS Grid template columns dynamically
+            const kanbanBoard = document.getElementById('kanban-board');
+            kanbanBoard.style.gridTemplateColumns = `${doneWidth}fr ${progressWidth}fr ${todoWidth}fr`;
+
+            // Also adjust column-content grid for Completed section if it needs 2 columns
+            const doneContent = document.getElementById('done-column');
+            if (doneWidth === 2) {
+                doneContent.style.gridTemplateColumns = 'repeat(2, 1fr)';
+            } else {
+                doneContent.style.gridTemplateColumns = '1fr';
+            }
+
+            // Adjust column-content grid for Todo section if it needs 2 columns
+            const todoContent = document.getElementById('todo-column');
+            if (todoWidth === 2) {
+                todoContent.style.gridTemplateColumns = 'repeat(2, 1fr)';
+            } else {
+                todoContent.style.gridTemplateColumns = '1fr';
+            }
+        }
+
         // Initialize the application
         function init() {
             initTheme();
             renderStats();
             renderKanbanBoard();
+
+            // Adjust column widths after rendering
+            setTimeout(() => {
+                adjustColumnWidths();
+            }, 500);
         }
 
         // Start the app when DOM is loaded

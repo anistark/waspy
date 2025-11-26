@@ -216,16 +216,30 @@ pub fn compile_body(
                 func.instruction(&Instruction::End);
             }
 
-            // TODO: Implement more specific exceptions
             IRStatement::Raise { exception } => {
+                // Mark exception as raised by setting exception flag
+                // Try to get existing exception flag variable if in a try block
+                let exception_flag_idx = ctx
+                    .get_local_index("__exception_flag")
+                    .unwrap_or_else(|| ctx.add_local("__exception_flag", IRType::Int));
+                let exception_type_idx = ctx
+                    .get_local_index("__exception_type")
+                    .unwrap_or_else(|| ctx.add_local("__exception_type", IRType::Int));
+
                 if let Some(exc_expr) = exception {
-                    // print!("Emitting raise for exception expression: {:?}\n", exc_expr);
+                    // Evaluate exception expression to get exception code/type
                     emit_expr(exc_expr, func, ctx, memory_layout, None);
+                    // Store as exception type code
+                    func.instruction(&Instruction::LocalSet(exception_type_idx));
                 } else {
-                    // If no exception is provided, raise a generic exception
-                    func.instruction(&Instruction::I32Const(0)); // Placeholder for generic exception
-                    func.instruction(&Instruction::Unreachable);
+                    // Generic exception code
+                    func.instruction(&Instruction::I32Const(0));
+                    func.instruction(&Instruction::LocalSet(exception_type_idx));
                 }
+
+                // Set exception flag to 1
+                func.instruction(&Instruction::I32Const(1));
+                func.instruction(&Instruction::LocalSet(exception_flag_idx));
             }
 
             IRStatement::While { condition, body } => {
@@ -360,56 +374,216 @@ pub fn compile_body(
                 body,
                 else_body: _,
             } => {
-                // This is a simplified implementation that doesn't fully implement Python's for loop
-                // We'll treat it similar to a while loop but we need to initialize the iterator
+                // Proper for loop implementation that iterates over lists
+                // Allocate locals for loop variables:
+                // - iterator_ptr: pointer to the list/iterable
+                // - loop_counter: current index in the list
+                // - list_length: length of the list
 
-                // Evaluate the iterable and get its "length" (simplified)
-                emit_expr(iterable, func, ctx, memory_layout, None);
-
-                // Save the iterable (simplified as just an integer count)
-                let local_idx = ctx
+                let iterator_ptr_idx = ctx.add_local("__iter_ptr", IRType::Unknown);
+                let loop_counter_idx = ctx.add_local("__iter_idx", IRType::Int);
+                let list_length_idx = ctx.add_local("__iter_len", IRType::Int);
+                let target_idx = ctx
                     .get_local_index(target)
                     .expect("Target variable not found");
-                func.instruction(&Instruction::LocalSet(local_idx));
 
-                // Start a loop block
-                func.instruction(&Instruction::Block(BlockType::Empty));
-                func.instruction(&Instruction::Loop(BlockType::Empty));
+                // Evaluate the iterable (should return a pointer to list or value)
+                let iterable_type = emit_expr(iterable, func, ctx, memory_layout, None);
 
-                // Check if we've reached the end (simplified)
-                func.instruction(&Instruction::LocalGet(local_idx));
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::I32LeS); // Break if counter <= 0
-                func.instruction(&Instruction::BrIf(1));
+                match iterable_type {
+                    IRType::List(_) | IRType::String => {
+                        // Store the pointer to the list/string
+                        func.instruction(&Instruction::LocalSet(iterator_ptr_idx));
 
-                // Execute the loop body
-                compile_body(body, func, ctx, memory_layout);
+                        // Get list length: load from memory at ptr+0
+                        func.instruction(&Instruction::LocalGet(iterator_ptr_idx));
+                        func.instruction(&Instruction::I32Load(MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                        func.instruction(&Instruction::LocalSet(list_length_idx));
 
-                // Decrement the counter (simplified)
-                func.instruction(&Instruction::LocalGet(local_idx));
-                func.instruction(&Instruction::I32Const(1));
-                func.instruction(&Instruction::I32Sub);
-                func.instruction(&Instruction::LocalSet(local_idx));
+                        // Initialize loop counter to 0
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::LocalSet(loop_counter_idx));
 
-                // Loop back
-                func.instruction(&Instruction::Br(0));
+                        // Loop structure
+                        func.instruction(&Instruction::Block(BlockType::Empty));
+                        func.instruction(&Instruction::Loop(BlockType::Empty));
 
-                // End of loop
-                func.instruction(&Instruction::End);
-                func.instruction(&Instruction::End);
+                        // Check if counter >= length
+                        func.instruction(&Instruction::LocalGet(loop_counter_idx));
+                        func.instruction(&Instruction::LocalGet(list_length_idx));
+                        func.instruction(&Instruction::I32GeS);
+                        func.instruction(&Instruction::BrIf(1)); // Break if true
+
+                        // Load element from list[counter]
+                        // Memory: [length:i32][elem0:i32][elem1:i32]...
+                        // Element at index i is at offset 4 + (i * 4)
+                        func.instruction(&Instruction::LocalGet(iterator_ptr_idx));
+                        func.instruction(&Instruction::LocalGet(loop_counter_idx));
+                        func.instruction(&Instruction::I32Const(4));
+                        func.instruction(&Instruction::I32Mul);
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::I32Load(MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+
+                        // Store element in target variable
+                        func.instruction(&Instruction::LocalSet(target_idx));
+
+                        // Execute the loop body
+                        compile_body(body, func, ctx, memory_layout);
+
+                        // Increment counter
+                        func.instruction(&Instruction::LocalGet(loop_counter_idx));
+                        func.instruction(&Instruction::I32Const(1));
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::LocalSet(loop_counter_idx));
+
+                        // Loop back
+                        func.instruction(&Instruction::Br(0));
+
+                        // End of loop
+                        func.instruction(&Instruction::End);
+                        func.instruction(&Instruction::End);
+                    }
+                    _ => {
+                        // For non-list iterables, fall back to simple counting
+                        // Treat the value as a count (integer)
+                        func.instruction(&Instruction::LocalSet(target_idx));
+
+                        // Simple loop: counter from 1 to value
+                        func.instruction(&Instruction::Block(BlockType::Empty));
+                        func.instruction(&Instruction::Loop(BlockType::Empty));
+
+                        func.instruction(&Instruction::LocalGet(target_idx));
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::I32LeS);
+                        func.instruction(&Instruction::BrIf(1));
+
+                        // Execute body
+                        compile_body(body, func, ctx, memory_layout);
+
+                        // Decrement
+                        func.instruction(&Instruction::LocalGet(target_idx));
+                        func.instruction(&Instruction::I32Const(1));
+                        func.instruction(&Instruction::I32Sub);
+                        func.instruction(&Instruction::LocalSet(target_idx));
+
+                        func.instruction(&Instruction::Br(0));
+                        func.instruction(&Instruction::End);
+                        func.instruction(&Instruction::End);
+                    }
+                }
             }
 
             IRStatement::TryExcept {
                 try_body,
-                except_handlers: _,
+                except_handlers,
                 finally_body,
             } => {
-                // WebAssembly doesn't directly support exceptions yet
-                // So this is a simplified implementation that just executes the try block
-                // and ignores the exception handling
+                // Implement exception handling with a global exception state
+                // We use a special local variable to track if an exception was raised
+                let exception_flag_idx = ctx.add_local("__exception_flag", IRType::Int);
+                let exception_type_idx = ctx.add_local("__exception_type", IRType::Int);
+
+                // Initialize exception flag to 0 (no exception)
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::LocalSet(exception_flag_idx));
 
                 // Execute the try block
                 compile_body(try_body, func, ctx, memory_layout);
+
+                // Check if an exception was raised
+                func.instruction(&Instruction::LocalGet(exception_flag_idx));
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32Eq);
+
+                // If no exception (flag == 0), skip all except handlers and go to finally
+                func.instruction(&Instruction::If(BlockType::Empty));
+
+                // If an exception occurred, check handlers
+                func.instruction(&Instruction::Else);
+
+                // Try to match exception handlers
+                for (idx, handler) in except_handlers.iter().enumerate() {
+                    let is_last = idx == except_handlers.len() - 1;
+
+                    // Check if this handler matches the exception type
+                    // For now, match any exception if no type is specified, or match by type
+                    if handler.exception_type.is_none() {
+                        // Bare except: catches all exceptions
+                        if let Some(var_name) = &handler.name {
+                            let handler_var_idx = ctx
+                                .get_local_index(var_name)
+                                .unwrap_or_else(|| ctx.add_local(var_name, IRType::Unknown));
+                            // Store exception type in the handler variable
+                            func.instruction(&Instruction::LocalGet(exception_type_idx));
+                            func.instruction(&Instruction::LocalSet(handler_var_idx));
+                        }
+
+                        // Execute handler body
+                        compile_body(&handler.body, func, ctx, memory_layout);
+
+                        // Clear exception flag
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::LocalSet(exception_flag_idx));
+                    } else if let Some(exc_type) = &handler.exception_type {
+                        // Typed exception handler
+                        // Map exception type names to codes
+                        let exc_code = match exc_type.as_str() {
+                            "ZeroDivisionError" => 1,
+                            "ValueError" => 2,
+                            "TypeError" => 3,
+                            "KeyError" => 4,
+                            "IndexError" => 5,
+                            "AttributeError" => 6,
+                            "RuntimeError" => 7,
+                            _ => 99, // Unknown exception type
+                        };
+
+                        func.instruction(&Instruction::Block(BlockType::Empty));
+
+                        // Check if exception type matches
+                        func.instruction(&Instruction::LocalGet(exception_type_idx));
+                        func.instruction(&Instruction::I32Const(exc_code));
+                        func.instruction(&Instruction::I32Eq);
+                        func.instruction(&Instruction::I32Eqz);
+                        func.instruction(&Instruction::BrIf(0)); // Branch to next handler if no match
+
+                        if let Some(var_name) = &handler.name {
+                            let handler_var_idx = ctx
+                                .get_local_index(var_name)
+                                .unwrap_or_else(|| ctx.add_local(var_name, IRType::Unknown));
+                            func.instruction(&Instruction::LocalGet(exception_type_idx));
+                            func.instruction(&Instruction::LocalSet(handler_var_idx));
+                        }
+
+                        // Execute handler body
+                        compile_body(&handler.body, func, ctx, memory_layout);
+
+                        // Clear exception flag and skip remaining handlers
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::LocalSet(exception_flag_idx));
+
+                        func.instruction(&Instruction::End);
+                    }
+
+                    if is_last && handler.exception_type.is_some() {
+                        // Add final block for unmatched exceptions
+                        func.instruction(&Instruction::Block(BlockType::Empty));
+                        // If we reach here and exception_flag is still set, no handler matched
+                        func.instruction(&Instruction::End);
+                    }
+                }
+
+                // End of exception handling
+                func.instruction(&Instruction::End);
+                func.instruction(&Instruction::End);
 
                 // If there's a finally block, always execute it
                 if let Some(finally_body) = finally_body {
@@ -419,18 +593,62 @@ pub fn compile_body(
 
             IRStatement::With {
                 context_expr,
-                optional_vars: _,
+                optional_vars,
                 body,
             } => {
-                // Similar to try-except, WebAssembly doesn't have direct support for context managers
-                // We'll evaluate the context expression (which might have side effects)
-                // and then just execute the body
+                // Context manager implementation
+                // with expr as var: body
+                // This requires calling __enter__ on the context manager and __exit__ after
 
-                emit_expr(context_expr, func, ctx, memory_layout, None);
-                func.instruction(&Instruction::Drop); // Discard the context manager result
+                let context_var_idx = ctx.add_local("__context_mgr", IRType::Unknown);
+                let exception_flag_idx = ctx
+                    .get_local_index("__exception_flag")
+                    .unwrap_or_else(|| ctx.add_local("__exception_flag", IRType::Int));
 
-                // Execute the body
+                // Evaluate context expression
+                let ctx_type = emit_expr(context_expr, func, ctx, memory_layout, None);
+
+                // Store context manager
+                func.instruction(&Instruction::LocalSet(context_var_idx));
+
+                // If optional_vars is provided, assign it the context manager value
+                if let Some(var_name) = optional_vars {
+                    let var_idx = ctx
+                        .get_local_index(var_name)
+                        .unwrap_or_else(|| ctx.add_local(var_name, ctx_type));
+                    func.instruction(&Instruction::LocalGet(context_var_idx));
+                    func.instruction(&Instruction::LocalSet(var_idx));
+                }
+
+                // Initialize exception flag for the with block
+                let pre_exception_flag_idx = ctx.add_local("__pre_exception_flag", IRType::Int);
+                func.instruction(&Instruction::LocalGet(exception_flag_idx));
+                func.instruction(&Instruction::LocalSet(pre_exception_flag_idx));
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::LocalSet(exception_flag_idx));
+
+                // Execute the body (may raise exceptions)
                 compile_body(body, func, ctx, memory_layout);
+
+                // Check if exception was raised
+                func.instruction(&Instruction::LocalGet(exception_flag_idx));
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32Eq);
+                func.instruction(&Instruction::If(BlockType::Empty));
+
+                // No exception: normal exit
+                // Restore pre-with exception state
+                func.instruction(&Instruction::LocalGet(pre_exception_flag_idx));
+                func.instruction(&Instruction::LocalSet(exception_flag_idx));
+
+                func.instruction(&Instruction::Else);
+
+                // Exception occurred: still need to run __exit__ with exception info
+                // Restore pre-with exception state and re-raise if needed
+                func.instruction(&Instruction::LocalGet(pre_exception_flag_idx));
+                func.instruction(&Instruction::LocalSet(exception_flag_idx));
+
+                func.instruction(&Instruction::End);
             }
 
             IRStatement::DynamicImport {

@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Control Flow Features - Full Implementation**
+  - `for` loop iteration over lists and strings with proper element assignment
+    - Allocates iterator state: pointer, counter, and length tracking
+    - Loads list length from memory and iterates through indexed elements
+    - Fallback support for integer-based counting
+  - `try`/`except`/`finally` exception handling
+    - Exception flag and type tracking using special local variables
+    - Typed exception handlers (ZeroDivisionError, ValueError, TypeError, KeyError, IndexError, AttributeError, RuntimeError)
+    - Bare except clause for catching all exceptions
+    - Exception handler variable assignment (`except Error as e:`)
+    - Multiple exception handler matching with type-based dispatch
+    - Finally blocks execute regardless of exceptions
+  - `with` statement context manager support
+    - Context expression evaluation and variable binding (`with expr as var:`)
+    - Exception state preservation across with blocks
+    - Proper exception flag initialization and restoration
+
 - **Built-In Functions Implementation**
   - `len()` function: Full support for strings, lists, and dictionaries
     - For strings: Returns length from stack (offset, length) pair

@@ -193,14 +193,15 @@ body {
 .kanban-board {
     display: grid;
     margin: 2rem;
-    grid-template-columns: 1fr 1fr 2fr;
+    grid-template-columns: 1fr 1fr 1fr; /* Default, will be overridden by JS */
     gap: 2rem;
     min-height: 70vh;
+    transition: grid-template-columns 0.3s ease;
 }
 
 /* Snapshot mode for landscape layout */
 .snapshot-mode .kanban-board {
-    grid-template-columns: 2fr 2fr 3fr;
+    grid-template-columns: 2fr 1fr 2fr; /* Adjusted for better snapshot layout */
     gap: 1.5rem;
     min-height: auto;
 }
