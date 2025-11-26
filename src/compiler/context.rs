@@ -16,11 +16,20 @@ pub struct FunctionInfo {
     pub return_type: IRType,
 }
 
+/// Class information for instantiation and method dispatch
+pub struct ClassInfo {
+    pub name: String,
+    pub methods: HashMap<String, u32>, // method_name -> function_index
+    pub field_offsets: HashMap<String, u64>, // field_name -> byte_offset
+    pub instance_size: u32,            // size of instance in bytes
+}
+
 /// Compiled Local variables and function types
 pub struct CompilationContext {
     pub locals_map: HashMap<String, LocalInfo>,
     pub local_count: u32,
     pub function_map: HashMap<String, FunctionInfo>,
+    pub class_map: HashMap<String, ClassInfo>,
     pub temp_local: u32, // For temporary calculations
 }
 
@@ -31,6 +40,7 @@ impl CompilationContext {
             locals_map: HashMap::new(),
             local_count: 0,
             function_map: HashMap::new(),
+            class_map: HashMap::new(),
             temp_local: 0,
         };
 
@@ -86,5 +96,15 @@ impl CompilationContext {
     /// Get information about a function by name
     pub fn get_function_info(&self, name: &str) -> Option<&FunctionInfo> {
         self.function_map.get(name)
+    }
+
+    /// Add a class to the context
+    pub fn add_class(&mut self, class_info: ClassInfo) {
+        self.class_map.insert(class_info.name.clone(), class_info);
+    }
+
+    /// Get information about a class by name
+    pub fn get_class_info(&self, name: &str) -> Option<&ClassInfo> {
+        self.class_map.get(name)
     }
 }

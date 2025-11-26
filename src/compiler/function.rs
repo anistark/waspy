@@ -267,11 +267,11 @@ pub fn compile_body(
             }
             IRStatement::AttributeAssign {
                 object,
-                attribute: _, // Ignore the attribute field for now
+                attribute,
                 value,
             } => {
                 // Emit code for the object (get reference)
-                emit_expr(object, func, ctx, memory_layout, None);
+                let obj_type = emit_expr(object, func, ctx, memory_layout, None);
 
                 // Store the object reference temporarily
                 func.instruction(&Instruction::LocalSet(ctx.temp_local));
@@ -285,18 +285,27 @@ pub fn compile_body(
                 // Load the object reference
                 func.instruction(&Instruction::LocalGet(ctx.temp_local));
 
-                // Load the value
-                func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
+                // Check if object is a custom class
+                if let crate::ir::IRType::Class(class_name) = &obj_type {
+                    if let Some(class_info) = ctx.get_class_info(class_name) {
+                        if let Some(&field_offset) = class_info.field_offsets.get(attribute) {
+                            // Stack: object_ptr
+                            // Load the value to store
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
+                            // Store value at object_ptr + field_offset
+                            func.instruction(&Instruction::I32Store(MemArg {
+                                offset: field_offset,
+                                align: 2,
+                                memory_index: 0,
+                            }));
+                            return;
+                        }
+                    }
+                }
 
-                // In a real implementation, you would need to:
-                // 1. Get the offset of the attribute in the object
-                // 2. Store the value at that offset
-                // For now, we'll just emit a fake store operation
-
-                // This is a placeholder for actual attribute assignment
-                // TODO: Implement proper object attribute assignment
-                func.instruction(&Instruction::Drop); // Drop the value
-                func.instruction(&Instruction::Drop); // Drop the object reference
+                // Fallback: drop everything
+                func.instruction(&Instruction::Drop); // Drop object pointer
+                func.instruction(&Instruction::Drop); // Drop value
             }
 
             IRStatement::AugAssign { target, value, op } => {
