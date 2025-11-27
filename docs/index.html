@@ -4,7 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Waspy - Python to WebAssembly Compiler</title>
-    
+    <link rel="icon" href="../assets/logo.png" type="image/png">
+
     <!-- Fonts -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     
@@ -249,6 +250,19 @@
             max-width: 600px;
             margin-left: auto;
             margin-right: auto;
+        }
+
+        .hero-logo {
+            max-width: 200px;
+            height: auto;
+            margin: 2rem auto;
+            display: block;
+            animation: float 3s ease-in-out infinite;
+        }
+
+        @keyframes float {
+            0%, 100% { transform: translateY(0px); }
+            50% { transform: translateY(-10px); }
         }
 
         .cta-buttons {
@@ -840,8 +854,9 @@
                 </div>
                 
                 <h1>Python → WebAssembly</h1>
+                <img src="../assets/logo.png" alt="Waspy Logo" class="hero-logo">
                 <p class="subtitle">
-                    Compile Python functions to WebAssembly with ease. 
+                    Compile Python functions to WebAssembly with ease.
                     Built in Rust for performance and reliability.
                 </p>
                 
