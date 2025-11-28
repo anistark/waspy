@@ -127,6 +127,7 @@ fn type_to_string(ir_type: &ir::IRType) -> String {
         }
         ir::IRType::Class(name) => name.clone(),
         ir::IRType::Module(name) => format!("Module[{name}]"),
+        ir::IRType::Bytes => "bytes".to_string(),
         ir::IRType::None => "None".to_string(),
         ir::IRType::Any => "Any".to_string(),
         ir::IRType::Unknown => "unknown".to_string(),
