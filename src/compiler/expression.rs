@@ -68,6 +68,16 @@ pub fn emit_expr(
                     func.instruction(&Instruction::I32Const(0));
                     IRType::Tuple(vec![IRType::Unknown])
                 }
+                IRConstant::Bytes(b) => {
+                    // Get the bytes' offset in memory
+                    let offset = memory_layout.bytes_offsets.get(b).unwrap_or(&0);
+
+                    // Push the bytes' memory offset and length onto the stack
+                    func.instruction(&Instruction::I32Const(*offset as i32));
+                    func.instruction(&Instruction::I32Const(b.len() as i32));
+
+                    IRType::Bytes
+                }
             }
         }
         IRExpr::Param(name) | IRExpr::Variable(name) => {
@@ -89,12 +99,14 @@ pub fn emit_expr(
             let left_type = emit_expr(left, func, ctx, memory_layout, None);
             let right_type = emit_expr(right, func, ctx, memory_layout, Some(&left_type));
 
-            // Handle string operations
-            if left_type == IRType::String {
+            // Handle string and bytes operations
+            if left_type == IRType::String || left_type == IRType::Bytes {
                 match op {
                     IROp::Add => {
-                        if right_type == IRType::String {
-                            // String concatenation: stack has (left_offset, left_len, right_offset, right_len)
+                        if (left_type == IRType::String && right_type == IRType::String)
+                            || (left_type == IRType::Bytes && right_type == IRType::Bytes)
+                        {
+                            // String/Bytes concatenation: stack has (left_offset, left_len, right_offset, right_len)
                             // We need to return (concat_offset, concat_len)
                             // Stack: (left_offset, left_len, right_offset, right_len)
 
@@ -115,25 +127,25 @@ pub fn emit_expr(
 
                             // For runtime concatenation, we need to:
                             // 1. Calculate where to put the result in memory
-                            // 2. Copy left string
-                            // 3. Copy right string
-                            // Since we don't have dynamic allocation, we use the end of current string data
-                            // For now, we'll implement a simplified version that works for small strings
+                            // 2. Copy left string/bytes
+                            // 3. Copy right string/bytes
+                            // Since we don't have dynamic allocation, we use the end of current data
+                            // For now, we'll implement a simplified version that works for small data
 
                             // Get left offset and length
                             func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
                             func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
 
                             // Stack: (left_offset, left_len)
-                            // The concatenated string will be stored after all current strings
+                            // The concatenated data will be stored after all current data
                             // Use a heuristic: place result at a fixed high offset (TODO: improve)
-                            // For now, return a dummy concatenation using the left string as base
+                            // For now, return a dummy concatenation using the left data as base
                             // Drop the length and return (left_offset, concat_len)
                             func.instruction(&Instruction::Drop);
                             func.instruction(&Instruction::LocalGet(ctx.temp_local));
 
                             // Stack: (left_offset, concat_len)
-                            return IRType::String;
+                            return left_type.clone();
                         }
                     }
                     IROp::Mod => {
@@ -779,6 +791,29 @@ pub fn emit_expr(
 
                     IRType::String
                 }
+                IRType::Bytes => {
+                    // Bytes indexing returns an integer (byte value 0-255)
+                    // Stack: (offset, length, index)
+                    // Result: integer value at that position
+
+                    // Save offset
+                    func.instruction(&Instruction::LocalSet(ctx.temp_local + 1));
+                    // Drop length, keep offset and index
+                    func.instruction(&Instruction::LocalSet(ctx.temp_local));
+                    // Restore offset
+                    func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
+                    // Add index to offset to get memory address
+                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                    func.instruction(&Instruction::I32Add);
+                    // Load unsigned byte (0-255)
+                    func.instruction(&Instruction::I32Load8U(MemArg {
+                        offset: 0,
+                        align: 0,
+                        memory_index: 0,
+                    }));
+
+                    IRType::Int
+                }
                 IRType::List(element_type) => {
                     // List indexing: list is stored as [length:i32][elem0:i32][elem1:i32]...
                     // We have: list_ptr on stack, index on stack
@@ -855,12 +890,12 @@ pub fn emit_expr(
             let container_type = emit_expr(container, func, ctx, memory_layout, None);
 
             match container_type {
-                IRType::String => {
-                    // String slicing: str[start:end]
+                IRType::String | IRType::Bytes => {
+                    // String/Bytes slicing: str[start:end] or bytes[start:end]
                     // Stack initially: (offset, length)
                     // Result: (new_offset, new_length)
 
-                    // Save string length to temp local
+                    // Save length to temp local
                     func.instruction(&Instruction::LocalSet(ctx.temp_local));
 
                     // Stack: (offset)
@@ -986,7 +1021,7 @@ pub fn emit_expr(
                         func.instruction(&Instruction::Drop);
                     }
 
-                    IRType::String
+                    container_type.clone()
                 }
                 IRType::List(_) => {
                     // List slicing: list[start:end:step]

@@ -664,7 +664,8 @@ pub fn type_to_string(ir_type: &IRType) -> String {
             format!("Union[{inner}]")
         }
         IRType::Class(name) => name.clone(),
-        IRType::Module(name) => format!("Module[{name}]"), // Add handling for Module type
+        IRType::Module(name) => format!("Module[{name}]"),
+        IRType::Bytes => "bytes".to_string(),
         IRType::None => "None".to_string(),
         IRType::Any => "Any".to_string(),
         IRType::Unknown => "unknown".to_string(),

@@ -219,6 +219,7 @@ pub enum IRConstant {
     List(Vec<IRConstant>),
     Dict(Vec<(IRConstant, IRConstant)>),
     Tuple(Vec<IRConstant>),
+    Bytes(Vec<u8>),
 }
 
 /// Type system for IR
@@ -240,6 +241,7 @@ pub enum IRType {
     Class(String),
     // New type for modules
     Module(String),
+    Bytes,
 }
 
 /// Binary operators in the IR
@@ -299,6 +301,8 @@ pub enum IRBoolOp {
 pub struct MemoryLayout {
     pub string_offsets: std::collections::HashMap<String, u32>,
     pub next_string_offset: u32,
+    pub bytes_offsets: std::collections::HashMap<Vec<u8>, u32>,
+    pub next_bytes_offset: u32,
     pub object_heap_offset: u32, // Where object instances are stored
     pub next_object_id: u32,     // Counter for allocating object instances
 }
@@ -315,6 +319,8 @@ impl MemoryLayout {
         MemoryLayout {
             string_offsets: std::collections::HashMap::new(),
             next_string_offset: 0,
+            bytes_offsets: std::collections::HashMap::new(),
+            next_bytes_offset: 32768,
             object_heap_offset: 65536,
             next_object_id: 0,
         }
@@ -331,6 +337,21 @@ impl MemoryLayout {
 
         // Advance offset by string length + null terminator
         self.next_string_offset += (s.len() + 1) as u32;
+
+        offset
+    }
+
+    /// Add bytes to memory and return its offset
+    pub fn add_bytes(&mut self, b: &[u8]) -> u32 {
+        if let Some(&offset) = self.bytes_offsets.get(b) {
+            return offset;
+        }
+
+        let offset = self.next_bytes_offset;
+        self.bytes_offsets.insert(b.to_vec(), offset);
+
+        // Advance offset by bytes length
+        self.next_bytes_offset += b.len() as u32;
 
         offset
     }
