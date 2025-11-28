@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Object-Oriented Programming**
+  - Class definitions with full parsing, IR generation, and WASM compilation
+  - Instance method definitions with implicit `self` parameter
+  - Object instantiation via class constructor calls (e.g., `ClassName(args)`)
+  - Automatic `__init__` method invocation during object creation
+  - Method calls with proper dispatch to compiled methods (e.g., `obj.method()`)
+  - Instance attribute access (getter): `obj.attr` returns field value
+  - Instance attribute assignment (setter): `obj.attr = value` stores to memory
+  - Per-instance field storage with calculated memory offsets
+  - Memory layout extensions to support object heap allocation (starting at 64KB)
+  - Qualified method export names (ClassName::method_name) for WASM exports
+  - Class method compilation alongside module functions
+  - Support for mixed instance variables and methods in class definitions
+  - Proper type tracking with `IRType::Class(name)` throughout compilation
+
 - **Control Flow Features - Full Implementation**
   - `for` loop iteration over lists and strings with proper element assignment
     - Allocates iterator state: pointer, counter, and length tracking

@@ -294,11 +294,13 @@ pub enum IRBoolOp {
     Or,  // or
 }
 
-/// Memory layout information for string storage
+/// Memory layout information for string and object storage
 #[derive(Debug, Clone)]
 pub struct MemoryLayout {
     pub string_offsets: std::collections::HashMap<String, u32>,
     pub next_string_offset: u32,
+    pub object_heap_offset: u32, // Where object instances are stored
+    pub next_object_id: u32,     // Counter for allocating object instances
 }
 
 impl Default for MemoryLayout {
@@ -309,9 +311,12 @@ impl Default for MemoryLayout {
 
 impl MemoryLayout {
     pub fn new() -> Self {
+        // Start objects at 64KB to avoid collision with small offsets
         MemoryLayout {
             string_offsets: std::collections::HashMap::new(),
             next_string_offset: 0,
+            object_heap_offset: 65536,
+            next_object_id: 0,
         }
     }
 
@@ -328,6 +333,14 @@ impl MemoryLayout {
         self.next_string_offset += (s.len() + 1) as u32;
 
         offset
+    }
+
+    /// Allocate space for an object instance, returns pointer to allocated memory
+    pub fn allocate_object(&mut self, size: u32) -> u32 {
+        let ptr = self.object_heap_offset;
+        self.object_heap_offset += size;
+        self.next_object_id += 1;
+        ptr
     }
 }
 

@@ -446,6 +446,35 @@ pub fn emit_expr(
                 arg_types.push(arg_type);
             }
 
+            // Check if this is a class instantiation
+            if let Some(class_info) = ctx.get_class_info(function_name) {
+                // Allocate space for the object instance
+                // For now, use a fixed allocation strategy - sequential allocation
+                let instance_ptr = 65536
+                    + (ctx
+                        .get_class_info(function_name)
+                        .map(|c| c.instance_size)
+                        .unwrap_or(0));
+                func.instruction(&Instruction::I32Const(instance_ptr as i32));
+
+                // Call __init__ method if it exists
+                if let Some(&init_func_idx) = class_info.methods.get("__init__") {
+                    // Stack: ...object_ptr
+                    // Need to pass self as first argument
+                    // Duplicate object pointer to pass to __init__
+                    func.instruction(&Instruction::LocalSet(ctx.temp_local));
+                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
+
+                    // Now call __init__ with self and other arguments
+                    func.instruction(&Instruction::Call(init_func_idx));
+                    // Drop the return value from __init__
+                    func.instruction(&Instruction::Drop);
+                }
+
+                return IRType::Class(function_name.clone());
+            }
+
             // Look up the function index if it exists in our context
             if let Some(func_info) = ctx.get_function_info(function_name.as_str()) {
                 func.instruction(&Instruction::Call(func_info.index));
@@ -976,17 +1005,45 @@ pub fn emit_expr(
                 _ => IRType::Unknown,
             }
         }
-        IRExpr::Attribute {
-            object,
-            attribute: _,
-        } => {
-            // TODO: Object support
-            // For now, return 0
-            emit_expr(object, func, ctx, memory_layout, None);
-            func.instruction(&Instruction::Drop);
-            func.instruction(&Instruction::I32Const(0));
+        IRExpr::Attribute { object, attribute } => {
+            // Evaluate object to get pointer
+            let obj_type = emit_expr(object, func, ctx, memory_layout, None);
 
-            IRType::Unknown
+            match &obj_type {
+                IRType::Class(class_name) => {
+                    // Get class info to find field offset
+                    if let Some(class_info) = ctx.get_class_info(class_name) {
+                        if let Some(&field_offset) = class_info.field_offsets.get(attribute) {
+                            // Stack: ...object_ptr
+                            // Load from object_ptr + field_offset
+                            func.instruction(&Instruction::I32Load(MemArg {
+                                offset: field_offset,
+                                align: 2,
+                                memory_index: 0,
+                            }));
+                            // For now, return as Int (could be any type)
+                            IRType::Unknown
+                        } else {
+                            // Field not found in class
+                            func.instruction(&Instruction::Drop);
+                            func.instruction(&Instruction::I32Const(0));
+                            IRType::Unknown
+                        }
+                    } else {
+                        // Class not found
+                        func.instruction(&Instruction::Drop);
+                        func.instruction(&Instruction::I32Const(0));
+                        IRType::Unknown
+                    }
+                }
+                _ => {
+                    // Non-class attribute access (strings, lists handled separately)
+                    emit_expr(object, func, ctx, memory_layout, None);
+                    func.instruction(&Instruction::Drop);
+                    func.instruction(&Instruction::I32Const(0));
+                    IRType::Unknown
+                }
+            }
         }
         IRExpr::ListComp {
             expr,
@@ -1234,8 +1291,40 @@ pub fn emit_expr(
                     arguments,
                     &object_type,
                 ),
+                IRType::Class(class_name) => {
+                    // Custom class method call
+                    if let Some(class_info) = ctx.get_class_info(class_name) {
+                        if let Some(&method_idx) = class_info.methods.get(method_name.as_str()) {
+                            // Stack has object pointer already on top
+                            // Evaluate and push arguments
+                            for arg in arguments {
+                                emit_expr(arg, func, ctx, memory_layout, None);
+                            }
+                            // Call the method
+                            func.instruction(&Instruction::Call(method_idx));
+                            // For now, assume method returns an unknown type
+                            IRType::Unknown
+                        } else {
+                            // Method not found on class
+                            func.instruction(&Instruction::Drop); // drop object
+                            for arg in arguments {
+                                emit_expr(arg, func, ctx, memory_layout, None);
+                                func.instruction(&Instruction::Drop);
+                            }
+                            IRType::Unknown
+                        }
+                    } else {
+                        // Class not found
+                        func.instruction(&Instruction::Drop); // drop object
+                        for arg in arguments {
+                            emit_expr(arg, func, ctx, memory_layout, None);
+                            func.instruction(&Instruction::Drop);
+                        }
+                        IRType::Unknown
+                    }
+                }
                 _ => {
-                    // Non-string/list methods not yet supported
+                    // Non-string/list/class methods not yet supported
                     func.instruction(&Instruction::Drop);
                     func.instruction(&Instruction::Drop);
                     for arg in arguments {

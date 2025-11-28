@@ -1,6 +1,7 @@
-use crate::compiler::context::CompilationContext;
+use crate::compiler::context::{ClassInfo, CompilationContext};
 use crate::compiler::function::compile_function;
 use crate::ir::{IRModule, IRType, MemoryLayout};
+use std::collections::HashMap;
 use wasm_encoder::{
     CodeSection, ConstExpr, DataSection, ExportSection, FunctionSection, MemorySection, MemoryType,
     Module, TypeSection, ValType,
@@ -32,7 +33,13 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
     // Build type section
     let mut types = TypeSection::new();
 
-    // Create function types for each function
+    // Calculate total number of functions (module functions + all class methods)
+    let mut total_function_count = ir_module.functions.len();
+    for cls in &ir_module.classes {
+        total_function_count += cls.methods.len();
+    }
+
+    // Create function types for module functions
     for func in &ir_module.functions {
         // Map IR parameter types to WebAssembly types
         let params: Vec<ValType> = func
@@ -48,12 +55,25 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
         types.ty().function(params, results);
     }
 
+    // Create function types for class methods
+    for cls in &ir_module.classes {
+        for method in &cls.methods {
+            let params: Vec<ValType> = method
+                .params
+                .iter()
+                .map(|param| ir_type_to_wasm_type(&param.param_type))
+                .collect();
+            let results = vec![ir_type_to_wasm_type(&method.return_type)];
+            types.ty().function(params, results);
+        }
+    }
+
     module.section(&types);
 
     // Build function section
     let mut functions = FunctionSection::new();
-    for idx in 0..ir_module.functions.len() {
-        functions.function(idx as u32);
+    for _ in 0..total_function_count {
+        functions.function(functions.len());
     }
     module.section(&functions);
 
@@ -71,20 +91,60 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
     // Export section - export both functions and memory
     let mut exports = ExportSection::new();
 
-    // Register and export functions
-    for (idx, func) in ir_module.functions.iter().enumerate() {
+    // Register module functions
+    let mut func_idx = 0u32;
+    for func in &ir_module.functions {
         // Register function in context
         let param_types = func.params.iter().map(|p| p.param_type.clone()).collect();
 
-        ctx.add_function(
-            &func.name,
-            idx as u32,
-            param_types,
-            func.return_type.clone(),
-        );
+        ctx.add_function(&func.name, func_idx, param_types, func.return_type.clone());
 
         // Export the function
-        exports.export(&func.name, wasm_encoder::ExportKind::Func, idx as u32);
+        exports.export(&func.name, wasm_encoder::ExportKind::Func, func_idx);
+        func_idx += 1;
+    }
+
+    // Register and export class methods
+    for cls in &ir_module.classes {
+        let mut class_info = ClassInfo {
+            name: cls.name.clone(),
+            methods: HashMap::new(),
+            field_offsets: HashMap::new(),
+            instance_size: 0,
+        };
+
+        // Calculate field offsets and instance size
+        let mut current_offset = 4u64; // 4 bytes for type tag at offset 0
+        for var in &cls.class_vars {
+            class_info
+                .field_offsets
+                .insert(var.name.clone(), current_offset);
+            // Each field is 8 bytes (can hold i32 or f64)
+            current_offset += 8;
+        }
+        class_info.instance_size = current_offset as u32;
+
+        // Register methods
+        for method in &cls.methods {
+            let param_types = method.params.iter().map(|p| p.param_type.clone()).collect();
+            let qualified_name = format!("{}::{}", cls.name, method.name);
+
+            ctx.add_function(
+                &qualified_name,
+                func_idx,
+                param_types,
+                method.return_type.clone(),
+            );
+
+            class_info.methods.insert(method.name.clone(), func_idx);
+
+            // Export method with qualified name
+            exports.export(&qualified_name, wasm_encoder::ExportKind::Func, func_idx);
+            func_idx += 1;
+        }
+
+        // Add class to context
+        ctx.add_class(class_info);
     }
 
     // Export memory
@@ -126,6 +186,14 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
     for func_ir in &ir_module.functions {
         let compiled_func = compile_function(func_ir, &mut ctx, &memory_layout);
         codes.function(&compiled_func);
+    }
+
+    // Compile class methods
+    for cls in &ir_module.classes {
+        for method in &cls.methods {
+            let compiled_method = compile_function(method, &mut ctx, &memory_layout);
+            codes.function(&compiled_method);
+        }
     }
 
     module.section(&codes);
