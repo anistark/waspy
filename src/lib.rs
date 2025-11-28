@@ -666,6 +666,7 @@ pub fn type_to_string(ir_type: &IRType) -> String {
         IRType::Class(name) => name.clone(),
         IRType::Module(name) => format!("Module[{name}]"),
         IRType::Bytes => "bytes".to_string(),
+        IRType::Set(elem_type) => format!("Set[{}]", type_to_string(elem_type)),
         IRType::None => "None".to_string(),
         IRType::Any => "Any".to_string(),
         IRType::Unknown => "unknown".to_string(),
