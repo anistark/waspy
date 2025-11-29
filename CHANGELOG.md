@@ -5,9 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.0](https://github.com/anistark/waspy/releases/tag/v0.7.0) - 2025-11-29
 
 ### Added
+- **Bytes Type Support**
+  - Bytes literals: `b"hello"` and `b'world'`
+  - Bytes indexing (read & write): `bytes_var[i]` and `bytes_var[i] = value`
+  - Bytes slicing: `bytes_var[start:end:step]` with proper bounds checking
+  - Bytes concatenation with the `+` operator
+  - Full WASM compilation support for binary data handling
+
 - **Object-Oriented Programming**
   - Class definitions with full parsing, IR generation, and WASM compilation
   - Instance method definitions with implicit `self` parameter
