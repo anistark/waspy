@@ -78,6 +78,12 @@ pub fn emit_expr(
 
                     IRType::Bytes
                 }
+                IRConstant::Set(_) => {
+                    // Set stored as identifier (set_id)
+                    // TODO: Proper set implementation with element storage
+                    func.instruction(&Instruction::I32Const(0));
+                    IRType::Set(Box::new(IRType::Unknown))
+                }
             }
         }
         IRExpr::Param(name) | IRExpr::Variable(name) => {
@@ -711,6 +717,72 @@ pub fn emit_expr(
             // Return pointer to the list
             func.instruction(&Instruction::I32Const(list_ptr as i32));
             IRType::List(Box::new(elem_type))
+        }
+        IRExpr::SetLiteral(elements) => {
+            // Set layout in memory: [num_elements:i32][elem0:i32][elem1:i32]...
+            // Similar to list but for sets (elements stored sequentially)
+            // Allocate after lists (at offset 20000+)
+
+            if elements.is_empty() {
+                // Empty set: just a length of 0
+                func.instruction(&Instruction::I32Const(20000)); // Pointer to empty set
+                return IRType::Set(Box::new(IRType::Unknown));
+            }
+
+            // Use a fixed allocation address for simplicity
+            let set_ptr = 20000 + (ctx.local_count * 100);
+
+            // Store number of elements at the beginning
+            func.instruction(&Instruction::I32Const(set_ptr as i32));
+            func.instruction(&Instruction::I32Const(elements.len() as i32));
+            func.instruction(&Instruction::I32Store(MemArg {
+                offset: 0,
+                align: 2,
+                memory_index: 0,
+            }));
+
+            // Determine element type from first element
+            let elem_type = if !elements.is_empty() {
+                emit_expr(&elements[0], func, ctx, memory_layout, None)
+            } else {
+                IRType::Unknown
+            };
+
+            // Store each element
+            for (i, elem) in elements.iter().enumerate() {
+                let offset = 4 + (i as u32 * 4); // Skip element count field
+
+                // Get the element value
+                let elem_type = emit_expr(elem, func, ctx, memory_layout, None);
+
+                // Store based on element type
+                match elem_type {
+                    IRType::Float => {
+                        func.instruction(&Instruction::I32Const(set_ptr as i32));
+                        func.instruction(&Instruction::I32Const(offset as i32));
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::F64Store(MemArg {
+                            offset: 0,
+                            align: 3,
+                            memory_index: 0,
+                        }));
+                    }
+                    _ => {
+                        func.instruction(&Instruction::I32Const(set_ptr as i32));
+                        func.instruction(&Instruction::I32Const(offset as i32));
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::I32Store(MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                    }
+                }
+            }
+
+            // Return pointer to the set
+            func.instruction(&Instruction::I32Const(set_ptr as i32));
+            IRType::Set(Box::new(elem_type))
         }
         IRExpr::DictLiteral(pairs) => {
             // Dict layout in memory: [num_entries:i32][key0:i32][val0:i32][key1:i32][val1:i32]...

@@ -426,6 +426,7 @@ fn process_module_level_ann_assign(
                 IRType::Bytes => IRExpr::Const(IRConstant::Bytes(Vec::new())),
                 IRType::List(_) => IRExpr::ListLiteral(Vec::new()),
                 IRType::Dict(_, _) => IRExpr::DictLiteral(Vec::new()),
+                IRType::Set(_) => IRExpr::SetLiteral(Vec::new()),
                 _ => IRExpr::Const(IRConstant::None),
             }
         };
@@ -550,6 +551,10 @@ fn type_annotation_to_ir_type(expr: &Expr) -> Result<IRType> {
                     "List" | "list" => {
                         let element_type = type_annotation_to_ir_type(&subscript.slice)?;
                         Ok(IRType::List(Box::new(element_type)))
+                    }
+                    "Set" | "set" => {
+                        let element_type = type_annotation_to_ir_type(&subscript.slice)?;
+                        Ok(IRType::Set(Box::new(element_type)))
                     }
                     "Dict" | "dict" => {
                         if let Expr::Tuple(tuple) = &*subscript.slice {
@@ -715,6 +720,7 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                         IRType::Bool => IRExpr::Const(IRConstant::Bool(false)),
                         IRType::String => IRExpr::Const(IRConstant::String(String::new())),
                         IRType::Bytes => IRExpr::Const(IRConstant::Bytes(Vec::new())),
+                        IRType::Set(_) => IRExpr::SetLiteral(Vec::new()),
                         IRType::None => IRExpr::Const(IRConstant::None),
                         _ => IRExpr::Const(IRConstant::None),
                     }
@@ -1573,6 +1579,13 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                 elements.push(lower_expr(item, memory_layout)?);
             }
             Ok(IRExpr::ListLiteral(elements))
+        }
+        Expr::Set(set) => {
+            let mut elements = Vec::new();
+            for item in &set.elts {
+                elements.push(lower_expr(item, memory_layout)?);
+            }
+            Ok(IRExpr::SetLiteral(elements))
         }
         Expr::Dict(dict) => {
             let mut pairs = Vec::new();

@@ -170,6 +170,7 @@ pub enum IRExpr {
     },
     ListLiteral(Vec<IRExpr>),
     DictLiteral(Vec<(IRExpr, IRExpr)>),
+    SetLiteral(Vec<IRExpr>),
     Indexing {
         // list[index] or dict[key]
         container: Box<IRExpr>,
@@ -220,6 +221,7 @@ pub enum IRConstant {
     Dict(Vec<(IRConstant, IRConstant)>),
     Tuple(Vec<IRConstant>),
     Bytes(Vec<u8>),
+    Set(Vec<IRConstant>),
 }
 
 /// Type system for IR
@@ -242,6 +244,7 @@ pub enum IRType {
     // New type for modules
     Module(String),
     Bytes,
+    Set(Box<IRType>),
 }
 
 /// Binary operators in the IR
@@ -303,6 +306,7 @@ pub struct MemoryLayout {
     pub next_string_offset: u32,
     pub bytes_offsets: std::collections::HashMap<Vec<u8>, u32>,
     pub next_bytes_offset: u32,
+    pub set_id_counter: u32,
     pub object_heap_offset: u32, // Where object instances are stored
     pub next_object_id: u32,     // Counter for allocating object instances
 }
@@ -321,6 +325,7 @@ impl MemoryLayout {
             next_string_offset: 0,
             bytes_offsets: std::collections::HashMap::new(),
             next_bytes_offset: 32768,
+            set_id_counter: 0,
             object_heap_offset: 65536,
             next_object_id: 0,
         }
