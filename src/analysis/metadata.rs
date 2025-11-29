@@ -129,6 +129,7 @@ fn type_to_string(ir_type: &ir::IRType) -> String {
         ir::IRType::Module(name) => format!("Module[{name}]"),
         ir::IRType::Bytes => "bytes".to_string(),
         ir::IRType::Set(elem_type) => format!("Set[{}]", type_to_string(elem_type)),
+        ir::IRType::Range => "range".to_string(),
         ir::IRType::None => "None".to_string(),
         ir::IRType::Any => "Any".to_string(),
         ir::IRType::Unknown => "unknown".to_string(),

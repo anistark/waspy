@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Tuple Data Type - Full Implementation**
+  - Tuple literals with variable expressions: `(a, b, c)` and `(x + 1, y * 2)`
+  - Tuple indexing with type tracking: `tuple[0]`, `tuple[1]`, etc.
+  - Heterogeneous tuples with mixed types: `(42, "hello", 3.14)`
+  - Empty tuples with type annotations: `empty: tuple[int] = ()`
+  - Single-element tuples: `(value,)` with proper syntax
+  - Proper type preservation for each element in the tuple
+  - Memory layout: `[length:i32][elem0:i32][elem1:i32]...`
+
+- **Range Function - Full Implementation**
+  - `range(stop)` - Single argument form
+  - `range(start, stop)` - Two argument form
+  - `range(start, stop, step)` - Full three argument form with custom step
+  - Full integration with for loops
+  - Range iteration support with step handling: `for i in range(0, 10, 2):`
+  - Negative step support: `for i in range(10, 0, -1):`
+  - Range object stored in memory: `[start:i32][stop:i32][step:i32][current:i32]`
+
+### Added Files
+- `examples/tuple_example.py` - Demonstrates tuple creation, indexing, and type mixing
+- `examples/range_example.py` - Demonstrates all range() variants and for loop iteration
+
+### Changed
+- Added `TupleLiteral(Vec<IRExpr>)` variant to `IRExpr` enum
+- Added `RangeCall { start, stop, step }` variant to `IRExpr` enum
+- Added `IRType::Range` to type system
+- Enhanced for loop handler to support range iteration with proper step increments
+
 ## [0.7.0](https://github.com/anistark/waspy/releases/tag/v0.7.0) - 2025-11-29
 
 ### Added

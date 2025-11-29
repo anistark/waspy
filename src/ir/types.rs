@@ -171,6 +171,7 @@ pub enum IRExpr {
     ListLiteral(Vec<IRExpr>),
     DictLiteral(Vec<(IRExpr, IRExpr)>),
     SetLiteral(Vec<IRExpr>),
+    TupleLiteral(Vec<IRExpr>),
     Indexing {
         // list[index] or dict[key]
         container: Box<IRExpr>,
@@ -205,6 +206,12 @@ pub enum IRExpr {
     DynamicImportExpr {
         // __import__(module_name) or importlib.import_module(module_name)
         module_name: Box<IRExpr>,
+    },
+    RangeCall {
+        // range(start, stop, step)
+        start: Option<Box<IRExpr>>,
+        stop: Box<IRExpr>,
+        step: Option<Box<IRExpr>>,
     },
 }
 
@@ -245,6 +252,7 @@ pub enum IRType {
     Module(String),
     Bytes,
     Set(Box<IRType>),
+    Range,
 }
 
 /// Binary operators in the IR

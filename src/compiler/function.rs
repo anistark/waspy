@@ -460,6 +460,63 @@ pub fn compile_body(
                         func.instruction(&Instruction::End);
                         func.instruction(&Instruction::End);
                     }
+                    IRType::Range => {
+                        // Range object layout: [start:i32][stop:i32][step:i32][current:i32]
+                        func.instruction(&Instruction::LocalSet(iterator_ptr_idx));
+
+                        // Load start value into target
+                        func.instruction(&Instruction::LocalGet(iterator_ptr_idx));
+                        func.instruction(&Instruction::I32Load(MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                        func.instruction(&Instruction::LocalSet(target_idx));
+
+                        // Initialize loop counter to 0
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::LocalSet(loop_counter_idx));
+
+                        // Loop structure
+                        func.instruction(&Instruction::Block(BlockType::Empty));
+                        func.instruction(&Instruction::Loop(BlockType::Empty));
+
+                        // Load stop and step for comparison
+                        func.instruction(&Instruction::LocalGet(iterator_ptr_idx));
+                        func.instruction(&Instruction::I32Load(MemArg {
+                            offset: 4,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                        func.instruction(&Instruction::LocalSet(list_length_idx));
+
+                        // Check if current >= stop
+                        func.instruction(&Instruction::LocalGet(target_idx));
+                        func.instruction(&Instruction::LocalGet(list_length_idx));
+                        func.instruction(&Instruction::I32GeS);
+                        func.instruction(&Instruction::BrIf(1)); // Break if true
+
+                        // Execute the loop body
+                        compile_body(body, func, ctx, memory_layout);
+
+                        // Increment by step
+                        func.instruction(&Instruction::LocalGet(target_idx));
+                        func.instruction(&Instruction::LocalGet(iterator_ptr_idx));
+                        func.instruction(&Instruction::I32Load(MemArg {
+                            offset: 8,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::LocalSet(target_idx));
+
+                        // Loop back
+                        func.instruction(&Instruction::Br(0));
+
+                        // End of loop
+                        func.instruction(&Instruction::End);
+                        func.instruction(&Instruction::End);
+                    }
                     _ => {
                         // For non-list iterables, fall back to simple counting
                         // Treat the value as a count (integer)

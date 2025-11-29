@@ -784,6 +784,63 @@ pub fn emit_expr(
             func.instruction(&Instruction::I32Const(set_ptr as i32));
             IRType::Set(Box::new(elem_type))
         }
+        IRExpr::TupleLiteral(elements) => {
+            // Tuple layout in memory: [length:i32][elem0:i32][elem1:i32]...
+            // Fixed-size tuples allocated after sets (at offset 30000+)
+
+            if elements.is_empty() {
+                func.instruction(&Instruction::I32Const(30000));
+                return IRType::Tuple(vec![]);
+            }
+
+            let tuple_ptr = 30000 + (ctx.local_count * 100);
+
+            // Store length at the beginning
+            func.instruction(&Instruction::I32Const(tuple_ptr as i32));
+            func.instruction(&Instruction::I32Const(elements.len() as i32));
+            func.instruction(&Instruction::I32Store(MemArg {
+                offset: 0,
+                align: 2,
+                memory_index: 0,
+            }));
+
+            // Track element types for heterogeneous tuples
+            let mut element_types = Vec::new();
+
+            // Store each element
+            for (i, elem) in elements.iter().enumerate() {
+                let offset = 4 + (i as u32 * 4);
+
+                let elem_type = emit_expr(elem, func, ctx, memory_layout, None);
+                element_types.push(elem_type.clone());
+
+                match elem_type {
+                    IRType::Float => {
+                        func.instruction(&Instruction::I32Const(tuple_ptr as i32));
+                        func.instruction(&Instruction::I32Const(offset as i32));
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::F64Store(MemArg {
+                            offset: 0,
+                            align: 3,
+                            memory_index: 0,
+                        }));
+                    }
+                    _ => {
+                        func.instruction(&Instruction::I32Const(tuple_ptr as i32));
+                        func.instruction(&Instruction::I32Const(offset as i32));
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::I32Store(MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                    }
+                }
+            }
+
+            func.instruction(&Instruction::I32Const(tuple_ptr as i32));
+            IRType::Tuple(element_types)
+        }
         IRExpr::DictLiteral(pairs) => {
             // Dict layout in memory: [num_entries:i32][key0:i32][val0:i32][key1:i32][val1:i32]...
             // Allocate dict at a fixed offset (after lists)
@@ -945,6 +1002,48 @@ pub fn emit_expr(
                     func.instruction(&Instruction::I32Const(0));
 
                     value_type.as_ref().clone()
+                }
+                IRType::Tuple(element_types) => {
+                    // Tuple indexing: tuple is stored as [length:i32][elem0:i32][elem1:i32]...
+                    // Index must be a constant or we compute dynamically
+                    // Save tuple pointer
+                    func.instruction(&Instruction::LocalSet(ctx.temp_local));
+                    // index is still on stack, multiply by 4
+                    func.instruction(&Instruction::I32Const(4));
+                    func.instruction(&Instruction::I32Mul);
+                    // Add 4 to skip the length field
+                    func.instruction(&Instruction::I32Const(4));
+                    func.instruction(&Instruction::I32Add);
+                    // Restore tuple pointer and add
+                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                    func.instruction(&Instruction::I32Add);
+
+                    // For homogeneous indexing, use first element type
+                    // In practice, we'd need to track which index is being accessed
+                    let elem_type = if !element_types.is_empty() {
+                        element_types[0].clone()
+                    } else {
+                        IRType::Unknown
+                    };
+
+                    match &elem_type {
+                        IRType::Float => {
+                            func.instruction(&Instruction::F64Load(MemArg {
+                                offset: 0,
+                                align: 3,
+                                memory_index: 0,
+                            }));
+                        }
+                        _ => {
+                            func.instruction(&Instruction::I32Load(MemArg {
+                                offset: 0,
+                                align: 2,
+                                memory_index: 0,
+                            }));
+                        }
+                    }
+
+                    elem_type
                 }
                 _ => {
                     // Unknown container types
@@ -1441,6 +1540,73 @@ pub fn emit_expr(
                     IRType::Unknown
                 }
             }
+        }
+        IRExpr::RangeCall { start, stop, step } => {
+            // Range object layout in memory: [start:i32][stop:i32][step:i32][current:i32]
+            // Allocate range object at offset 40000+
+            let range_ptr = 40000 + (ctx.local_count * 100);
+
+            // Evaluate and store start (default 0)
+            if let Some(s) = start {
+                emit_expr(s, func, ctx, memory_layout, Some(&IRType::Int));
+            } else {
+                func.instruction(&Instruction::I32Const(0));
+            }
+
+            func.instruction(&Instruction::I32Const(range_ptr as i32));
+            func.instruction(&Instruction::LocalSet(ctx.temp_local));
+            func.instruction(&Instruction::LocalGet(ctx.temp_local));
+            func.instruction(&Instruction::I32Store(MemArg {
+                offset: 0,
+                align: 2,
+                memory_index: 0,
+            }));
+
+            // Evaluate and store stop
+            emit_expr(stop, func, ctx, memory_layout, Some(&IRType::Int));
+            func.instruction(&Instruction::LocalGet(ctx.temp_local));
+            func.instruction(&Instruction::I32Const(4));
+            func.instruction(&Instruction::I32Add);
+            func.instruction(&Instruction::I32Store(MemArg {
+                offset: 0,
+                align: 2,
+                memory_index: 0,
+            }));
+
+            // Evaluate and store step (default 1)
+            if let Some(s) = step {
+                emit_expr(s, func, ctx, memory_layout, Some(&IRType::Int));
+            } else {
+                func.instruction(&Instruction::I32Const(1));
+            }
+            func.instruction(&Instruction::LocalGet(ctx.temp_local));
+            func.instruction(&Instruction::I32Const(8));
+            func.instruction(&Instruction::I32Add);
+            func.instruction(&Instruction::I32Store(MemArg {
+                offset: 0,
+                align: 2,
+                memory_index: 0,
+            }));
+
+            // Store current position (same as start)
+            func.instruction(&Instruction::LocalGet(ctx.temp_local));
+            func.instruction(&Instruction::I32Load(MemArg {
+                offset: 0,
+                align: 2,
+                memory_index: 0,
+            }));
+            func.instruction(&Instruction::LocalGet(ctx.temp_local));
+            func.instruction(&Instruction::I32Const(12));
+            func.instruction(&Instruction::I32Add);
+            func.instruction(&Instruction::I32Store(MemArg {
+                offset: 0,
+                align: 2,
+                memory_index: 0,
+            }));
+
+            // Return pointer to range object
+            func.instruction(&Instruction::I32Const(range_ptr as i32));
+            IRType::Range
         }
         IRExpr::DynamicImportExpr { module_name } => {
             // Emit code to evaluate the module name
