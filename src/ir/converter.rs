@@ -1291,7 +1291,10 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                             2 => {
                                 // range(start, stop)
                                 return Ok(IRExpr::RangeCall {
-                                    start: Some(Box::new(lower_expr(&call.args[0], memory_layout)?)),
+                                    start: Some(Box::new(lower_expr(
+                                        &call.args[0],
+                                        memory_layout,
+                                    )?)),
                                     stop: Box::new(lower_expr(&call.args[1], memory_layout)?),
                                     step: None,
                                 });
@@ -1299,15 +1302,16 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                             3 => {
                                 // range(start, stop, step)
                                 return Ok(IRExpr::RangeCall {
-                                    start: Some(Box::new(lower_expr(&call.args[0], memory_layout)?)),
+                                    start: Some(Box::new(lower_expr(
+                                        &call.args[0],
+                                        memory_layout,
+                                    )?)),
                                     stop: Box::new(lower_expr(&call.args[1], memory_layout)?),
                                     step: Some(Box::new(lower_expr(&call.args[2], memory_layout)?)),
                                 });
                             }
                             _ => {
-                                return Err(anyhow!(
-                                    "range() takes 1 to 3 positional arguments"
-                                ));
+                                return Err(anyhow!("range() takes 1 to 3 positional arguments"));
                             }
                         }
                     }
