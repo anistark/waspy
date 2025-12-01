@@ -88,6 +88,13 @@ pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
                     ctx.add_local(target, var_type);
                 }
             }
+            IRStatement::TupleUnpack { targets, .. } => {
+                for target in targets {
+                    if ctx.get_local_index(target).is_none() {
+                        ctx.add_local(target, IRType::Unknown);
+                    }
+                }
+            }
             IRStatement::If {
                 then_body,
                 else_body,
@@ -191,6 +198,50 @@ pub fn compile_body(
                 } else {
                     // Handle the case where the variable is not found in the context
                     panic!("Variable {target} not found in context");
+                }
+            }
+            IRStatement::TupleUnpack { targets, value } => {
+                // Emit code for the value (should be a tuple)
+                let _tuple_type = emit_expr(value, func, ctx, memory_layout, None);
+
+                // Load tuple length
+                func.instruction(&Instruction::LocalSet(ctx.temp_local));
+                func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                func.instruction(&Instruction::I32Load(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+
+                // Verify that number of targets matches tuple length
+                func.instruction(&Instruction::I32Const(targets.len() as i32));
+                func.instruction(&Instruction::I32Ne);
+                func.instruction(&Instruction::If(BlockType::Empty));
+                // Error case: tuple size mismatch - for now just continue
+                func.instruction(&Instruction::End);
+
+                // Extract each element from the tuple and assign to target variables
+                for (i, target) in targets.iter().enumerate() {
+                    // Load tuple pointer
+                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
+
+                    // Add offset to get element (4 + i*4)
+                    func.instruction(&Instruction::I32Const(4 + (i as i32) * 4));
+                    func.instruction(&Instruction::I32Add);
+
+                    // Load element value
+                    func.instruction(&Instruction::I32Load(MemArg {
+                        offset: 0,
+                        align: 2,
+                        memory_index: 0,
+                    }));
+
+                    // Store in target variable
+                    if let Some(local_idx) = ctx.get_local_index(target) {
+                        func.instruction(&Instruction::LocalSet(local_idx));
+                    } else {
+                        panic!("Variable {target} not found in context");
+                    }
                 }
             }
             IRStatement::If {

@@ -670,6 +670,21 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                             var_type: None,
                         });
                     }
+                    Expr::Tuple(tuple_expr) => {
+                        // Handle tuple unpacking like "a, b = (1, 2)"
+                        let targets: Result<Vec<String>, _> = tuple_expr
+                            .elts
+                            .iter()
+                            .map(|elt| match elt {
+                                Expr::Name(name) => Ok(name.id.to_string()),
+                                _ => Err(anyhow!("Only simple variable names supported in tuple unpacking")),
+                            })
+                            .collect();
+                        let targets = targets?;
+                        let value = lower_expr(&assign.value, memory_layout)?;
+
+                        ir_statements.push(IRStatement::TupleUnpack { targets, value });
+                    }
                     Expr::Attribute(attr) => {
                         // Handle attribute assignment like "self.width = width"
                         let object = lower_expr(&attr.value, memory_layout)?;
@@ -696,7 +711,7 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                     }
                     _ => {
                         return Err(anyhow!(
-                            "Only variable, attribute, or subscript assignment supported"
+                            "Only variable, attribute, subscript, or tuple assignment supported"
                         ))
                     }
                 }
@@ -1314,6 +1329,27 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                                 return Err(anyhow!("range() takes 1 to 3 positional arguments"));
                             }
                         }
+                    }
+
+                    // namedtuple() function - returns a class factory
+                    if function_name == "namedtuple" {
+                        // namedtuple(typename, field_names) -> class
+                        // For simplicity, we treat it as a function call
+                        // The arguments are (typename: str, field_names: str or list)
+                        // It returns a callable that creates instances
+                        if call.args.is_empty() {
+                            return Err(anyhow!("namedtuple() requires at least 1 argument"));
+                        }
+                        // Process arguments
+                        let mut arguments = Vec::new();
+                        for arg in &call.args {
+                            arguments.push(lower_expr(arg, memory_layout)?);
+                        }
+                        // Return as a function call - at runtime it will be a callable
+                        return Ok(IRExpr::FunctionCall {
+                            function_name: "namedtuple".to_string(),
+                            arguments,
+                        });
                     }
 
                     let mut arguments = Vec::new();

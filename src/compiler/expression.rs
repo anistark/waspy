@@ -641,6 +641,25 @@ pub fn emit_expr(
                             arg_types[1].clone()
                         }
                     }
+                    "namedtuple" => {
+                        // namedtuple(typename, field_names) -> class
+                        // Returns a callable that creates namedtuple instances
+                        // For now, just drop arguments and return a pointer
+                        for arg_type in &arg_types {
+                            match arg_type {
+                                IRType::String => {
+                                    func.instruction(&Instruction::Drop);
+                                    func.instruction(&Instruction::Drop);
+                                }
+                                _ => {
+                                    func.instruction(&Instruction::Drop);
+                                }
+                            }
+                        }
+                        // Return a callable reference (just use 0 as placeholder)
+                        func.instruction(&Instruction::I32Const(0));
+                        IRType::Unknown
+                    }
                     _ => {
                         // Unknown function, return default value
                         func.instruction(&Instruction::I32Const(0));
@@ -1496,6 +1515,13 @@ pub fn emit_expr(
                     method_name,
                     arguments,
                     &object_type,
+                ),
+                IRType::Tuple(_element_types) => emit_tuple_method_call(
+                    func,
+                    ctx,
+                    memory_layout,
+                    method_name,
+                    arguments,
                 ),
                 IRType::Class(class_name) => {
                     // Custom class method call
@@ -2401,6 +2427,159 @@ pub fn emit_list_method_call(
         _ => {
             // Unknown method
             func.instruction(&Instruction::Drop); // Drop list_ptr
+            func.instruction(&Instruction::I32Const(0));
+            IRType::Unknown
+        }
+    }
+}
+
+/// Emit WASM code for tuple method calls
+fn emit_tuple_method_call(
+    func: &mut Function,
+    ctx: &CompilationContext,
+    memory_layout: &MemoryLayout,
+    method_name: &str,
+    arguments: &[IRExpr],
+) -> IRType {
+    match method_name {
+        "index" => {
+            // tuple.index(value) -> int
+            // Linear search for first occurrence (same as list)
+            if !arguments.is_empty() {
+                func.instruction(&Instruction::LocalSet(ctx.temp_local));
+                emit_expr(&arguments[0], func, ctx, memory_layout, None);
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 1));
+
+                func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                func.instruction(&Instruction::I32Load(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 2));
+
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 3));
+
+                func.instruction(&Instruction::Block(BlockType::Empty));
+                func.instruction(&Instruction::Loop(BlockType::Empty));
+
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
+                func.instruction(&Instruction::I32GeS);
+                func.instruction(&Instruction::BrIf(1));
+
+                func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
+                func.instruction(&Instruction::I32Const(4));
+                func.instruction(&Instruction::I32Mul);
+                func.instruction(&Instruction::I32Const(4));
+                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::I32Add);
+
+                func.instruction(&Instruction::I32Load(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
+                func.instruction(&Instruction::I32Eq);
+
+                func.instruction(&Instruction::If(BlockType::Empty));
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
+                func.instruction(&Instruction::Br(2));
+                func.instruction(&Instruction::End);
+
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
+                func.instruction(&Instruction::I32Const(1));
+                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 3));
+
+                func.instruction(&Instruction::Br(0));
+
+                func.instruction(&Instruction::End);
+                func.instruction(&Instruction::End);
+
+                func.instruction(&Instruction::I32Const(-1));
+            } else {
+                func.instruction(&Instruction::Drop);
+                func.instruction(&Instruction::I32Const(0));
+            }
+            IRType::Int
+        }
+        "count" => {
+            // tuple.count(value) -> int
+            // Count occurrences (same as list)
+            if !arguments.is_empty() {
+                func.instruction(&Instruction::LocalSet(ctx.temp_local));
+                emit_expr(&arguments[0], func, ctx, memory_layout, None);
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 1));
+
+                func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                func.instruction(&Instruction::I32Load(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 2));
+
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 3));
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 4));
+
+                func.instruction(&Instruction::Block(BlockType::Empty));
+                func.instruction(&Instruction::Loop(BlockType::Empty));
+
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
+                func.instruction(&Instruction::I32GeS);
+                func.instruction(&Instruction::BrIf(1));
+
+                func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
+                func.instruction(&Instruction::I32Const(4));
+                func.instruction(&Instruction::I32Mul);
+                func.instruction(&Instruction::I32Const(4));
+                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::I32Add);
+
+                func.instruction(&Instruction::I32Load(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
+                func.instruction(&Instruction::I32Eq);
+
+                func.instruction(&Instruction::If(BlockType::Empty));
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
+                func.instruction(&Instruction::I32Const(1));
+                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 4));
+                func.instruction(&Instruction::End);
+
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
+                func.instruction(&Instruction::I32Const(1));
+                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 3));
+
+                func.instruction(&Instruction::Br(0));
+
+                func.instruction(&Instruction::End);
+                func.instruction(&Instruction::End);
+
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
+            } else {
+                func.instruction(&Instruction::Drop);
+                func.instruction(&Instruction::I32Const(0));
+            }
+            IRType::Int
+        }
+        _ => {
+            func.instruction(&Instruction::Drop);
             func.instruction(&Instruction::I32Const(0));
             IRType::Unknown
         }

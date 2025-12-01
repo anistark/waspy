@@ -98,6 +98,11 @@ pub enum IRStatement {
         index: IRExpr,
         value: IRExpr,
     },
+    // Tuple unpacking like a, b = (1, 2)
+    TupleUnpack {
+        targets: Vec<String>,
+        value: IRExpr,
+    },
 }
 
 /// Except handler for try-except statements
