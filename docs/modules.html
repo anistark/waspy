@@ -293,12 +293,13 @@
             },
             generators: {
                 title: "GENERATORS & ITERATORS",
-                status: "todo",
+                status: "progress",
+                version: "unreleased",
                 features: [
                     { name: "yield statement & generator functions", status: "todo" },
                     { name: "Iterator protocol (__iter__, __next__)", status: "todo" },
-                    { name: "range() function implementation", status: "todo" },
-                    { name: "for loop iteration over collections", status: "todo" }
+                    { name: "range() function implementation - all variants", status: "done", version: "unreleased" },
+                    { name: "for loop iteration over ranges with step support", status: "done", version: "unreleased" }
                 ]
             },
             errorHandling: {
@@ -315,14 +316,18 @@
             advancedTypes: {
                 title: "ADVANCED DATA TYPES",
                 status: "progress",
-                version: "0.7.0",
+                version: "unreleased",
                 features: [
                     { name: "Bytes type & binary data handling", status: "done", version: "0.7.0" },
                     { name: "Bytes literals, indexing, slicing, concatenation", status: "done", version: "0.7.0" },
                     { name: "Set type ({1, 2, 3}) & literals", status: "done", version: "0.7.0" },
                     { name: "Empty sets with type annotations", status: "done", version: "0.7.0" },
                     { name: "Set operations (add, remove, union, intersection)", status: "todo" },
-                    { name: "Tuple operations & unpacking", status: "todo" },
+                    { name: "Tuple literals with variable expressions (a, b, c)", status: "done", version: "unreleased" },
+                    { name: "Tuple indexing with type tracking", status: "done", version: "unreleased" },
+                    { name: "Heterogeneous tuples with mixed types", status: "done", version: "unreleased" },
+                    { name: "Tuple unpacking & assignment", status: "todo" },
+                    { name: "Tuple methods (.index, .count)", status: "todo" },
                     { name: "String formatting (.format() & % & f-strings)", status: "done" }
                 ]
             },

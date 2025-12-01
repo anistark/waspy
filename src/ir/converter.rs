@@ -1277,6 +1277,45 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                         return lower_expr(&call.args[0], memory_layout);
                     }
 
+                    // range() function
+                    if function_name == "range" {
+                        match call.args.len() {
+                            1 => {
+                                // range(stop)
+                                return Ok(IRExpr::RangeCall {
+                                    start: None,
+                                    stop: Box::new(lower_expr(&call.args[0], memory_layout)?),
+                                    step: None,
+                                });
+                            }
+                            2 => {
+                                // range(start, stop)
+                                return Ok(IRExpr::RangeCall {
+                                    start: Some(Box::new(lower_expr(
+                                        &call.args[0],
+                                        memory_layout,
+                                    )?)),
+                                    stop: Box::new(lower_expr(&call.args[1], memory_layout)?),
+                                    step: None,
+                                });
+                            }
+                            3 => {
+                                // range(start, stop, step)
+                                return Ok(IRExpr::RangeCall {
+                                    start: Some(Box::new(lower_expr(
+                                        &call.args[0],
+                                        memory_layout,
+                                    )?)),
+                                    stop: Box::new(lower_expr(&call.args[1], memory_layout)?),
+                                    step: Some(Box::new(lower_expr(&call.args[2], memory_layout)?)),
+                                });
+                            }
+                            _ => {
+                                return Err(anyhow!("range() takes 1 to 3 positional arguments"));
+                            }
+                        }
+                    }
+
                     let mut arguments = Vec::new();
                     for arg in &call.args {
                         arguments.push(lower_expr(arg, memory_layout)?);
@@ -1586,6 +1625,13 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                 elements.push(lower_expr(item, memory_layout)?);
             }
             Ok(IRExpr::SetLiteral(elements))
+        }
+        Expr::Tuple(tuple) => {
+            let mut elements = Vec::new();
+            for item in &tuple.elts {
+                elements.push(lower_expr(item, memory_layout)?);
+            }
+            Ok(IRExpr::TupleLiteral(elements))
         }
         Expr::Dict(dict) => {
             let mut pairs = Vec::new();
