@@ -1516,13 +1516,9 @@ pub fn emit_expr(
                     arguments,
                     &object_type,
                 ),
-                IRType::Tuple(_element_types) => emit_tuple_method_call(
-                    func,
-                    ctx,
-                    memory_layout,
-                    method_name,
-                    arguments,
-                ),
+                IRType::Tuple(_element_types) => {
+                    emit_tuple_method_call(func, ctx, memory_layout, method_name, arguments)
+                }
                 IRType::Class(class_name) => {
                     // Custom class method call
                     if let Some(class_info) = ctx.get_class_info(class_name) {

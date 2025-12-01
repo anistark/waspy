@@ -677,7 +677,9 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                             .iter()
                             .map(|elt| match elt {
                                 Expr::Name(name) => Ok(name.id.to_string()),
-                                _ => Err(anyhow!("Only simple variable names supported in tuple unpacking")),
+                                _ => Err(anyhow!(
+                                    "Only simple variable names supported in tuple unpacking"
+                                )),
                             })
                             .collect();
                         let targets = targets?;
