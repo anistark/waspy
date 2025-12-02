@@ -1003,7 +1003,7 @@ pub fn emit_expr(
                     // Dictionary indexing using linear search
                     // Dict layout: [num_entries:i32][key0:i32][val0:i32][key1:i32][val1:i32]...
                     // Save dict pointer and key
-                    func.instruction(&Instruction::LocalSet(ctx.temp_local));     // dict_ptr
+                    func.instruction(&Instruction::LocalSet(ctx.temp_local)); // dict_ptr
                     func.instruction(&Instruction::LocalSet(ctx.temp_local + 1)); // search_key
 
                     // Load the number of entries
@@ -1030,7 +1030,7 @@ pub fn emit_expr(
                     func.instruction(&Instruction::BrIf(1)); // Break loop
 
                     // Load key at offset: dict_ptr + 4 + (counter * 8)
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local));     // dict_ptr
+                    func.instruction(&Instruction::LocalGet(ctx.temp_local)); // dict_ptr
                     func.instruction(&Instruction::LocalGet(ctx.temp_local + 3)); // counter
                     func.instruction(&Instruction::I32Const(8));
                     func.instruction(&Instruction::I32Mul);
