@@ -218,6 +218,12 @@ pub enum IRExpr {
         stop: Box<IRExpr>,
         step: Option<Box<IRExpr>>,
     },
+    Lambda {
+        // lambda x: x + 1
+        params: Vec<IRParam>,
+        body: Box<IRExpr>,
+        captured_vars: Vec<String>, // Variables captured from outer scope
+    },
 }
 
 /// Constant value types supported in the IR
@@ -258,6 +264,7 @@ pub enum IRType {
     Bytes,
     Set(Box<IRType>),
     Range,
+    Callable { params: Vec<IRType>, return_type: Box<IRType> },
 }
 
 /// Binary operators in the IR
@@ -379,6 +386,14 @@ impl MemoryLayout {
         let ptr = self.object_heap_offset;
         self.object_heap_offset += size;
         self.next_object_id += 1;
+        ptr
+    }
+
+    /// Allocate space for a list, returns pointer to allocated memory
+    pub fn allocate_list(&mut self, element_count: u32) -> u32 {
+        let size = 4 + (element_count * 4);
+        let ptr = self.object_heap_offset;
+        self.object_heap_offset += size;
         ptr
     }
 }

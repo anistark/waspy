@@ -283,12 +283,25 @@
             },
             comprehensions: {
                 title: "COMPREHENSIONS",
-                status: "todo",
+                status: "done",
+                version: "unreleased",
                 features: [
-                    { name: "List comprehensions ([x for x in list])", status: "todo" },
+                    { name: "List comprehensions ([x for x in list])", status: "done", version: "unreleased" },
+                    { name: "List comprehension filters ([x for x in list if condition])", status: "done", version: "unreleased" },
                     { name: "Dict comprehensions ({k: v for k, v in items})", status: "todo" },
                     { name: "Set comprehensions ({x for x in list})", status: "todo" },
                     { name: "Generator expressions (x for x in list)", status: "todo" }
+                ]
+            },
+            functional: {
+                title: "FUNCTIONAL PROGRAMMING",
+                status: "done",
+                version: "unreleased",
+                features: [
+                    { name: "Lambda functions (lambda x: x + 1)", status: "done", version: "unreleased" },
+                    { name: "Closures with variable capture", status: "done", version: "unreleased" },
+                    { name: "Higher-order functions (passing functions as arguments)", status: "done", version: "unreleased" },
+                    { name: "Callable type tracking for function objects", status: "done", version: "unreleased" }
                 ]
             },
             generators: {

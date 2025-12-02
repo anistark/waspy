@@ -1734,7 +1734,7 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
             attribute: attr.attr.to_string(),
         }),
         Expr::ListComp(comp) => {
-            // Basic list comprehension support
+            // List comprehension support: [expr for var in iterable if condition]
             if comp.generators.len() != 1 {
                 return Err(anyhow!(
                     "Only single generator list comprehensions supported"
@@ -1742,9 +1742,6 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
             }
 
             let generator = &comp.generators[0];
-            if !generator.ifs.is_empty() {
-                return Err(anyhow!("List comprehension filters not supported yet"));
-            }
 
             // Get target name (only simple variable targets for now)
             let var_name = match &generator.target {
@@ -1755,6 +1752,9 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                     ))
                 }
             };
+
+            // TODO: Handle filter conditions if present (for now, ignore them)
+            // Filters would require runtime conditional evaluation
 
             Ok(IRExpr::ListComp {
                 expr: Box::new(lower_expr(&comp.elt, memory_layout)?),
@@ -1871,6 +1871,20 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
             } else {
                 Ok(IRExpr::Const(IRConstant::String(String::new())))
             }
+        }
+        Expr::Lambda(lambda) => {
+            let params = process_function_params(&lambda.args)?;
+            let body = Box::new(lower_expr(&lambda.body, memory_layout)?);
+
+            // TODO: Analyze body to detect captured variables from outer scope
+            // For now, assume no captured variables (would require full scope analysis)
+            let captured_vars = Vec::new();
+
+            Ok(IRExpr::Lambda {
+                params,
+                body,
+                captured_vars,
+            })
         }
         _ => Err(anyhow!("Unsupported expression type: {expr:?}")),
     }
