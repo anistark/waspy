@@ -827,8 +827,15 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                 ir_statements.push(IRStatement::While { condition, body });
             }
             Stmt::Expr(expr_stmt) => {
-                // Check for dynamic imports in expressions
-                if let Some(dynamic_import) =
+                // Check for yield statements
+                if let Expr::Yield(yield_expr) = &*expr_stmt.value {
+                    let value = if let Some(val) = &yield_expr.value {
+                        Some(lower_expr(val, memory_layout)?)
+                    } else {
+                        None
+                    };
+                    ir_statements.push(IRStatement::Yield { value });
+                } else if let Some(dynamic_import) =
                     check_for_dynamic_import_expr(&expr_stmt.value, memory_layout)?
                 {
                     ir_statements.push(dynamic_import);

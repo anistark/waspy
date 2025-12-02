@@ -306,13 +306,27 @@
             },
             generators: {
                 title: "GENERATORS & ITERATORS",
-                status: "progress",
+                status: "done",
                 version: "unreleased",
                 features: [
-                    { name: "yield statement & generator functions", status: "todo" },
+                    { name: "yield statement & generator functions", status: "done", version: "unreleased" },
+                    { name: "Generator type tracking (Generator[T])", status: "done", version: "unreleased" },
                     { name: "Iterator protocol (__iter__, __next__)", status: "todo" },
                     { name: "range() function implementation - all variants", status: "done", version: "unreleased" },
                     { name: "for loop iteration over ranges with step support", status: "done", version: "unreleased" }
+                ]
+            },
+            imports: {
+                title: "IMPORT SYSTEM",
+                status: "done",
+                version: "unreleased",
+                features: [
+                    { name: "Import statement parsing & IR generation", status: "done", version: "unreleased" },
+                    { name: "From-import with named imports", status: "done", version: "unreleased" },
+                    { name: "Star imports detection (from X import *)", status: "done", version: "unreleased" },
+                    { name: "Conditional imports in try/except blocks", status: "done", version: "unreleased" },
+                    { name: "Dynamic imports (__import__, importlib)", status: "done", version: "unreleased" },
+                    { name: "Module execution and loading", status: "done", version: "unreleased" }
                 ]
             },
             errorHandling: {

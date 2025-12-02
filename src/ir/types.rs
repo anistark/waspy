@@ -103,6 +103,15 @@ pub enum IRStatement {
         targets: Vec<String>,
         value: IRExpr,
     },
+    // Yield statement for generators: yield value
+    Yield {
+        value: Option<IRExpr>,
+    },
+    // Import module statement for module loading: import module_name
+    ImportModule {
+        module_name: String,
+        alias: Option<String>,
+    },
 }
 
 /// Except handler for try-except statements
@@ -265,6 +274,7 @@ pub enum IRType {
     Set(Box<IRType>),
     Range,
     Callable { params: Vec<IRType>, return_type: Box<IRType> },
+    Generator(Box<IRType>), // Generator yields values of this type
 }
 
 /// Binary operators in the IR
