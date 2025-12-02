@@ -878,10 +878,7 @@ pub fn compile_body(
                 func.instruction(&Instruction::Drop);
             }
 
-            IRStatement::ImportModule {
-                module_name,
-                alias,
-            } => {
+            IRStatement::ImportModule { module_name, alias } => {
                 // Create a variable to hold the imported module
                 let var_name = alias.as_ref().unwrap_or(module_name);
                 let _local_idx = ctx.add_local(var_name, IRType::Module(module_name.clone()));

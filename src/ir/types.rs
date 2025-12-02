@@ -273,7 +273,10 @@ pub enum IRType {
     Bytes,
     Set(Box<IRType>),
     Range,
-    Callable { params: Vec<IRType>, return_type: Box<IRType> },
+    Callable {
+        params: Vec<IRType>,
+        return_type: Box<IRType>,
+    },
     Generator(Box<IRType>), // Generator yields values of this type
 }
 
