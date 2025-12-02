@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Tuple Data Type - Full Implementation**
+- **Tuple Data Type**
   - Tuple literals with variable expressions: `(a, b, c)` and `(x + 1, y * 2)`
   - Tuple indexing with type tracking: `tuple[0]`, `tuple[1]`, etc.
   - Heterogeneous tuples with mixed types: `(42, "hello", 3.14)`
@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Proper type preservation for each element in the tuple
   - Memory layout: `[length:i32][elem0:i32][elem1:i32]...`
 
-- **Range Function - Full Implementation**
+- **Range Function**
   - `range(stop)` - Single argument form
   - `range(start, stop)` - Two argument form
   - `range(start, stop, step)` - Full three argument form with custom step
@@ -25,10 +25,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Range iteration support with step handling: `for i in range(0, 10, 2):`
   - Negative step support: `for i in range(10, 0, -1):`
   - Range object stored in memory: `[start:i32][stop:i32][step:i32][current:i32]`
-
-### Added Files
-- `examples/tuple_example.py` - Demonstrates tuple creation, indexing, and type mixing
-- `examples/range_example.py` - Demonstrates all range() variants and for loop iteration
 
 ### Changed
 - Added `TupleLiteral(Vec<IRExpr>)` variant to `IRExpr` enum
