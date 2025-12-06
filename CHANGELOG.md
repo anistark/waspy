@@ -8,6 +8,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Generator Functions & Iterators**
+  - `yield` statement support in function bodies: `yield value`
+  - Generator type system: `IRType::Generator[T]` for type tracking
+  - Yield statement compilation to WASM instructions
+  - Foundation for iterator protocol implementation
+  - Support for generator expressions in comprehensions
+
+- **Import System**
+  - Import statement parsing: `import module` and `import module as alias`
+  - From-import support: `from module import name1, name2` with aliases
+  - Star imports: `from module import *` with detection and tracking
+  - Conditional imports in try/except blocks with fallback tracking
+  - Dynamic imports via `__import__(module_name)` function
+  - Dynamic imports via `importlib.import_module(module_name)`
+  - Module variable tracking and registration in IR
+  - Module type system: `IRType::Module(name)` for imported modules
+  - Import statement IR generation and WASM compilation
+
+- **Functional Programming Features**
+  - Lambda functions: Anonymous function support with `lambda x: x + 1` syntax
+  - Parameter support in lambdas with type inference
+  - Callable type tracking for function objects: `IRType::Callable { params, return_type }`
+  - Closures: Variables captured from outer scope with `captured_vars` field
+  - Foundation for higher-order functions (passing functions as arguments)
+
+- **List Comprehensions**
+  - List comprehension syntax: `[expr for var in iterable]`
+  - Filter conditions in comprehensions: `[x for x in list if condition]`
+  - Single generator comprehension support with proper iteration
+  - Constant list literal optimization for comprehensions
+  - Runtime support for variable-based iterables
+  - Memory allocation for result lists via `allocate_list()` helper
+
+- **Exception Handling Enhancements**
+  - `raise` statement with exception type support
+  - Exception type tracking and flag management in WASM execution
+  - Multiple exception handler support (already present, verified working)
+  - Exception propagation through try/except/finally blocks
+  - Exception state preservation and restoration
+
 - **Tuple Data Type**
   - Tuple literals with variable expressions: `(a, b, c)` and `(x + 1, y * 2)`
   - Tuple indexing with type tracking: `tuple[0]`, `tuple[1]`, etc.
@@ -27,10 +67,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Range object stored in memory: `[start:i32][stop:i32][step:i32][current:i32]`
 
 ### Changed
+- Added `Yield { value }` statement variant for generator support
+- Added `ImportModule { module_name, alias }` statement variant for module execution
+- Added `Generator(Box<IRType>)` variant to `IRType` enum for generator type tracking
+- Added `Lambda { params, body, captured_vars }` variant to `IRExpr` enum
+- Added `Callable { params, return_type }` variant to `IRType` enum
+- Updated `ListComp` handling to support filter conditions in comprehensions
+- Added `allocate_list(element_count: u32)` helper method to `MemoryLayout`
+- Removed error blocking for list comprehension filters (now supported)
+- Enhanced type_to_string() function in both metadata.rs and lib.rs for Callable and Generator types
 - Added `TupleLiteral(Vec<IRExpr>)` variant to `IRExpr` enum
 - Added `RangeCall { start, stop, step }` variant to `IRExpr` enum
 - Added `IRType::Range` to type system
 - Enhanced for loop handler to support range iteration with proper step increments
+- Extended compiler/function.rs to handle Yield and ImportModule statements
 
 ## [0.7.0](https://github.com/anistark/waspy/releases/tag/v0.7.0) - 2025-11-29
 

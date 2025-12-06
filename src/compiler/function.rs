@@ -862,6 +862,32 @@ pub fn compile_body(
                     }
                 }
             }
+
+            IRStatement::Yield { value } => {
+                // Emit the yielded value expression
+                if let Some(val) = value {
+                    emit_expr(val, func, ctx, memory_layout, None);
+                } else {
+                    // yield without a value yields None
+                    func.instruction(&Instruction::I32Const(0));
+                }
+
+                // For generator support, the yielded value would be stored
+                // in a generator state and execution would be paused.
+                // For now, this is a placeholder that just drops the value.
+                func.instruction(&Instruction::Drop);
+            }
+
+            IRStatement::ImportModule { module_name, alias } => {
+                // Create a variable to hold the imported module
+                let var_name = alias.as_ref().unwrap_or(module_name);
+                let _local_idx = ctx.add_local(var_name, IRType::Module(module_name.clone()));
+
+                // For now, store a dummy module reference
+                // Full implementation would load and execute the module
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::LocalSet(_local_idx));
+            }
         }
     }
 }

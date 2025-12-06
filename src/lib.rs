@@ -671,6 +671,8 @@ pub fn type_to_string(ir_type: &IRType) -> String {
         IRType::None => "None".to_string(),
         IRType::Any => "Any".to_string(),
         IRType::Unknown => "unknown".to_string(),
+        IRType::Callable { .. } => "Callable".to_string(),
+        IRType::Generator(yield_type) => format!("Generator[{}]", type_to_string(yield_type)),
     }
 }
 

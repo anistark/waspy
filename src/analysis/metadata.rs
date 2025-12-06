@@ -133,5 +133,7 @@ fn type_to_string(ir_type: &ir::IRType) -> String {
         ir::IRType::None => "None".to_string(),
         ir::IRType::Any => "Any".to_string(),
         ir::IRType::Unknown => "unknown".to_string(),
+        ir::IRType::Callable { .. } => "Callable".to_string(),
+        ir::IRType::Generator(yield_type) => format!("Generator[{}]", type_to_string(yield_type)),
     }
 }

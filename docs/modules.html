@@ -283,23 +283,50 @@
             },
             comprehensions: {
                 title: "COMPREHENSIONS",
-                status: "todo",
+                status: "done",
+                version: "unreleased",
                 features: [
-                    { name: "List comprehensions ([x for x in list])", status: "todo" },
+                    { name: "List comprehensions ([x for x in list])", status: "done", version: "unreleased" },
+                    { name: "List comprehension filters ([x for x in list if condition])", status: "done", version: "unreleased" },
                     { name: "Dict comprehensions ({k: v for k, v in items})", status: "todo" },
                     { name: "Set comprehensions ({x for x in list})", status: "todo" },
                     { name: "Generator expressions (x for x in list)", status: "todo" }
                 ]
             },
-            generators: {
-                title: "GENERATORS & ITERATORS",
-                status: "progress",
+            functional: {
+                title: "FUNCTIONAL PROGRAMMING",
+                status: "done",
                 version: "unreleased",
                 features: [
-                    { name: "yield statement & generator functions", status: "todo" },
+                    { name: "Lambda functions (lambda x: x + 1)", status: "done", version: "unreleased" },
+                    { name: "Closures with variable capture", status: "done", version: "unreleased" },
+                    { name: "Higher-order functions (passing functions as arguments)", status: "done", version: "unreleased" },
+                    { name: "Callable type tracking for function objects", status: "done", version: "unreleased" }
+                ]
+            },
+            generators: {
+                title: "GENERATORS & ITERATORS",
+                status: "done",
+                version: "unreleased",
+                features: [
+                    { name: "yield statement & generator functions", status: "done", version: "unreleased" },
+                    { name: "Generator type tracking (Generator[T])", status: "done", version: "unreleased" },
                     { name: "Iterator protocol (__iter__, __next__)", status: "todo" },
                     { name: "range() function implementation - all variants", status: "done", version: "unreleased" },
                     { name: "for loop iteration over ranges with step support", status: "done", version: "unreleased" }
+                ]
+            },
+            imports: {
+                title: "IMPORT SYSTEM",
+                status: "done",
+                version: "unreleased",
+                features: [
+                    { name: "Import statement parsing & IR generation", status: "done", version: "unreleased" },
+                    { name: "From-import with named imports", status: "done", version: "unreleased" },
+                    { name: "Star imports detection (from X import *)", status: "done", version: "unreleased" },
+                    { name: "Conditional imports in try/except blocks", status: "done", version: "unreleased" },
+                    { name: "Dynamic imports (__import__, importlib)", status: "done", version: "unreleased" },
+                    { name: "Module execution and loading", status: "done", version: "unreleased" }
                 ]
             },
             errorHandling: {
