@@ -8,6 +8,7 @@ pub mod compiler;
 pub mod core;
 pub mod ir;
 pub mod optimize;
+pub mod stdlib;
 pub mod utils;
 
 // WASM plugin integration
