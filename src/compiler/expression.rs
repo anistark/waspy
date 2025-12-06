@@ -1341,38 +1341,61 @@ pub fn emit_expr(
             }
         }
         IRExpr::Attribute { object, attribute } => {
-            // Evaluate object to get pointer
+            if let IRExpr::Variable(module_name) = &**object {
+                if crate::stdlib::is_stdlib_module(module_name) {
+                    if let Some(value) = crate::stdlib::get_stdlib_attributes(module_name, attribute) {
+                        return match value {
+                            crate::stdlib::StdlibValue::Int(i) => {
+                                func.instruction(&Instruction::I32Const(i));
+                                IRType::Int
+                            }
+                            crate::stdlib::StdlibValue::String(s) => {
+                                let offset = memory_layout.string_offsets.get(&s).copied().unwrap_or(0);
+                                func.instruction(&Instruction::I32Const(offset as i32));
+                                func.instruction(&Instruction::I32Const(s.len() as i32));
+                                IRType::String
+                            }
+                            crate::stdlib::StdlibValue::Float(f) => {
+                                func.instruction(&Instruction::F64Const(f.into()));
+                                IRType::Float
+                            }
+                            crate::stdlib::StdlibValue::List(_) => {
+                                func.instruction(&Instruction::I32Const(10000));
+                                IRType::List(Box::new(IRType::String))
+                            }
+                            crate::stdlib::StdlibValue::None => {
+                                func.instruction(&Instruction::I32Const(0));
+                                IRType::None
+                            }
+                        };
+                    }
+                }
+            }
+
             let obj_type = emit_expr(object, func, ctx, memory_layout, None);
 
             match &obj_type {
                 IRType::Class(class_name) => {
-                    // Get class info to find field offset
                     if let Some(class_info) = ctx.get_class_info(class_name) {
                         if let Some(&field_offset) = class_info.field_offsets.get(attribute) {
-                            // Stack: ...object_ptr
-                            // Load from object_ptr + field_offset
                             func.instruction(&Instruction::I32Load(MemArg {
                                 offset: field_offset,
                                 align: 2,
                                 memory_index: 0,
                             }));
-                            // For now, return as Int (could be any type)
                             IRType::Unknown
                         } else {
-                            // Field not found in class
                             func.instruction(&Instruction::Drop);
                             func.instruction(&Instruction::I32Const(0));
                             IRType::Unknown
                         }
                     } else {
-                        // Class not found
                         func.instruction(&Instruction::Drop);
                         func.instruction(&Instruction::I32Const(0));
                         IRType::Unknown
                     }
                 }
                 _ => {
-                    // Non-class attribute access (strings, lists handled separately)
                     emit_expr(object, func, ctx, memory_layout, None);
                     func.instruction(&Instruction::Drop);
                     func.instruction(&Instruction::I32Const(0));

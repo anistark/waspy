@@ -238,15 +238,17 @@
                     { name: "sum() - iterable with start value", status: "done", version: "0.7.0" }
                 ]
             },
-            imports: {
-                title: "IMPORT SYSTEM",
+            runtimeFeatures: {
+                title: "RUNTIME FEATURES",
                 status: "progress",
-                version: "0.5.0",
+                version: "in-dev",
                 features: [
-                    { name: "Import syntax parsing (all types)", status: "done", version: "0.5.0" },
-                    { name: "Conditional imports (try/except)", status: "done", version: "0.5.0" },
-                    { name: "Dynamic imports (__import__, importlib)", status: "done", version: "0.5.0" },
-                    { name: "Actual module loading & execution", status: "todo", version: "todo" }
+                    { name: "Generator State Management - execution context suspension/resumption", status: "progress" },
+                    { name: "Dynamic Module Loading - runtime module loading and execution", status: "progress" },
+                    { name: "Closure Variable Capture Analysis - detecting and capturing closure variables", status: "progress" },
+                    { name: "String Transformation in WASM - full character-by-char transformations", status: "progress" },
+                    { name: "Set Hashing & Storage - proper hash table implementation for sets", status: "progress" },
+                    { name: "Dictionary Index Assignment with Update - modifying dictionary values", status: "progress" }
                 ]
             },
 
@@ -273,12 +275,19 @@
             },
             stdlib: {
                 title: "STANDARD LIBRARY",
-                status: "todo",
+                status: "progress",
+                version: "in-dev",
                 features: [
-                    { name: "sys module (system parameters)", status: "todo" },
-                    { name: "os module (operating system interface)", status: "todo" },
-                    { name: "math module (mathematical functions)", status: "todo" },
-                    { name: "json module (JSON encoding/decoding)", status: "todo" }
+                    { name: "sys module (argv, platform, version, maxsize, stdin/stdout/stderr, path)", status: "done", version: "unreleased" },
+                    { name: "os module (operating system interface)", status: "progress" },
+                    { name: "math module (mathematical functions)", status: "progress" },
+                    { name: "random module (random number generation)", status: "progress" },
+                    { name: "json module (JSON encoding/decoding)", status: "progress" },
+                    { name: "re module (regular expressions)", status: "progress" },
+                    { name: "datetime module (date and time handling)", status: "progress" },
+                    { name: "collections module (specialized container types)", status: "progress" },
+                    { name: "itertools module (iterator utilities)", status: "progress" },
+                    { name: "functools module (higher-order functions)", status: "progress" }
                 ]
             },
             comprehensions: {
