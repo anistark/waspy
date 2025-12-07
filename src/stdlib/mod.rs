@@ -3,8 +3,16 @@ pub mod sys;
 pub fn is_stdlib_module(name: &str) -> bool {
     matches!(
         name,
-        "sys" | "os" | "math" | "random" | "json" | "re" | "datetime" | "collections"
-            | "itertools" | "functools"
+        "sys"
+            | "os"
+            | "math"
+            | "random"
+            | "json"
+            | "re"
+            | "datetime"
+            | "collections"
+            | "itertools"
+            | "functools"
     )
 }
 

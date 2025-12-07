@@ -1343,14 +1343,17 @@ pub fn emit_expr(
         IRExpr::Attribute { object, attribute } => {
             if let IRExpr::Variable(module_name) = &**object {
                 if crate::stdlib::is_stdlib_module(module_name) {
-                    if let Some(value) = crate::stdlib::get_stdlib_attributes(module_name, attribute) {
+                    if let Some(value) =
+                        crate::stdlib::get_stdlib_attributes(module_name, attribute)
+                    {
                         return match value {
                             crate::stdlib::StdlibValue::Int(i) => {
                                 func.instruction(&Instruction::I32Const(i));
                                 IRType::Int
                             }
                             crate::stdlib::StdlibValue::String(s) => {
-                                let offset = memory_layout.string_offsets.get(&s).copied().unwrap_or(0);
+                                let offset =
+                                    memory_layout.string_offsets.get(&s).copied().unwrap_or(0);
                                 func.instruction(&Instruction::I32Const(offset as i32));
                                 func.instruction(&Instruction::I32Const(s.len() as i32));
                                 IRType::String
