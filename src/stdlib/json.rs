@@ -25,3 +25,18 @@ pub enum JsonFunction {
     JSONEncoder,
     JSONDecoder,
 }
+
+/// Parse a JSON string at compile time (for constant strings)
+pub fn parse_json_string(json_str: &str) -> Result<serde_json::Value, String> {
+    serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {e}"))
+}
+
+/// Serialize a value to JSON at compile time
+pub fn serialize_to_json(value: &serde_json::Value) -> Result<String, String> {
+    serde_json::to_string(value).map_err(|e| format!("JSON serialize error: {e}"))
+}
+
+/// Serialize a value to pretty JSON at compile time
+pub fn serialize_to_json_pretty(value: &serde_json::Value) -> Result<String, String> {
+    serde_json::to_string_pretty(value).map_err(|e| format!("JSON serialize error: {e}"))
+}

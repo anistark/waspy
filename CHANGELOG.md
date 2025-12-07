@@ -12,8 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **sys module**: System parameters and functions
     - Attributes: `argv`, `platform`, `version`, `maxsize`, `stdin`, `stdout`, `stderr`, `path`
   - **os module**: Operating system interface
-    - Attributes: `name`, `sep`, `pathsep`, `linesep`, `devnull`, `curdir`, `pardir`, `extsep`
+    - Attributes: `name`, `sep`, `pathsep`, `linesep`, `devnull`, `curdir`, `pardir`, `extsep`, `environ`
     - Functions: `getcwd`, `getenv`, `getpid`, `urandom`
+    - **os.path submodule**: Path manipulation functions
+      - Functions: `join`, `exists`, `isfile`, `isdir`, `basename`, `dirname`, `abspath`, `split`, `splitext`
+      - Attributes: `sep`, `pathsep`, `curdir`, `pardir`
   - **math module**: Mathematical functions and constants
     - Constants: `pi`, `e`, `tau`, `inf`, `nan`
     - Trigonometric: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`
@@ -25,13 +28,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Functions: `random`, `randint`, `randrange`, `uniform`, `choice`, `shuffle`, `sample`, `seed`, `getrandbits`, `gauss`, `normalvariate`, `expovariate`
   - **json module**: JSON encoding and decoding
     - Functions: `loads`, `dumps`, `load`, `dump`, `JSONEncoder`, `JSONDecoder`
+    - Implementation: Uses `serde_json` for compile-time JSON operations
+    - Runtime JSON parsing infrastructure in place
   - **re module**: Regular expression operations
     - Functions: `compile`, `search`, `match`, `fullmatch`, `findall`, `finditer`, `split`, `sub`, `subn`, `escape`, `purge`
     - Flags: `IGNORECASE`, `MULTILINE`, `DOTALL`, `VERBOSE`, `ASCII` (and short forms: `I`, `M`, `S`, `X`, `A`)
-  - **datetime module**: Date and time manipulation
+  - **datetime module**: Date and time manipulation using chrono crate
     - Types: `datetime`, `date`, `time`, `timedelta`, `timezone`, `tzinfo`
     - Methods: `now`, `today`, `fromtimestamp`, `fromisoformat`, `strftime`, `strptime`, `replace`, `timestamp`, `isoformat`, `weekday`, `isoweekday`
     - Constants: `MINYEAR`, `MAXYEAR`
+    - Implementation: Uses `chrono` crate for compile-time datetime operations
+    - Compile-time helpers: `datetime_now_utc()`, `datetime_now_local()`, `date_today()`, `datetime_from_timestamp()`, `datetime_from_iso()`, `datetime_to_iso()`, `datetime_strftime()`
   - **collections module**: Specialized container datatypes
     - Functions: `namedtuple`, `deque`, `Counter`, `OrderedDict`, `defaultdict`, `ChainMap`, `UserDict`, `UserList`, `UserString`
   - **itertools module**: Iterator building blocks

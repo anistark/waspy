@@ -1366,6 +1366,10 @@ pub fn emit_expr(
                                 func.instruction(&Instruction::I32Const(10000));
                                 IRType::List(Box::new(IRType::String))
                             }
+                            crate::stdlib::StdlibValue::Dict(_) => {
+                                func.instruction(&Instruction::I32Const(10000));
+                                IRType::Dict(Box::new(IRType::String), Box::new(IRType::String))
+                            }
                             crate::stdlib::StdlibValue::None => {
                                 func.instruction(&Instruction::I32Const(0));
                                 IRType::None

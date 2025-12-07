@@ -15,7 +15,7 @@ fn test_file(file_path: &str, test_name: &str) -> TestResult {
         return TestResult {
             name: test_name.to_string(),
             passed: false,
-            error: Some(format!("File not found: {}", file_path)),
+            error: Some(format!("File not found: {file_path}")),
         };
     }
 
@@ -25,7 +25,7 @@ fn test_file(file_path: &str, test_name: &str) -> TestResult {
             return TestResult {
                 name: test_name.to_string(),
                 passed: false,
-                error: Some(format!("Failed to read file: {}", e)),
+                error: Some(format!("Failed to read file: {e}")),
             }
         }
     };
@@ -39,7 +39,7 @@ fn test_file(file_path: &str, test_name: &str) -> TestResult {
         Err(e) => TestResult {
             name: test_name.to_string(),
             passed: false,
-            error: Some(format!("{}", e)),
+            error: Some(format!("{e}")),
         },
     }
 }
@@ -53,6 +53,7 @@ fn main() {
         ("examples/test_os.py", "os module"),
         ("examples/test_re.py", "re module"),
         ("examples/test_datetime.py", "datetime module"),
+        ("examples/test_json.py", "json module"),
         ("examples/test_all_stdlib_imports.py", "all stdlib imports"),
     ];
 
@@ -61,7 +62,7 @@ fn main() {
     let mut failed = 0;
 
     for (file_path, test_name) in tests {
-        print!("Testing {}... ", test_name);
+        print!("Testing {test_name}... ");
         let result = test_file(file_path, test_name);
 
         if result.passed {
@@ -70,7 +71,7 @@ fn main() {
         } else {
             println!("❌ FAIL");
             if let Some(error) = &result.error {
-                println!("  Error: {}", error);
+                println!("  Error: {error}");
             }
             failed += 1;
         }
@@ -79,7 +80,7 @@ fn main() {
     }
 
     println!("\n============================================");
-    println!("Results: {} passed, {} failed\n", passed, failed);
+    println!("Results: {passed} passed, {failed} failed\n");
 
     if failed == 0 {
         println!("✅ All stdlib module tests passed!");
@@ -90,7 +91,7 @@ fn main() {
         for result in results.iter().filter(|r| !r.passed) {
             println!("  - {}", result.name);
             if let Some(error) = &result.error {
-                println!("    {}", error);
+                println!("    {error}");
             }
         }
         std::process::exit(1);

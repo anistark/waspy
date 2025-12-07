@@ -46,6 +46,7 @@ pub enum StdlibValue {
     Int(i32),
     String(String),
     List(Vec<String>),
+    Dict(Vec<(String, String)>),
     Float(f64),
     None,
 }
