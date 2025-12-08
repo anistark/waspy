@@ -1485,6 +1485,111 @@ pub fn emit_expr(
                             };
                         }
                     }
+
+                    // Handle json module functions
+                    if module_name == "json" {
+                        if let Some(json_func) = crate::stdlib::json::get_function(method_name) {
+                            return match json_func {
+                                crate::stdlib::json::JsonFunction::Dumps => {
+                                    // json.dumps(obj) - serialize Python object to JSON string
+                                    // For now, we'll handle basic types and return a JSON string
+                                    // TODO: Implement full serialization for all types
+                                    if arguments.is_empty() {
+                                        // Return empty JSON object string
+                                        let json_str = "{}".to_string();
+                                        let offset = memory_layout
+                                            .string_offsets
+                                            .get(&json_str)
+                                            .copied()
+                                            .unwrap_or(0);
+                                        func.instruction(&Instruction::I32Const(offset as i32));
+                                        func.instruction(&Instruction::I32Const(
+                                            json_str.len() as i32
+                                        ));
+                                    } else {
+                                        // Emit the argument and for now return a placeholder JSON string
+                                        // In a full implementation, this would serialize the value
+                                        emit_expr(&arguments[0], func, ctx, memory_layout, None);
+
+                                        // Drop the emitted value and return placeholder
+                                        // NOTE: This is a simplified implementation
+                                        func.instruction(&Instruction::Drop);
+
+                                        let json_str = "{}".to_string();
+                                        let offset = memory_layout
+                                            .string_offsets
+                                            .get(&json_str)
+                                            .copied()
+                                            .unwrap_or(0);
+                                        func.instruction(&Instruction::I32Const(offset as i32));
+                                        func.instruction(&Instruction::I32Const(
+                                            json_str.len() as i32
+                                        ));
+                                    }
+                                    IRType::String
+                                }
+                                crate::stdlib::json::JsonFunction::Loads => {
+                                    // json.loads(s) - parse JSON string to Python object
+                                    // For now, return an empty dict as placeholder
+                                    // TODO: Implement full JSON parsing at runtime
+                                    if !arguments.is_empty() {
+                                        // Emit and drop the string argument
+                                        emit_expr(&arguments[0], func, ctx, memory_layout, None);
+                                        func.instruction(&Instruction::Drop);
+                                        func.instruction(&Instruction::Drop);
+                                    }
+
+                                    // Return empty dict placeholder
+                                    func.instruction(&Instruction::I32Const(0));
+                                    IRType::Dict(
+                                        Box::new(IRType::String),
+                                        Box::new(IRType::Unknown),
+                                    )
+                                }
+                                crate::stdlib::json::JsonFunction::Load => {
+                                    // json.load(fp) - load JSON from file object
+                                    // Drop file argument and return empty dict
+                                    for arg in arguments {
+                                        emit_expr(arg, func, ctx, memory_layout, None);
+                                        func.instruction(&Instruction::Drop);
+                                    }
+                                    func.instruction(&Instruction::I32Const(0));
+                                    IRType::Dict(
+                                        Box::new(IRType::String),
+                                        Box::new(IRType::Unknown),
+                                    )
+                                }
+                                crate::stdlib::json::JsonFunction::Dump => {
+                                    // json.dump(obj, fp) - serialize object to file
+                                    // Drop all arguments and return None
+                                    for arg in arguments {
+                                        emit_expr(arg, func, ctx, memory_layout, None);
+                                        func.instruction(&Instruction::Drop);
+                                    }
+                                    func.instruction(&Instruction::I32Const(0));
+                                    IRType::None
+                                }
+                                crate::stdlib::json::JsonFunction::JSONEncoder => {
+                                    // JSONEncoder class - return placeholder
+                                    for arg in arguments {
+                                        emit_expr(arg, func, ctx, memory_layout, None);
+                                        func.instruction(&Instruction::Drop);
+                                    }
+                                    func.instruction(&Instruction::I32Const(0));
+                                    IRType::Unknown
+                                }
+                                crate::stdlib::json::JsonFunction::JSONDecoder => {
+                                    // JSONDecoder class - return placeholder
+                                    for arg in arguments {
+                                        emit_expr(arg, func, ctx, memory_layout, None);
+                                        func.instruction(&Instruction::Drop);
+                                    }
+                                    func.instruction(&Instruction::I32Const(0));
+                                    IRType::Unknown
+                                }
+                            };
+                        }
+                    }
                 }
             }
 
