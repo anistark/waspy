@@ -15,6 +15,7 @@ pub fn get_attribute(attr: &str) -> Option<StdlibValue> {
             ("HOME".to_string(), "/".to_string()),
             ("USER".to_string(), "wasm".to_string()),
         ])),
+        "path" => Some(StdlibValue::Module("os.path".to_string())),
         _ => None,
     }
 }
