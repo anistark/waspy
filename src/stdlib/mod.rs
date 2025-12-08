@@ -41,6 +41,10 @@ pub fn get_stdlib_attributes(module: &str, attr: &str) -> Option<StdlibValue> {
     }
 }
 
+pub fn is_stdlib_submodule(module: &str, submodule: &str) -> bool {
+    matches!((module, submodule), ("os", "path"))
+}
+
 #[derive(Debug, Clone)]
 pub enum StdlibValue {
     Int(i32),
@@ -49,4 +53,5 @@ pub enum StdlibValue {
     Dict(Vec<(String, String)>),
     Float(f64),
     None,
+    Module(String), // Represents a sub-module like os.path
 }

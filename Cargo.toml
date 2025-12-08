@@ -1,6 +1,6 @@
 [package]
 name = "waspy"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 rust-version = "1.70.0"
 description = "A Python interpreter written in Rust, designed for WebAssembly."
@@ -25,11 +25,11 @@ wasm-plugin = ["serde"]
 
 [dependencies]
 rustpython-parser = "0.4.0"
-wasm-encoder = "0.240.0"
+wasm-encoder = "0.243.0"
 anyhow = "1.0.100"
 binaryen = "0.13.0"
 thiserror = "1.0"
-log = "0.4.28"
+log = "0.4.29"
 serde = { version = "1.0.228", features = ["derive"], optional = true }
 serde_json = "1.0"
 chrono = "0.4"

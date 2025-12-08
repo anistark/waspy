@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Complete System Calls Implementation** (Issue #27)
+  - Functional `os` module method calls (`os.getcwd()`, `os.getenv()`, `os.getpid()`, `os.urandom()`)
+  - Full `os.path` module support with working method calls
+    - Path manipulation: `os.path.join()`, `os.path.basename()`, `os.path.dirname()`, `os.path.abspath()`
+    - Path inspection: `os.path.exists()`, `os.path.isfile()`, `os.path.isdir()`
+    - Path operations: `os.path.split()`, `os.path.splitext()`
+  - Stdlib module method call handling in compiler for `sys`, `os`, and `os.path` modules
+  - WASM-appropriate implementations with platform limitations for web environments
+  - Comprehensive test suite in `examples/test_system_calls.py`
+
+### Fixed
+- Fixed `os` module functions that were previously only stubs
+- Fixed `os.path` sub-module access that was returning only attributes, not callable functions
+- Fixed stdlib method call compilation to properly handle module and sub-module method invocations
+
+## [0.8.0](https://github.com/anistark/waspy/releases/tag/v0.8.0) - 2025-12-07
+
+### Added
 - **Standard Library Modules (Complete)**
   - **sys module**: System parameters and functions
     - Attributes: `argv`, `platform`, `version`, `maxsize`, `stdin`, `stdout`, `stderr`, `path`
