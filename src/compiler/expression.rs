@@ -1445,7 +1445,11 @@ pub fn emit_expr(
                                     // getcwd() returns current working directory as string
                                     // For WASM, return "/" as default
                                     let cwd = "/".to_string();
-                                    let offset = memory_layout.string_offsets.get(&cwd).copied().unwrap_or(0);
+                                    let offset = memory_layout
+                                        .string_offsets
+                                        .get(&cwd)
+                                        .copied()
+                                        .unwrap_or(0);
                                     func.instruction(&Instruction::I32Const(offset as i32));
                                     func.instruction(&Instruction::I32Const(cwd.len() as i32));
                                     IRType::String
@@ -1485,129 +1489,151 @@ pub fn emit_expr(
             }
 
             // Check if this is an os.path method call
-            if let IRExpr::Attribute { object: attr_obj, attribute: attr_name } = &**object {
+            if let IRExpr::Attribute {
+                object: attr_obj,
+                attribute: attr_name,
+            } = &**object
+            {
                 if let IRExpr::Variable(module_name) = &**attr_obj {
-                    if crate::stdlib::is_stdlib_submodule(module_name, attr_name) {
-                        if module_name == "os" && attr_name == "path" {
-                            if let Some(path_func) = crate::stdlib::os::path::get_function(method_name) {
-                                return match path_func {
-                                    crate::stdlib::os::path::PathFunction::Join => {
-                                        // join(*paths) - joins path components
-                                        // For simplicity, just return first argument or "/"
-                                        if arguments.is_empty() {
-                                            let path = "/".to_string();
-                                            let offset = memory_layout.string_offsets.get(&path).copied().unwrap_or(0);
-                                            func.instruction(&Instruction::I32Const(offset as i32));
-                                            func.instruction(&Instruction::I32Const(path.len() as i32));
-                                        } else {
-                                            // Return first argument as simplified implementation
-                                            emit_expr(&arguments[0], func, ctx, memory_layout, None);
-                                            // Drop remaining arguments
-                                            for arg in arguments.iter().skip(1) {
-                                                emit_expr(arg, func, ctx, memory_layout, None);
-                                                func.instruction(&Instruction::Drop);
-                                                func.instruction(&Instruction::Drop);
-                                            }
-                                        }
-                                        IRType::String
-                                    }
-                                    crate::stdlib::os::path::PathFunction::Exists => {
-                                        // exists(path) - check if path exists
-                                        // For WASM, always return False
-                                        for arg in arguments {
-                                            emit_expr(arg, func, ctx, memory_layout, None);
-                                            func.instruction(&Instruction::Drop);
-                                            func.instruction(&Instruction::Drop);
-                                        }
-                                        func.instruction(&Instruction::I32Const(0));
-                                        IRType::Bool
-                                    }
-                                    crate::stdlib::os::path::PathFunction::Isfile => {
-                                        // isfile(path) - check if path is a file
-                                        // For WASM, always return False
-                                        for arg in arguments {
-                                            emit_expr(arg, func, ctx, memory_layout, None);
-                                            func.instruction(&Instruction::Drop);
-                                            func.instruction(&Instruction::Drop);
-                                        }
-                                        func.instruction(&Instruction::I32Const(0));
-                                        IRType::Bool
-                                    }
-                                    crate::stdlib::os::path::PathFunction::Isdir => {
-                                        // isdir(path) - check if path is a directory
-                                        // For WASM, always return False
-                                        for arg in arguments {
-                                            emit_expr(arg, func, ctx, memory_layout, None);
-                                            func.instruction(&Instruction::Drop);
-                                            func.instruction(&Instruction::Drop);
-                                        }
-                                        func.instruction(&Instruction::I32Const(0));
-                                        IRType::Bool
-                                    }
-                                    crate::stdlib::os::path::PathFunction::Basename => {
-                                        // basename(path) - get the base name
-                                        // For simplicity, return the input path
-                                        if arguments.is_empty() {
-                                            let path = "".to_string();
-                                            let offset = memory_layout.string_offsets.get(&path).copied().unwrap_or(0);
-                                            func.instruction(&Instruction::I32Const(offset as i32));
-                                            func.instruction(&Instruction::I32Const(path.len() as i32));
-                                        } else {
-                                            emit_expr(&arguments[0], func, ctx, memory_layout, None);
-                                        }
-                                        IRType::String
-                                    }
-                                    crate::stdlib::os::path::PathFunction::Dirname => {
-                                        // dirname(path) - get the directory name
-                                        // For simplicity, return "/"
-                                        for arg in arguments {
-                                            emit_expr(arg, func, ctx, memory_layout, None);
-                                            func.instruction(&Instruction::Drop);
-                                            func.instruction(&Instruction::Drop);
-                                        }
+                    if crate::stdlib::is_stdlib_submodule(module_name, attr_name)
+                        && module_name == "os"
+                        && attr_name == "path"
+                    {
+                        if let Some(path_func) = crate::stdlib::os::path::get_function(method_name)
+                        {
+                            return match path_func {
+                                crate::stdlib::os::path::PathFunction::Join => {
+                                    // join(*paths) - joins path components
+                                    // For simplicity, just return first argument or "/"
+                                    if arguments.is_empty() {
                                         let path = "/".to_string();
-                                        let offset = memory_layout.string_offsets.get(&path).copied().unwrap_or(0);
+                                        let offset = memory_layout
+                                            .string_offsets
+                                            .get(&path)
+                                            .copied()
+                                            .unwrap_or(0);
                                         func.instruction(&Instruction::I32Const(offset as i32));
                                         func.instruction(&Instruction::I32Const(path.len() as i32));
-                                        IRType::String
-                                    }
-                                    crate::stdlib::os::path::PathFunction::Abspath => {
-                                        // abspath(path) - get absolute path
-                                        // For simplicity, return input path
-                                        if arguments.is_empty() {
-                                            let path = "/".to_string();
-                                            let offset = memory_layout.string_offsets.get(&path).copied().unwrap_or(0);
-                                            func.instruction(&Instruction::I32Const(offset as i32));
-                                            func.instruction(&Instruction::I32Const(path.len() as i32));
-                                        } else {
-                                            emit_expr(&arguments[0], func, ctx, memory_layout, None);
-                                        }
-                                        IRType::String
-                                    }
-                                    crate::stdlib::os::path::PathFunction::Split => {
-                                        // split(path) - split into (head, tail)
-                                        // Return tuple as simplified implementation
-                                        for arg in arguments {
+                                    } else {
+                                        // Return first argument as simplified implementation
+                                        emit_expr(&arguments[0], func, ctx, memory_layout, None);
+                                        // Drop remaining arguments
+                                        for arg in arguments.iter().skip(1) {
                                             emit_expr(arg, func, ctx, memory_layout, None);
                                             func.instruction(&Instruction::Drop);
                                             func.instruction(&Instruction::Drop);
                                         }
-                                        func.instruction(&Instruction::I32Const(0));
-                                        IRType::Tuple(vec![IRType::String, IRType::String])
                                     }
-                                    crate::stdlib::os::path::PathFunction::Splitext => {
-                                        // splitext(path) - split into (root, ext)
-                                        // Return tuple as simplified implementation
-                                        for arg in arguments {
-                                            emit_expr(arg, func, ctx, memory_layout, None);
-                                            func.instruction(&Instruction::Drop);
-                                            func.instruction(&Instruction::Drop);
-                                        }
-                                        func.instruction(&Instruction::I32Const(0));
-                                        IRType::Tuple(vec![IRType::String, IRType::String])
+                                    IRType::String
+                                }
+                                crate::stdlib::os::path::PathFunction::Exists => {
+                                    // exists(path) - check if path exists
+                                    // For WASM, always return False
+                                    for arg in arguments {
+                                        emit_expr(arg, func, ctx, memory_layout, None);
+                                        func.instruction(&Instruction::Drop);
+                                        func.instruction(&Instruction::Drop);
                                     }
-                                };
-                            }
+                                    func.instruction(&Instruction::I32Const(0));
+                                    IRType::Bool
+                                }
+                                crate::stdlib::os::path::PathFunction::Isfile => {
+                                    // isfile(path) - check if path is a file
+                                    // For WASM, always return False
+                                    for arg in arguments {
+                                        emit_expr(arg, func, ctx, memory_layout, None);
+                                        func.instruction(&Instruction::Drop);
+                                        func.instruction(&Instruction::Drop);
+                                    }
+                                    func.instruction(&Instruction::I32Const(0));
+                                    IRType::Bool
+                                }
+                                crate::stdlib::os::path::PathFunction::Isdir => {
+                                    // isdir(path) - check if path is a directory
+                                    // For WASM, always return False
+                                    for arg in arguments {
+                                        emit_expr(arg, func, ctx, memory_layout, None);
+                                        func.instruction(&Instruction::Drop);
+                                        func.instruction(&Instruction::Drop);
+                                    }
+                                    func.instruction(&Instruction::I32Const(0));
+                                    IRType::Bool
+                                }
+                                crate::stdlib::os::path::PathFunction::Basename => {
+                                    // basename(path) - get the base name
+                                    // For simplicity, return the input path
+                                    if arguments.is_empty() {
+                                        let path = "".to_string();
+                                        let offset = memory_layout
+                                            .string_offsets
+                                            .get(&path)
+                                            .copied()
+                                            .unwrap_or(0);
+                                        func.instruction(&Instruction::I32Const(offset as i32));
+                                        func.instruction(&Instruction::I32Const(path.len() as i32));
+                                    } else {
+                                        emit_expr(&arguments[0], func, ctx, memory_layout, None);
+                                    }
+                                    IRType::String
+                                }
+                                crate::stdlib::os::path::PathFunction::Dirname => {
+                                    // dirname(path) - get the directory name
+                                    // For simplicity, return "/"
+                                    for arg in arguments {
+                                        emit_expr(arg, func, ctx, memory_layout, None);
+                                        func.instruction(&Instruction::Drop);
+                                        func.instruction(&Instruction::Drop);
+                                    }
+                                    let path = "/".to_string();
+                                    let offset = memory_layout
+                                        .string_offsets
+                                        .get(&path)
+                                        .copied()
+                                        .unwrap_or(0);
+                                    func.instruction(&Instruction::I32Const(offset as i32));
+                                    func.instruction(&Instruction::I32Const(path.len() as i32));
+                                    IRType::String
+                                }
+                                crate::stdlib::os::path::PathFunction::Abspath => {
+                                    // abspath(path) - get absolute path
+                                    // For simplicity, return input path
+                                    if arguments.is_empty() {
+                                        let path = "/".to_string();
+                                        let offset = memory_layout
+                                            .string_offsets
+                                            .get(&path)
+                                            .copied()
+                                            .unwrap_or(0);
+                                        func.instruction(&Instruction::I32Const(offset as i32));
+                                        func.instruction(&Instruction::I32Const(path.len() as i32));
+                                    } else {
+                                        emit_expr(&arguments[0], func, ctx, memory_layout, None);
+                                    }
+                                    IRType::String
+                                }
+                                crate::stdlib::os::path::PathFunction::Split => {
+                                    // split(path) - split into (head, tail)
+                                    // Return tuple as simplified implementation
+                                    for arg in arguments {
+                                        emit_expr(arg, func, ctx, memory_layout, None);
+                                        func.instruction(&Instruction::Drop);
+                                        func.instruction(&Instruction::Drop);
+                                    }
+                                    func.instruction(&Instruction::I32Const(0));
+                                    IRType::Tuple(vec![IRType::String, IRType::String])
+                                }
+                                crate::stdlib::os::path::PathFunction::Splitext => {
+                                    // splitext(path) - split into (root, ext)
+                                    // Return tuple as simplified implementation
+                                    for arg in arguments {
+                                        emit_expr(arg, func, ctx, memory_layout, None);
+                                        func.instruction(&Instruction::Drop);
+                                        func.instruction(&Instruction::Drop);
+                                    }
+                                    func.instruction(&Instruction::I32Const(0));
+                                    IRType::Tuple(vec![IRType::String, IRType::String])
+                                }
+                            };
                         }
                     }
                 }
