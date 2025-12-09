@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Logging Module** (Issue #34)
+  - Complete implementation of Python's `logging` standard library module
+  - Log level constants: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`, `NOTSET`
+  - Aliases: `WARN` (for `WARNING`), `FATAL` (for `CRITICAL`)
+  - Logging functions: `debug()`, `info()`, `warning()`, `error()`, `critical()`, `exception()`, `log()`
+  - Configuration: `basicConfig()`, `setLevel()`, `disable()`
+  - Logger management: `getLogger()`
+  - Handler support: `addHandler()`, `removeHandler()`
+  - Classes: `Logger`, `Handler`, `StreamHandler`, `FileHandler`, `Formatter`, `Filter`, `LogRecord`
+  - Test suite in `examples/test_logging.py`
+
 - **JSON Module Runtime Implementation** (Issue #31)
   - Implemented runtime support for `json.dumps()` - serialize Python objects to JSON strings
   - Implemented runtime support for `json.loads()` - parse JSON strings to Python objects
