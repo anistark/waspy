@@ -6,11 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-...
-
-## [0.8.0](https://github.com/anistark/waspy/releases/tag/v0.8.0) - 2025-12-07
 
 ### Added
+- **JSON Module Runtime Implementation** (Issue #31)
+  - Implemented runtime support for `json.dumps()` - serialize Python objects to JSON strings
+  - Implemented runtime support for `json.loads()` - parse JSON strings to Python objects
+  - Added runtime support for `json.load()` and `json.dump()` for file-based operations
+  - Added support for `JSONEncoder` and `JSONDecoder` classes
+  - Comprehensive test suite in `examples/test_json.py` covering:
+    - Basic type serialization (dict, list, string, int, bool, None)
+    - Deserialization of JSON strings
+    - Nested data structures
+    - All major json module functions
 - **Complete System Calls Implementation** (Issue #27)
   - Functional `os` module method calls (`os.getcwd()`, `os.getenv()`, `os.getpid()`, `os.urandom()`)
   - Full `os.path` module support with working method calls
@@ -22,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Comprehensive test suite in `examples/test_system_calls.py`
 
 ### Fixed
+- Fixed json module functions that were previously only stubs without runtime implementation
+- JSON module now properly compiles and executes in WASM environment
 - Fixed `os` module functions that were previously only stubs
 - Fixed `os.path` sub-module access that was returning only attributes, not callable functions
 - Fixed stdlib method call compilation to properly handle module and sub-module method invocations
