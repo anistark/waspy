@@ -3,6 +3,7 @@ pub mod datetime;
 pub mod functools;
 pub mod itertools;
 pub mod json;
+pub mod logging;
 pub mod math;
 pub mod os;
 pub mod random;
@@ -22,6 +23,7 @@ pub fn is_stdlib_module(name: &str) -> bool {
             | "collections"
             | "itertools"
             | "functools"
+            | "logging"
     )
 }
 
@@ -37,6 +39,7 @@ pub fn get_stdlib_attributes(module: &str, attr: &str) -> Option<StdlibValue> {
         "collections" => collections::get_attribute(attr),
         "itertools" => itertools::get_attribute(attr),
         "functools" => functools::get_attribute(attr),
+        "logging" => logging::get_attribute(attr),
         _ => None,
     }
 }

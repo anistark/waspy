@@ -1590,6 +1590,55 @@ pub fn emit_expr(
                             };
                         }
                     }
+
+                    // Handle logging module functions
+                    if module_name == "logging" {
+                        if let Some(log_func) = crate::stdlib::logging::get_function(method_name) {
+                            // Emit and drop all arguments
+                            for arg in arguments {
+                                let arg_type = emit_expr(arg, func, ctx, memory_layout, None);
+                                match arg_type {
+                                    IRType::String => {
+                                        // Strings are (offset, length)
+                                        func.instruction(&Instruction::Drop);
+                                        func.instruction(&Instruction::Drop);
+                                    }
+                                    _ => {
+                                        func.instruction(&Instruction::Drop);
+                                    }
+                                }
+                            }
+
+                            return match log_func {
+                                crate::stdlib::logging::LoggingFunction::Debug
+                                | crate::stdlib::logging::LoggingFunction::Info
+                                | crate::stdlib::logging::LoggingFunction::Warning
+                                | crate::stdlib::logging::LoggingFunction::Error
+                                | crate::stdlib::logging::LoggingFunction::Critical
+                                | crate::stdlib::logging::LoggingFunction::Exception
+                                | crate::stdlib::logging::LoggingFunction::Log
+                                | crate::stdlib::logging::LoggingFunction::BasicConfig
+                                | crate::stdlib::logging::LoggingFunction::SetLevel
+                                | crate::stdlib::logging::LoggingFunction::Disable
+                                | crate::stdlib::logging::LoggingFunction::AddHandler
+                                | crate::stdlib::logging::LoggingFunction::RemoveHandler => {
+                                    func.instruction(&Instruction::I32Const(0));
+                                    IRType::None
+                                }
+                                crate::stdlib::logging::LoggingFunction::GetLogger
+                                | crate::stdlib::logging::LoggingFunction::Logger
+                                | crate::stdlib::logging::LoggingFunction::Handler
+                                | crate::stdlib::logging::LoggingFunction::StreamHandler
+                                | crate::stdlib::logging::LoggingFunction::FileHandler
+                                | crate::stdlib::logging::LoggingFunction::Formatter
+                                | crate::stdlib::logging::LoggingFunction::Filter
+                                | crate::stdlib::logging::LoggingFunction::LogRecord => {
+                                    func.instruction(&Instruction::I32Const(0));
+                                    IRType::Unknown
+                                }
+                            };
+                        }
+                    }
                 }
             }
 
