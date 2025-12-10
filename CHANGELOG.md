@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Regular Expression (re) Module Runtime Implementation** (Issue #30)
+  - Full runtime support using the `regex` crate
+  - Core functions: `re.compile()`, `re.search()`, `re.match()`, `re.fullmatch()`
+  - Multi-match functions: `re.findall()`, `re.finditer()`
+  - String manipulation: `re.split()`, `re.sub()`, `re.subn()`
+  - Utility functions: `re.escape()`, `re.purge()`
+  - **Match object support** with methods:
+    - `group()` - returns matched string
+    - `groups()` - returns tuple of captured groups
+    - `start()`, `end()` - match position indices
+    - `span()` - returns (start, end) tuple
+  - **Regex flags support**:
+    - `re.IGNORECASE` / `re.I` - case-insensitive matching
+    - `re.MULTILINE` / `re.M` - multi-line mode (^ and $ match line boundaries)
+    - `re.DOTALL` / `re.S` - dot matches newlines
+    - `re.VERBOSE` / `re.X` - verbose patterns with comments
+    - `re.ASCII` / `re.A` - ASCII-only matching
+    - `re.UNICODE` / `re.U` - Unicode matching (default)
+  - Compile-time pattern evaluation for constant string patterns
+
 - **Datetime Module Runtime Implementation** (Issue #32)
   - Full runtime support for `datetime` module with chrono backend
   - Constructors: `datetime.datetime()`, `datetime.date()`, `datetime.time()`, `datetime.timedelta()`

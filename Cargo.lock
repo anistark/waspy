@@ -894,6 +894,7 @@ dependencies = [
  "binaryen",
  "chrono",
  "log",
+ "regex",
  "rustpython-parser",
  "serde",
  "serde_json",
