@@ -278,6 +278,11 @@ pub enum IRType {
         return_type: Box<IRType>,
     },
     Generator(Box<IRType>), // Generator yields values of this type
+    // Datetime types for proper arithmetic support
+    Datetime,  // (year, month, day, hour, minute, second, microsecond)
+    Date,      // (year, month, day)
+    Time,      // (hour, minute, second, microsecond)
+    Timedelta, // (days, seconds, microseconds)
 }
 
 /// Binary operators in the IR

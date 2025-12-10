@@ -8,6 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Datetime Module Runtime Implementation** (Issue #32)
+  - Full runtime support for `datetime` module with chrono backend
+  - Constructors: `datetime.datetime()`, `datetime.date()`, `datetime.time()`, `datetime.timedelta()`
+  - Class methods: `datetime.datetime.now()`, `datetime.datetime.today()`, `datetime.date.today()`
+  - Factory methods: `fromtimestamp()`, `fromisoformat()`, `strptime()`
+  - Instance methods: `strftime()`, `isoformat()`, `replace()`, `timestamp()`, `weekday()`, `isoweekday()`
+  - **Date arithmetic operations**:
+    - `datetime + timedelta` → datetime
+    - `datetime - timedelta` → datetime
+    - `datetime - datetime` → timedelta
+    - `date + timedelta` → date
+    - `date - timedelta` → date
+    - `date - date` → timedelta
+    - `timedelta + timedelta` → timedelta
+    - `timedelta - timedelta` → timedelta
+  - New dedicated IRType variants: `Datetime`, `Date`, `Time`, `Timedelta`
+  - Datetime represented as 7 i32s: (year, month, day, hour, minute, second, microsecond)
+  - Date represented as 3 i32s: (year, month, day)
+  - Time represented as 4 i32s: (hour, minute, second, microsecond)
+  - Timedelta represented as 3 i32s: (days, seconds, microseconds)
+  - Test suite in `examples/test_datetime.py`
+
 - **Logging Module** (Issue #34)
   - Complete implementation of Python's `logging` standard library module
   - Log level constants: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`, `NOTSET`

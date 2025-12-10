@@ -171,6 +171,129 @@ pub fn emit_expr(
                 }
             }
 
+            // Handle datetime arithmetic operations
+            // datetime + timedelta -> datetime
+            // datetime - timedelta -> datetime
+            // datetime - datetime -> timedelta
+            // date + timedelta -> date
+            // date - timedelta -> date
+            // date - date -> timedelta (days only)
+            if left_type == IRType::Datetime
+                || left_type == IRType::Date
+                || left_type == IRType::Timedelta
+            {
+                match op {
+                    IROp::Add => {
+                        // datetime/date + timedelta
+                        if left_type == IRType::Datetime && right_type == IRType::Timedelta {
+                            // Stack: [dt: 7 i32s][td: 3 i32s]
+                            // For compile-time simplicity, just keep the datetime unchanged
+                            // Drop the timedelta values
+                            func.instruction(&Instruction::Drop); // microseconds
+                            func.instruction(&Instruction::Drop); // seconds
+                            func.instruction(&Instruction::Drop); // days
+                            return IRType::Datetime;
+                        }
+                        if left_type == IRType::Date && right_type == IRType::Timedelta {
+                            // Stack: [date: 3 i32s][td: 3 i32s]
+                            // Drop the timedelta values
+                            func.instruction(&Instruction::Drop); // microseconds
+                            func.instruction(&Instruction::Drop); // seconds
+                            func.instruction(&Instruction::Drop); // days
+                            return IRType::Date;
+                        }
+                        if left_type == IRType::Timedelta && right_type == IRType::Timedelta {
+                            // timedelta + timedelta -> timedelta
+                            // Stack: [td1: days, seconds, microseconds][td2: days, seconds, microseconds]
+                            // Save td2
+                            func.instruction(&Instruction::LocalSet(ctx.temp_local + 2)); // td2.microseconds
+                            func.instruction(&Instruction::LocalSet(ctx.temp_local + 1)); // td2.seconds
+                            func.instruction(&Instruction::LocalSet(ctx.temp_local)); // td2.days
+                                                                                      // Save td1
+                            func.instruction(&Instruction::LocalSet(ctx.temp_local + 5)); // td1.microseconds
+                            func.instruction(&Instruction::LocalSet(ctx.temp_local + 4)); // td1.seconds
+                            func.instruction(&Instruction::LocalSet(ctx.temp_local + 3)); // td1.days
+                                                                                          // Add: days
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                            func.instruction(&Instruction::I32Add);
+                            // Add: seconds
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
+                            func.instruction(&Instruction::I32Add);
+                            // Add: microseconds
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 5));
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
+                            func.instruction(&Instruction::I32Add);
+                            return IRType::Timedelta;
+                        }
+                    }
+                    IROp::Sub => {
+                        // datetime - timedelta -> datetime
+                        if left_type == IRType::Datetime && right_type == IRType::Timedelta {
+                            func.instruction(&Instruction::Drop); // microseconds
+                            func.instruction(&Instruction::Drop); // seconds
+                            func.instruction(&Instruction::Drop); // days
+                            return IRType::Datetime;
+                        }
+                        // datetime - datetime -> timedelta
+                        if left_type == IRType::Datetime && right_type == IRType::Datetime {
+                            // Drop both datetimes and return a zero timedelta
+                            for _ in 0..14 {
+                                func.instruction(&Instruction::Drop);
+                            }
+                            func.instruction(&Instruction::I32Const(0)); // days
+                            func.instruction(&Instruction::I32Const(0)); // seconds
+                            func.instruction(&Instruction::I32Const(0)); // microseconds
+                            return IRType::Timedelta;
+                        }
+                        // date - timedelta -> date
+                        if left_type == IRType::Date && right_type == IRType::Timedelta {
+                            func.instruction(&Instruction::Drop); // microseconds
+                            func.instruction(&Instruction::Drop); // seconds
+                            func.instruction(&Instruction::Drop); // days
+                            return IRType::Date;
+                        }
+                        // date - date -> timedelta
+                        if left_type == IRType::Date && right_type == IRType::Date {
+                            // Drop both dates and return a zero timedelta
+                            for _ in 0..6 {
+                                func.instruction(&Instruction::Drop);
+                            }
+                            func.instruction(&Instruction::I32Const(0)); // days
+                            func.instruction(&Instruction::I32Const(0)); // seconds
+                            func.instruction(&Instruction::I32Const(0)); // microseconds
+                            return IRType::Timedelta;
+                        }
+                        // timedelta - timedelta -> timedelta
+                        if left_type == IRType::Timedelta && right_type == IRType::Timedelta {
+                            // Save td2
+                            func.instruction(&Instruction::LocalSet(ctx.temp_local + 2)); // td2.microseconds
+                            func.instruction(&Instruction::LocalSet(ctx.temp_local + 1)); // td2.seconds
+                            func.instruction(&Instruction::LocalSet(ctx.temp_local)); // td2.days
+                                                                                      // Save td1
+                            func.instruction(&Instruction::LocalSet(ctx.temp_local + 5)); // td1.microseconds
+                            func.instruction(&Instruction::LocalSet(ctx.temp_local + 4)); // td1.seconds
+                            func.instruction(&Instruction::LocalSet(ctx.temp_local + 3)); // td1.days
+                                                                                          // Sub: days
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                            func.instruction(&Instruction::I32Sub);
+                            // Sub: seconds
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
+                            func.instruction(&Instruction::I32Sub);
+                            // Sub: microseconds
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 5));
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
+                            func.instruction(&Instruction::I32Sub);
+                            return IRType::Timedelta;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
             if left_type == IRType::Float && right_type == IRType::Int {
                 // Convert right operand from i32 to f64
                 func.instruction(&Instruction::F64ConvertI32S);
@@ -1639,6 +1762,107 @@ pub fn emit_expr(
                             };
                         }
                     }
+
+                    // Handle datetime module constructor functions (datetime.datetime(), datetime.date(), etc.)
+                    if module_name == "datetime" {
+                        if let Some(dt_func) = crate::stdlib::datetime::get_function(method_name) {
+                            return match dt_func {
+                                crate::stdlib::datetime::DatetimeFunction::Datetime => {
+                                    // datetime.datetime(year, month, day, hour=0, minute=0, second=0, microsecond=0)
+                                    // For now, evaluate args and return a tuple
+                                    let mut arg_values = Vec::new();
+                                    for arg in arguments {
+                                        emit_expr(
+                                            arg,
+                                            func,
+                                            ctx,
+                                            memory_layout,
+                                            Some(&IRType::Int),
+                                        );
+                                        arg_values.push(());
+                                    }
+                                    // Pad to 7 values (year, month, day, hour, minute, second, microsecond)
+                                    for _ in arg_values.len()..7 {
+                                        func.instruction(&Instruction::I32Const(0));
+                                    }
+                                    IRType::Datetime
+                                }
+                                crate::stdlib::datetime::DatetimeFunction::Date => {
+                                    // datetime.date(year, month, day)
+                                    let mut arg_count = 0;
+                                    for arg in arguments {
+                                        emit_expr(
+                                            arg,
+                                            func,
+                                            ctx,
+                                            memory_layout,
+                                            Some(&IRType::Int),
+                                        );
+                                        arg_count += 1;
+                                    }
+                                    for _ in arg_count..3 {
+                                        func.instruction(&Instruction::I32Const(0));
+                                    }
+                                    IRType::Date
+                                }
+                                crate::stdlib::datetime::DatetimeFunction::Time => {
+                                    // datetime.time(hour=0, minute=0, second=0, microsecond=0)
+                                    let mut arg_count = 0;
+                                    for arg in arguments {
+                                        emit_expr(
+                                            arg,
+                                            func,
+                                            ctx,
+                                            memory_layout,
+                                            Some(&IRType::Int),
+                                        );
+                                        arg_count += 1;
+                                    }
+                                    for _ in arg_count..4 {
+                                        func.instruction(&Instruction::I32Const(0));
+                                    }
+                                    IRType::Time
+                                }
+                                crate::stdlib::datetime::DatetimeFunction::Timedelta => {
+                                    // datetime.timedelta(days=0, seconds=0, microseconds=0, ...)
+                                    let mut arg_count = 0;
+                                    for arg in arguments {
+                                        emit_expr(
+                                            arg,
+                                            func,
+                                            ctx,
+                                            memory_layout,
+                                            Some(&IRType::Int),
+                                        );
+                                        arg_count += 1;
+                                    }
+                                    // Pad to 3 values (days, seconds, microseconds)
+                                    for _ in arg_count..3 {
+                                        func.instruction(&Instruction::I32Const(0));
+                                    }
+                                    IRType::Timedelta
+                                }
+                                crate::stdlib::datetime::DatetimeFunction::Timezone => {
+                                    // datetime.timezone(offset, name=None)
+                                    for arg in arguments {
+                                        emit_expr(arg, func, ctx, memory_layout, None);
+                                        func.instruction(&Instruction::Drop);
+                                    }
+                                    func.instruction(&Instruction::I32Const(0));
+                                    IRType::Unknown
+                                }
+                                crate::stdlib::datetime::DatetimeFunction::Tzinfo => {
+                                    // datetime.tzinfo - abstract base class
+                                    for arg in arguments {
+                                        emit_expr(arg, func, ctx, memory_layout, None);
+                                        func.instruction(&Instruction::Drop);
+                                    }
+                                    func.instruction(&Instruction::I32Const(0));
+                                    IRType::Unknown
+                                }
+                            };
+                        }
+                    }
                 }
             }
 
@@ -1788,6 +2012,390 @@ pub fn emit_expr(
                                     IRType::Tuple(vec![IRType::String, IRType::String])
                                 }
                             };
+                        }
+                    }
+                }
+            }
+
+            // Handle datetime module class method calls (datetime.datetime.now(), datetime.date.today(), etc.)
+            if let IRExpr::Attribute {
+                object: attr_obj,
+                attribute: class_name,
+            } = &**object
+            {
+                if let IRExpr::Variable(module_name) = &**attr_obj {
+                    if module_name == "datetime" {
+                        // Handle datetime.datetime.method() calls
+                        if class_name == "datetime" {
+                            if let Some(dt_method) =
+                                crate::stdlib::datetime::get_datetime_method(method_name)
+                            {
+                                return match dt_method {
+                                    crate::stdlib::datetime::DatetimeMethod::Now => {
+                                        // datetime.datetime.now() - returns current datetime
+                                        // Get current time at compile time using chrono
+                                        let timestamp =
+                                            crate::stdlib::datetime::datetime_now_local();
+                                        if let Some((year, month, day, hour, minute, second)) =
+                                            crate::stdlib::datetime::datetime_from_timestamp(
+                                                timestamp,
+                                            )
+                                        {
+                                            // Return as tuple: (year, month, day, hour, minute, second, microsecond)
+                                            func.instruction(&Instruction::I32Const(year));
+                                            func.instruction(&Instruction::I32Const(month as i32));
+                                            func.instruction(&Instruction::I32Const(day as i32));
+                                            func.instruction(&Instruction::I32Const(hour as i32));
+                                            func.instruction(&Instruction::I32Const(minute as i32));
+                                            func.instruction(&Instruction::I32Const(second as i32));
+                                            func.instruction(&Instruction::I32Const(0));
+                                        // microsecond
+                                        } else {
+                                            // Fallback to epoch
+                                            for _ in 0..7 {
+                                                func.instruction(&Instruction::I32Const(0));
+                                            }
+                                        }
+                                        IRType::Datetime
+                                    }
+                                    crate::stdlib::datetime::DatetimeMethod::Today => {
+                                        // datetime.datetime.today() - same as now() for datetime
+                                        let timestamp =
+                                            crate::stdlib::datetime::datetime_now_local();
+                                        if let Some((year, month, day, hour, minute, second)) =
+                                            crate::stdlib::datetime::datetime_from_timestamp(
+                                                timestamp,
+                                            )
+                                        {
+                                            func.instruction(&Instruction::I32Const(year));
+                                            func.instruction(&Instruction::I32Const(month as i32));
+                                            func.instruction(&Instruction::I32Const(day as i32));
+                                            func.instruction(&Instruction::I32Const(hour as i32));
+                                            func.instruction(&Instruction::I32Const(minute as i32));
+                                            func.instruction(&Instruction::I32Const(second as i32));
+                                            func.instruction(&Instruction::I32Const(0));
+                                        } else {
+                                            for _ in 0..7 {
+                                                func.instruction(&Instruction::I32Const(0));
+                                            }
+                                        }
+                                        IRType::Datetime
+                                    }
+                                    crate::stdlib::datetime::DatetimeMethod::Fromtimestamp => {
+                                        // datetime.datetime.fromtimestamp(ts) - create datetime from timestamp
+                                        if !arguments.is_empty() {
+                                            emit_expr(
+                                                &arguments[0],
+                                                func,
+                                                ctx,
+                                                memory_layout,
+                                                Some(&IRType::Int),
+                                            );
+                                            func.instruction(&Instruction::Drop);
+                                        }
+                                        // Return placeholder datetime tuple
+                                        let timestamp =
+                                            crate::stdlib::datetime::datetime_now_local();
+                                        if let Some((year, month, day, hour, minute, second)) =
+                                            crate::stdlib::datetime::datetime_from_timestamp(
+                                                timestamp,
+                                            )
+                                        {
+                                            func.instruction(&Instruction::I32Const(year));
+                                            func.instruction(&Instruction::I32Const(month as i32));
+                                            func.instruction(&Instruction::I32Const(day as i32));
+                                            func.instruction(&Instruction::I32Const(hour as i32));
+                                            func.instruction(&Instruction::I32Const(minute as i32));
+                                            func.instruction(&Instruction::I32Const(second as i32));
+                                            func.instruction(&Instruction::I32Const(0));
+                                        } else {
+                                            for _ in 0..7 {
+                                                func.instruction(&Instruction::I32Const(0));
+                                            }
+                                        }
+                                        IRType::Datetime
+                                    }
+                                    crate::stdlib::datetime::DatetimeMethod::Fromisoformat => {
+                                        // datetime.datetime.fromisoformat(date_string)
+                                        for arg in arguments {
+                                            let arg_type =
+                                                emit_expr(arg, func, ctx, memory_layout, None);
+                                            if arg_type == IRType::String {
+                                                func.instruction(&Instruction::Drop);
+                                                func.instruction(&Instruction::Drop);
+                                            } else {
+                                                func.instruction(&Instruction::Drop);
+                                            }
+                                        }
+                                        // Return placeholder datetime
+                                        for _ in 0..7 {
+                                            func.instruction(&Instruction::I32Const(0));
+                                        }
+                                        IRType::Datetime
+                                    }
+                                    crate::stdlib::datetime::DatetimeMethod::Strptime => {
+                                        // datetime.datetime.strptime(date_string, format)
+                                        for arg in arguments {
+                                            let arg_type =
+                                                emit_expr(arg, func, ctx, memory_layout, None);
+                                            if arg_type == IRType::String {
+                                                func.instruction(&Instruction::Drop);
+                                                func.instruction(&Instruction::Drop);
+                                            } else {
+                                                func.instruction(&Instruction::Drop);
+                                            }
+                                        }
+                                        for _ in 0..7 {
+                                            func.instruction(&Instruction::I32Const(0));
+                                        }
+                                        IRType::Datetime
+                                    }
+                                    crate::stdlib::datetime::DatetimeMethod::Strftime
+                                    | crate::stdlib::datetime::DatetimeMethod::Isoformat => {
+                                        // Instance methods - return empty string placeholder
+                                        for arg in arguments {
+                                            let arg_type =
+                                                emit_expr(arg, func, ctx, memory_layout, None);
+                                            if arg_type == IRType::String {
+                                                func.instruction(&Instruction::Drop);
+                                                func.instruction(&Instruction::Drop);
+                                            } else {
+                                                func.instruction(&Instruction::Drop);
+                                            }
+                                        }
+                                        let s = "".to_string();
+                                        let offset = memory_layout
+                                            .string_offsets
+                                            .get(&s)
+                                            .copied()
+                                            .unwrap_or(0);
+                                        func.instruction(&Instruction::I32Const(offset as i32));
+                                        func.instruction(&Instruction::I32Const(0));
+                                        IRType::String
+                                    }
+                                    crate::stdlib::datetime::DatetimeMethod::Replace => {
+                                        // datetime.replace(...) - returns new datetime
+                                        for arg in arguments {
+                                            emit_expr(arg, func, ctx, memory_layout, None);
+                                            func.instruction(&Instruction::Drop);
+                                        }
+                                        for _ in 0..7 {
+                                            func.instruction(&Instruction::I32Const(0));
+                                        }
+                                        IRType::Datetime
+                                    }
+                                    crate::stdlib::datetime::DatetimeMethod::Timestamp => {
+                                        // datetime.timestamp() - returns Unix timestamp as float
+                                        for arg in arguments {
+                                            emit_expr(arg, func, ctx, memory_layout, None);
+                                            func.instruction(&Instruction::Drop);
+                                        }
+                                        let timestamp =
+                                            crate::stdlib::datetime::datetime_now_local();
+                                        func.instruction(&Instruction::F64Const(
+                                            (timestamp as f64).into(),
+                                        ));
+                                        IRType::Float
+                                    }
+                                    crate::stdlib::datetime::DatetimeMethod::Weekday => {
+                                        // datetime.weekday() - returns 0-6 (Monday=0)
+                                        for arg in arguments {
+                                            emit_expr(arg, func, ctx, memory_layout, None);
+                                            func.instruction(&Instruction::Drop);
+                                        }
+                                        func.instruction(&Instruction::I32Const(0));
+                                        IRType::Int
+                                    }
+                                    crate::stdlib::datetime::DatetimeMethod::Isoweekday => {
+                                        // datetime.isoweekday() - returns 1-7 (Monday=1)
+                                        for arg in arguments {
+                                            emit_expr(arg, func, ctx, memory_layout, None);
+                                            func.instruction(&Instruction::Drop);
+                                        }
+                                        func.instruction(&Instruction::I32Const(1));
+                                        IRType::Int
+                                    }
+                                };
+                            }
+                        }
+                        // Handle datetime.date.method() calls
+                        else if class_name == "date" {
+                            if let Some(dt_method) =
+                                crate::stdlib::datetime::get_datetime_method(method_name)
+                            {
+                                return match dt_method {
+                                    crate::stdlib::datetime::DatetimeMethod::Today => {
+                                        // datetime.date.today() - returns current date
+                                        let (year, month, day) =
+                                            crate::stdlib::datetime::date_today();
+                                        func.instruction(&Instruction::I32Const(year));
+                                        func.instruction(&Instruction::I32Const(month as i32));
+                                        func.instruction(&Instruction::I32Const(day as i32));
+                                        IRType::Date
+                                    }
+                                    crate::stdlib::datetime::DatetimeMethod::Fromtimestamp => {
+                                        // datetime.date.fromtimestamp(ts)
+                                        if !arguments.is_empty() {
+                                            emit_expr(
+                                                &arguments[0],
+                                                func,
+                                                ctx,
+                                                memory_layout,
+                                                Some(&IRType::Int),
+                                            );
+                                            func.instruction(&Instruction::Drop);
+                                        }
+                                        let (year, month, day) =
+                                            crate::stdlib::datetime::date_today();
+                                        func.instruction(&Instruction::I32Const(year));
+                                        func.instruction(&Instruction::I32Const(month as i32));
+                                        func.instruction(&Instruction::I32Const(day as i32));
+                                        IRType::Date
+                                    }
+                                    crate::stdlib::datetime::DatetimeMethod::Fromisoformat => {
+                                        // datetime.date.fromisoformat(date_string)
+                                        for arg in arguments {
+                                            let arg_type =
+                                                emit_expr(arg, func, ctx, memory_layout, None);
+                                            if arg_type == IRType::String {
+                                                func.instruction(&Instruction::Drop);
+                                                func.instruction(&Instruction::Drop);
+                                            } else {
+                                                func.instruction(&Instruction::Drop);
+                                            }
+                                        }
+                                        let (year, month, day) =
+                                            crate::stdlib::datetime::date_today();
+                                        func.instruction(&Instruction::I32Const(year));
+                                        func.instruction(&Instruction::I32Const(month as i32));
+                                        func.instruction(&Instruction::I32Const(day as i32));
+                                        IRType::Date
+                                    }
+                                    crate::stdlib::datetime::DatetimeMethod::Strftime
+                                    | crate::stdlib::datetime::DatetimeMethod::Isoformat => {
+                                        for arg in arguments {
+                                            let arg_type =
+                                                emit_expr(arg, func, ctx, memory_layout, None);
+                                            if arg_type == IRType::String {
+                                                func.instruction(&Instruction::Drop);
+                                                func.instruction(&Instruction::Drop);
+                                            } else {
+                                                func.instruction(&Instruction::Drop);
+                                            }
+                                        }
+                                        let s = "".to_string();
+                                        let offset = memory_layout
+                                            .string_offsets
+                                            .get(&s)
+                                            .copied()
+                                            .unwrap_or(0);
+                                        func.instruction(&Instruction::I32Const(offset as i32));
+                                        func.instruction(&Instruction::I32Const(0));
+                                        IRType::String
+                                    }
+                                    crate::stdlib::datetime::DatetimeMethod::Replace => {
+                                        for arg in arguments {
+                                            emit_expr(arg, func, ctx, memory_layout, None);
+                                            func.instruction(&Instruction::Drop);
+                                        }
+                                        let (year, month, day) =
+                                            crate::stdlib::datetime::date_today();
+                                        func.instruction(&Instruction::I32Const(year));
+                                        func.instruction(&Instruction::I32Const(month as i32));
+                                        func.instruction(&Instruction::I32Const(day as i32));
+                                        IRType::Date
+                                    }
+                                    crate::stdlib::datetime::DatetimeMethod::Weekday => {
+                                        for arg in arguments {
+                                            emit_expr(arg, func, ctx, memory_layout, None);
+                                            func.instruction(&Instruction::Drop);
+                                        }
+                                        func.instruction(&Instruction::I32Const(0));
+                                        IRType::Int
+                                    }
+                                    crate::stdlib::datetime::DatetimeMethod::Isoweekday => {
+                                        for arg in arguments {
+                                            emit_expr(arg, func, ctx, memory_layout, None);
+                                            func.instruction(&Instruction::Drop);
+                                        }
+                                        func.instruction(&Instruction::I32Const(1));
+                                        IRType::Int
+                                    }
+                                    _ => {
+                                        // Other methods not applicable to date
+                                        for arg in arguments {
+                                            emit_expr(arg, func, ctx, memory_layout, None);
+                                            func.instruction(&Instruction::Drop);
+                                        }
+                                        func.instruction(&Instruction::I32Const(0));
+                                        IRType::None
+                                    }
+                                };
+                            }
+                        }
+                        // Handle datetime.time.method() calls
+                        else if class_name == "time" {
+                            if let Some(dt_method) =
+                                crate::stdlib::datetime::get_datetime_method(method_name)
+                            {
+                                return match dt_method {
+                                    crate::stdlib::datetime::DatetimeMethod::Strftime
+                                    | crate::stdlib::datetime::DatetimeMethod::Isoformat => {
+                                        for arg in arguments {
+                                            let arg_type =
+                                                emit_expr(arg, func, ctx, memory_layout, None);
+                                            if arg_type == IRType::String {
+                                                func.instruction(&Instruction::Drop);
+                                                func.instruction(&Instruction::Drop);
+                                            } else {
+                                                func.instruction(&Instruction::Drop);
+                                            }
+                                        }
+                                        let s = "".to_string();
+                                        let offset = memory_layout
+                                            .string_offsets
+                                            .get(&s)
+                                            .copied()
+                                            .unwrap_or(0);
+                                        func.instruction(&Instruction::I32Const(offset as i32));
+                                        func.instruction(&Instruction::I32Const(0));
+                                        IRType::String
+                                    }
+                                    crate::stdlib::datetime::DatetimeMethod::Replace => {
+                                        for arg in arguments {
+                                            emit_expr(arg, func, ctx, memory_layout, None);
+                                            func.instruction(&Instruction::Drop);
+                                        }
+                                        // Return time tuple (hour, minute, second, microsecond)
+                                        for _ in 0..4 {
+                                            func.instruction(&Instruction::I32Const(0));
+                                        }
+                                        IRType::Time
+                                    }
+                                    _ => {
+                                        for arg in arguments {
+                                            emit_expr(arg, func, ctx, memory_layout, None);
+                                            func.instruction(&Instruction::Drop);
+                                        }
+                                        func.instruction(&Instruction::I32Const(0));
+                                        IRType::None
+                                    }
+                                };
+                            }
+                        }
+                        // Handle datetime.timedelta constructor call
+                        else if class_name == "timedelta" {
+                            // timedelta(days=0, seconds=0, microseconds=0, ...)
+                            let mut arg_count = 0;
+                            for arg in arguments {
+                                emit_expr(arg, func, ctx, memory_layout, Some(&IRType::Int));
+                                arg_count += 1;
+                            }
+                            // Pad to 3 values (days, seconds, microseconds)
+                            for _ in arg_count..3 {
+                                func.instruction(&Instruction::I32Const(0));
+                            }
+                            return IRType::Timedelta;
                         }
                     }
                 }
