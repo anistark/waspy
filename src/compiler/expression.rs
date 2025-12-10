@@ -1763,6 +1763,567 @@ pub fn emit_expr(
                         }
                     }
 
+                    // Handle re module functions
+                    if module_name == "re" {
+                        if let Some(re_func) = crate::stdlib::re::get_function(method_name) {
+                            return match re_func {
+                                crate::stdlib::re::ReFunction::Compile => {
+                                    // re.compile(pattern, flags=0) - compile pattern for reuse
+                                    // For compile-time constant patterns, we can pre-validate
+                                    if !arguments.is_empty() {
+                                        if let IRExpr::Const(IRConstant::String(pattern)) =
+                                            &arguments[0]
+                                        {
+                                            // Validate pattern at compile time
+                                            let flags = if arguments.len() > 1 {
+                                                if let IRExpr::Const(IRConstant::Int(f)) =
+                                                    &arguments[1]
+                                                {
+                                                    *f
+                                                } else {
+                                                    0
+                                                }
+                                            } else {
+                                                0
+                                            };
+                                            // Store pattern in memory (lookup existing or use 0)
+                                            let offset = memory_layout
+                                                .string_offsets
+                                                .get(pattern)
+                                                .copied()
+                                                .unwrap_or(0);
+                                            func.instruction(&Instruction::I32Const(offset as i32));
+                                            func.instruction(&Instruction::I32Const(
+                                                pattern.len() as i32
+                                            ));
+                                            func.instruction(&Instruction::I32Const(flags));
+                                            return IRType::Unknown; // Pattern object
+                                        }
+                                    }
+                                    // Drop all arguments for non-constant patterns
+                                    for arg in arguments {
+                                        let arg_type =
+                                            emit_expr(arg, func, ctx, memory_layout, None);
+                                        if arg_type == IRType::String {
+                                            func.instruction(&Instruction::Drop);
+                                            func.instruction(&Instruction::Drop);
+                                        } else {
+                                            func.instruction(&Instruction::Drop);
+                                        }
+                                    }
+                                    func.instruction(&Instruction::I32Const(0));
+                                    func.instruction(&Instruction::I32Const(0));
+                                    func.instruction(&Instruction::I32Const(0));
+                                    IRType::Unknown
+                                }
+                                crate::stdlib::re::ReFunction::Search => {
+                                    // re.search(pattern, string, flags=0) - search for pattern
+                                    // Returns Match object or None
+                                    if arguments.len() >= 2 {
+                                        if let (
+                                            IRExpr::Const(IRConstant::String(pattern)),
+                                            IRExpr::Const(IRConstant::String(text)),
+                                        ) = (&arguments[0], &arguments[1])
+                                        {
+                                            let flags = if arguments.len() > 2 {
+                                                if let IRExpr::Const(IRConstant::Int(f)) =
+                                                    &arguments[2]
+                                                {
+                                                    *f
+                                                } else {
+                                                    0
+                                                }
+                                            } else {
+                                                0
+                                            };
+                                            // Execute search at compile time
+                                            if let Some(result) =
+                                                crate::stdlib::re::search(pattern, text, flags)
+                                            {
+                                                // Return match info (using text offset if available)
+                                                let offset = memory_layout
+                                                    .string_offsets
+                                                    .get(&result.group)
+                                                    .copied()
+                                                    .unwrap_or(0);
+                                                func.instruction(&Instruction::I32Const(
+                                                    offset as i32,
+                                                ));
+                                                func.instruction(&Instruction::I32Const(
+                                                    result.group.len() as i32,
+                                                ));
+                                                func.instruction(&Instruction::I32Const(
+                                                    result.start as i32,
+                                                ));
+                                                func.instruction(&Instruction::I32Const(
+                                                    result.end as i32,
+                                                ));
+                                                return IRType::Unknown; // Match object
+                                            } else {
+                                                // No match - return None indicator
+                                                func.instruction(&Instruction::I32Const(0));
+                                                func.instruction(&Instruction::I32Const(0));
+                                                func.instruction(&Instruction::I32Const(-1));
+                                                func.instruction(&Instruction::I32Const(-1));
+                                                return IRType::None;
+                                            }
+                                        }
+                                    }
+                                    // Runtime search - drop args and return placeholder
+                                    for arg in arguments {
+                                        let arg_type =
+                                            emit_expr(arg, func, ctx, memory_layout, None);
+                                        if arg_type == IRType::String {
+                                            func.instruction(&Instruction::Drop);
+                                            func.instruction(&Instruction::Drop);
+                                        } else {
+                                            func.instruction(&Instruction::Drop);
+                                        }
+                                    }
+                                    func.instruction(&Instruction::I32Const(0));
+                                    func.instruction(&Instruction::I32Const(0));
+                                    func.instruction(&Instruction::I32Const(-1));
+                                    func.instruction(&Instruction::I32Const(-1));
+                                    IRType::None
+                                }
+                                crate::stdlib::re::ReFunction::Match => {
+                                    // re.match(pattern, string, flags=0) - match at beginning
+                                    if arguments.len() >= 2 {
+                                        if let (
+                                            IRExpr::Const(IRConstant::String(pattern)),
+                                            IRExpr::Const(IRConstant::String(text)),
+                                        ) = (&arguments[0], &arguments[1])
+                                        {
+                                            let flags = if arguments.len() > 2 {
+                                                if let IRExpr::Const(IRConstant::Int(f)) =
+                                                    &arguments[2]
+                                                {
+                                                    *f
+                                                } else {
+                                                    0
+                                                }
+                                            } else {
+                                                0
+                                            };
+                                            if let Some(result) =
+                                                crate::stdlib::re::match_start(pattern, text, flags)
+                                            {
+                                                let offset = memory_layout
+                                                    .string_offsets
+                                                    .get(&result.group)
+                                                    .copied()
+                                                    .unwrap_or(0);
+                                                func.instruction(&Instruction::I32Const(
+                                                    offset as i32,
+                                                ));
+                                                func.instruction(&Instruction::I32Const(
+                                                    result.group.len() as i32,
+                                                ));
+                                                func.instruction(&Instruction::I32Const(
+                                                    result.start as i32,
+                                                ));
+                                                func.instruction(&Instruction::I32Const(
+                                                    result.end as i32,
+                                                ));
+                                                return IRType::Unknown;
+                                            } else {
+                                                func.instruction(&Instruction::I32Const(0));
+                                                func.instruction(&Instruction::I32Const(0));
+                                                func.instruction(&Instruction::I32Const(-1));
+                                                func.instruction(&Instruction::I32Const(-1));
+                                                return IRType::None;
+                                            }
+                                        }
+                                    }
+                                    for arg in arguments {
+                                        let arg_type =
+                                            emit_expr(arg, func, ctx, memory_layout, None);
+                                        if arg_type == IRType::String {
+                                            func.instruction(&Instruction::Drop);
+                                            func.instruction(&Instruction::Drop);
+                                        } else {
+                                            func.instruction(&Instruction::Drop);
+                                        }
+                                    }
+                                    func.instruction(&Instruction::I32Const(0));
+                                    func.instruction(&Instruction::I32Const(0));
+                                    func.instruction(&Instruction::I32Const(-1));
+                                    func.instruction(&Instruction::I32Const(-1));
+                                    IRType::None
+                                }
+                                crate::stdlib::re::ReFunction::Fullmatch => {
+                                    // re.fullmatch(pattern, string, flags=0) - full string match
+                                    if arguments.len() >= 2 {
+                                        if let (
+                                            IRExpr::Const(IRConstant::String(pattern)),
+                                            IRExpr::Const(IRConstant::String(text)),
+                                        ) = (&arguments[0], &arguments[1])
+                                        {
+                                            let flags = if arguments.len() > 2 {
+                                                if let IRExpr::Const(IRConstant::Int(f)) =
+                                                    &arguments[2]
+                                                {
+                                                    *f
+                                                } else {
+                                                    0
+                                                }
+                                            } else {
+                                                0
+                                            };
+                                            if let Some(result) =
+                                                crate::stdlib::re::fullmatch(pattern, text, flags)
+                                            {
+                                                let offset = memory_layout
+                                                    .string_offsets
+                                                    .get(&result.group)
+                                                    .copied()
+                                                    .unwrap_or(0);
+                                                func.instruction(&Instruction::I32Const(
+                                                    offset as i32,
+                                                ));
+                                                func.instruction(&Instruction::I32Const(
+                                                    result.group.len() as i32,
+                                                ));
+                                                func.instruction(&Instruction::I32Const(
+                                                    result.start as i32,
+                                                ));
+                                                func.instruction(&Instruction::I32Const(
+                                                    result.end as i32,
+                                                ));
+                                                return IRType::Unknown;
+                                            } else {
+                                                func.instruction(&Instruction::I32Const(0));
+                                                func.instruction(&Instruction::I32Const(0));
+                                                func.instruction(&Instruction::I32Const(-1));
+                                                func.instruction(&Instruction::I32Const(-1));
+                                                return IRType::None;
+                                            }
+                                        }
+                                    }
+                                    for arg in arguments {
+                                        let arg_type =
+                                            emit_expr(arg, func, ctx, memory_layout, None);
+                                        if arg_type == IRType::String {
+                                            func.instruction(&Instruction::Drop);
+                                            func.instruction(&Instruction::Drop);
+                                        } else {
+                                            func.instruction(&Instruction::Drop);
+                                        }
+                                    }
+                                    func.instruction(&Instruction::I32Const(0));
+                                    func.instruction(&Instruction::I32Const(0));
+                                    func.instruction(&Instruction::I32Const(-1));
+                                    func.instruction(&Instruction::I32Const(-1));
+                                    IRType::None
+                                }
+                                crate::stdlib::re::ReFunction::Findall => {
+                                    // re.findall(pattern, string, flags=0) - find all matches
+                                    if arguments.len() >= 2 {
+                                        if let (
+                                            IRExpr::Const(IRConstant::String(pattern)),
+                                            IRExpr::Const(IRConstant::String(text)),
+                                        ) = (&arguments[0], &arguments[1])
+                                        {
+                                            let flags = if arguments.len() > 2 {
+                                                if let IRExpr::Const(IRConstant::Int(f)) =
+                                                    &arguments[2]
+                                                {
+                                                    *f
+                                                } else {
+                                                    0
+                                                }
+                                            } else {
+                                                0
+                                            };
+                                            let results =
+                                                crate::stdlib::re::findall(pattern, text, flags);
+                                            // Return list pointer and count (placeholder)
+                                            func.instruction(&Instruction::I32Const(0));
+                                            func.instruction(&Instruction::I32Const(
+                                                results.len() as i32
+                                            ));
+                                            return IRType::List(Box::new(IRType::String));
+                                        }
+                                    }
+                                    for arg in arguments {
+                                        let arg_type =
+                                            emit_expr(arg, func, ctx, memory_layout, None);
+                                        if arg_type == IRType::String {
+                                            func.instruction(&Instruction::Drop);
+                                            func.instruction(&Instruction::Drop);
+                                        } else {
+                                            func.instruction(&Instruction::Drop);
+                                        }
+                                    }
+                                    func.instruction(&Instruction::I32Const(0));
+                                    func.instruction(&Instruction::I32Const(0));
+                                    IRType::List(Box::new(IRType::String))
+                                }
+                                crate::stdlib::re::ReFunction::Finditer => {
+                                    // re.finditer(pattern, string, flags=0) - iterator of matches
+                                    for arg in arguments {
+                                        let arg_type =
+                                            emit_expr(arg, func, ctx, memory_layout, None);
+                                        if arg_type == IRType::String {
+                                            func.instruction(&Instruction::Drop);
+                                            func.instruction(&Instruction::Drop);
+                                        } else {
+                                            func.instruction(&Instruction::Drop);
+                                        }
+                                    }
+                                    func.instruction(&Instruction::I32Const(0));
+                                    IRType::Unknown // Iterator
+                                }
+                                crate::stdlib::re::ReFunction::Split => {
+                                    // re.split(pattern, string, maxsplit=0, flags=0)
+                                    if arguments.len() >= 2 {
+                                        if let (
+                                            IRExpr::Const(IRConstant::String(pattern)),
+                                            IRExpr::Const(IRConstant::String(text)),
+                                        ) = (&arguments[0], &arguments[1])
+                                        {
+                                            let maxsplit = if arguments.len() > 2 {
+                                                if let IRExpr::Const(IRConstant::Int(m)) =
+                                                    &arguments[2]
+                                                {
+                                                    if *m > 0 {
+                                                        Some(*m as usize)
+                                                    } else {
+                                                        None
+                                                    }
+                                                } else {
+                                                    None
+                                                }
+                                            } else {
+                                                None
+                                            };
+                                            let flags = if arguments.len() > 3 {
+                                                if let IRExpr::Const(IRConstant::Int(f)) =
+                                                    &arguments[3]
+                                                {
+                                                    *f
+                                                } else {
+                                                    0
+                                                }
+                                            } else {
+                                                0
+                                            };
+                                            let results = crate::stdlib::re::split(
+                                                pattern, text, maxsplit, flags,
+                                            );
+                                            // Return list pointer and count (placeholder)
+                                            func.instruction(&Instruction::I32Const(0));
+                                            func.instruction(&Instruction::I32Const(
+                                                results.len() as i32
+                                            ));
+                                            return IRType::List(Box::new(IRType::String));
+                                        }
+                                    }
+                                    for arg in arguments {
+                                        let arg_type =
+                                            emit_expr(arg, func, ctx, memory_layout, None);
+                                        if arg_type == IRType::String {
+                                            func.instruction(&Instruction::Drop);
+                                            func.instruction(&Instruction::Drop);
+                                        } else {
+                                            func.instruction(&Instruction::Drop);
+                                        }
+                                    }
+                                    func.instruction(&Instruction::I32Const(0));
+                                    func.instruction(&Instruction::I32Const(0));
+                                    IRType::List(Box::new(IRType::String))
+                                }
+                                crate::stdlib::re::ReFunction::Sub => {
+                                    // re.sub(pattern, repl, string, count=0, flags=0)
+                                    if arguments.len() >= 3 {
+                                        if let (
+                                            IRExpr::Const(IRConstant::String(pattern)),
+                                            IRExpr::Const(IRConstant::String(repl)),
+                                            IRExpr::Const(IRConstant::String(text)),
+                                        ) = (&arguments[0], &arguments[1], &arguments[2])
+                                        {
+                                            let count = if arguments.len() > 3 {
+                                                if let IRExpr::Const(IRConstant::Int(c)) =
+                                                    &arguments[3]
+                                                {
+                                                    if *c > 0 {
+                                                        Some(*c as usize)
+                                                    } else {
+                                                        None
+                                                    }
+                                                } else {
+                                                    None
+                                                }
+                                            } else {
+                                                None
+                                            };
+                                            let flags = if arguments.len() > 4 {
+                                                if let IRExpr::Const(IRConstant::Int(f)) =
+                                                    &arguments[4]
+                                                {
+                                                    *f
+                                                } else {
+                                                    0
+                                                }
+                                            } else {
+                                                0
+                                            };
+                                            let result = crate::stdlib::re::sub(
+                                                pattern, repl, text, count, flags,
+                                            );
+                                            // Return string offset and length (placeholder)
+                                            let offset = memory_layout
+                                                .string_offsets
+                                                .get(&result)
+                                                .copied()
+                                                .unwrap_or(0);
+                                            func.instruction(&Instruction::I32Const(offset as i32));
+                                            func.instruction(&Instruction::I32Const(
+                                                result.len() as i32
+                                            ));
+                                            return IRType::String;
+                                        }
+                                    }
+                                    for arg in arguments {
+                                        let arg_type =
+                                            emit_expr(arg, func, ctx, memory_layout, None);
+                                        if arg_type == IRType::String {
+                                            func.instruction(&Instruction::Drop);
+                                            func.instruction(&Instruction::Drop);
+                                        } else {
+                                            func.instruction(&Instruction::Drop);
+                                        }
+                                    }
+                                    func.instruction(&Instruction::I32Const(0));
+                                    func.instruction(&Instruction::I32Const(0));
+                                    IRType::String
+                                }
+                                crate::stdlib::re::ReFunction::Subn => {
+                                    // re.subn(pattern, repl, string, count=0, flags=0)
+                                    // Returns (new_string, num_substitutions)
+                                    if arguments.len() >= 3 {
+                                        if let (
+                                            IRExpr::Const(IRConstant::String(pattern)),
+                                            IRExpr::Const(IRConstant::String(repl)),
+                                            IRExpr::Const(IRConstant::String(text)),
+                                        ) = (&arguments[0], &arguments[1], &arguments[2])
+                                        {
+                                            let count = if arguments.len() > 3 {
+                                                if let IRExpr::Const(IRConstant::Int(c)) =
+                                                    &arguments[3]
+                                                {
+                                                    if *c > 0 {
+                                                        Some(*c as usize)
+                                                    } else {
+                                                        None
+                                                    }
+                                                } else {
+                                                    None
+                                                }
+                                            } else {
+                                                None
+                                            };
+                                            let flags = if arguments.len() > 4 {
+                                                if let IRExpr::Const(IRConstant::Int(f)) =
+                                                    &arguments[4]
+                                                {
+                                                    *f
+                                                } else {
+                                                    0
+                                                }
+                                            } else {
+                                                0
+                                            };
+                                            let (result, num_subs) = crate::stdlib::re::subn(
+                                                pattern, repl, text, count, flags,
+                                            );
+                                            // Return string offset and length (placeholder)
+                                            let offset = memory_layout
+                                                .string_offsets
+                                                .get(&result)
+                                                .copied()
+                                                .unwrap_or(0);
+                                            func.instruction(&Instruction::I32Const(offset as i32));
+                                            func.instruction(&Instruction::I32Const(
+                                                result.len() as i32
+                                            ));
+                                            func.instruction(&Instruction::I32Const(
+                                                num_subs as i32,
+                                            ));
+                                            return IRType::Tuple(vec![
+                                                IRType::String,
+                                                IRType::Int,
+                                            ]);
+                                        }
+                                    }
+                                    for arg in arguments {
+                                        let arg_type =
+                                            emit_expr(arg, func, ctx, memory_layout, None);
+                                        if arg_type == IRType::String {
+                                            func.instruction(&Instruction::Drop);
+                                            func.instruction(&Instruction::Drop);
+                                        } else {
+                                            func.instruction(&Instruction::Drop);
+                                        }
+                                    }
+                                    func.instruction(&Instruction::I32Const(0));
+                                    func.instruction(&Instruction::I32Const(0));
+                                    func.instruction(&Instruction::I32Const(0));
+                                    IRType::Tuple(vec![IRType::String, IRType::Int])
+                                }
+                                crate::stdlib::re::ReFunction::Escape => {
+                                    // re.escape(pattern) - escape special characters
+                                    if !arguments.is_empty() {
+                                        if let IRExpr::Const(IRConstant::String(pattern)) =
+                                            &arguments[0]
+                                        {
+                                            let escaped = crate::stdlib::re::escape(pattern);
+                                            // Return escaped string offset and length (placeholder)
+                                            let offset = memory_layout
+                                                .string_offsets
+                                                .get(&escaped)
+                                                .copied()
+                                                .unwrap_or(0);
+                                            func.instruction(&Instruction::I32Const(offset as i32));
+                                            func.instruction(&Instruction::I32Const(
+                                                escaped.len() as i32
+                                            ));
+                                            return IRType::String;
+                                        }
+                                    }
+                                    for arg in arguments {
+                                        let arg_type =
+                                            emit_expr(arg, func, ctx, memory_layout, None);
+                                        if arg_type == IRType::String {
+                                            func.instruction(&Instruction::Drop);
+                                            func.instruction(&Instruction::Drop);
+                                        } else {
+                                            func.instruction(&Instruction::Drop);
+                                        }
+                                    }
+                                    func.instruction(&Instruction::I32Const(0));
+                                    func.instruction(&Instruction::I32Const(0));
+                                    IRType::String
+                                }
+                                crate::stdlib::re::ReFunction::Purge => {
+                                    // re.purge() - clear regex cache (no-op in our implementation)
+                                    for arg in arguments {
+                                        let arg_type =
+                                            emit_expr(arg, func, ctx, memory_layout, None);
+                                        if arg_type == IRType::String {
+                                            func.instruction(&Instruction::Drop);
+                                            func.instruction(&Instruction::Drop);
+                                        } else {
+                                            func.instruction(&Instruction::Drop);
+                                        }
+                                    }
+                                    func.instruction(&Instruction::I32Const(0));
+                                    IRType::None
+                                }
+                            };
+                        }
+                    }
+
                     // Handle datetime module constructor functions (datetime.datetime(), datetime.date(), etc.)
                     if module_name == "datetime" {
                         if let Some(dt_func) = crate::stdlib::datetime::get_function(method_name) {
