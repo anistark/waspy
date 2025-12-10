@@ -135,5 +135,9 @@ fn type_to_string(ir_type: &ir::IRType) -> String {
         ir::IRType::Unknown => "unknown".to_string(),
         ir::IRType::Callable { .. } => "Callable".to_string(),
         ir::IRType::Generator(yield_type) => format!("Generator[{}]", type_to_string(yield_type)),
+        ir::IRType::Datetime => "datetime.datetime".to_string(),
+        ir::IRType::Date => "datetime.date".to_string(),
+        ir::IRType::Time => "datetime.time".to_string(),
+        ir::IRType::Timedelta => "datetime.timedelta".to_string(),
     }
 }

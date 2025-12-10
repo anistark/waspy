@@ -674,6 +674,10 @@ pub fn type_to_string(ir_type: &IRType) -> String {
         IRType::Unknown => "unknown".to_string(),
         IRType::Callable { .. } => "Callable".to_string(),
         IRType::Generator(yield_type) => format!("Generator[{}]", type_to_string(yield_type)),
+        IRType::Datetime => "datetime.datetime".to_string(),
+        IRType::Date => "datetime.date".to_string(),
+        IRType::Time => "datetime.time".to_string(),
+        IRType::Timedelta => "datetime.timedelta".to_string(),
     }
 }
 
