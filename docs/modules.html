@@ -280,17 +280,17 @@
                 features: [
                     { name: "sys module - attributes (argv, platform, version, maxsize, stdin/stdout/stderr, path)", status: "done", version: "0.8.0" },
                     { name: "os module - attributes & functions (name, sep, pathsep, linesep, devnull, curdir, pardir, extsep, environ)", status: "done", version: "0.8.0" },
-                    { name: "os module - callable functions (getcwd(), getenv(), getpid(), urandom()) - fully functional", status: "done", version: "unreleased" },
-                    { name: "os.path submodule - callable functions (join(), exists(), isfile(), isdir(), basename(), dirname(), abspath(), split(), splitext()) - fully functional", status: "done", version: "unreleased" },
+                    { name: "os module - callable functions (getcwd(), getenv(), getpid(), urandom()) - fully functional", status: "done", version: "0.9.0" },
+                    { name: "os.path submodule - callable functions (join(), exists(), isfile(), isdir(), basename(), dirname(), abspath(), split(), splitext()) - fully functional", status: "done", version: "0.9.0" },
                     { name: "math module (pi, e, tau, inf, nan, sqrt, sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh, exp, log, log10, log2, pow, floor, ceil, trunc, round, abs, fabs, copysign, fmod, remainder, degrees, radians, hypot, factorial, gcd, isnan, isinf, isfinite)", status: "done", version: "0.8.0" },
                     { name: "random module (random, randint, randrange, uniform, choice, shuffle, sample, seed, getrandbits, gauss, normalvariate, expovariate)", status: "done", version: "0.8.0" },
-                    { name: "json module (loads, dumps, load, dump, JSONEncoder, JSONDecoder) - runtime implementation", status: "done", version: "unreleased" },
-                    { name: "re module (compile, search, match, fullmatch, findall, finditer, split, sub, subn, escape, purge, IGNORECASE, MULTILINE, DOTALL, VERBOSE, ASCII, UNICODE) - full runtime support with match objects", status: "done", version: "unreleased" },
-                    { name: "datetime module (datetime, date, time, timedelta, timezone, tzinfo, now, today, fromtimestamp, fromisoformat, strftime, strptime, replace, timestamp, isoformat, weekday, isoweekday, MINYEAR, MAXYEAR) - full runtime support", status: "done", version: "unreleased" },
+                    { name: "json module (loads, dumps, load, dump, JSONEncoder, JSONDecoder) - runtime implementation", status: "done", version: "0.9.0" },
+                    { name: "re module (compile, search, match, fullmatch, findall, finditer, split, sub, subn, escape, purge, IGNORECASE, MULTILINE, DOTALL, VERBOSE, ASCII, UNICODE) - full runtime support with match objects", status: "done", version: "0.9.0" },
+                    { name: "datetime module (datetime, date, time, timedelta, timezone, tzinfo, now, today, fromtimestamp, fromisoformat, strftime, strptime, replace, timestamp, isoformat, weekday, isoweekday, MINYEAR, MAXYEAR) - full runtime support", status: "done", version: "0.9.0" },
                     { name: "collections module (namedtuple, deque, Counter, OrderedDict, defaultdict, ChainMap, UserDict, UserList, UserString)", status: "done", version: "0.8.0" },
                     { name: "itertools module (count, cycle, repeat, chain, compress, dropwhile, filterfalse, groupby, islice, starmap, takewhile, tee, zip_longest, product, permutations, combinations, combinations_with_replacement, accumulate, batched, pairwise)", status: "done", version: "0.8.0" },
                     { name: "functools module (reduce, partial, partialmethod, wraps, update_wrapper, total_ordering, cmp_to_key, lru_cache, cache, cached_property, singledispatch, singledispatchmethod)", status: "done", version: "0.8.0" },
-                    { name: "logging module (DEBUG, INFO, WARNING, ERROR, CRITICAL, NOTSET, debug, info, warning, error, critical, exception, log, basicConfig, getLogger, setLevel, disable, Logger, Handler, StreamHandler, FileHandler, Formatter, Filter, LogRecord)", status: "done", version: "unreleased" }
+                    { name: "logging module (DEBUG, INFO, WARNING, ERROR, CRITICAL, NOTSET, debug, info, warning, error, critical, exception, log, basicConfig, getLogger, setLevel, disable, Logger, Handler, StreamHandler, FileHandler, Formatter, Filter, LogRecord)", status: "done", version: "0.9.0" }
                 ]
             },
             comprehensions: {
@@ -658,7 +658,7 @@
                             <li class="feature-item">
                                 <span class="feature-status">${getStatusIcon(feature.status)}</span>
                                 <span class="feature-text">${feature.name}</span>
-                                ${feature.version && feature.version !== 'todo' ? `<span class="feature-version" title="Version introduced">${feature.version === 'Unreleased' ? 'upcoming' : feature.version}</span>` : ''}
+                                ${feature.version && feature.version !== 'todo' ? `<span class="feature-version" title="Version introduced">${feature.version === '0.9.0' ? 'upcoming' : feature.version}</span>` : ''}
                             </li>
                         `).join('')}
                     </ul>
