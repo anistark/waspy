@@ -1,6 +1,13 @@
 use crate::ir::IRType;
 use std::collections::HashMap;
 
+/// Number of scratch/temporary locals reserved for intermediate calculations
+/// (pointer/index bookkeeping, search loops, type coercion, ...). Reserved
+/// per-function in `compile_function` after params and named locals, so these
+/// indices never alias real variables. Keep this >= the largest `temp_local + N`
+/// offset emitted anywhere in the compiler.
+pub const SCRATCH_LOCALS: u32 = 8;
+
 /// Local variable
 pub struct LocalInfo {
     pub index: u32,
@@ -36,19 +43,15 @@ pub struct CompilationContext {
 impl CompilationContext {
     /// Create a new compilation context
     pub fn new() -> Self {
-        let mut ctx = CompilationContext {
+        // Scratch locals are reserved per-function in `compile_function` (after
+        // params and named locals are allocated), so nothing is reserved here.
+        CompilationContext {
             locals_map: HashMap::new(),
             local_count: 0,
             function_map: HashMap::new(),
             class_map: HashMap::new(),
             temp_local: 0,
-        };
-
-        // Add temporary locals for calculations
-        ctx.temp_local = ctx.local_count;
-        ctx.local_count += 3;
-
-        ctx
+        }
     }
 
     /// Add a local variable to the context

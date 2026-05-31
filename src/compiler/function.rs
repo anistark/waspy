@@ -1,4 +1,4 @@
-use crate::compiler::context::CompilationContext;
+use crate::compiler::context::{CompilationContext, SCRATCH_LOCALS};
 use crate::compiler::expression::{emit_expr, emit_integer_power_operation};
 use crate::ir::{IRBody, IRFunction, IROp, IRStatement, IRType, MemoryLayout};
 use wasm_encoder::{BlockType, Function, Instruction, MemArg, ValType};
@@ -18,6 +18,13 @@ pub fn compile_function(
 
     // Scan for variable declarations to allocate locals
     scan_and_allocate_locals(&ir_func.body, ctx);
+
+    // Reserve scratch locals after all params and named locals so temporary
+    // calculations never clobber real variables. These indices are declared as
+    // i32 locals by the type-counting loop below (they are absent from
+    // locals_map, so get_local_type_by_index defaults them to i32).
+    ctx.temp_local = ctx.local_count;
+    ctx.local_count += SCRATCH_LOCALS;
 
     // Determine local types for WebAssembly
     let mut locals = Vec::new();
@@ -298,8 +305,9 @@ pub fn compile_body(
                 func.instruction(&Instruction::Block(BlockType::Empty));
                 func.instruction(&Instruction::Loop(BlockType::Empty));
 
-                // Condition check
+                // Condition check: exit the loop when the condition is false.
                 emit_expr(condition, func, ctx, memory_layout, Some(&IRType::Bool));
+                func.instruction(&Instruction::I32Eqz);
                 func.instruction(&Instruction::BrIf(1));
 
                 // Loop body
@@ -840,17 +848,130 @@ pub fn compile_body(
                         }
                     }
                     IRType::Dict(_key_type, _value_type) => {
-                        // Dictionary assignment (linear search and update)
-                        // For now, just store at a fixed offset after the entries
-                        // TODO: Implement proper hash table or linear probe storage
-                        func.instruction(&Instruction::LocalGet(ctx.temp_local)); // dict_ptr
-                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 1)); // key
-                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 2)); // value
+                        // Dictionary assignment via linear search.
+                        // Layout: [num_entries:i32][key0][val0][key1][val1]...
+                        //   temp_local     = dict_ptr
+                        //   temp_local + 1 = key
+                        //   temp_local + 2 = value
+                        //   temp_local + 3 = num_entries
+                        //   temp_local + 4 = counter
+                        //   temp_local + 5 = found flag (0/1)
 
-                        // Just drop the values for now - proper implementation would search/update
-                        func.instruction(&Instruction::Drop);
-                        func.instruction(&Instruction::Drop);
-                        func.instruction(&Instruction::Drop);
+                        // num_entries = load(dict_ptr)
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                        func.instruction(&Instruction::I32Load(MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                        func.instruction(&Instruction::LocalSet(ctx.temp_local + 3));
+
+                        // counter = 0; found = 0
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::LocalSet(ctx.temp_local + 4));
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::LocalSet(ctx.temp_local + 5));
+
+                        // Search for an existing entry with a matching key.
+                        func.instruction(&Instruction::Block(BlockType::Empty));
+                        func.instruction(&Instruction::Loop(BlockType::Empty));
+
+                        // if counter >= num_entries: break
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
+                        func.instruction(&Instruction::I32GeS);
+                        func.instruction(&Instruction::BrIf(1));
+
+                        // key_at = load(dict_ptr + counter*8 + 4)
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
+                        func.instruction(&Instruction::I32Const(8));
+                        func.instruction(&Instruction::I32Mul);
+                        func.instruction(&Instruction::I32Const(4));
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::I32Load(MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+
+                        // if key_at == key: update value and break
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
+                        func.instruction(&Instruction::I32Eq);
+                        func.instruction(&Instruction::If(BlockType::Empty));
+                        // address = dict_ptr + counter*8 + 8
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
+                        func.instruction(&Instruction::I32Const(8));
+                        func.instruction(&Instruction::I32Mul);
+                        func.instruction(&Instruction::I32Const(8));
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 2)); // value
+                        func.instruction(&Instruction::I32Store(MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                        func.instruction(&Instruction::I32Const(1));
+                        func.instruction(&Instruction::LocalSet(ctx.temp_local + 5)); // found = 1
+                        func.instruction(&Instruction::Br(2)); // exit the loop
+                        func.instruction(&Instruction::End);
+
+                        // counter += 1; continue
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
+                        func.instruction(&Instruction::I32Const(1));
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::LocalSet(ctx.temp_local + 4));
+                        func.instruction(&Instruction::Br(0));
+                        func.instruction(&Instruction::End); // loop
+                        func.instruction(&Instruction::End); // block
+
+                        // If the key was not present, append a new entry at slot
+                        // num_entries and bump the entry count.
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 5));
+                        func.instruction(&Instruction::I32Eqz);
+                        func.instruction(&Instruction::If(BlockType::Empty));
+                        // store key at dict_ptr + num_entries*8 + 4
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
+                        func.instruction(&Instruction::I32Const(8));
+                        func.instruction(&Instruction::I32Mul);
+                        func.instruction(&Instruction::I32Const(4));
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 1)); // key
+                        func.instruction(&Instruction::I32Store(MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                        // store value at dict_ptr + num_entries*8 + 8
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
+                        func.instruction(&Instruction::I32Const(8));
+                        func.instruction(&Instruction::I32Mul);
+                        func.instruction(&Instruction::I32Const(8));
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 2)); // value
+                        func.instruction(&Instruction::I32Store(MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                        // num_entries += 1; store back to dict_ptr
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
+                        func.instruction(&Instruction::I32Const(1));
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::I32Store(MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                        func.instruction(&Instruction::End);
                     }
                     IRType::String => {
                         // String indexing is read-only in Python, assignment not directly supported

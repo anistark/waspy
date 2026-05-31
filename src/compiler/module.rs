@@ -1,6 +1,6 @@
 use crate::compiler::context::{ClassInfo, CompilationContext};
 use crate::compiler::function::compile_function;
-use crate::ir::{IRModule, IRType, MemoryLayout};
+use crate::ir::{IRModule, IRType};
 use std::collections::HashMap;
 use wasm_encoder::{
     CodeSection, ConstExpr, DataSection, ExportSection, FunctionSection, MemorySection, MemoryType,
@@ -23,12 +23,9 @@ fn ir_type_to_wasm_type(ir_type: &IRType) -> ValType {
 pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
     let mut module = Module::new();
     let mut ctx = CompilationContext::new();
-    let memory_layout = MemoryLayout::new();
-
-    // Pre-scan for string constants to allocate in memory
-    for _func in &ir_module.functions {
-        // TODO: Scan for string literals
-    }
+    // String/bytes offsets are resolved during lowering and carried on the IR
+    // module; the compiler reuses that layout to emit loads and the data section.
+    let memory_layout = ir_module.memory_layout.clone();
 
     // Build type section
     let mut types = TypeSection::new();
@@ -178,8 +175,6 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
         data.active(0, &ConstExpr::i32_const(0), all_strings);
     }
 
-    module.section(&data);
-
     // Code section
     let mut codes = CodeSection::new();
 
@@ -196,7 +191,11 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
         }
     }
 
+    // The WASM spec requires the Code section (id 10) before the Data section
+    // (id 11); emitting Data first produces a module that strict validators
+    // (and Binaryen's reader) reject, which previously disabled optimization.
     module.section(&codes);
+    module.section(&data);
 
     module.finish()
 }
