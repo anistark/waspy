@@ -6,6 +6,7 @@ pub struct IRModule {
     pub imports: Vec<IRImport>,     // Module-level imports
     pub classes: Vec<IRClass>,      // Module-level classes
     pub metadata: std::collections::HashMap<String, String>, // Module metadata
+    pub memory_layout: MemoryLayout, // String/bytes offsets and object heap layout
 }
 
 /// IR representation of a function
@@ -399,6 +400,27 @@ impl MemoryLayout {
         offset
     }
 
+    /// Merge the string and bytes entries from another layout, assigning fresh
+    /// non-colliding offsets here. Used when combining several lowered modules
+    /// into one binary. The IR references string/bytes *values* (offsets are
+    /// resolved at compile time), so re-adding by value is sufficient; entries
+    /// are processed in offset order for deterministic output.
+    pub fn merge_from(&mut self, other: &MemoryLayout) {
+        let mut strings: Vec<(&String, u32)> =
+            other.string_offsets.iter().map(|(s, &o)| (s, o)).collect();
+        strings.sort_by_key(|&(_, offset)| offset);
+        for (s, _) in strings {
+            self.add_string(s);
+        }
+
+        let mut bytes: Vec<(&Vec<u8>, u32)> =
+            other.bytes_offsets.iter().map(|(b, &o)| (b, o)).collect();
+        bytes.sort_by_key(|&(_, offset)| offset);
+        for (b, _) in bytes {
+            self.add_bytes(b);
+        }
+    }
+
     /// Allocate space for an object instance, returns pointer to allocated memory
     pub fn allocate_object(&mut self, size: u32) -> u32 {
         let ptr = self.object_heap_offset;
@@ -431,6 +453,7 @@ impl IRModule {
             imports: Vec::new(),
             classes: Vec::new(),
             metadata: std::collections::HashMap::new(),
+            memory_layout: MemoryLayout::new(),
         }
     }
 }

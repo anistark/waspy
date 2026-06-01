@@ -238,6 +238,11 @@ pub fn compile_multiple_python_files_with_options(
         combined_module.variables.extend(ir_module.variables);
         combined_module.imports.extend(ir_module.imports);
         combined_module.classes.extend(ir_module.classes);
+
+        // Merge this file's string/bytes layout into the combined module.
+        combined_module
+            .memory_layout
+            .merge_from(&ir_module.memory_layout);
     }
 
     if combined_module.functions.is_empty() {
@@ -399,6 +404,11 @@ pub fn compile_multiple_python_files_with_config(
         combined_module.variables.extend(ir_module.variables);
         combined_module.imports.extend(ir_module.imports);
         combined_module.classes.extend(ir_module.classes);
+
+        // Merge this file's string/bytes layout into the combined module.
+        combined_module
+            .memory_layout
+            .merge_from(&ir_module.memory_layout);
 
         // Add module-level metadata
         for (key, value) in ir_module.metadata {

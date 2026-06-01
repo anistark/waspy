@@ -111,6 +111,10 @@ pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
     // Process circular imports
     process_circular_imports(&mut module);
 
+    // Carry the populated string/bytes layout to the compiler, which needs the
+    // resolved offsets to emit loads and the data section.
+    module.memory_layout = memory_layout;
+
     Ok(module)
 }
 
@@ -542,6 +546,14 @@ fn type_annotation_to_ir_type(expr: &Expr) -> Result<IRType> {
             "bytes" => Ok(IRType::Bytes),
             "None" => Ok(IRType::None),
             "Any" => Ok(IRType::Any),
+            // Bare builtin collection annotations (element types unknown).
+            "list" => Ok(IRType::List(Box::new(IRType::Unknown))),
+            "set" => Ok(IRType::Set(Box::new(IRType::Unknown))),
+            "tuple" => Ok(IRType::Tuple(vec![])),
+            "dict" => Ok(IRType::Dict(
+                Box::new(IRType::Unknown),
+                Box::new(IRType::Unknown),
+            )),
             _ => Ok(IRType::Class(name.id.to_string())),
         },
         Expr::Subscript(subscript) => {

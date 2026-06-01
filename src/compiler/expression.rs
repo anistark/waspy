@@ -8,6 +8,16 @@ fn f64_const(value: f64) -> wasm_encoder::Ieee64 {
     value.into()
 }
 
+/// Collections store one i32 word per element, but strings and bytes leave two
+/// values on the stack (offset, length). After emitting such an element, drop
+/// the length so only the offset remains; identical string literals are
+/// interned to the same offset, so offset comparison preserves value equality.
+fn narrow_element_to_word(func: &mut Function, elem_type: &IRType) {
+    if matches!(elem_type, IRType::String | IRType::Bytes) {
+        func.instruction(&Instruction::Drop);
+    }
+}
+
 /// Emit WebAssembly instructions for an IR expression
 pub fn emit_expr(
     expr: &IRExpr,
@@ -467,6 +477,91 @@ pub fn emit_expr(
             }
         }
         IRExpr::CompareOp { left, right, op } => {
+            // Membership tests (`in` / `not in`) search a container rather than
+            // comparing two scalars, so they are handled before the numeric
+            // comparison logic below.
+            if matches!(op, IRCompareOp::In | IRCompareOp::NotIn) {
+                let elem_type = emit_expr(left, func, ctx, memory_layout, None);
+                // Reduce the searched element to a single word (matching how
+                // collection elements are stored) before emitting the container.
+                narrow_element_to_word(func, &elem_type);
+                let container_type = emit_expr(right, func, ctx, memory_layout, None);
+
+                // Sets and lists share the [count:i32][elem0:i32]... layout with
+                // 4-byte elements, so a linear scan works for both. Float
+                // elements (stored as f64) and other containers fall back to a
+                // conservative constant result.
+                let searchable = matches!(container_type, IRType::Set(_) | IRType::List(_))
+                    && elem_type != IRType::Float;
+
+                if !searchable {
+                    func.instruction(&Instruction::Drop); // container pointer
+                    func.instruction(&Instruction::Drop); // element
+                    func.instruction(&Instruction::I32Const(i32::from(matches!(
+                        op,
+                        IRCompareOp::NotIn
+                    ))));
+                    return IRType::Bool;
+                }
+
+                // Stack: (element, container_ptr).
+                func.instruction(&Instruction::LocalSet(ctx.temp_local)); // container_ptr
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 1)); // element
+
+                // count = load(container_ptr)
+                func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                func.instruction(&Instruction::I32Load(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 2)); // count
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 3)); // counter
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 4)); // found
+
+                func.instruction(&Instruction::Block(BlockType::Empty));
+                func.instruction(&Instruction::Loop(BlockType::Empty));
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
+                func.instruction(&Instruction::I32GeS);
+                func.instruction(&Instruction::BrIf(1));
+                // existing = load(container_ptr + 4 + counter*4)
+                func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                func.instruction(&Instruction::I32Const(4));
+                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
+                func.instruction(&Instruction::I32Const(4));
+                func.instruction(&Instruction::I32Mul);
+                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::I32Load(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
+                func.instruction(&Instruction::I32Eq);
+                func.instruction(&Instruction::If(BlockType::Empty));
+                func.instruction(&Instruction::I32Const(1));
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 4)); // found = 1
+                func.instruction(&Instruction::Br(2));
+                func.instruction(&Instruction::End);
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
+                func.instruction(&Instruction::I32Const(1));
+                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 3));
+                func.instruction(&Instruction::Br(0));
+                func.instruction(&Instruction::End); // loop
+                func.instruction(&Instruction::End); // block
+
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
+                if matches!(op, IRCompareOp::NotIn) {
+                    func.instruction(&Instruction::I32Eqz);
+                }
+                return IRType::Bool;
+            }
+
             let left_type = emit_expr(left, func, ctx, memory_layout, None);
             let right_type = emit_expr(right, func, ctx, memory_layout, Some(&left_type));
 
@@ -628,22 +723,17 @@ pub fn emit_expr(
                             return IRType::Unknown;
                         }
                         match &arg_types[0] {
-                            IRType::String => {
-                                // String is (offset, length) on stack; pop offset, keep length
+                            IRType::String | IRType::Bytes => {
+                                // (offset, length) on stack; pop offset, keep length
                                 func.instruction(&Instruction::Drop);
                                 IRType::Int
                             }
-                            IRType::List(_) => {
-                                // List is a pointer; load length from first 4 bytes
-                                func.instruction(&Instruction::I32Load(MemArg {
-                                    offset: 0,
-                                    align: 2,
-                                    memory_index: 0,
-                                }));
-                                IRType::Int
-                            }
-                            IRType::Dict(_, _) => {
-                                // Dict is a pointer; load length from first 4 bytes
+                            // Lists, dicts, sets and tuples are all pointers that
+                            // store their element/entry count in the first 4 bytes.
+                            IRType::List(_)
+                            | IRType::Dict(_, _)
+                            | IRType::Set(_)
+                            | IRType::Tuple(_) => {
                                 func.instruction(&Instruction::I32Load(MemArg {
                                     offset: 0,
                                     align: 2,
@@ -814,28 +904,20 @@ pub fn emit_expr(
                 memory_index: 0,
             }));
 
-            // Determine element type from first element
-            let elem_type = if !elements.is_empty() {
-                emit_expr(&elements[0], func, ctx, memory_layout, None)
-            } else {
-                IRType::Unknown
-            };
-
-            // Store each element
+            // Store each element. A WASM store pops the value first, then the
+            // address, so the destination address must be pushed *before* the
+            // value. list_ptr and the slot offset are compile-time constants,
+            // so we fold them into a single address constant.
+            let mut elem_type = IRType::Unknown;
             for (i, elem) in elements.iter().enumerate() {
-                let offset = 4 + (i as u32 * 4); // Skip length field
+                let addr = list_ptr + 4 + (i as u32 * 4); // Skip length field
 
-                // Get the element value
-                let elem_type = emit_expr(elem, func, ctx, memory_layout, None);
+                func.instruction(&Instruction::I32Const(addr as i32));
+                let ty = emit_expr(elem, func, ctx, memory_layout, None);
+                narrow_element_to_word(func, &ty);
 
-                // Store based on element type
-                match elem_type {
+                match ty {
                     IRType::Float => {
-                        func.instruction(&Instruction::I32Const(list_ptr as i32));
-                        func.instruction(&Instruction::I32Const(offset as i32));
-                        func.instruction(&Instruction::I32Add);
-                        // Value is already on stack, but we need it as f64
-                        // TODO: Handle type conversion properly
                         func.instruction(&Instruction::F64Store(MemArg {
                             offset: 0,
                             align: 3,
@@ -843,16 +925,16 @@ pub fn emit_expr(
                         }));
                     }
                     _ => {
-                        func.instruction(&Instruction::I32Const(list_ptr as i32));
-                        func.instruction(&Instruction::I32Const(offset as i32));
-                        func.instruction(&Instruction::I32Add);
-                        // Value is already on stack
                         func.instruction(&Instruction::I32Store(MemArg {
                             offset: 0,
                             align: 2,
                             memory_index: 0,
                         }));
                     }
+                }
+
+                if i == 0 {
+                    elem_type = ty;
                 }
             }
 
@@ -862,64 +944,119 @@ pub fn emit_expr(
         }
         IRExpr::SetLiteral(elements) => {
             // Set layout in memory: [num_elements:i32][elem0:i32][elem1:i32]...
-            // Similar to list but for sets (elements stored sequentially)
-            // Allocate after lists (at offset 20000+)
+            // A set drops duplicate elements, so the stored count is computed at
+            // runtime as elements are inserted (it may be smaller than the
+            // number of literal elements).
 
+            // Empty set: store a count of 0 so membership tests read a valid header.
             if elements.is_empty() {
-                // Empty set: just a length of 0
-                func.instruction(&Instruction::I32Const(20000)); // Pointer to empty set
+                func.instruction(&Instruction::I32Const(20000));
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32Store(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+                func.instruction(&Instruction::I32Const(20000));
                 return IRType::Set(Box::new(IRType::Unknown));
             }
 
-            // Use a fixed allocation address for simplicity
+            // Use a fixed allocation address for simplicity.
             let set_ptr = 20000 + (ctx.local_count * 100);
 
-            // Store number of elements at the beginning
+            // Start with an empty set (count = 0).
             func.instruction(&Instruction::I32Const(set_ptr as i32));
-            func.instruction(&Instruction::I32Const(elements.len() as i32));
+            func.instruction(&Instruction::I32Const(0));
             func.instruction(&Instruction::I32Store(MemArg {
                 offset: 0,
                 align: 2,
                 memory_index: 0,
             }));
 
-            // Determine element type from first element
-            let elem_type = if !elements.is_empty() {
-                emit_expr(&elements[0], func, ctx, memory_layout, None)
-            } else {
-                IRType::Unknown
-            };
-
-            // Store each element
+            let mut elem_type = IRType::Unknown;
             for (i, elem) in elements.iter().enumerate() {
-                let offset = 4 + (i as u32 * 4); // Skip element count field
-
-                // Get the element value
-                let elem_type = emit_expr(elem, func, ctx, memory_layout, None);
-
-                // Store based on element type
-                match elem_type {
-                    IRType::Float => {
-                        func.instruction(&Instruction::I32Const(set_ptr as i32));
-                        func.instruction(&Instruction::I32Const(offset as i32));
-                        func.instruction(&Instruction::I32Add);
-                        func.instruction(&Instruction::F64Store(MemArg {
-                            offset: 0,
-                            align: 3,
-                            memory_index: 0,
-                        }));
-                    }
-                    _ => {
-                        func.instruction(&Instruction::I32Const(set_ptr as i32));
-                        func.instruction(&Instruction::I32Const(offset as i32));
-                        func.instruction(&Instruction::I32Add);
-                        func.instruction(&Instruction::I32Store(MemArg {
-                            offset: 0,
-                            align: 2,
-                            memory_index: 0,
-                        }));
-                    }
+                // Evaluate the element first (this may use scratch locals), then
+                // stash it before running the dedup search.
+                let ty = emit_expr(elem, func, ctx, memory_layout, None);
+                narrow_element_to_word(func, &ty);
+                if i == 0 {
+                    elem_type = ty;
                 }
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 1)); // element
+
+                // count = load(set_ptr)
+                func.instruction(&Instruction::I32Const(set_ptr as i32));
+                func.instruction(&Instruction::I32Load(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 2)); // count
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 3)); // counter
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 4)); // found
+
+                // Search the existing elements for a duplicate.
+                func.instruction(&Instruction::Block(BlockType::Empty));
+                func.instruction(&Instruction::Loop(BlockType::Empty));
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
+                func.instruction(&Instruction::I32GeS);
+                func.instruction(&Instruction::BrIf(1));
+                // existing = load(set_ptr + 4 + counter*4)
+                func.instruction(&Instruction::I32Const((set_ptr + 4) as i32));
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
+                func.instruction(&Instruction::I32Const(4));
+                func.instruction(&Instruction::I32Mul);
+                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::I32Load(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
+                func.instruction(&Instruction::I32Eq);
+                func.instruction(&Instruction::If(BlockType::Empty));
+                func.instruction(&Instruction::I32Const(1));
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 4)); // found = 1
+                func.instruction(&Instruction::Br(2));
+                func.instruction(&Instruction::End);
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
+                func.instruction(&Instruction::I32Const(1));
+                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 3));
+                func.instruction(&Instruction::Br(0));
+                func.instruction(&Instruction::End); // loop
+                func.instruction(&Instruction::End); // block
+
+                // If not already present, append at slot `count` and bump count.
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
+                func.instruction(&Instruction::I32Eqz);
+                func.instruction(&Instruction::If(BlockType::Empty));
+                // address = set_ptr + 4 + count*4
+                func.instruction(&Instruction::I32Const((set_ptr + 4) as i32));
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
+                func.instruction(&Instruction::I32Const(4));
+                func.instruction(&Instruction::I32Mul);
+                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 1)); // element
+                func.instruction(&Instruction::I32Store(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+                // count += 1
+                func.instruction(&Instruction::I32Const(set_ptr as i32));
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
+                func.instruction(&Instruction::I32Const(1));
+                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::I32Store(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+                func.instruction(&Instruction::End);
             }
 
             // Return pointer to the set
@@ -949,18 +1086,18 @@ pub fn emit_expr(
             // Track element types for heterogeneous tuples
             let mut element_types = Vec::new();
 
-            // Store each element
+            // Store each element. The destination address is pushed before the
+            // value (WASM stores pop the value first, then the address).
             for (i, elem) in elements.iter().enumerate() {
-                let offset = 4 + (i as u32 * 4);
+                let addr = tuple_ptr + 4 + (i as u32 * 4);
 
+                func.instruction(&Instruction::I32Const(addr as i32));
                 let elem_type = emit_expr(elem, func, ctx, memory_layout, None);
+                narrow_element_to_word(func, &elem_type);
                 element_types.push(elem_type.clone());
 
                 match elem_type {
                     IRType::Float => {
-                        func.instruction(&Instruction::I32Const(tuple_ptr as i32));
-                        func.instruction(&Instruction::I32Const(offset as i32));
-                        func.instruction(&Instruction::I32Add);
                         func.instruction(&Instruction::F64Store(MemArg {
                             offset: 0,
                             align: 3,
@@ -968,9 +1105,6 @@ pub fn emit_expr(
                         }));
                     }
                     _ => {
-                        func.instruction(&Instruction::I32Const(tuple_ptr as i32));
-                        func.instruction(&Instruction::I32Const(offset as i32));
-                        func.instruction(&Instruction::I32Add);
                         func.instruction(&Instruction::I32Store(MemArg {
                             offset: 0,
                             align: 2,
@@ -1009,16 +1143,16 @@ pub fn emit_expr(
                 (IRType::Unknown, IRType::Unknown)
             };
 
-            // Store each key-value pair
+            // Store each key-value pair. The destination address is pushed
+            // before the value (WASM stores pop the value first, then address).
             for (i, (key_expr, val_expr)) in pairs.iter().enumerate() {
-                let key_offset = 4 + (i as u32 * 8); // 4 bytes for length + i * 8 (key + value)
-                let val_offset = 8 + (i as u32 * 8);
+                let key_addr = dict_ptr + 4 + (i as u32 * 8); // length + i*8 (key + value)
+                let val_addr = dict_ptr + 8 + (i as u32 * 8);
 
                 // Store key
-                emit_expr(key_expr, func, ctx, memory_layout, None);
-                func.instruction(&Instruction::I32Const(dict_ptr as i32));
-                func.instruction(&Instruction::I32Const(key_offset as i32));
-                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::I32Const(key_addr as i32));
+                let k_type = emit_expr(key_expr, func, ctx, memory_layout, None);
+                narrow_element_to_word(func, &k_type);
                 func.instruction(&Instruction::I32Store(MemArg {
                     offset: 0,
                     align: 2,
@@ -1026,10 +1160,9 @@ pub fn emit_expr(
                 }));
 
                 // Store value
-                emit_expr(val_expr, func, ctx, memory_layout, None);
-                func.instruction(&Instruction::I32Const(dict_ptr as i32));
-                func.instruction(&Instruction::I32Const(val_offset as i32));
-                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::I32Const(val_addr as i32));
+                let v_type = emit_expr(val_expr, func, ctx, memory_layout, None);
+                narrow_element_to_word(func, &v_type);
                 func.instruction(&Instruction::I32Store(MemArg {
                     offset: 0,
                     align: 2,
@@ -1048,35 +1181,27 @@ pub fn emit_expr(
 
             match container_type {
                 IRType::String => {
-                    // String indexing returns a single character string
-                    // Stack: (offset, length, index)
-                    // Result: (char_offset, 1) - single character at the index
-
-                    // Drop the length, keep offset and index
-                    func.instruction(&Instruction::LocalSet(ctx.temp_local));
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                    func.instruction(&Instruction::I32Add);
-                    // Now we have the offset of the character
-                    // Length is always 1 for a single character
+                    // String indexing returns a single character string.
+                    // Stack: (offset, length, index) -> result (char_offset, 1)
+                    func.instruction(&Instruction::LocalSet(ctx.temp_local)); // index
+                    func.instruction(&Instruction::Drop); // discard length
+                                                          // Stack: (offset)
+                    func.instruction(&Instruction::LocalGet(ctx.temp_local)); // index
+                    func.instruction(&Instruction::I32Add); // offset + index
+                                                            // Length is always 1 for a single character
                     func.instruction(&Instruction::I32Const(1));
 
                     IRType::String
                 }
                 IRType::Bytes => {
-                    // Bytes indexing returns an integer (byte value 0-255)
-                    // Stack: (offset, length, index)
-                    // Result: integer value at that position
-
-                    // Save offset
-                    func.instruction(&Instruction::LocalSet(ctx.temp_local + 1));
-                    // Drop length, keep offset and index
-                    func.instruction(&Instruction::LocalSet(ctx.temp_local));
-                    // Restore offset
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
-                    // Add index to offset to get memory address
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                    func.instruction(&Instruction::I32Add);
-                    // Load unsigned byte (0-255)
+                    // Bytes indexing returns an integer (byte value 0-255).
+                    // Stack: (offset, length, index) -> result (byte)
+                    func.instruction(&Instruction::LocalSet(ctx.temp_local)); // index
+                    func.instruction(&Instruction::Drop); // discard length
+                                                          // Stack: (offset)
+                    func.instruction(&Instruction::LocalGet(ctx.temp_local)); // index
+                    func.instruction(&Instruction::I32Add); // offset + index
+                                                            // Load unsigned byte (0-255)
                     func.instruction(&Instruction::I32Load8U(MemArg {
                         offset: 0,
                         align: 0,
@@ -1087,20 +1212,15 @@ pub fn emit_expr(
                 }
                 IRType::List(element_type) => {
                     // List indexing: list is stored as [length:i32][elem0:i32][elem1:i32]...
-                    // We have: list_ptr on stack, index on stack
-                    // Calculate address: list_ptr + 4 + (index * 4)
-
-                    // Save list pointer
-                    func.instruction(&Instruction::LocalSet(ctx.temp_local));
-                    // index is still on stack, multiply by 4
+                    // Stack: (list_ptr, index). Address = list_ptr + 4 + index*4.
+                    func.instruction(&Instruction::LocalSet(ctx.temp_local)); // index
+                                                                              // Stack: (list_ptr)
+                    func.instruction(&Instruction::LocalGet(ctx.temp_local)); // index
                     func.instruction(&Instruction::I32Const(4));
-                    func.instruction(&Instruction::I32Mul);
-                    // Add 4 to skip the length field
+                    func.instruction(&Instruction::I32Mul); // index * 4
                     func.instruction(&Instruction::I32Const(4));
-                    func.instruction(&Instruction::I32Add);
-                    // Restore list pointer and add
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                    func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::I32Add); // index*4 + 4
+                    func.instruction(&Instruction::I32Add); // list_ptr + index*4 + 4
 
                     // Load the element based on element type
                     match element_type.as_ref() {
@@ -1125,9 +1245,9 @@ pub fn emit_expr(
                 IRType::Dict(_key_type, value_type) => {
                     // Dictionary indexing using linear search
                     // Dict layout: [num_entries:i32][key0:i32][val0:i32][key1:i32][val1:i32]...
-                    // Save dict pointer and key
-                    func.instruction(&Instruction::LocalSet(ctx.temp_local)); // dict_ptr
+                    // Stack: (dict_ptr, search_key) with search_key on top.
                     func.instruction(&Instruction::LocalSet(ctx.temp_local + 1)); // search_key
+                    func.instruction(&Instruction::LocalSet(ctx.temp_local)); // dict_ptr
 
                     // Load the number of entries
                     func.instruction(&Instruction::LocalGet(ctx.temp_local));
@@ -1138,9 +1258,13 @@ pub fn emit_expr(
                     }));
                     func.instruction(&Instruction::LocalSet(ctx.temp_local + 2)); // num_entries
 
-                    // Initialize counter to 0
+                    // Initialize counter and result (result defaults to 0 when
+                    // the key is absent). Using a result local avoids leaving a
+                    // stray value on the stack on the found path.
                     func.instruction(&Instruction::I32Const(0));
                     func.instruction(&Instruction::LocalSet(ctx.temp_local + 3)); // counter
+                    func.instruction(&Instruction::I32Const(0));
+                    func.instruction(&Instruction::LocalSet(ctx.temp_local + 4)); // result
 
                     // Loop: while counter < num_entries
                     func.instruction(&Instruction::Block(BlockType::Empty));
@@ -1171,7 +1295,7 @@ pub fn emit_expr(
                     func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
                     func.instruction(&Instruction::I32Eq);
 
-                    // If equal, load and return value
+                    // If equal, capture the value and break out of the loop
                     func.instruction(&Instruction::If(BlockType::Empty));
                     // Load value at offset: dict_ptr + 4 + (counter * 8) + 4
                     func.instruction(&Instruction::LocalGet(ctx.temp_local));
@@ -1180,12 +1304,14 @@ pub fn emit_expr(
                     func.instruction(&Instruction::I32Mul);
                     func.instruction(&Instruction::I32Const(8));
                     func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::I32Add);
                     func.instruction(&Instruction::I32Load(MemArg {
                         offset: 0,
                         align: 2,
                         memory_index: 0,
                     }));
-                    func.instruction(&Instruction::Br(2)); // Break out of loop with value
+                    func.instruction(&Instruction::LocalSet(ctx.temp_local + 4)); // result
+                    func.instruction(&Instruction::Br(2)); // Break out of the loop
                     func.instruction(&Instruction::End);
 
                     // Increment counter
@@ -1198,25 +1324,22 @@ pub fn emit_expr(
                     func.instruction(&Instruction::End);
                     func.instruction(&Instruction::End);
 
-                    // Not found: return default value 0
-                    func.instruction(&Instruction::I32Const(0));
+                    // Push the looked-up value (0 if the key was not found)
+                    func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
 
                     value_type.as_ref().clone()
                 }
                 IRType::Tuple(element_types) => {
                     // Tuple indexing: tuple is stored as [length:i32][elem0:i32][elem1:i32]...
-                    // Index must be a constant or we compute dynamically
-                    // Save tuple pointer
-                    func.instruction(&Instruction::LocalSet(ctx.temp_local));
-                    // index is still on stack, multiply by 4
+                    // Stack: (tuple_ptr, index). Address = tuple_ptr + 4 + index*4.
+                    func.instruction(&Instruction::LocalSet(ctx.temp_local)); // index
+                                                                              // Stack: (tuple_ptr)
+                    func.instruction(&Instruction::LocalGet(ctx.temp_local)); // index
                     func.instruction(&Instruction::I32Const(4));
-                    func.instruction(&Instruction::I32Mul);
-                    // Add 4 to skip the length field
+                    func.instruction(&Instruction::I32Mul); // index * 4
                     func.instruction(&Instruction::I32Const(4));
-                    func.instruction(&Instruction::I32Add);
-                    // Restore tuple pointer and add
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                    func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::I32Add); // index*4 + 4
+                    func.instruction(&Instruction::I32Add); // tuple_ptr + index*4 + 4
 
                     // For homogeneous indexing, use first element type
                     // In practice, we'd need to track which index is being accessed
