@@ -8,44 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
-- **Compiled modules now produce valid, runnable WebAssembly** ([#78](https://github.com/anistark/waspy/pull/78))
-  - Emit the Code section (id 10) before the Data section (id 11); previously the section order caused WASM runtimes and Binaryen to reject every module, which also silently disabled optimization
-  - Reserve scratch/temporary locals per function so intermediate calculations no longer alias real variables or reference undeclared local indices
-  - Inverted the `while` loop exit test that caused loops to break out immediately
-  - Map bare `list` / `dict` / `set` / `tuple` annotations to their collection types
-  - Carry the `MemoryLayout` built during AST lowering through to codegen instead of rebuilding an empty one, so strings resolve to the correct data offsets
-- **Collection runtime corrections** ([#78](https://github.com/anistark/waspy/pull/78))
-  - `dict[key] = value` now updates an existing entry or appends a new one
-  - Sets de-duplicate at construction, and `in` / `not in` work for both sets and lists
-  - Fixed reversed store operands, index-read stack handling, a dict read that always returned 0, and `len()` for sets, tuples, and bytes
-- **Float and integer elements in lists and tuples now read back correctly**
-  - Float elements are stored as f32 in the one-word-per-element layout (previously an 8-byte store into a 4-byte slot corrupted neighbouring elements)
-  - Unannotated collection locals keep their element type, so `xs[i]` no longer returns a constant `0`
-  - Expression statements no longer emit a stray `drop` after `print()` (which returns no value), which had produced invalid modules
-- **Collections no longer alias each other in memory** (Issue #14)
-  - Each list/set/tuple/dict/range literal now reserves its own region via a compile-time bump allocator; previously every same-type literal in a function shared a single address (e.g. `a = [1, 2]; b = [3, 4]` made `b` overwrite `a`), and nested literals collided
-  - Memory is sized to the collection high-water mark; collection storage moved above the string/bytes/object regions
-  - Known gap: a literal inside a loop still reuses its region across iterations
-- **`for ... in range(...)` loops now run** (ascending ranges)
-  - The loop's iterator helper locals were allocated after the function's local set was fixed, producing an out-of-range reference; they are now reserved up front (keyed per loop, so nested loops get distinct locals)
-  - The range object's `start`/`stop`/`step` fields were written with reversed store operands, so the loop read a `stop` of 0 and ran zero times; fixed
-  - Known gap: descending ranges (negative step, e.g. `range(10, 0, -1)`) still iterate zero times — the loop condition is ascending-only
-- **`try`/`except`/`finally` now compiles to a valid module**
-  - The exception-state locals (`__exception_flag`, `__exception_type`) were allocated during codegen after the local set was fixed; they are now reserved during the scan
-  - The exception-dispatch emitted one `End` too many, closing the function frame early ("function body shorter than given size"); now balanced. Bare, typed, finally-only, and nested `try` blocks all validate and run
-- **Float and mixed int/float numeric code is correct**
-  - `and` / `or` produced an empty-block-typed `if` while pushing a value; they now yield an `i32` result
-  - Mixed `int`/`float` arithmetic widens the integer operand to `f64` (the `int op float` case previously stashed an `f64` into an `i32` scratch local)
-  - Unannotated float locals (e.g. `result = 1.0`) are inferred as `f64` instead of defaulting to `i32`
-  - Function locals are declared in index order; they were grouped by type, which mis-mapped indices once a function mixed `int` and `float` locals
-- **Module-level variables resolve inside functions**
-  - References to module-level variables (e.g. `PI = 3.14159`) were emitted as a `-999` sentinel; they are now resolved by inlining the variable's initializer, emitted at its natural type so `2 * PI` keeps `PI` an `f64`
-- **`int()` and `float()` actually convert**
-  - Both previously passed their argument through unchanged; `int()` now truncates a float to `i32` and `float()` widens an int to `f64`
-- **`min()` / `max()` over multiple arguments**
-  - The reduction consumed the running value in the comparison and left the `if`/`else` arms unbalanced under an empty block type; rewritten as a result-typed fold that returns the correct minimum/maximum
-- **`os.path` submodule attributes** (e.g. `os.path.sep`)
-  - Accessing an attribute of a stdlib submodule fell through to a stray `drop` that underflowed the stack; submodule attributes are now resolved like module attributes
+- Compiled modules are valid and runnable: Code section before Data, per-function scratch locals, corrected `while` exit test, bare `list`/`dict`/`set`/`tuple` annotations, and `MemoryLayout` propagated to codegen ([#78](https://github.com/anistark/waspy/pull/78))
+- Collection runtime: `dict[key] = value` update/append, set de-duplication, `in`/`not in` for sets and lists, and `len()` for sets/tuples/bytes ([#78](https://github.com/anistark/waspy/pull/78))
+- Collections no longer alias in memory — each list/set/tuple/dict/range literal gets its own region via a compile-time bump allocator; distinct and nested literals previously shared one address (Issue #14)
+- Float elements in lists/tuples round-trip correctly (stored as f32 in the one-word slot), and unannotated collection locals keep their element type so `xs[i]` no longer returns `0`
+- `for ... in range(...)` iterates (ascending): iterator locals are reserved up front (nested loops get distinct locals) and range fields use the correct store operand order
+- `try`/`except`/`finally` compiles to a valid module: exception-state locals reserved in the scan, and balanced control flow (was emitting one `End` too many)
+- Numeric typing: `and`/`or` yield an `i32` result, mixed int/float arithmetic widens the int operand to `f64`, unannotated float locals infer as `f64`, and locals are declared in index order
+- Module-level variables (e.g. `PI = 3.14159`) resolve inside functions by inlining their initializer
+- `int()` / `float()` actually convert (truncate / widen); `min()` / `max()` reduce correctly; `os.path` submodule attributes (e.g. `os.path.sep`) resolve
+- Expression statements no longer emit a stray `drop` after `print()`
 
 ## [0.9.0](https://github.com/anistark/waspy/releases/tag/v0.9.0) - 2025-12-14
 
