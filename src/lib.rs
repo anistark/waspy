@@ -698,44 +698,77 @@ pub use crate::core::parser;
 mod collection_tests {
     use super::*;
 
-    /// Compile without optimization and fully validate the raw module. This
-    /// checks types and stack balance, catching the collection codegen bugs
-    /// (wrong element widths, untyped locals, and the stray drop after `print`)
+    use wasmi::{Engine, Linker, Module, Store};
+
+    /// Compile (unoptimized) and instantiate the module, returning the wasmi
+    /// instance + store so a test can call exported functions. Instantiation
+    /// validates types and stack balance, so this also guards the codegen bugs
     /// that previously produced invalid modules.
-    fn compiles_to_valid_wasm(source: &str) -> bool {
+    fn instantiate(source: &str) -> (wasmi::Instance, Store<()>) {
         let options = CompilerOptions {
             optimize: false,
             ..CompilerOptions::default()
         };
         let wasm = compile_python_to_wasm_with_options(source, &options).expect("compilation");
-        wasmparser::validate(&wasm).is_ok()
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm[..]).expect("valid wasm module");
+        let mut store = Store::new(&engine, ());
+        let instance = Linker::<()>::new(&engine)
+            .instantiate(&mut store, &module)
+            .expect("instantiation")
+            .start(&mut store)
+            .expect("start");
+        (instance, store)
+    }
+
+    fn call_i32(source: &str, func: &str) -> i32 {
+        let (instance, mut store) = instantiate(source);
+        instance
+            .get_typed_func::<(), i32>(&store, func)
+            .expect("exported i32 fn")
+            .call(&mut store, ())
+            .expect("call")
     }
 
     #[test]
-    fn float_list_indexing_is_valid() {
-        assert!(compiles_to_valid_wasm(
-            "def f() -> float:\n    xs = [1.5, 2.5, 3.5]\n    return xs[1]\n"
-        ));
+    fn float_list_roundtrips() {
+        // Reads the float element back and compares (returns 1 on match). The
+        // value is stored as f32; 2.5 is exact, so equality holds.
+        let src = "def f() -> int:\n    xs = [1.5, 2.5, 3.5]\n    if xs[1] == 2.5:\n        return 1\n    return 0\n";
+        assert_eq!(call_i32(src, "f"), 1);
     }
 
     #[test]
-    fn float_tuple_indexing_is_valid() {
-        assert!(compiles_to_valid_wasm(
-            "def f() -> float:\n    t = (1.25, 2.75)\n    return t[1]\n"
-        ));
+    fn float_tuple_roundtrips() {
+        let src = "def f() -> int:\n    t = (1.25, 2.75)\n    if t[1] == 2.75:\n        return 1\n    return 0\n";
+        assert_eq!(call_i32(src, "f"), 1);
     }
 
     #[test]
-    fn int_list_indexing_is_valid() {
-        assert!(compiles_to_valid_wasm(
-            "def f() -> int:\n    xs = [10, 20, 30]\n    return xs[1]\n"
-        ));
+    fn int_list_indexing_returns_element() {
+        // Previously returned a constant 0: the untyped local lost its type.
+        let src = "def f() -> int:\n    xs = [10, 20, 30]\n    return xs[1]\n";
+        assert_eq!(call_i32(src, "f"), 20);
+    }
+
+    #[test]
+    fn distinct_collections_do_not_alias() {
+        // Both lists previously shared one address (base + local_count*100).
+        let src =
+            "def f() -> int:\n    a = [1, 2, 3]\n    b = [10, 20, 30]\n    return a[0] + b[0]\n";
+        assert_eq!(call_i32(src, "f"), 11);
+    }
+
+    #[test]
+    fn nested_collections_do_not_alias() {
+        let src = "def f() -> int:\n    m = [[1, 2], [3, 4]]\n    return m[0][1] + m[1][0]\n";
+        assert_eq!(call_i32(src, "f"), 5);
     }
 
     #[test]
     fn print_of_collection_element_is_valid() {
-        assert!(compiles_to_valid_wasm(
-            "def f():\n    xs = [1, 2, 3]\n    print(xs[0])\n"
-        ));
+        // print() returns nothing; a stray drop would underflow and fail to
+        // instantiate. Just ensure it builds and instantiates.
+        instantiate("def f():\n    xs = [1, 2, 3]\n    print(xs[0])\n");
     }
 }

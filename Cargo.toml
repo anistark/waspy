@@ -36,7 +36,7 @@ chrono = "0.4"
 regex = "1.11"
 
 [dev-dependencies]
-wasmparser = "0.243.0"
+wasmi = "0.31"
 
 [lib]
 name = "waspy"

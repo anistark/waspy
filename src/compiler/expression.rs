@@ -923,17 +923,23 @@ pub fn emit_expr(
         }
         IRExpr::ListLiteral(elements) => {
             // List layout in memory: [length:i32][elem0:i32][elem1:i32]...
-            // For now, allocate after string data (at offset 10000)
-            // Each element takes 4 bytes for i32 values
+            // Each element takes 4 bytes.
 
             if elements.is_empty() {
-                // Empty list: just a length of 0
-                func.instruction(&Instruction::I32Const(10000)); // Pointer to empty list
+                // Empty list: a header with length 0.
+                let list_ptr = ctx.alloc_collection(4);
+                func.instruction(&Instruction::I32Const(list_ptr as i32));
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32Store(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+                func.instruction(&Instruction::I32Const(list_ptr as i32));
                 return IRType::List(Box::new(IRType::Unknown));
             }
 
-            // Use a fixed allocation address for simplicity
-            let list_ptr = 10000 + (ctx.local_count * 100);
+            let list_ptr = ctx.alloc_collection(4 + elements.len() as u32 * 4);
 
             // Store length at the beginning
             func.instruction(&Instruction::I32Const(list_ptr as i32));
@@ -974,19 +980,19 @@ pub fn emit_expr(
 
             // Empty set: store a count of 0 so membership tests read a valid header.
             if elements.is_empty() {
-                func.instruction(&Instruction::I32Const(20000));
+                let set_ptr = ctx.alloc_collection(4);
+                func.instruction(&Instruction::I32Const(set_ptr as i32));
                 func.instruction(&Instruction::I32Const(0));
                 func.instruction(&Instruction::I32Store(MemArg {
                     offset: 0,
                     align: 2,
                     memory_index: 0,
                 }));
-                func.instruction(&Instruction::I32Const(20000));
+                func.instruction(&Instruction::I32Const(set_ptr as i32));
                 return IRType::Set(Box::new(IRType::Unknown));
             }
 
-            // Use a fixed allocation address for simplicity.
-            let set_ptr = 20000 + (ctx.local_count * 100);
+            let set_ptr = ctx.alloc_collection(4 + elements.len() as u32 * 4);
 
             // Start with an empty set (count = 0).
             func.instruction(&Instruction::I32Const(set_ptr as i32));
@@ -1089,14 +1095,21 @@ pub fn emit_expr(
         }
         IRExpr::TupleLiteral(elements) => {
             // Tuple layout in memory: [length:i32][elem0:i32][elem1:i32]...
-            // Fixed-size tuples allocated after sets (at offset 30000+)
 
             if elements.is_empty() {
-                func.instruction(&Instruction::I32Const(30000));
+                let tuple_ptr = ctx.alloc_collection(4);
+                func.instruction(&Instruction::I32Const(tuple_ptr as i32));
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32Store(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+                func.instruction(&Instruction::I32Const(tuple_ptr as i32));
                 return IRType::Tuple(vec![]);
             }
 
-            let tuple_ptr = 30000 + (ctx.local_count * 100);
+            let tuple_ptr = ctx.alloc_collection(4 + elements.len() as u32 * 4);
 
             // Store length at the beginning
             func.instruction(&Instruction::I32Const(tuple_ptr as i32));
@@ -1127,8 +1140,7 @@ pub fn emit_expr(
         }
         IRExpr::DictLiteral(pairs) => {
             // Dict layout in memory: [num_entries:i32][key0:i32][val0:i32][key1:i32][val1:i32]...
-            // Allocate dict at a fixed offset (after lists)
-            let dict_ptr = 50000 + (ctx.local_count * 100);
+            let dict_ptr = ctx.alloc_collection(4 + pairs.len() as u32 * 8);
 
             // Store number of entries
             func.instruction(&Instruction::I32Const(dict_ptr as i32));
@@ -3369,8 +3381,7 @@ pub fn emit_expr(
         }
         IRExpr::RangeCall { start, stop, step } => {
             // Range object layout in memory: [start:i32][stop:i32][step:i32][current:i32]
-            // Allocate range object at offset 40000+
-            let range_ptr = 40000 + (ctx.local_count * 100);
+            let range_ptr = ctx.alloc_collection(16);
 
             // Evaluate and store start (default 0)
             if let Some(s) = start {

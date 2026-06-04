@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Float elements are stored as f32 in the one-word-per-element layout (previously an 8-byte store into a 4-byte slot corrupted neighbouring elements)
   - Unannotated collection locals keep their element type, so `xs[i]` no longer returns a constant `0`
   - Expression statements no longer emit a stray `drop` after `print()` (which returns no value), which had produced invalid modules
+- **Collections no longer alias each other in memory** (Issue #14)
+  - Each list/set/tuple/dict/range literal now reserves its own region via a compile-time bump allocator; previously every same-type literal in a function shared a single address (e.g. `a = [1, 2]; b = [3, 4]` made `b` overwrite `a`), and nested literals collided
+  - Memory is sized to the collection high-water mark; collection storage moved above the string/bytes/object regions
+  - Known gap: a literal inside a loop still reuses its region across iterations
 
 ## [0.9.0](https://github.com/anistark/waspy/releases/tag/v0.9.0) - 2025-12-14
 
