@@ -730,6 +730,15 @@ mod collection_tests {
             .expect("call")
     }
 
+    fn call_i32_arg(source: &str, func: &str, arg: i32) -> i32 {
+        let (instance, mut store) = instantiate(source);
+        instance
+            .get_typed_func::<i32, i32>(&store, func)
+            .expect("exported i32 fn")
+            .call(&mut store, arg)
+            .expect("call")
+    }
+
     #[test]
     fn float_list_roundtrips() {
         // Reads the float element back and compares (returns 1 on match). The
@@ -789,5 +798,19 @@ mod collection_tests {
     fn nested_range_loops_use_distinct_iterators() {
         let src = "def f() -> int:\n    s = 0\n    for i in range(3):\n        for j in range(4):\n            s = s + 1\n    return s\n";
         assert_eq!(call_i32(src, "f"), 12);
+    }
+
+    #[test]
+    fn try_except_finally_is_valid_and_runs() {
+        // try/except/finally previously emitted an extra End that closed the
+        // function frame early ("body shorter than given size").
+        let src = "def f(x: int) -> int:\n    try:\n        return x + 1\n    except ValueError:\n        return -1\n    finally:\n        x = x + 100\n";
+        assert_eq!(call_i32_arg(src, "f", 5), 6);
+    }
+
+    #[test]
+    fn nested_try_except_is_valid() {
+        let src = "def f(x: int) -> int:\n    try:\n        try:\n            return x + 5\n        except KeyError:\n            return -2\n    except ValueError:\n        return -1\n";
+        assert_eq!(call_i32_arg(src, "f", 5), 10);
     }
 }

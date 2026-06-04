@@ -779,8 +779,9 @@ pub fn compile_body(
                     }
                 }
 
-                // End of exception handling
-                func.instruction(&Instruction::End);
+                // Close the exception-dispatch if/else. Each typed handler opens
+                // and closes its own block, so only this `If` remains open here;
+                // a second `End` would close the function frame early.
                 func.instruction(&Instruction::End);
 
                 // If there's a finally block, always execute it

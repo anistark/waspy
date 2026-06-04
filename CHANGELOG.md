@@ -30,6 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The loop's iterator helper locals were allocated after the function's local set was fixed, producing an out-of-range reference; they are now reserved up front (keyed per loop, so nested loops get distinct locals)
   - The range object's `start`/`stop`/`step` fields were written with reversed store operands, so the loop read a `stop` of 0 and ran zero times; fixed
   - Known gap: descending ranges (negative step, e.g. `range(10, 0, -1)`) still iterate zero times — the loop condition is ascending-only
+- **`try`/`except`/`finally` now compiles to a valid module**
+  - The exception-state locals (`__exception_flag`, `__exception_type`) were allocated during codegen after the local set was fixed; they are now reserved during the scan
+  - The exception-dispatch emitted one `End` too many, closing the function frame early ("function body shorter than given size"); now balanced. Bare, typed, finally-only, and nested `try` blocks all validate and run
 
 ## [0.9.0](https://github.com/anistark/waspy/releases/tag/v0.9.0) - 2025-12-14
 
