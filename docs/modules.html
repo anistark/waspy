@@ -658,7 +658,7 @@
                             <li class="feature-item">
                                 <span class="feature-status">${getStatusIcon(feature.status)}</span>
                                 <span class="feature-text">${feature.name}</span>
-                                ${feature.version && feature.version !== 'todo' ? `<span class="feature-version" title="Version introduced">${feature.version === '0.9.0' ? 'upcoming' : feature.version}</span>` : ''}
+                                ${feature.version && feature.version !== 'todo' ? `<span class="feature-version" title="Version introduced">${feature.version}</span>` : ''}
                             </li>
                         `).join('')}
                     </ul>

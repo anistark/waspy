@@ -7,7 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-...
+### Fixed
+- **Compiled modules now produce valid, runnable WebAssembly** ([#78](https://github.com/anistark/waspy/pull/78))
+  - Emit the Code section (id 10) before the Data section (id 11); previously the section order caused WASM runtimes and Binaryen to reject every module, which also silently disabled optimization
+  - Reserve scratch/temporary locals per function so intermediate calculations no longer alias real variables or reference undeclared local indices
+  - Inverted the `while` loop exit test that caused loops to break out immediately
+  - Map bare `list` / `dict` / `set` / `tuple` annotations to their collection types
+  - Carry the `MemoryLayout` built during AST lowering through to codegen instead of rebuilding an empty one, so strings resolve to the correct data offsets
+- **Collection runtime corrections** ([#78](https://github.com/anistark/waspy/pull/78))
+  - `dict[key] = value` now updates an existing entry or appends a new one
+  - Sets de-duplicate at construction, and `in` / `not in` work for both sets and lists
+  - Fixed reversed store operands, index-read stack handling, a dict read that always returned 0, and `len()` for sets, tuples, and bytes
 
 ## [0.9.0](https://github.com/anistark/waspy/releases/tag/v0.9.0) - 2025-12-14
 

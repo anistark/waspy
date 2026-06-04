@@ -13,3 +13,5 @@ examples/*.html
 
 # Custom
 NOTES.md
+.claude
+.pi
