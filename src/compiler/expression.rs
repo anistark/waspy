@@ -18,6 +18,46 @@ fn narrow_element_to_word(func: &mut Function, elem_type: &IRType) {
     }
 }
 
+/// Store the value on top of the stack into a 4-byte collection slot (the
+/// destination address must be pushed first). Floats are narrowed to f32 so
+/// they fit the one-word-per-element layout; everything else is already an
+/// i32 word (ints, bools, interned string/bytes offsets).
+fn store_collection_word(func: &mut Function, elem_type: &IRType) {
+    if matches!(elem_type, IRType::Float) {
+        func.instruction(&Instruction::F32DemoteF64);
+        func.instruction(&Instruction::F32Store(MemArg {
+            offset: 0,
+            align: 2,
+            memory_index: 0,
+        }));
+    } else {
+        func.instruction(&Instruction::I32Store(MemArg {
+            offset: 0,
+            align: 2,
+            memory_index: 0,
+        }));
+    }
+}
+
+/// Load a 4-byte collection slot (address on top of the stack), widening f32
+/// float slots back to the f64 the rest of the compiler works with.
+fn load_collection_word(func: &mut Function, elem_type: &IRType) {
+    if matches!(elem_type, IRType::Float) {
+        func.instruction(&Instruction::F32Load(MemArg {
+            offset: 0,
+            align: 2,
+            memory_index: 0,
+        }));
+        func.instruction(&Instruction::F64PromoteF32);
+    } else {
+        func.instruction(&Instruction::I32Load(MemArg {
+            offset: 0,
+            align: 2,
+            memory_index: 0,
+        }));
+    }
+}
+
 /// Emit WebAssembly instructions for an IR expression
 pub fn emit_expr(
     expr: &IRExpr,
@@ -915,23 +955,7 @@ pub fn emit_expr(
                 func.instruction(&Instruction::I32Const(addr as i32));
                 let ty = emit_expr(elem, func, ctx, memory_layout, None);
                 narrow_element_to_word(func, &ty);
-
-                match ty {
-                    IRType::Float => {
-                        func.instruction(&Instruction::F64Store(MemArg {
-                            offset: 0,
-                            align: 3,
-                            memory_index: 0,
-                        }));
-                    }
-                    _ => {
-                        func.instruction(&Instruction::I32Store(MemArg {
-                            offset: 0,
-                            align: 2,
-                            memory_index: 0,
-                        }));
-                    }
-                }
+                store_collection_word(func, &ty);
 
                 if i == 0 {
                     elem_type = ty;
@@ -1094,24 +1118,8 @@ pub fn emit_expr(
                 func.instruction(&Instruction::I32Const(addr as i32));
                 let elem_type = emit_expr(elem, func, ctx, memory_layout, None);
                 narrow_element_to_word(func, &elem_type);
-                element_types.push(elem_type.clone());
-
-                match elem_type {
-                    IRType::Float => {
-                        func.instruction(&Instruction::F64Store(MemArg {
-                            offset: 0,
-                            align: 3,
-                            memory_index: 0,
-                        }));
-                    }
-                    _ => {
-                        func.instruction(&Instruction::I32Store(MemArg {
-                            offset: 0,
-                            align: 2,
-                            memory_index: 0,
-                        }));
-                    }
-                }
+                store_collection_word(func, &elem_type);
+                element_types.push(elem_type);
             }
 
             func.instruction(&Instruction::I32Const(tuple_ptr as i32));
@@ -1222,23 +1230,7 @@ pub fn emit_expr(
                     func.instruction(&Instruction::I32Add); // index*4 + 4
                     func.instruction(&Instruction::I32Add); // list_ptr + index*4 + 4
 
-                    // Load the element based on element type
-                    match element_type.as_ref() {
-                        IRType::Float => {
-                            func.instruction(&Instruction::F64Load(MemArg {
-                                offset: 0,
-                                align: 3,
-                                memory_index: 0,
-                            }));
-                        }
-                        _ => {
-                            func.instruction(&Instruction::I32Load(MemArg {
-                                offset: 0,
-                                align: 2,
-                                memory_index: 0,
-                            }));
-                        }
-                    }
+                    load_collection_word(func, element_type.as_ref());
 
                     element_type.as_ref().clone()
                 }
@@ -1349,22 +1341,7 @@ pub fn emit_expr(
                         IRType::Unknown
                     };
 
-                    match &elem_type {
-                        IRType::Float => {
-                            func.instruction(&Instruction::F64Load(MemArg {
-                                offset: 0,
-                                align: 3,
-                                memory_index: 0,
-                            }));
-                        }
-                        _ => {
-                            func.instruction(&Instruction::I32Load(MemArg {
-                                offset: 0,
-                                align: 2,
-                                memory_index: 0,
-                            }));
-                        }
-                    }
+                    load_collection_word(func, &elem_type);
 
                     elem_type
                 }

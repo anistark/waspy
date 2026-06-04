@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `dict[key] = value` now updates an existing entry or appends a new one
   - Sets de-duplicate at construction, and `in` / `not in` work for both sets and lists
   - Fixed reversed store operands, index-read stack handling, a dict read that always returned 0, and `len()` for sets, tuples, and bytes
+- **Float and integer elements in lists and tuples now read back correctly**
+  - Float elements are stored as f32 in the one-word-per-element layout (previously an 8-byte store into a 4-byte slot corrupted neighbouring elements)
+  - Unannotated collection locals keep their element type, so `xs[i]` no longer returns a constant `0`
+  - Expression statements no longer emit a stray `drop` after `print()` (which returns no value), which had produced invalid modules
 
 ## [0.9.0](https://github.com/anistark/waspy/releases/tag/v0.9.0) - 2025-12-14
 

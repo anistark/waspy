@@ -198,7 +198,28 @@ pub fn compile_body(
                     .or_else(|| ctx.get_local_info(target).map(|info| info.var_type.clone()));
 
                 // Emit code for the value
-                emit_expr(value, func, ctx, memory_layout, expected_type.as_ref());
+                let value_type = emit_expr(value, func, ctx, memory_layout, expected_type.as_ref());
+
+                // An unannotated local is allocated as Unknown (an i32 slot).
+                // Recover the element/entry types of collections so later
+                // indexing knows how to load each slot. Only pointer-shaped
+                // types are adopted, since they share that same i32 slot and
+                // won't disturb the already-fixed local layout.
+                if let Some(info) = ctx.locals_map.get_mut(target) {
+                    if matches!(info.var_type, IRType::Unknown)
+                        && matches!(
+                            value_type,
+                            IRType::List(_)
+                                | IRType::Tuple(_)
+                                | IRType::Dict(_, _)
+                                | IRType::Set(_)
+                                | IRType::String
+                                | IRType::Bytes
+                        )
+                    {
+                        info.var_type = value_type;
+                    }
+                }
 
                 if let Some(local_idx) = ctx.get_local_index(target) {
                     func.instruction(&Instruction::LocalSet(local_idx));
@@ -321,8 +342,13 @@ pub fn compile_body(
                 func.instruction(&Instruction::End);
             }
             IRStatement::Expression(expr) => {
-                emit_expr(expr, func, ctx, memory_layout, None);
-                func.instruction(&Instruction::Drop);
+                // Discard the result only when the expression actually leaves a
+                // value. Calls like print() return None and push nothing, so an
+                // unconditional drop would underflow the stack.
+                let result_type = emit_expr(expr, func, ctx, memory_layout, None);
+                if !matches!(result_type, IRType::None) {
+                    func.instruction(&Instruction::Drop);
+                }
             }
             IRStatement::AttributeAssign {
                 object,

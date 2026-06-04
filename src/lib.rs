@@ -693,3 +693,49 @@ pub fn type_to_string(ir_type: &IRType) -> String {
 
 pub use crate::analysis::metadata::FunctionSignature;
 pub use crate::core::parser;
+
+#[cfg(test)]
+mod collection_tests {
+    use super::*;
+
+    /// Compile without optimization and fully validate the raw module. This
+    /// checks types and stack balance, catching the collection codegen bugs
+    /// (wrong element widths, untyped locals, and the stray drop after `print`)
+    /// that previously produced invalid modules.
+    fn compiles_to_valid_wasm(source: &str) -> bool {
+        let options = CompilerOptions {
+            optimize: false,
+            ..CompilerOptions::default()
+        };
+        let wasm = compile_python_to_wasm_with_options(source, &options).expect("compilation");
+        wasmparser::validate(&wasm).is_ok()
+    }
+
+    #[test]
+    fn float_list_indexing_is_valid() {
+        assert!(compiles_to_valid_wasm(
+            "def f() -> float:\n    xs = [1.5, 2.5, 3.5]\n    return xs[1]\n"
+        ));
+    }
+
+    #[test]
+    fn float_tuple_indexing_is_valid() {
+        assert!(compiles_to_valid_wasm(
+            "def f() -> float:\n    t = (1.25, 2.75)\n    return t[1]\n"
+        ));
+    }
+
+    #[test]
+    fn int_list_indexing_is_valid() {
+        assert!(compiles_to_valid_wasm(
+            "def f() -> int:\n    xs = [10, 20, 30]\n    return xs[1]\n"
+        ));
+    }
+
+    #[test]
+    fn print_of_collection_element_is_valid() {
+        assert!(compiles_to_valid_wasm(
+            "def f():\n    xs = [1, 2, 3]\n    print(xs[0])\n"
+        ));
+    }
+}
