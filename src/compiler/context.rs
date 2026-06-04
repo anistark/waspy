@@ -43,7 +43,8 @@ pub struct CompilationContext {
     pub local_count: u32,
     pub function_map: HashMap<String, FunctionInfo>,
     pub class_map: HashMap<String, ClassInfo>,
-    pub temp_local: u32, // For temporary calculations
+    pub temp_local: u32,     // For temporary calculations (i32 scratch)
+    pub temp_local_f64: u32, // Single f64 scratch local (operand juggling for coercions)
     /// Sequence counter for `for` loops, advanced in identical pre-order by the
     /// local-allocation scan and by codegen so each loop reuses the iterator
     /// helper locals (`__iter_*_{n}`) reserved for it. Reset per function.
@@ -66,6 +67,7 @@ impl CompilationContext {
             function_map: HashMap::new(),
             class_map: HashMap::new(),
             temp_local: 0,
+            temp_local_f64: 0,
             for_loop_seq: 0,
             collection_alloc_offset: Cell::new(0),
         }

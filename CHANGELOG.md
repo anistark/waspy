@@ -33,6 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`try`/`except`/`finally` now compiles to a valid module**
   - The exception-state locals (`__exception_flag`, `__exception_type`) were allocated during codegen after the local set was fixed; they are now reserved during the scan
   - The exception-dispatch emitted one `End` too many, closing the function frame early ("function body shorter than given size"); now balanced. Bare, typed, finally-only, and nested `try` blocks all validate and run
+- **Float and mixed int/float numeric code is correct**
+  - `and` / `or` produced an empty-block-typed `if` while pushing a value; they now yield an `i32` result
+  - Mixed `int`/`float` arithmetic widens the integer operand to `f64` (the `int op float` case previously stashed an `f64` into an `i32` scratch local)
+  - Unannotated float locals (e.g. `result = 1.0`) are inferred as `f64` instead of defaulting to `i32`
+  - Function locals are declared in index order; they were grouped by type, which mis-mapped indices once a function mixed `int` and `float` locals
 
 ## [0.9.0](https://github.com/anistark/waspy/releases/tag/v0.9.0) - 2025-12-14
 

@@ -1,6 +1,6 @@
 use crate::compiler::context::{CompilationContext, SCRATCH_LOCALS};
 use crate::compiler::expression::{emit_expr, emit_integer_power_operation};
-use crate::ir::{IRBody, IRFunction, IROp, IRStatement, IRType, MemoryLayout};
+use crate::ir::{IRBody, IRConstant, IRExpr, IRFunction, IROp, IRStatement, IRType, MemoryLayout};
 use wasm_encoder::{BlockType, Function, Instruction, MemArg, ValType};
 
 /// Compile an IR function into a WebAssembly function
@@ -22,34 +22,28 @@ pub fn compile_function(
     scan_and_allocate_locals(&ir_func.body, ctx);
 
     // Reserve scratch locals after all params and named locals so temporary
-    // calculations never clobber real variables. These indices are declared as
-    // i32 locals by the type-counting loop below (they are absent from
-    // locals_map, so get_local_type_by_index defaults them to i32).
+    // calculations never clobber real variables. The i32 scratch run is absent
+    // from locals_map (defaults to i32); the f64 scratch is registered so it is
+    // declared as f64 and used for operand juggling during int/float coercion.
     ctx.temp_local = ctx.local_count;
     ctx.local_count += SCRATCH_LOCALS;
+    ctx.temp_local_f64 = ctx.add_local("__f64_scratch", IRType::Float);
 
-    // Determine local types for WebAssembly
-    let mut locals = Vec::new();
+    // Declare locals in index order, coalescing adjacent same-type runs. The
+    // local index assigned by `add_local` must match the WASM declaration
+    // order, so grouping all i32s then all f64s (which reorders indices) is
+    // wrong once a function mixes int and float locals.
     let num_params = ir_func.params.len() as u32;
-
-    // Group locals by type
-    let mut i32_count = 0;
-    let mut f64_count = 0;
-
-    // Count locals by type (excluding parameters)
+    let mut locals: Vec<(u32, ValType)> = Vec::new();
     for i in num_params..ctx.local_count {
-        match get_local_type_by_index(ctx, i) {
-            IRType::Float => f64_count += 1,
-            _ => i32_count += 1,
+        let val_type = match get_local_type_by_index(ctx, i) {
+            IRType::Float => ValType::F64,
+            _ => ValType::I32,
+        };
+        match locals.last_mut() {
+            Some((count, last)) if *last == val_type => *count += 1,
+            _ => locals.push((1, val_type)),
         }
-    }
-
-    // Add locals to function signature
-    if i32_count > 0 {
-        locals.push((i32_count, ValType::I32));
-    }
-    if f64_count > 0 {
-        locals.push((f64_count, ValType::F64));
     }
 
     let mut func = Function::new(locals);
@@ -99,15 +93,52 @@ fn ensure_local(ctx: &mut CompilationContext, name: &str, var_type: IRType) {
     }
 }
 
+/// Best-effort type inference for an unannotated assignment value. Only used to
+/// decide a local's WASM value type (f64 vs i32), so it just needs to recognise
+/// float-producing expressions confidently; anything else is left `Unknown`
+/// (an i32 slot, which collections and pointers also use).
+fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRType {
+    match value {
+        IRExpr::Const(IRConstant::Float(_)) => IRType::Float,
+        IRExpr::BinaryOp { left, right, .. } => {
+            if infer_value_type(left, ctx) == IRType::Float
+                || infer_value_type(right, ctx) == IRType::Float
+            {
+                IRType::Float
+            } else {
+                IRType::Unknown
+            }
+        }
+        IRExpr::UnaryOp { operand, .. } => infer_value_type(operand, ctx),
+        IRExpr::Variable(name) => ctx
+            .get_local_info(name)
+            .map(|info| info.var_type.clone())
+            .unwrap_or(IRType::Unknown),
+        IRExpr::FunctionCall { function_name, .. } if function_name == "float" => IRType::Float,
+        IRExpr::FunctionCall { function_name, .. } => ctx
+            .get_function_info(function_name)
+            .map(|f| f.return_type.clone())
+            .filter(|t| *t == IRType::Float)
+            .unwrap_or(IRType::Unknown),
+        _ => IRType::Unknown,
+    }
+}
+
 /// Scan the function body for variable declarations and allocate local variables
 pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
     for stmt in &body.statements {
         match stmt {
             IRStatement::Assign {
-                target, var_type, ..
+                target,
+                var_type,
+                value,
             } => {
                 if ctx.get_local_index(target).is_none() {
-                    let var_type = var_type.clone().unwrap_or(IRType::Unknown);
+                    // Use the annotation if present; otherwise infer the type
+                    // from the value so unannotated float locals become f64.
+                    let var_type = var_type
+                        .clone()
+                        .unwrap_or_else(|| infer_value_type(value, ctx));
                     ctx.add_local(target, var_type);
                 }
             }

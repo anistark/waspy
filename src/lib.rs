@@ -813,4 +813,34 @@ mod collection_tests {
         let src = "def f(x: int) -> int:\n    try:\n        try:\n            return x + 5\n        except KeyError:\n            return -2\n    except ValueError:\n        return -1\n";
         assert_eq!(call_i32_arg(src, "f", 5), 10);
     }
+
+    #[test]
+    fn int_plus_float_coerces() {
+        // a (int) + b (float) widens the int to f64; the result equals 3.5.
+        let src = "def f() -> int:\n    a = 2\n    b = 1.5\n    if (a + b) == 3.5:\n        return 1\n    return 0\n";
+        assert_eq!(call_i32(src, "f"), 1);
+    }
+
+    #[test]
+    fn boolean_and_or_short_circuit() {
+        // and/or now yield an i32 result from their if/else instead of an
+        // empty block type.
+        let and =
+            "def f(a: int) -> int:\n    if (a > 0) and (a < 10):\n        return 1\n    return 0\n";
+        assert_eq!(call_i32_arg(and, "f", 5), 1);
+        assert_eq!(call_i32_arg(and, "f", 20), 0);
+        let or =
+            "def f(a: int) -> int:\n    if (a < 0) or (a > 100):\n        return 1\n    return 0\n";
+        assert_eq!(call_i32_arg(or, "f", -1), 1);
+        assert_eq!(call_i32_arg(or, "f", 50), 0);
+    }
+
+    #[test]
+    fn unannotated_float_local_in_mixed_function() {
+        // `result` is an unannotated float local (f64) living alongside the int
+        // local `i`; both the type inference and index-order local layout must
+        // be right for this to validate and compute 2**10.
+        let src = "def f() -> int:\n    result = 1.0\n    i = 0\n    while i < 10:\n        result = result * 2.0\n        i = i + 1\n    if result == 1024.0:\n        return 1\n    return 0\n";
+        assert_eq!(call_i32(src, "f"), 1);
+    }
 }

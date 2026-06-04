@@ -1,6 +1,6 @@
 use crate::compiler::context::CompilationContext;
 use crate::ir::{IRBoolOp, IRCompareOp, IRConstant, IRExpr, IROp, IRType, IRUnaryOp, MemoryLayout};
-use wasm_encoder::{BlockType, Function, Instruction, MemArg};
+use wasm_encoder::{BlockType, Function, Instruction, MemArg, ValType};
 
 // Helper to convert f64 to Ieee64
 #[inline]
@@ -344,14 +344,19 @@ pub fn emit_expr(
                 }
             }
 
-            if left_type == IRType::Float && right_type == IRType::Int {
-                // Convert right operand from i32 to f64
+            // int/bool/unknown values are all i32-represented; widen the i32
+            // side to f64 when the other operand is a float.
+            let left_int_like = matches!(left_type, IRType::Int | IRType::Bool | IRType::Unknown);
+            let right_int_like = matches!(right_type, IRType::Int | IRType::Bool | IRType::Unknown);
+            if left_type == IRType::Float && right_int_like {
+                // Right operand (top of stack) is i32; widen it to f64.
                 func.instruction(&Instruction::F64ConvertI32S);
-            } else if left_type == IRType::Int && right_type == IRType::Float {
-                // Move stack: f64 under i32
-                func.instruction(&Instruction::LocalSet(ctx.temp_local));
+            } else if left_int_like && right_type == IRType::Float {
+                // Left operand is the i32 buried under the f64 right operand.
+                // Stash the f64 (needs an f64 local), widen the int, restore.
+                func.instruction(&Instruction::LocalSet(ctx.temp_local_f64));
                 func.instruction(&Instruction::F64ConvertI32S);
-                func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                func.instruction(&Instruction::LocalGet(ctx.temp_local_f64));
             }
 
             let result_type = if left_type == IRType::Float || right_type == IRType::Float {
@@ -687,8 +692,9 @@ pub fn emit_expr(
                     func.instruction(&Instruction::LocalSet(ctx.temp_local));
                     func.instruction(&Instruction::LocalGet(ctx.temp_local));
 
-                    // If-else pattern for short-circuit evaluation
-                    func.instruction(&Instruction::If(BlockType::Empty));
+                    // If-else pattern for short-circuit evaluation. Both arms
+                    // leave the boolean result, so the if yields an i32.
+                    func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
                     emit_expr(right, func, ctx, memory_layout, Some(&IRType::Bool));
                     func.instruction(&Instruction::Else);
                     func.instruction(&Instruction::I32Const(0)); // False
@@ -700,8 +706,9 @@ pub fn emit_expr(
                     func.instruction(&Instruction::LocalSet(ctx.temp_local));
                     func.instruction(&Instruction::LocalGet(ctx.temp_local));
 
-                    // If-else pattern for short-circuit evaluation
-                    func.instruction(&Instruction::If(BlockType::Empty));
+                    // If-else pattern for short-circuit evaluation. Both arms
+                    // leave the boolean result, so the if yields an i32.
+                    func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
                     func.instruction(&Instruction::I32Const(1)); // True
                     func.instruction(&Instruction::Else);
                     emit_expr(right, func, ctx, memory_layout, Some(&IRType::Bool));
