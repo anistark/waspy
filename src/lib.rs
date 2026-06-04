@@ -858,4 +858,19 @@ mod collection_tests {
         let src = "def f() -> int:\n    return int(3.7) + int(float(2))\n";
         assert_eq!(call_i32(src, "f"), 5);
     }
+
+    #[test]
+    fn min_and_max_reduce() {
+        // The reduction previously left the if/else stack unbalanced.
+        let src = "def lo() -> int:\n    return min(5, 3, 8, 1, 9)\ndef hi() -> int:\n    return max(5, 3, 8, 1, 9)\n";
+        assert_eq!(call_i32(src, "lo"), 1);
+        assert_eq!(call_i32(src, "hi"), 9);
+    }
+
+    #[test]
+    fn os_path_submodule_attribute_is_valid() {
+        // os.path.<attr> previously fell through to a stray drop that
+        // underflowed the stack; it now resolves the submodule attribute.
+        instantiate("import os\ndef f():\n    print(\"sep:\", os.path.sep)\n");
+    }
 }

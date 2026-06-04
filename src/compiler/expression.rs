@@ -827,26 +827,21 @@ pub fn emit_expr(
                             func.instruction(&Instruction::Drop);
                             return IRType::Int;
                         }
-                        // min(a, b, ...) - multiple arguments
+                        // min(a, b, ...) - fold the args (top of stack down) into
+                        // a running minimum. Each step replaces the top two with
+                        // their minimum via a result-typed if.
                         let result_type = arg_types[0].clone();
-                        // Stack after emit_expr: arg0, arg1, arg2, ...
-                        // Compare pairs and keep minimum
                         for _ in 1..arg_types.len() {
-                            // Stack: ..., min_so_far, next_val
-                            // Save next_val, then compare
-                            func.instruction(&Instruction::LocalSet(ctx.temp_local));
-                            // Stack: ..., min_so_far
+                            // Stack: ..., running, next
+                            func.instruction(&Instruction::LocalSet(ctx.temp_local + 1)); // next
+                            func.instruction(&Instruction::LocalSet(ctx.temp_local)); // running
                             func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                            // Stack: ..., min_so_far, next_val
-                            func.instruction(&Instruction::I32LtS);
-                            func.instruction(&Instruction::If(BlockType::Empty));
-                            // next_val < min_so_far, so pop min_so_far and keep next_val
-                            func.instruction(&Instruction::Drop);
-                            func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
+                            func.instruction(&Instruction::I32LtS); // running < next
+                            func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local)); // keep running
                             func.instruction(&Instruction::Else);
-                            // min_so_far <= next_val, drop next_val and keep min_so_far
-                            func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                            func.instruction(&Instruction::Drop);
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 1)); // keep next
                             func.instruction(&Instruction::End);
                         }
                         result_type
@@ -861,26 +856,19 @@ pub fn emit_expr(
                             func.instruction(&Instruction::Drop);
                             return IRType::Int;
                         }
-                        // max(a, b, ...) - multiple arguments
+                        // max(a, b, ...) - fold the args into a running maximum.
                         let result_type = arg_types[0].clone();
-                        // Stack after emit_expr: arg0, arg1, arg2, ...
-                        // Compare pairs and keep maximum
                         for _ in 1..arg_types.len() {
-                            // Stack: ..., max_so_far, next_val
-                            // Save next_val, then compare
-                            func.instruction(&Instruction::LocalSet(ctx.temp_local));
-                            // Stack: ..., max_so_far
+                            // Stack: ..., running, next
+                            func.instruction(&Instruction::LocalSet(ctx.temp_local + 1)); // next
+                            func.instruction(&Instruction::LocalSet(ctx.temp_local)); // running
                             func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                            // Stack: ..., max_so_far, next_val
-                            func.instruction(&Instruction::I32GtS);
-                            func.instruction(&Instruction::If(BlockType::Empty));
-                            // max_so_far > next_val, keep max_so_far
-                            func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                            func.instruction(&Instruction::Drop);
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
+                            func.instruction(&Instruction::I32GtS); // running > next
+                            func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local)); // keep running
                             func.instruction(&Instruction::Else);
-                            // max_so_far <= next_val, so pop max_so_far and keep next_val
-                            func.instruction(&Instruction::Drop);
-                            func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 1)); // keep next
                             func.instruction(&Instruction::End);
                         }
                         result_type
@@ -1602,47 +1590,57 @@ pub fn emit_expr(
             }
         }
         IRExpr::Attribute { object, attribute } => {
-            if let IRExpr::Variable(module_name) = &**object {
-                if crate::stdlib::is_stdlib_module(module_name) {
-                    if let Some(value) =
-                        crate::stdlib::get_stdlib_attributes(module_name, attribute)
-                    {
-                        return match value {
-                            crate::stdlib::StdlibValue::Int(i) => {
-                                func.instruction(&Instruction::I32Const(i));
-                                IRType::Int
-                            }
-                            crate::stdlib::StdlibValue::String(s) => {
-                                let offset =
-                                    memory_layout.string_offsets.get(&s).copied().unwrap_or(0);
-                                func.instruction(&Instruction::I32Const(offset as i32));
-                                func.instruction(&Instruction::I32Const(s.len() as i32));
-                                IRType::String
-                            }
-                            crate::stdlib::StdlibValue::Float(f) => {
-                                func.instruction(&Instruction::F64Const(f.into()));
-                                IRType::Float
-                            }
-                            crate::stdlib::StdlibValue::List(_) => {
-                                func.instruction(&Instruction::I32Const(10000));
-                                IRType::List(Box::new(IRType::String))
-                            }
-                            crate::stdlib::StdlibValue::Dict(_) => {
-                                func.instruction(&Instruction::I32Const(10000));
-                                IRType::Dict(Box::new(IRType::String), Box::new(IRType::String))
-                            }
-                            crate::stdlib::StdlibValue::None => {
-                                func.instruction(&Instruction::I32Const(0));
-                                IRType::None
-                            }
-                            crate::stdlib::StdlibValue::Module(module_name) => {
-                                // Module doesn't need to push anything to the stack
-                                // Just return the Module type for further processing
-                                IRType::Module(module_name)
-                            }
-                        };
-                    }
+            // Resolve a stdlib attribute, whether on a module (`os.sep`) or a
+            // submodule (`os.path.sep`, where `object` is itself `os.path`).
+            let stdlib_value = match &**object {
+                IRExpr::Variable(module_name) if crate::stdlib::is_stdlib_module(module_name) => {
+                    crate::stdlib::get_stdlib_attributes(module_name, attribute)
                 }
+                IRExpr::Attribute {
+                    object: inner,
+                    attribute: sub,
+                } => match &**inner {
+                    IRExpr::Variable(parent) if crate::stdlib::is_stdlib_submodule(parent, sub) => {
+                        crate::stdlib::get_submodule_attribute(parent, sub, attribute)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+
+            if let Some(value) = stdlib_value {
+                return match value {
+                    crate::stdlib::StdlibValue::Int(i) => {
+                        func.instruction(&Instruction::I32Const(i));
+                        IRType::Int
+                    }
+                    crate::stdlib::StdlibValue::String(s) => {
+                        let offset = memory_layout.string_offsets.get(&s).copied().unwrap_or(0);
+                        func.instruction(&Instruction::I32Const(offset as i32));
+                        func.instruction(&Instruction::I32Const(s.len() as i32));
+                        IRType::String
+                    }
+                    crate::stdlib::StdlibValue::Float(f) => {
+                        func.instruction(&Instruction::F64Const(f.into()));
+                        IRType::Float
+                    }
+                    crate::stdlib::StdlibValue::List(_) => {
+                        func.instruction(&Instruction::I32Const(10000));
+                        IRType::List(Box::new(IRType::String))
+                    }
+                    crate::stdlib::StdlibValue::Dict(_) => {
+                        func.instruction(&Instruction::I32Const(10000));
+                        IRType::Dict(Box::new(IRType::String), Box::new(IRType::String))
+                    }
+                    crate::stdlib::StdlibValue::None => {
+                        func.instruction(&Instruction::I32Const(0));
+                        IRType::None
+                    }
+                    crate::stdlib::StdlibValue::Module(module_name) => {
+                        // Module doesn't need to push anything to the stack
+                        IRType::Module(module_name)
+                    }
+                };
             }
 
             let obj_type = emit_expr(object, func, ctx, memory_layout, None);
