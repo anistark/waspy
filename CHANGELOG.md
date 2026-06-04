@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Each list/set/tuple/dict/range literal now reserves its own region via a compile-time bump allocator; previously every same-type literal in a function shared a single address (e.g. `a = [1, 2]; b = [3, 4]` made `b` overwrite `a`), and nested literals collided
   - Memory is sized to the collection high-water mark; collection storage moved above the string/bytes/object regions
   - Known gap: a literal inside a loop still reuses its region across iterations
+- **`for ... in range(...)` loops now run** (ascending ranges)
+  - The loop's iterator helper locals were allocated after the function's local set was fixed, producing an out-of-range reference; they are now reserved up front (keyed per loop, so nested loops get distinct locals)
+  - The range object's `start`/`stop`/`step` fields were written with reversed store operands, so the loop read a `stop` of 0 and ran zero times; fixed
+  - Known gap: descending ranges (negative step, e.g. `range(10, 0, -1)`) still iterate zero times — the loop condition is ascending-only
 
 ## [0.9.0](https://github.com/anistark/waspy/releases/tag/v0.9.0) - 2025-12-14
 

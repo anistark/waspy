@@ -44,6 +44,10 @@ pub struct CompilationContext {
     pub function_map: HashMap<String, FunctionInfo>,
     pub class_map: HashMap<String, ClassInfo>,
     pub temp_local: u32, // For temporary calculations
+    /// Sequence counter for `for` loops, advanced in identical pre-order by the
+    /// local-allocation scan and by codegen so each loop reuses the iterator
+    /// helper locals (`__iter_*_{n}`) reserved for it. Reset per function.
+    pub for_loop_seq: u32,
     /// Running high-water mark of the collection heap, in bytes past
     /// `COLLECTION_HEAP_BASE`. Each literal reserves a fresh region here, so it
     /// grows monotonically across the whole module. A `Cell` because codegen
@@ -62,6 +66,7 @@ impl CompilationContext {
             function_map: HashMap::new(),
             class_map: HashMap::new(),
             temp_local: 0,
+            for_loop_seq: 0,
             collection_alloc_offset: Cell::new(0),
         }
     }

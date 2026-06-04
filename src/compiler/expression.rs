@@ -3383,63 +3383,49 @@ pub fn emit_expr(
             // Range object layout in memory: [start:i32][stop:i32][step:i32][current:i32]
             let range_ptr = ctx.alloc_collection(16);
 
-            // Evaluate and store start (default 0)
+            // Each field store pushes the destination address *before* the value
+            // (a WASM store pops the value first, then the address). range_ptr is
+            // a constant, so the field offset goes in the store's MemArg.
+            let store_field = |func: &mut Function, offset: u64| {
+                func.instruction(&Instruction::I32Store(MemArg {
+                    offset,
+                    align: 2,
+                    memory_index: 0,
+                }));
+            };
+
+            // start (default 0) at offset 0
+            func.instruction(&Instruction::I32Const(range_ptr as i32));
             if let Some(s) = start {
                 emit_expr(s, func, ctx, memory_layout, Some(&IRType::Int));
             } else {
                 func.instruction(&Instruction::I32Const(0));
             }
+            store_field(func, 0);
 
+            // stop at offset 4
             func.instruction(&Instruction::I32Const(range_ptr as i32));
-            func.instruction(&Instruction::LocalSet(ctx.temp_local));
-            func.instruction(&Instruction::LocalGet(ctx.temp_local));
-            func.instruction(&Instruction::I32Store(MemArg {
-                offset: 0,
-                align: 2,
-                memory_index: 0,
-            }));
-
-            // Evaluate and store stop
             emit_expr(stop, func, ctx, memory_layout, Some(&IRType::Int));
-            func.instruction(&Instruction::LocalGet(ctx.temp_local));
-            func.instruction(&Instruction::I32Const(4));
-            func.instruction(&Instruction::I32Add);
-            func.instruction(&Instruction::I32Store(MemArg {
-                offset: 0,
-                align: 2,
-                memory_index: 0,
-            }));
+            store_field(func, 4);
 
-            // Evaluate and store step (default 1)
+            // step (default 1) at offset 8
+            func.instruction(&Instruction::I32Const(range_ptr as i32));
             if let Some(s) = step {
                 emit_expr(s, func, ctx, memory_layout, Some(&IRType::Int));
             } else {
                 func.instruction(&Instruction::I32Const(1));
             }
-            func.instruction(&Instruction::LocalGet(ctx.temp_local));
-            func.instruction(&Instruction::I32Const(8));
-            func.instruction(&Instruction::I32Add);
-            func.instruction(&Instruction::I32Store(MemArg {
-                offset: 0,
-                align: 2,
-                memory_index: 0,
-            }));
+            store_field(func, 8);
 
-            // Store current position (same as start)
-            func.instruction(&Instruction::LocalGet(ctx.temp_local));
+            // current = start at offset 12
+            func.instruction(&Instruction::I32Const(range_ptr as i32));
+            func.instruction(&Instruction::I32Const(range_ptr as i32));
             func.instruction(&Instruction::I32Load(MemArg {
                 offset: 0,
                 align: 2,
                 memory_index: 0,
             }));
-            func.instruction(&Instruction::LocalGet(ctx.temp_local));
-            func.instruction(&Instruction::I32Const(12));
-            func.instruction(&Instruction::I32Add);
-            func.instruction(&Instruction::I32Store(MemArg {
-                offset: 0,
-                align: 2,
-                memory_index: 0,
-            }));
+            store_field(func, 12);
 
             // Return pointer to range object
             func.instruction(&Instruction::I32Const(range_ptr as i32));

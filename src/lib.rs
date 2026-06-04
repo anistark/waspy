@@ -771,4 +771,23 @@ mod collection_tests {
         // instantiate. Just ensure it builds and instantiates.
         instantiate("def f():\n    xs = [1, 2, 3]\n    print(xs[0])\n");
     }
+
+    #[test]
+    fn range_for_loop_iterates() {
+        // for-over-range: previously the loop's iterator locals were added
+        // after the function's locals were fixed (out-of-range), and the range
+        // object's fields were stored with reversed operands, so the loop ran
+        // zero times. Sum 0..5 (with step) to exercise both.
+        let sum =
+            "def f() -> int:\n    t = 0\n    for i in range(5):\n        t = t + i\n    return t\n";
+        assert_eq!(call_i32(sum, "f"), 10);
+        let step = "def f() -> int:\n    t = 0\n    for i in range(0, 10, 2):\n        t = t + i\n    return t\n";
+        assert_eq!(call_i32(step, "f"), 20);
+    }
+
+    #[test]
+    fn nested_range_loops_use_distinct_iterators() {
+        let src = "def f() -> int:\n    s = 0\n    for i in range(3):\n        for j in range(4):\n            s = s + 1\n    return s\n";
+        assert_eq!(call_i32(src, "f"), 12);
+    }
 }

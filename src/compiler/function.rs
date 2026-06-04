@@ -16,7 +16,9 @@ pub fn compile_function(
         ctx.add_local(&param.name, param.param_type.clone());
     }
 
-    // Scan for variable declarations to allocate locals
+    // Scan for variable declarations to allocate locals. The for-loop counter
+    // is advanced during the scan and replayed during codegen, so reset it here.
+    ctx.for_loop_seq = 0;
     scan_and_allocate_locals(&ir_func.body, ctx);
 
     // Reserve scratch locals after all params and named locals so temporary
@@ -51,6 +53,10 @@ pub fn compile_function(
     }
 
     let mut func = Function::new(locals);
+
+    // Replay the same for-loop numbering used by the scan above so codegen
+    // resolves the matching iterator helper locals.
+    ctx.for_loop_seq = 0;
 
     // Compile the function body
     compile_body(&ir_func.body, &mut func, ctx, memory_layout);
@@ -125,6 +131,14 @@ pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
                 if ctx.get_local_index(target).is_none() {
                     ctx.add_local(target, IRType::Unknown);
                 }
+                // Reserve this loop's iterator helper locals up front (codegen
+                // can't add locals after the function's local vector is fixed).
+                // Keyed by sequence number so nested loops get distinct locals.
+                let seq = ctx.for_loop_seq;
+                ctx.for_loop_seq += 1;
+                ctx.add_local(&format!("__iter_ptr_{seq}"), IRType::Unknown);
+                ctx.add_local(&format!("__iter_idx_{seq}"), IRType::Int);
+                ctx.add_local(&format!("__iter_len_{seq}"), IRType::Int);
                 scan_and_allocate_locals(body, ctx);
                 if let Some(else_body) = else_body {
                     scan_and_allocate_locals(else_body, ctx);
@@ -474,9 +488,19 @@ pub fn compile_body(
                 // - loop_counter: current index in the list
                 // - list_length: length of the list
 
-                let iterator_ptr_idx = ctx.add_local("__iter_ptr", IRType::Unknown);
-                let loop_counter_idx = ctx.add_local("__iter_idx", IRType::Int);
-                let list_length_idx = ctx.add_local("__iter_len", IRType::Int);
+                // Reuse the iterator helper locals reserved for this loop during
+                // the scan, replaying the same sequence numbering.
+                let seq = ctx.for_loop_seq;
+                ctx.for_loop_seq += 1;
+                let iterator_ptr_idx = ctx
+                    .get_local_index(&format!("__iter_ptr_{seq}"))
+                    .expect("iterator ptr local not reserved");
+                let loop_counter_idx = ctx
+                    .get_local_index(&format!("__iter_idx_{seq}"))
+                    .expect("iterator idx local not reserved");
+                let list_length_idx = ctx
+                    .get_local_index(&format!("__iter_len_{seq}"))
+                    .expect("iterator len local not reserved");
                 let target_idx = ctx
                     .get_local_index(target)
                     .expect("Target variable not found");
