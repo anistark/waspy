@@ -89,6 +89,16 @@ fn get_local_type_by_index(ctx: &CompilationContext, index: u32) -> IRType {
     IRType::Int // Default to i32
 }
 
+/// Reserve a named local if it has not been allocated yet. Used by the scan to
+/// pre-declare the compiler's internal helper locals (exception state, context
+/// managers, ...) so codegen never adds locals after the function's local
+/// vector is fixed.
+fn ensure_local(ctx: &mut CompilationContext, name: &str, var_type: IRType) {
+    if ctx.get_local_index(name).is_none() {
+        ctx.add_local(name, var_type);
+    }
+}
+
 /// Scan the function body for variable declarations and allocate local variables
 pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
     for stmt in &body.statements {
@@ -144,11 +154,19 @@ pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
                     scan_and_allocate_locals(else_body, ctx);
                 }
             }
+            IRStatement::Raise { .. } => {
+                // Raise uses the shared exception-state locals; reserve them so
+                // codegen never has to add locals after the local set is fixed.
+                ensure_local(ctx, "__exception_flag", IRType::Int);
+                ensure_local(ctx, "__exception_type", IRType::Int);
+            }
             IRStatement::TryExcept {
                 try_body,
                 except_handlers,
                 finally_body,
             } => {
+                ensure_local(ctx, "__exception_flag", IRType::Int);
+                ensure_local(ctx, "__exception_type", IRType::Int);
                 scan_and_allocate_locals(try_body, ctx);
 
                 for handler in except_handlers {
@@ -663,8 +681,13 @@ pub fn compile_body(
             } => {
                 // Implement exception handling with a global exception state
                 // We use a special local variable to track if an exception was raised
-                let exception_flag_idx = ctx.add_local("__exception_flag", IRType::Int);
-                let exception_type_idx = ctx.add_local("__exception_type", IRType::Int);
+                // Reuse the exception-state locals reserved during the scan.
+                let exception_flag_idx = ctx
+                    .get_local_index("__exception_flag")
+                    .unwrap_or_else(|| ctx.add_local("__exception_flag", IRType::Int));
+                let exception_type_idx = ctx
+                    .get_local_index("__exception_type")
+                    .unwrap_or_else(|| ctx.add_local("__exception_type", IRType::Int));
 
                 // Initialize exception flag to 0 (no exception)
                 func.instruction(&Instruction::I32Const(0));
