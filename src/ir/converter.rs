@@ -1302,8 +1302,22 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                     // Direct function call like func()
                     let function_name = name.id.to_string();
 
-                    // Type conversion functions like int, float, str
-                    let type_conversions = ["int", "float", "str", "bool"];
+                    // Numeric conversions int()/float() must actually convert,
+                    // so keep them as calls for the compiler to coerce. str()
+                    // and bool() currently pass the value through unchanged.
+                    if function_name == "int" || function_name == "float" {
+                        if call.args.len() != 1 {
+                            return Err(anyhow!(
+                                "Type conversion function expects exactly one argument"
+                            ));
+                        }
+                        let arg = lower_expr(&call.args[0], memory_layout)?;
+                        return Ok(IRExpr::FunctionCall {
+                            function_name,
+                            arguments: vec![arg],
+                        });
+                    }
+                    let type_conversions = ["str", "bool"];
                     if type_conversions.contains(&function_name.as_str()) {
                         if call.args.len() != 1 {
                             return Err(anyhow!(

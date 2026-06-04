@@ -140,14 +140,19 @@ pub fn emit_expr(
             if let Some(local_info) = ctx.get_local_info(name) {
                 func.instruction(&Instruction::LocalGet(local_info.index));
                 local_info.var_type.clone()
+            } else if let Some((declared, value)) = ctx.get_module_var(name) {
+                // Module-level variable: inline its initializer. Clone first so
+                // the recursive emit does not alias the borrow of `ctx`. Emit at
+                // the value's natural type (expected_type None) — passing the
+                // caller's expectation through would, e.g., truncate a float
+                // constant to i32 in `2 * PI`.
+                let declared = declared.clone();
+                let value = value.clone();
+                let emitted = emit_expr(&value, func, ctx, memory_layout, None);
+                declared.unwrap_or(emitted)
             } else {
-                // Default to i32 if type info is missing
-                if let Some(local_idx) = ctx.get_local_index(name) {
-                    func.instruction(&Instruction::LocalGet(local_idx));
-                } else {
-                    // Indicate an error or unknown variable
-                    func.instruction(&Instruction::I32Const(-999));
-                }
+                // Unknown variable
+                func.instruction(&Instruction::I32Const(-999));
                 IRType::Unknown
             }
         }
@@ -879,6 +884,20 @@ pub fn emit_expr(
                             func.instruction(&Instruction::End);
                         }
                         result_type
+                    }
+                    "int" => {
+                        // int(x): truncate a float to i32; ints pass through.
+                        if matches!(arg_types.first(), Some(IRType::Float)) {
+                            func.instruction(&Instruction::I32TruncF64S);
+                        }
+                        IRType::Int
+                    }
+                    "float" => {
+                        // float(x): widen an int to f64; floats pass through.
+                        if !matches!(arg_types.first(), Some(IRType::Float)) {
+                            func.instruction(&Instruction::F64ConvertI32S);
+                        }
+                        IRType::Float
                     }
                     "sum" => {
                         if arg_types.is_empty() {

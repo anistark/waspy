@@ -843,4 +843,19 @@ mod collection_tests {
         let src = "def f() -> int:\n    result = 1.0\n    i = 0\n    while i < 10:\n        result = result * 2.0\n        i = i + 1\n    if result == 1024.0:\n        return 1\n    return 0\n";
         assert_eq!(call_i32(src, "f"), 1);
     }
+
+    #[test]
+    fn module_level_float_constant_is_inlined() {
+        // A module-level float constant used in arithmetic; emitting it at its
+        // natural type (not the caller's expectation) keeps it an f64.
+        let src = "PI = 2.5\ndef f() -> int:\n    if (PI * 4.0) == 10.0:\n        return 1\n    return 0\n";
+        assert_eq!(call_i32(src, "f"), 1);
+    }
+
+    #[test]
+    fn int_and_float_conversions() {
+        // int() truncates a float; float() widens an int.
+        let src = "def f() -> int:\n    return int(3.7) + int(float(2))\n";
+        assert_eq!(call_i32(src, "f"), 5);
+    }
 }

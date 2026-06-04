@@ -1,4 +1,4 @@
-use crate::ir::IRType;
+use crate::ir::{IRExpr, IRType};
 use std::cell::Cell;
 use std::collections::HashMap;
 
@@ -43,6 +43,9 @@ pub struct CompilationContext {
     pub local_count: u32,
     pub function_map: HashMap<String, FunctionInfo>,
     pub class_map: HashMap<String, ClassInfo>,
+    /// Module-level variables, by name -> (declared type, initializer). Read
+    /// references to these are inlined by emitting the initializer expression.
+    pub module_vars: HashMap<String, (Option<IRType>, IRExpr)>,
     pub temp_local: u32,     // For temporary calculations (i32 scratch)
     pub temp_local_f64: u32, // Single f64 scratch local (operand juggling for coercions)
     /// Sequence counter for `for` loops, advanced in identical pre-order by the
@@ -66,6 +69,7 @@ impl CompilationContext {
             local_count: 0,
             function_map: HashMap::new(),
             class_map: HashMap::new(),
+            module_vars: HashMap::new(),
             temp_local: 0,
             temp_local_f64: 0,
             for_loop_seq: 0,
@@ -139,5 +143,15 @@ impl CompilationContext {
     /// Get information about a class by name
     pub fn get_class_info(&self, name: &str) -> Option<&ClassInfo> {
         self.class_map.get(name)
+    }
+
+    /// Register a module-level variable and its initializer.
+    pub fn add_module_var(&mut self, name: &str, var_type: Option<IRType>, value: IRExpr) {
+        self.module_vars.insert(name.to_string(), (var_type, value));
+    }
+
+    /// Look up a module-level variable's (declared type, initializer).
+    pub fn get_module_var(&self, name: &str) -> Option<&(Option<IRType>, IRExpr)> {
+        self.module_vars.get(name)
     }
 }

@@ -38,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Mixed `int`/`float` arithmetic widens the integer operand to `f64` (the `int op float` case previously stashed an `f64` into an `i32` scratch local)
   - Unannotated float locals (e.g. `result = 1.0`) are inferred as `f64` instead of defaulting to `i32`
   - Function locals are declared in index order; they were grouped by type, which mis-mapped indices once a function mixed `int` and `float` locals
+- **Module-level variables resolve inside functions**
+  - References to module-level variables (e.g. `PI = 3.14159`) were emitted as a `-999` sentinel; they are now resolved by inlining the variable's initializer, emitted at its natural type so `2 * PI` keeps `PI` an `f64`
+- **`int()` and `float()` actually convert**
+  - Both previously passed their argument through unchanged; `int()` now truncates a float to `i32` and `float()` widens an int to `f64`
 
 ## [0.9.0](https://github.com/anistark/waspy/releases/tag/v0.9.0) - 2025-12-14
 

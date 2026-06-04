@@ -27,6 +27,11 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
     // module; the compiler reuses that layout to emit loads and the data section.
     let memory_layout = ir_module.memory_layout.clone();
 
+    // Register module-level variables so functions can inline their values.
+    for var in &ir_module.variables {
+        ctx.add_module_var(&var.name, var.var_type.clone(), var.value.clone());
+    }
+
     // Build type section
     let mut types = TypeSection::new();
 
