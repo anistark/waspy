@@ -1,4 +1,5 @@
-use crate::ir::IRType;
+use crate::ir::{IRExpr, IRType};
+use std::cell::Cell;
 use std::collections::HashMap;
 
 /// Number of scratch/temporary locals reserved for intermediate calculations
@@ -7,6 +8,11 @@ use std::collections::HashMap;
 /// indices never alias real variables. Keep this >= the largest `temp_local + N`
 /// offset emitted anywhere in the compiler.
 pub const SCRATCH_LOCALS: u32 = 8;
+
+/// Base address of the collection heap. Sits above the string (from 0), bytes
+/// (from 32768), and object-instance (from 65536) regions so collection
+/// literals never overlap them.
+pub const COLLECTION_HEAP_BASE: u32 = 131072;
 
 /// Local variable
 pub struct LocalInfo {
@@ -37,7 +43,20 @@ pub struct CompilationContext {
     pub local_count: u32,
     pub function_map: HashMap<String, FunctionInfo>,
     pub class_map: HashMap<String, ClassInfo>,
-    pub temp_local: u32, // For temporary calculations
+    /// Module-level variables, by name -> (declared type, initializer). Read
+    /// references to these are inlined by emitting the initializer expression.
+    pub module_vars: HashMap<String, (Option<IRType>, IRExpr)>,
+    pub temp_local: u32,     // For temporary calculations (i32 scratch)
+    pub temp_local_f64: u32, // Single f64 scratch local (operand juggling for coercions)
+    /// Sequence counter for `for` loops, advanced in identical pre-order by the
+    /// local-allocation scan and by codegen so each loop reuses the iterator
+    /// helper locals (`__iter_*_{n}`) reserved for it. Reset per function.
+    pub for_loop_seq: u32,
+    /// Running high-water mark of the collection heap, in bytes past
+    /// `COLLECTION_HEAP_BASE`. Each literal reserves a fresh region here, so it
+    /// grows monotonically across the whole module. A `Cell` because codegen
+    /// holds `&CompilationContext` while allocating.
+    pub collection_alloc_offset: Cell<u32>,
 }
 
 impl CompilationContext {
@@ -50,8 +69,23 @@ impl CompilationContext {
             local_count: 0,
             function_map: HashMap::new(),
             class_map: HashMap::new(),
+            module_vars: HashMap::new(),
             temp_local: 0,
+            temp_local_f64: 0,
+            for_loop_seq: 0,
+            collection_alloc_offset: Cell::new(0),
         }
+    }
+
+    /// Reserve a fresh, uniquely addressed region of `size` bytes for a
+    /// collection literal and return its compile-time base pointer. Distinct
+    /// (and nested) literals get distinct regions, so they never alias. Sizes
+    /// are rounded up to 8 bytes to keep f64/dict-entry slots aligned.
+    pub fn alloc_collection(&self, size: u32) -> u32 {
+        let aligned = (size + 7) & !7;
+        let offset = self.collection_alloc_offset.get();
+        self.collection_alloc_offset.set(offset + aligned);
+        COLLECTION_HEAP_BASE + offset
     }
 
     /// Add a local variable to the context
@@ -109,5 +143,15 @@ impl CompilationContext {
     /// Get information about a class by name
     pub fn get_class_info(&self, name: &str) -> Option<&ClassInfo> {
         self.class_map.get(name)
+    }
+
+    /// Register a module-level variable and its initializer.
+    pub fn add_module_var(&mut self, name: &str, var_type: Option<IRType>, value: IRExpr) {
+        self.module_vars.insert(name.to_string(), (var_type, value));
+    }
+
+    /// Look up a module-level variable's (declared type, initializer).
+    pub fn get_module_var(&self, name: &str) -> Option<&(Option<IRType>, IRExpr)> {
+        self.module_vars.get(name)
     }
 }

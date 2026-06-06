@@ -1,6 +1,6 @@
 use crate::compiler::context::{CompilationContext, SCRATCH_LOCALS};
 use crate::compiler::expression::{emit_expr, emit_integer_power_operation};
-use crate::ir::{IRBody, IRFunction, IROp, IRStatement, IRType, MemoryLayout};
+use crate::ir::{IRBody, IRConstant, IRExpr, IRFunction, IROp, IRStatement, IRType, MemoryLayout};
 use wasm_encoder::{BlockType, Function, Instruction, MemArg, ValType};
 
 /// Compile an IR function into a WebAssembly function
@@ -16,41 +16,41 @@ pub fn compile_function(
         ctx.add_local(&param.name, param.param_type.clone());
     }
 
-    // Scan for variable declarations to allocate locals
+    // Scan for variable declarations to allocate locals. The for-loop counter
+    // is advanced during the scan and replayed during codegen, so reset it here.
+    ctx.for_loop_seq = 0;
     scan_and_allocate_locals(&ir_func.body, ctx);
 
     // Reserve scratch locals after all params and named locals so temporary
-    // calculations never clobber real variables. These indices are declared as
-    // i32 locals by the type-counting loop below (they are absent from
-    // locals_map, so get_local_type_by_index defaults them to i32).
+    // calculations never clobber real variables. The i32 scratch run is absent
+    // from locals_map (defaults to i32); the f64 scratch is registered so it is
+    // declared as f64 and used for operand juggling during int/float coercion.
     ctx.temp_local = ctx.local_count;
     ctx.local_count += SCRATCH_LOCALS;
+    ctx.temp_local_f64 = ctx.add_local("__f64_scratch", IRType::Float);
 
-    // Determine local types for WebAssembly
-    let mut locals = Vec::new();
+    // Declare locals in index order, coalescing adjacent same-type runs. The
+    // local index assigned by `add_local` must match the WASM declaration
+    // order, so grouping all i32s then all f64s (which reorders indices) is
+    // wrong once a function mixes int and float locals.
     let num_params = ir_func.params.len() as u32;
-
-    // Group locals by type
-    let mut i32_count = 0;
-    let mut f64_count = 0;
-
-    // Count locals by type (excluding parameters)
+    let mut locals: Vec<(u32, ValType)> = Vec::new();
     for i in num_params..ctx.local_count {
-        match get_local_type_by_index(ctx, i) {
-            IRType::Float => f64_count += 1,
-            _ => i32_count += 1,
+        let val_type = match get_local_type_by_index(ctx, i) {
+            IRType::Float => ValType::F64,
+            _ => ValType::I32,
+        };
+        match locals.last_mut() {
+            Some((count, last)) if *last == val_type => *count += 1,
+            _ => locals.push((1, val_type)),
         }
     }
 
-    // Add locals to function signature
-    if i32_count > 0 {
-        locals.push((i32_count, ValType::I32));
-    }
-    if f64_count > 0 {
-        locals.push((f64_count, ValType::F64));
-    }
-
     let mut func = Function::new(locals);
+
+    // Replay the same for-loop numbering used by the scan above so codegen
+    // resolves the matching iterator helper locals.
+    ctx.for_loop_seq = 0;
 
     // Compile the function body
     compile_body(&ir_func.body, &mut func, ctx, memory_layout);
@@ -83,15 +83,62 @@ fn get_local_type_by_index(ctx: &CompilationContext, index: u32) -> IRType {
     IRType::Int // Default to i32
 }
 
+/// Reserve a named local if it has not been allocated yet. Used by the scan to
+/// pre-declare the compiler's internal helper locals (exception state, context
+/// managers, ...) so codegen never adds locals after the function's local
+/// vector is fixed.
+fn ensure_local(ctx: &mut CompilationContext, name: &str, var_type: IRType) {
+    if ctx.get_local_index(name).is_none() {
+        ctx.add_local(name, var_type);
+    }
+}
+
+/// Best-effort type inference for an unannotated assignment value. Only used to
+/// decide a local's WASM value type (f64 vs i32), so it just needs to recognise
+/// float-producing expressions confidently; anything else is left `Unknown`
+/// (an i32 slot, which collections and pointers also use).
+fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRType {
+    match value {
+        IRExpr::Const(IRConstant::Float(_)) => IRType::Float,
+        IRExpr::BinaryOp { left, right, .. } => {
+            if infer_value_type(left, ctx) == IRType::Float
+                || infer_value_type(right, ctx) == IRType::Float
+            {
+                IRType::Float
+            } else {
+                IRType::Unknown
+            }
+        }
+        IRExpr::UnaryOp { operand, .. } => infer_value_type(operand, ctx),
+        IRExpr::Variable(name) => ctx
+            .get_local_info(name)
+            .map(|info| info.var_type.clone())
+            .unwrap_or(IRType::Unknown),
+        IRExpr::FunctionCall { function_name, .. } if function_name == "float" => IRType::Float,
+        IRExpr::FunctionCall { function_name, .. } => ctx
+            .get_function_info(function_name)
+            .map(|f| f.return_type.clone())
+            .filter(|t| *t == IRType::Float)
+            .unwrap_or(IRType::Unknown),
+        _ => IRType::Unknown,
+    }
+}
+
 /// Scan the function body for variable declarations and allocate local variables
 pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
     for stmt in &body.statements {
         match stmt {
             IRStatement::Assign {
-                target, var_type, ..
+                target,
+                var_type,
+                value,
             } => {
                 if ctx.get_local_index(target).is_none() {
-                    let var_type = var_type.clone().unwrap_or(IRType::Unknown);
+                    // Use the annotation if present; otherwise infer the type
+                    // from the value so unannotated float locals become f64.
+                    let var_type = var_type
+                        .clone()
+                        .unwrap_or_else(|| infer_value_type(value, ctx));
                     ctx.add_local(target, var_type);
                 }
             }
@@ -125,16 +172,32 @@ pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
                 if ctx.get_local_index(target).is_none() {
                     ctx.add_local(target, IRType::Unknown);
                 }
+                // Reserve this loop's iterator helper locals up front (codegen
+                // can't add locals after the function's local vector is fixed).
+                // Keyed by sequence number so nested loops get distinct locals.
+                let seq = ctx.for_loop_seq;
+                ctx.for_loop_seq += 1;
+                ctx.add_local(&format!("__iter_ptr_{seq}"), IRType::Unknown);
+                ctx.add_local(&format!("__iter_idx_{seq}"), IRType::Int);
+                ctx.add_local(&format!("__iter_len_{seq}"), IRType::Int);
                 scan_and_allocate_locals(body, ctx);
                 if let Some(else_body) = else_body {
                     scan_and_allocate_locals(else_body, ctx);
                 }
+            }
+            IRStatement::Raise { .. } => {
+                // Raise uses the shared exception-state locals; reserve them so
+                // codegen never has to add locals after the local set is fixed.
+                ensure_local(ctx, "__exception_flag", IRType::Int);
+                ensure_local(ctx, "__exception_type", IRType::Int);
             }
             IRStatement::TryExcept {
                 try_body,
                 except_handlers,
                 finally_body,
             } => {
+                ensure_local(ctx, "__exception_flag", IRType::Int);
+                ensure_local(ctx, "__exception_type", IRType::Int);
                 scan_and_allocate_locals(try_body, ctx);
 
                 for handler in except_handlers {
@@ -198,7 +261,28 @@ pub fn compile_body(
                     .or_else(|| ctx.get_local_info(target).map(|info| info.var_type.clone()));
 
                 // Emit code for the value
-                emit_expr(value, func, ctx, memory_layout, expected_type.as_ref());
+                let value_type = emit_expr(value, func, ctx, memory_layout, expected_type.as_ref());
+
+                // An unannotated local is allocated as Unknown (an i32 slot).
+                // Recover the element/entry types of collections so later
+                // indexing knows how to load each slot. Only pointer-shaped
+                // types are adopted, since they share that same i32 slot and
+                // won't disturb the already-fixed local layout.
+                if let Some(info) = ctx.locals_map.get_mut(target) {
+                    if matches!(info.var_type, IRType::Unknown)
+                        && matches!(
+                            value_type,
+                            IRType::List(_)
+                                | IRType::Tuple(_)
+                                | IRType::Dict(_, _)
+                                | IRType::Set(_)
+                                | IRType::String
+                                | IRType::Bytes
+                        )
+                    {
+                        info.var_type = value_type;
+                    }
+                }
 
                 if let Some(local_idx) = ctx.get_local_index(target) {
                     func.instruction(&Instruction::LocalSet(local_idx));
@@ -321,8 +405,13 @@ pub fn compile_body(
                 func.instruction(&Instruction::End);
             }
             IRStatement::Expression(expr) => {
-                emit_expr(expr, func, ctx, memory_layout, None);
-                func.instruction(&Instruction::Drop);
+                // Discard the result only when the expression actually leaves a
+                // value. Calls like print() return None and push nothing, so an
+                // unconditional drop would underflow the stack.
+                let result_type = emit_expr(expr, func, ctx, memory_layout, None);
+                if !matches!(result_type, IRType::None) {
+                    func.instruction(&Instruction::Drop);
+                }
             }
             IRStatement::AttributeAssign {
                 object,
@@ -448,9 +537,19 @@ pub fn compile_body(
                 // - loop_counter: current index in the list
                 // - list_length: length of the list
 
-                let iterator_ptr_idx = ctx.add_local("__iter_ptr", IRType::Unknown);
-                let loop_counter_idx = ctx.add_local("__iter_idx", IRType::Int);
-                let list_length_idx = ctx.add_local("__iter_len", IRType::Int);
+                // Reuse the iterator helper locals reserved for this loop during
+                // the scan, replaying the same sequence numbering.
+                let seq = ctx.for_loop_seq;
+                ctx.for_loop_seq += 1;
+                let iterator_ptr_idx = ctx
+                    .get_local_index(&format!("__iter_ptr_{seq}"))
+                    .expect("iterator ptr local not reserved");
+                let loop_counter_idx = ctx
+                    .get_local_index(&format!("__iter_idx_{seq}"))
+                    .expect("iterator idx local not reserved");
+                let list_length_idx = ctx
+                    .get_local_index(&format!("__iter_len_{seq}"))
+                    .expect("iterator len local not reserved");
                 let target_idx = ctx
                     .get_local_index(target)
                     .expect("Target variable not found");
@@ -613,8 +712,13 @@ pub fn compile_body(
             } => {
                 // Implement exception handling with a global exception state
                 // We use a special local variable to track if an exception was raised
-                let exception_flag_idx = ctx.add_local("__exception_flag", IRType::Int);
-                let exception_type_idx = ctx.add_local("__exception_type", IRType::Int);
+                // Reuse the exception-state locals reserved during the scan.
+                let exception_flag_idx = ctx
+                    .get_local_index("__exception_flag")
+                    .unwrap_or_else(|| ctx.add_local("__exception_flag", IRType::Int));
+                let exception_type_idx = ctx
+                    .get_local_index("__exception_type")
+                    .unwrap_or_else(|| ctx.add_local("__exception_type", IRType::Int));
 
                 // Initialize exception flag to 0 (no exception)
                 func.instruction(&Instruction::I32Const(0));
@@ -706,8 +810,9 @@ pub fn compile_body(
                     }
                 }
 
-                // End of exception handling
-                func.instruction(&Instruction::End);
+                // Close the exception-dispatch if/else. Each typed handler opens
+                // and closes its own block, so only this `If` remains open here;
+                // a second `End` would close the function frame early.
                 func.instruction(&Instruction::End);
 
                 // If there's a finally block, always execute it

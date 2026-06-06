@@ -1,6 +1,6 @@
 use crate::compiler::context::CompilationContext;
 use crate::ir::{IRBoolOp, IRCompareOp, IRConstant, IRExpr, IROp, IRType, IRUnaryOp, MemoryLayout};
-use wasm_encoder::{BlockType, Function, Instruction, MemArg};
+use wasm_encoder::{BlockType, Function, Instruction, MemArg, ValType};
 
 // Helper to convert f64 to Ieee64
 #[inline]
@@ -15,6 +15,46 @@ fn f64_const(value: f64) -> wasm_encoder::Ieee64 {
 fn narrow_element_to_word(func: &mut Function, elem_type: &IRType) {
     if matches!(elem_type, IRType::String | IRType::Bytes) {
         func.instruction(&Instruction::Drop);
+    }
+}
+
+/// Store the value on top of the stack into a 4-byte collection slot (the
+/// destination address must be pushed first). Floats are narrowed to f32 so
+/// they fit the one-word-per-element layout; everything else is already an
+/// i32 word (ints, bools, interned string/bytes offsets).
+fn store_collection_word(func: &mut Function, elem_type: &IRType) {
+    if matches!(elem_type, IRType::Float) {
+        func.instruction(&Instruction::F32DemoteF64);
+        func.instruction(&Instruction::F32Store(MemArg {
+            offset: 0,
+            align: 2,
+            memory_index: 0,
+        }));
+    } else {
+        func.instruction(&Instruction::I32Store(MemArg {
+            offset: 0,
+            align: 2,
+            memory_index: 0,
+        }));
+    }
+}
+
+/// Load a 4-byte collection slot (address on top of the stack), widening f32
+/// float slots back to the f64 the rest of the compiler works with.
+fn load_collection_word(func: &mut Function, elem_type: &IRType) {
+    if matches!(elem_type, IRType::Float) {
+        func.instruction(&Instruction::F32Load(MemArg {
+            offset: 0,
+            align: 2,
+            memory_index: 0,
+        }));
+        func.instruction(&Instruction::F64PromoteF32);
+    } else {
+        func.instruction(&Instruction::I32Load(MemArg {
+            offset: 0,
+            align: 2,
+            memory_index: 0,
+        }));
     }
 }
 
@@ -100,14 +140,19 @@ pub fn emit_expr(
             if let Some(local_info) = ctx.get_local_info(name) {
                 func.instruction(&Instruction::LocalGet(local_info.index));
                 local_info.var_type.clone()
+            } else if let Some((declared, value)) = ctx.get_module_var(name) {
+                // Module-level variable: inline its initializer. Clone first so
+                // the recursive emit does not alias the borrow of `ctx`. Emit at
+                // the value's natural type (expected_type None) — passing the
+                // caller's expectation through would, e.g., truncate a float
+                // constant to i32 in `2 * PI`.
+                let declared = declared.clone();
+                let value = value.clone();
+                let emitted = emit_expr(&value, func, ctx, memory_layout, None);
+                declared.unwrap_or(emitted)
             } else {
-                // Default to i32 if type info is missing
-                if let Some(local_idx) = ctx.get_local_index(name) {
-                    func.instruction(&Instruction::LocalGet(local_idx));
-                } else {
-                    // Indicate an error or unknown variable
-                    func.instruction(&Instruction::I32Const(-999));
-                }
+                // Unknown variable
+                func.instruction(&Instruction::I32Const(-999));
                 IRType::Unknown
             }
         }
@@ -304,14 +349,19 @@ pub fn emit_expr(
                 }
             }
 
-            if left_type == IRType::Float && right_type == IRType::Int {
-                // Convert right operand from i32 to f64
+            // int/bool/unknown values are all i32-represented; widen the i32
+            // side to f64 when the other operand is a float.
+            let left_int_like = matches!(left_type, IRType::Int | IRType::Bool | IRType::Unknown);
+            let right_int_like = matches!(right_type, IRType::Int | IRType::Bool | IRType::Unknown);
+            if left_type == IRType::Float && right_int_like {
+                // Right operand (top of stack) is i32; widen it to f64.
                 func.instruction(&Instruction::F64ConvertI32S);
-            } else if left_type == IRType::Int && right_type == IRType::Float {
-                // Move stack: f64 under i32
-                func.instruction(&Instruction::LocalSet(ctx.temp_local));
+            } else if left_int_like && right_type == IRType::Float {
+                // Left operand is the i32 buried under the f64 right operand.
+                // Stash the f64 (needs an f64 local), widen the int, restore.
+                func.instruction(&Instruction::LocalSet(ctx.temp_local_f64));
                 func.instruction(&Instruction::F64ConvertI32S);
-                func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                func.instruction(&Instruction::LocalGet(ctx.temp_local_f64));
             }
 
             let result_type = if left_type == IRType::Float || right_type == IRType::Float {
@@ -647,8 +697,9 @@ pub fn emit_expr(
                     func.instruction(&Instruction::LocalSet(ctx.temp_local));
                     func.instruction(&Instruction::LocalGet(ctx.temp_local));
 
-                    // If-else pattern for short-circuit evaluation
-                    func.instruction(&Instruction::If(BlockType::Empty));
+                    // If-else pattern for short-circuit evaluation. Both arms
+                    // leave the boolean result, so the if yields an i32.
+                    func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
                     emit_expr(right, func, ctx, memory_layout, Some(&IRType::Bool));
                     func.instruction(&Instruction::Else);
                     func.instruction(&Instruction::I32Const(0)); // False
@@ -660,8 +711,9 @@ pub fn emit_expr(
                     func.instruction(&Instruction::LocalSet(ctx.temp_local));
                     func.instruction(&Instruction::LocalGet(ctx.temp_local));
 
-                    // If-else pattern for short-circuit evaluation
-                    func.instruction(&Instruction::If(BlockType::Empty));
+                    // If-else pattern for short-circuit evaluation. Both arms
+                    // leave the boolean result, so the if yields an i32.
+                    func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
                     func.instruction(&Instruction::I32Const(1)); // True
                     func.instruction(&Instruction::Else);
                     emit_expr(right, func, ctx, memory_layout, Some(&IRType::Bool));
@@ -775,26 +827,21 @@ pub fn emit_expr(
                             func.instruction(&Instruction::Drop);
                             return IRType::Int;
                         }
-                        // min(a, b, ...) - multiple arguments
+                        // min(a, b, ...) - fold the args (top of stack down) into
+                        // a running minimum. Each step replaces the top two with
+                        // their minimum via a result-typed if.
                         let result_type = arg_types[0].clone();
-                        // Stack after emit_expr: arg0, arg1, arg2, ...
-                        // Compare pairs and keep minimum
                         for _ in 1..arg_types.len() {
-                            // Stack: ..., min_so_far, next_val
-                            // Save next_val, then compare
-                            func.instruction(&Instruction::LocalSet(ctx.temp_local));
-                            // Stack: ..., min_so_far
+                            // Stack: ..., running, next
+                            func.instruction(&Instruction::LocalSet(ctx.temp_local + 1)); // next
+                            func.instruction(&Instruction::LocalSet(ctx.temp_local)); // running
                             func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                            // Stack: ..., min_so_far, next_val
-                            func.instruction(&Instruction::I32LtS);
-                            func.instruction(&Instruction::If(BlockType::Empty));
-                            // next_val < min_so_far, so pop min_so_far and keep next_val
-                            func.instruction(&Instruction::Drop);
-                            func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
+                            func.instruction(&Instruction::I32LtS); // running < next
+                            func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local)); // keep running
                             func.instruction(&Instruction::Else);
-                            // min_so_far <= next_val, drop next_val and keep min_so_far
-                            func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                            func.instruction(&Instruction::Drop);
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 1)); // keep next
                             func.instruction(&Instruction::End);
                         }
                         result_type
@@ -809,29 +856,36 @@ pub fn emit_expr(
                             func.instruction(&Instruction::Drop);
                             return IRType::Int;
                         }
-                        // max(a, b, ...) - multiple arguments
+                        // max(a, b, ...) - fold the args into a running maximum.
                         let result_type = arg_types[0].clone();
-                        // Stack after emit_expr: arg0, arg1, arg2, ...
-                        // Compare pairs and keep maximum
                         for _ in 1..arg_types.len() {
-                            // Stack: ..., max_so_far, next_val
-                            // Save next_val, then compare
-                            func.instruction(&Instruction::LocalSet(ctx.temp_local));
-                            // Stack: ..., max_so_far
+                            // Stack: ..., running, next
+                            func.instruction(&Instruction::LocalSet(ctx.temp_local + 1)); // next
+                            func.instruction(&Instruction::LocalSet(ctx.temp_local)); // running
                             func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                            // Stack: ..., max_so_far, next_val
-                            func.instruction(&Instruction::I32GtS);
-                            func.instruction(&Instruction::If(BlockType::Empty));
-                            // max_so_far > next_val, keep max_so_far
-                            func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                            func.instruction(&Instruction::Drop);
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
+                            func.instruction(&Instruction::I32GtS); // running > next
+                            func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local)); // keep running
                             func.instruction(&Instruction::Else);
-                            // max_so_far <= next_val, so pop max_so_far and keep next_val
-                            func.instruction(&Instruction::Drop);
-                            func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 1)); // keep next
                             func.instruction(&Instruction::End);
                         }
                         result_type
+                    }
+                    "int" => {
+                        // int(x): truncate a float to i32; ints pass through.
+                        if matches!(arg_types.first(), Some(IRType::Float)) {
+                            func.instruction(&Instruction::I32TruncF64S);
+                        }
+                        IRType::Int
+                    }
+                    "float" => {
+                        // float(x): widen an int to f64; floats pass through.
+                        if !matches!(arg_types.first(), Some(IRType::Float)) {
+                            func.instruction(&Instruction::F64ConvertI32S);
+                        }
+                        IRType::Float
                     }
                     "sum" => {
                         if arg_types.is_empty() {
@@ -883,17 +937,23 @@ pub fn emit_expr(
         }
         IRExpr::ListLiteral(elements) => {
             // List layout in memory: [length:i32][elem0:i32][elem1:i32]...
-            // For now, allocate after string data (at offset 10000)
-            // Each element takes 4 bytes for i32 values
+            // Each element takes 4 bytes.
 
             if elements.is_empty() {
-                // Empty list: just a length of 0
-                func.instruction(&Instruction::I32Const(10000)); // Pointer to empty list
+                // Empty list: a header with length 0.
+                let list_ptr = ctx.alloc_collection(4);
+                func.instruction(&Instruction::I32Const(list_ptr as i32));
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32Store(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+                func.instruction(&Instruction::I32Const(list_ptr as i32));
                 return IRType::List(Box::new(IRType::Unknown));
             }
 
-            // Use a fixed allocation address for simplicity
-            let list_ptr = 10000 + (ctx.local_count * 100);
+            let list_ptr = ctx.alloc_collection(4 + elements.len() as u32 * 4);
 
             // Store length at the beginning
             func.instruction(&Instruction::I32Const(list_ptr as i32));
@@ -915,23 +975,7 @@ pub fn emit_expr(
                 func.instruction(&Instruction::I32Const(addr as i32));
                 let ty = emit_expr(elem, func, ctx, memory_layout, None);
                 narrow_element_to_word(func, &ty);
-
-                match ty {
-                    IRType::Float => {
-                        func.instruction(&Instruction::F64Store(MemArg {
-                            offset: 0,
-                            align: 3,
-                            memory_index: 0,
-                        }));
-                    }
-                    _ => {
-                        func.instruction(&Instruction::I32Store(MemArg {
-                            offset: 0,
-                            align: 2,
-                            memory_index: 0,
-                        }));
-                    }
-                }
+                store_collection_word(func, &ty);
 
                 if i == 0 {
                     elem_type = ty;
@@ -950,19 +994,19 @@ pub fn emit_expr(
 
             // Empty set: store a count of 0 so membership tests read a valid header.
             if elements.is_empty() {
-                func.instruction(&Instruction::I32Const(20000));
+                let set_ptr = ctx.alloc_collection(4);
+                func.instruction(&Instruction::I32Const(set_ptr as i32));
                 func.instruction(&Instruction::I32Const(0));
                 func.instruction(&Instruction::I32Store(MemArg {
                     offset: 0,
                     align: 2,
                     memory_index: 0,
                 }));
-                func.instruction(&Instruction::I32Const(20000));
+                func.instruction(&Instruction::I32Const(set_ptr as i32));
                 return IRType::Set(Box::new(IRType::Unknown));
             }
 
-            // Use a fixed allocation address for simplicity.
-            let set_ptr = 20000 + (ctx.local_count * 100);
+            let set_ptr = ctx.alloc_collection(4 + elements.len() as u32 * 4);
 
             // Start with an empty set (count = 0).
             func.instruction(&Instruction::I32Const(set_ptr as i32));
@@ -1065,14 +1109,21 @@ pub fn emit_expr(
         }
         IRExpr::TupleLiteral(elements) => {
             // Tuple layout in memory: [length:i32][elem0:i32][elem1:i32]...
-            // Fixed-size tuples allocated after sets (at offset 30000+)
 
             if elements.is_empty() {
-                func.instruction(&Instruction::I32Const(30000));
+                let tuple_ptr = ctx.alloc_collection(4);
+                func.instruction(&Instruction::I32Const(tuple_ptr as i32));
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32Store(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+                func.instruction(&Instruction::I32Const(tuple_ptr as i32));
                 return IRType::Tuple(vec![]);
             }
 
-            let tuple_ptr = 30000 + (ctx.local_count * 100);
+            let tuple_ptr = ctx.alloc_collection(4 + elements.len() as u32 * 4);
 
             // Store length at the beginning
             func.instruction(&Instruction::I32Const(tuple_ptr as i32));
@@ -1094,24 +1145,8 @@ pub fn emit_expr(
                 func.instruction(&Instruction::I32Const(addr as i32));
                 let elem_type = emit_expr(elem, func, ctx, memory_layout, None);
                 narrow_element_to_word(func, &elem_type);
-                element_types.push(elem_type.clone());
-
-                match elem_type {
-                    IRType::Float => {
-                        func.instruction(&Instruction::F64Store(MemArg {
-                            offset: 0,
-                            align: 3,
-                            memory_index: 0,
-                        }));
-                    }
-                    _ => {
-                        func.instruction(&Instruction::I32Store(MemArg {
-                            offset: 0,
-                            align: 2,
-                            memory_index: 0,
-                        }));
-                    }
-                }
+                store_collection_word(func, &elem_type);
+                element_types.push(elem_type);
             }
 
             func.instruction(&Instruction::I32Const(tuple_ptr as i32));
@@ -1119,8 +1154,7 @@ pub fn emit_expr(
         }
         IRExpr::DictLiteral(pairs) => {
             // Dict layout in memory: [num_entries:i32][key0:i32][val0:i32][key1:i32][val1:i32]...
-            // Allocate dict at a fixed offset (after lists)
-            let dict_ptr = 50000 + (ctx.local_count * 100);
+            let dict_ptr = ctx.alloc_collection(4 + pairs.len() as u32 * 8);
 
             // Store number of entries
             func.instruction(&Instruction::I32Const(dict_ptr as i32));
@@ -1222,23 +1256,7 @@ pub fn emit_expr(
                     func.instruction(&Instruction::I32Add); // index*4 + 4
                     func.instruction(&Instruction::I32Add); // list_ptr + index*4 + 4
 
-                    // Load the element based on element type
-                    match element_type.as_ref() {
-                        IRType::Float => {
-                            func.instruction(&Instruction::F64Load(MemArg {
-                                offset: 0,
-                                align: 3,
-                                memory_index: 0,
-                            }));
-                        }
-                        _ => {
-                            func.instruction(&Instruction::I32Load(MemArg {
-                                offset: 0,
-                                align: 2,
-                                memory_index: 0,
-                            }));
-                        }
-                    }
+                    load_collection_word(func, element_type.as_ref());
 
                     element_type.as_ref().clone()
                 }
@@ -1349,22 +1367,7 @@ pub fn emit_expr(
                         IRType::Unknown
                     };
 
-                    match &elem_type {
-                        IRType::Float => {
-                            func.instruction(&Instruction::F64Load(MemArg {
-                                offset: 0,
-                                align: 3,
-                                memory_index: 0,
-                            }));
-                        }
-                        _ => {
-                            func.instruction(&Instruction::I32Load(MemArg {
-                                offset: 0,
-                                align: 2,
-                                memory_index: 0,
-                            }));
-                        }
-                    }
+                    load_collection_word(func, &elem_type);
 
                     elem_type
                 }
@@ -1587,47 +1590,57 @@ pub fn emit_expr(
             }
         }
         IRExpr::Attribute { object, attribute } => {
-            if let IRExpr::Variable(module_name) = &**object {
-                if crate::stdlib::is_stdlib_module(module_name) {
-                    if let Some(value) =
-                        crate::stdlib::get_stdlib_attributes(module_name, attribute)
-                    {
-                        return match value {
-                            crate::stdlib::StdlibValue::Int(i) => {
-                                func.instruction(&Instruction::I32Const(i));
-                                IRType::Int
-                            }
-                            crate::stdlib::StdlibValue::String(s) => {
-                                let offset =
-                                    memory_layout.string_offsets.get(&s).copied().unwrap_or(0);
-                                func.instruction(&Instruction::I32Const(offset as i32));
-                                func.instruction(&Instruction::I32Const(s.len() as i32));
-                                IRType::String
-                            }
-                            crate::stdlib::StdlibValue::Float(f) => {
-                                func.instruction(&Instruction::F64Const(f.into()));
-                                IRType::Float
-                            }
-                            crate::stdlib::StdlibValue::List(_) => {
-                                func.instruction(&Instruction::I32Const(10000));
-                                IRType::List(Box::new(IRType::String))
-                            }
-                            crate::stdlib::StdlibValue::Dict(_) => {
-                                func.instruction(&Instruction::I32Const(10000));
-                                IRType::Dict(Box::new(IRType::String), Box::new(IRType::String))
-                            }
-                            crate::stdlib::StdlibValue::None => {
-                                func.instruction(&Instruction::I32Const(0));
-                                IRType::None
-                            }
-                            crate::stdlib::StdlibValue::Module(module_name) => {
-                                // Module doesn't need to push anything to the stack
-                                // Just return the Module type for further processing
-                                IRType::Module(module_name)
-                            }
-                        };
-                    }
+            // Resolve a stdlib attribute, whether on a module (`os.sep`) or a
+            // submodule (`os.path.sep`, where `object` is itself `os.path`).
+            let stdlib_value = match &**object {
+                IRExpr::Variable(module_name) if crate::stdlib::is_stdlib_module(module_name) => {
+                    crate::stdlib::get_stdlib_attributes(module_name, attribute)
                 }
+                IRExpr::Attribute {
+                    object: inner,
+                    attribute: sub,
+                } => match &**inner {
+                    IRExpr::Variable(parent) if crate::stdlib::is_stdlib_submodule(parent, sub) => {
+                        crate::stdlib::get_submodule_attribute(parent, sub, attribute)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+
+            if let Some(value) = stdlib_value {
+                return match value {
+                    crate::stdlib::StdlibValue::Int(i) => {
+                        func.instruction(&Instruction::I32Const(i));
+                        IRType::Int
+                    }
+                    crate::stdlib::StdlibValue::String(s) => {
+                        let offset = memory_layout.string_offsets.get(&s).copied().unwrap_or(0);
+                        func.instruction(&Instruction::I32Const(offset as i32));
+                        func.instruction(&Instruction::I32Const(s.len() as i32));
+                        IRType::String
+                    }
+                    crate::stdlib::StdlibValue::Float(f) => {
+                        func.instruction(&Instruction::F64Const(f.into()));
+                        IRType::Float
+                    }
+                    crate::stdlib::StdlibValue::List(_) => {
+                        func.instruction(&Instruction::I32Const(10000));
+                        IRType::List(Box::new(IRType::String))
+                    }
+                    crate::stdlib::StdlibValue::Dict(_) => {
+                        func.instruction(&Instruction::I32Const(10000));
+                        IRType::Dict(Box::new(IRType::String), Box::new(IRType::String))
+                    }
+                    crate::stdlib::StdlibValue::None => {
+                        func.instruction(&Instruction::I32Const(0));
+                        IRType::None
+                    }
+                    crate::stdlib::StdlibValue::Module(module_name) => {
+                        // Module doesn't need to push anything to the stack
+                        IRType::Module(module_name)
+                    }
+                };
             }
 
             let obj_type = emit_expr(object, func, ctx, memory_layout, None);
@@ -3392,66 +3405,51 @@ pub fn emit_expr(
         }
         IRExpr::RangeCall { start, stop, step } => {
             // Range object layout in memory: [start:i32][stop:i32][step:i32][current:i32]
-            // Allocate range object at offset 40000+
-            let range_ptr = 40000 + (ctx.local_count * 100);
+            let range_ptr = ctx.alloc_collection(16);
 
-            // Evaluate and store start (default 0)
+            // Each field store pushes the destination address *before* the value
+            // (a WASM store pops the value first, then the address). range_ptr is
+            // a constant, so the field offset goes in the store's MemArg.
+            let store_field = |func: &mut Function, offset: u64| {
+                func.instruction(&Instruction::I32Store(MemArg {
+                    offset,
+                    align: 2,
+                    memory_index: 0,
+                }));
+            };
+
+            // start (default 0) at offset 0
+            func.instruction(&Instruction::I32Const(range_ptr as i32));
             if let Some(s) = start {
                 emit_expr(s, func, ctx, memory_layout, Some(&IRType::Int));
             } else {
                 func.instruction(&Instruction::I32Const(0));
             }
+            store_field(func, 0);
 
+            // stop at offset 4
             func.instruction(&Instruction::I32Const(range_ptr as i32));
-            func.instruction(&Instruction::LocalSet(ctx.temp_local));
-            func.instruction(&Instruction::LocalGet(ctx.temp_local));
-            func.instruction(&Instruction::I32Store(MemArg {
-                offset: 0,
-                align: 2,
-                memory_index: 0,
-            }));
-
-            // Evaluate and store stop
             emit_expr(stop, func, ctx, memory_layout, Some(&IRType::Int));
-            func.instruction(&Instruction::LocalGet(ctx.temp_local));
-            func.instruction(&Instruction::I32Const(4));
-            func.instruction(&Instruction::I32Add);
-            func.instruction(&Instruction::I32Store(MemArg {
-                offset: 0,
-                align: 2,
-                memory_index: 0,
-            }));
+            store_field(func, 4);
 
-            // Evaluate and store step (default 1)
+            // step (default 1) at offset 8
+            func.instruction(&Instruction::I32Const(range_ptr as i32));
             if let Some(s) = step {
                 emit_expr(s, func, ctx, memory_layout, Some(&IRType::Int));
             } else {
                 func.instruction(&Instruction::I32Const(1));
             }
-            func.instruction(&Instruction::LocalGet(ctx.temp_local));
-            func.instruction(&Instruction::I32Const(8));
-            func.instruction(&Instruction::I32Add);
-            func.instruction(&Instruction::I32Store(MemArg {
-                offset: 0,
-                align: 2,
-                memory_index: 0,
-            }));
+            store_field(func, 8);
 
-            // Store current position (same as start)
-            func.instruction(&Instruction::LocalGet(ctx.temp_local));
+            // current = start at offset 12
+            func.instruction(&Instruction::I32Const(range_ptr as i32));
+            func.instruction(&Instruction::I32Const(range_ptr as i32));
             func.instruction(&Instruction::I32Load(MemArg {
                 offset: 0,
                 align: 2,
                 memory_index: 0,
             }));
-            func.instruction(&Instruction::LocalGet(ctx.temp_local));
-            func.instruction(&Instruction::I32Const(12));
-            func.instruction(&Instruction::I32Add);
-            func.instruction(&Instruction::I32Store(MemArg {
-                offset: 0,
-                align: 2,
-                memory_index: 0,
-            }));
+            store_field(func, 12);
 
             // Return pointer to range object
             func.instruction(&Instruction::I32Const(range_ptr as i32));

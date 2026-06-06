@@ -48,6 +48,14 @@ pub fn is_stdlib_submodule(module: &str, submodule: &str) -> bool {
     matches!((module, submodule), ("os", "path"))
 }
 
+/// Resolve an attribute on a stdlib submodule, e.g. `os.path.sep`.
+pub fn get_submodule_attribute(module: &str, submodule: &str, attr: &str) -> Option<StdlibValue> {
+    match (module, submodule) {
+        ("os", "path") => os::path::get_attribute(attr),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum StdlibValue {
     Int(i32),

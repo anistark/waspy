@@ -1,4 +1,4 @@
-use crate::compiler::context::{ClassInfo, CompilationContext};
+use crate::compiler::context::{ClassInfo, CompilationContext, COLLECTION_HEAP_BASE};
 use crate::compiler::function::compile_function;
 use crate::ir::{IRModule, IRType};
 use std::collections::HashMap;
@@ -26,6 +26,11 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
     // String/bytes offsets are resolved during lowering and carried on the IR
     // module; the compiler reuses that layout to emit loads and the data section.
     let memory_layout = ir_module.memory_layout.clone();
+
+    // Register module-level variables so functions can inline their values.
+    for var in &ir_module.variables {
+        ctx.add_module_var(&var.name, var.var_type.clone(), var.value.clone());
+    }
 
     // Build type section
     let mut types = TypeSection::new();
@@ -73,17 +78,6 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
         functions.function(functions.len());
     }
     module.section(&functions);
-
-    // Memory section
-    let mut memories = MemorySection::new();
-    memories.memory(MemoryType {
-        minimum: 1,
-        maximum: Some(2),
-        memory64: false,
-        shared: false,
-        page_size_log2: None,
-    });
-    module.section(&memories);
 
     // Export section - export both functions and memory
     let mut exports = ExportSection::new();
@@ -147,8 +141,6 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
     // Export memory
     exports.export("memory", wasm_encoder::ExportKind::Memory, 0);
 
-    module.section(&exports);
-
     // Data section for string constants
     let mut data = DataSection::new();
 
@@ -191,9 +183,26 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
         }
     }
 
-    // The WASM spec requires the Code section (id 10) before the Data section
-    // (id 11); emitting Data first produces a module that strict validators
-    // (and Binaryen's reader) reject, which previously disabled optimization.
+    // Memory must hold the static data (strings/bytes/object instances) plus
+    // every collection region handed out during codegen. The collection heap
+    // grows from COLLECTION_HEAP_BASE, so size memory to cover its high-water
+    // mark (at least the base region).
+    let heap_end = COLLECTION_HEAP_BASE + ctx.collection_alloc_offset.get();
+    let min_pages = (((heap_end as u64) + 65535) / 65536).max(2);
+    let mut memories = MemorySection::new();
+    memories.memory(MemoryType {
+        minimum: min_pages,
+        maximum: None,
+        memory64: false,
+        shared: false,
+        page_size_log2: None,
+    });
+
+    // Section order follows the WASM spec: Memory (5), Export (7), Code (10),
+    // Data (11). Code must precede Data or strict validators (and Binaryen's
+    // reader) reject the module, which previously disabled optimization.
+    module.section(&memories);
+    module.section(&exports);
     module.section(&codes);
     module.section(&data);
 

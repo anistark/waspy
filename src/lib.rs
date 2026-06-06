@@ -693,3 +693,184 @@ pub fn type_to_string(ir_type: &IRType) -> String {
 
 pub use crate::analysis::metadata::FunctionSignature;
 pub use crate::core::parser;
+
+#[cfg(test)]
+mod collection_tests {
+    use super::*;
+
+    use wasmi::{Engine, Linker, Module, Store};
+
+    /// Compile (unoptimized) and instantiate the module, returning the wasmi
+    /// instance + store so a test can call exported functions. Instantiation
+    /// validates types and stack balance, so this also guards the codegen bugs
+    /// that previously produced invalid modules.
+    fn instantiate(source: &str) -> (wasmi::Instance, Store<()>) {
+        let options = CompilerOptions {
+            optimize: false,
+            ..CompilerOptions::default()
+        };
+        let wasm = compile_python_to_wasm_with_options(source, &options).expect("compilation");
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm[..]).expect("valid wasm module");
+        let mut store = Store::new(&engine, ());
+        let instance = Linker::<()>::new(&engine)
+            .instantiate(&mut store, &module)
+            .expect("instantiation")
+            .start(&mut store)
+            .expect("start");
+        (instance, store)
+    }
+
+    fn call_i32(source: &str, func: &str) -> i32 {
+        let (instance, mut store) = instantiate(source);
+        instance
+            .get_typed_func::<(), i32>(&store, func)
+            .expect("exported i32 fn")
+            .call(&mut store, ())
+            .expect("call")
+    }
+
+    fn call_i32_arg(source: &str, func: &str, arg: i32) -> i32 {
+        let (instance, mut store) = instantiate(source);
+        instance
+            .get_typed_func::<i32, i32>(&store, func)
+            .expect("exported i32 fn")
+            .call(&mut store, arg)
+            .expect("call")
+    }
+
+    #[test]
+    fn float_list_roundtrips() {
+        // Reads the float element back and compares (returns 1 on match). The
+        // value is stored as f32; 2.5 is exact, so equality holds.
+        let src = "def f() -> int:\n    xs = [1.5, 2.5, 3.5]\n    if xs[1] == 2.5:\n        return 1\n    return 0\n";
+        assert_eq!(call_i32(src, "f"), 1);
+    }
+
+    #[test]
+    fn float_tuple_roundtrips() {
+        let src = "def f() -> int:\n    t = (1.25, 2.75)\n    if t[1] == 2.75:\n        return 1\n    return 0\n";
+        assert_eq!(call_i32(src, "f"), 1);
+    }
+
+    #[test]
+    fn int_list_indexing_returns_element() {
+        // Previously returned a constant 0: the untyped local lost its type.
+        let src = "def f() -> int:\n    xs = [10, 20, 30]\n    return xs[1]\n";
+        assert_eq!(call_i32(src, "f"), 20);
+    }
+
+    #[test]
+    fn distinct_collections_do_not_alias() {
+        // Both lists previously shared one address (base + local_count*100).
+        let src =
+            "def f() -> int:\n    a = [1, 2, 3]\n    b = [10, 20, 30]\n    return a[0] + b[0]\n";
+        assert_eq!(call_i32(src, "f"), 11);
+    }
+
+    #[test]
+    fn nested_collections_do_not_alias() {
+        let src = "def f() -> int:\n    m = [[1, 2], [3, 4]]\n    return m[0][1] + m[1][0]\n";
+        assert_eq!(call_i32(src, "f"), 5);
+    }
+
+    #[test]
+    fn print_of_collection_element_is_valid() {
+        // print() returns nothing; a stray drop would underflow and fail to
+        // instantiate. Just ensure it builds and instantiates.
+        instantiate("def f():\n    xs = [1, 2, 3]\n    print(xs[0])\n");
+    }
+
+    #[test]
+    fn range_for_loop_iterates() {
+        // for-over-range: previously the loop's iterator locals were added
+        // after the function's locals were fixed (out-of-range), and the range
+        // object's fields were stored with reversed operands, so the loop ran
+        // zero times. Sum 0..5 (with step) to exercise both.
+        let sum =
+            "def f() -> int:\n    t = 0\n    for i in range(5):\n        t = t + i\n    return t\n";
+        assert_eq!(call_i32(sum, "f"), 10);
+        let step = "def f() -> int:\n    t = 0\n    for i in range(0, 10, 2):\n        t = t + i\n    return t\n";
+        assert_eq!(call_i32(step, "f"), 20);
+    }
+
+    #[test]
+    fn nested_range_loops_use_distinct_iterators() {
+        let src = "def f() -> int:\n    s = 0\n    for i in range(3):\n        for j in range(4):\n            s = s + 1\n    return s\n";
+        assert_eq!(call_i32(src, "f"), 12);
+    }
+
+    #[test]
+    fn try_except_finally_is_valid_and_runs() {
+        // try/except/finally previously emitted an extra End that closed the
+        // function frame early ("body shorter than given size").
+        let src = "def f(x: int) -> int:\n    try:\n        return x + 1\n    except ValueError:\n        return -1\n    finally:\n        x = x + 100\n";
+        assert_eq!(call_i32_arg(src, "f", 5), 6);
+    }
+
+    #[test]
+    fn nested_try_except_is_valid() {
+        let src = "def f(x: int) -> int:\n    try:\n        try:\n            return x + 5\n        except KeyError:\n            return -2\n    except ValueError:\n        return -1\n";
+        assert_eq!(call_i32_arg(src, "f", 5), 10);
+    }
+
+    #[test]
+    fn int_plus_float_coerces() {
+        // a (int) + b (float) widens the int to f64; the result equals 3.5.
+        let src = "def f() -> int:\n    a = 2\n    b = 1.5\n    if (a + b) == 3.5:\n        return 1\n    return 0\n";
+        assert_eq!(call_i32(src, "f"), 1);
+    }
+
+    #[test]
+    fn boolean_and_or_short_circuit() {
+        // and/or now yield an i32 result from their if/else instead of an
+        // empty block type.
+        let and =
+            "def f(a: int) -> int:\n    if (a > 0) and (a < 10):\n        return 1\n    return 0\n";
+        assert_eq!(call_i32_arg(and, "f", 5), 1);
+        assert_eq!(call_i32_arg(and, "f", 20), 0);
+        let or =
+            "def f(a: int) -> int:\n    if (a < 0) or (a > 100):\n        return 1\n    return 0\n";
+        assert_eq!(call_i32_arg(or, "f", -1), 1);
+        assert_eq!(call_i32_arg(or, "f", 50), 0);
+    }
+
+    #[test]
+    fn unannotated_float_local_in_mixed_function() {
+        // `result` is an unannotated float local (f64) living alongside the int
+        // local `i`; both the type inference and index-order local layout must
+        // be right for this to validate and compute 2**10.
+        let src = "def f() -> int:\n    result = 1.0\n    i = 0\n    while i < 10:\n        result = result * 2.0\n        i = i + 1\n    if result == 1024.0:\n        return 1\n    return 0\n";
+        assert_eq!(call_i32(src, "f"), 1);
+    }
+
+    #[test]
+    fn module_level_float_constant_is_inlined() {
+        // A module-level float constant used in arithmetic; emitting it at its
+        // natural type (not the caller's expectation) keeps it an f64.
+        let src = "PI = 2.5\ndef f() -> int:\n    if (PI * 4.0) == 10.0:\n        return 1\n    return 0\n";
+        assert_eq!(call_i32(src, "f"), 1);
+    }
+
+    #[test]
+    fn int_and_float_conversions() {
+        // int() truncates a float; float() widens an int.
+        let src = "def f() -> int:\n    return int(3.7) + int(float(2))\n";
+        assert_eq!(call_i32(src, "f"), 5);
+    }
+
+    #[test]
+    fn min_and_max_reduce() {
+        // The reduction previously left the if/else stack unbalanced.
+        let src = "def lo() -> int:\n    return min(5, 3, 8, 1, 9)\ndef hi() -> int:\n    return max(5, 3, 8, 1, 9)\n";
+        assert_eq!(call_i32(src, "lo"), 1);
+        assert_eq!(call_i32(src, "hi"), 9);
+    }
+
+    #[test]
+    fn os_path_submodule_attribute_is_valid() {
+        // os.path.<attr> previously fell through to a stray drop that
+        // underflowed the stack; it now resolves the submodule attribute.
+        instantiate("import os\ndef f():\n    print(\"sep:\", os.path.sep)\n");
+    }
+}
