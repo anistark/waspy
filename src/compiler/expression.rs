@@ -498,9 +498,12 @@ pub fn emit_expr(
                     // Integer/Boolean operations
                     match op {
                         IRUnaryOp::Neg => {
-                            // Negate: -x = 0 - x
-                            func.instruction(&Instruction::I32Const(0));
-                            func.instruction(&Instruction::I32Sub);
+                            // Negate: -x. The operand is already on the stack, so
+                            // multiply by -1 (mirroring the float path). Emitting
+                            // `i32.const 0; i32.sub` here would instead compute
+                            // `operand - 0`, leaving the value unchanged.
+                            func.instruction(&Instruction::I32Const(-1));
+                            func.instruction(&Instruction::I32Mul);
                             IRType::Int
                         }
                         IRUnaryOp::Not => {
