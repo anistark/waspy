@@ -319,7 +319,15 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
                 Stmt::FunctionDef(method_def) => {
                     // Process method (similar to function but with 'self' parameter)
                     let method_name = method_def.name.to_string();
-                    let params = process_function_params(&method_def.args)?;
+                    let mut params = process_function_params(&method_def.args)?;
+                    // The implicit `self` parameter is untyped in source; type it
+                    // as the enclosing class so attribute access/assignment can
+                    // resolve field offsets and types.
+                    if let Some(first) = params.first_mut() {
+                        if first.name == "self" {
+                            first.param_type = IRType::Class(name.clone());
+                        }
+                    }
                     let return_type = if let Some(returns) = &method_def.returns {
                         type_annotation_to_ir_type(returns)?
                     } else {

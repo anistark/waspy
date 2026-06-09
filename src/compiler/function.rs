@@ -73,6 +73,71 @@ pub fn compile_function(
     func
 }
 
+/// Resolve a class field to its `(byte offset, value type)`, if known.
+pub(crate) fn lookup_field(
+    ctx: &CompilationContext,
+    class_name: &str,
+    field: &str,
+) -> Option<(u64, IRType)> {
+    let class_info = ctx.get_class_info(class_name)?;
+    let offset = *class_info.field_offsets.get(field)?;
+    let ty = class_info
+        .field_types
+        .get(field)
+        .cloned()
+        .unwrap_or(IRType::Unknown);
+    Some((offset, ty))
+}
+
+/// Store instruction for a field of the given type (f64 for floats, i32 else).
+fn store_field_instr(ty: &IRType, offset: u64) -> Instruction<'static> {
+    let mem = MemArg {
+        offset,
+        align: if matches!(ty, IRType::Float) { 3 } else { 2 },
+        memory_index: 0,
+    };
+    if matches!(ty, IRType::Float) {
+        Instruction::F64Store(mem)
+    } else {
+        Instruction::I32Store(mem)
+    }
+}
+
+/// Emit a binary arithmetic op for an augmented field assignment, choosing the
+/// f64 or i32 instruction by operand type.
+fn emit_arith_op(func: &mut Function, op: &IROp, is_float: bool) {
+    let instr = match (op, is_float) {
+        (IROp::Add, false) => Instruction::I32Add,
+        (IROp::Sub, false) => Instruction::I32Sub,
+        (IROp::Mul, false) => Instruction::I32Mul,
+        (IROp::Div, false) | (IROp::FloorDiv, false) => Instruction::I32DivS,
+        (IROp::Mod, false) => Instruction::I32RemS,
+        (IROp::Add, true) => Instruction::F64Add,
+        (IROp::Sub, true) => Instruction::F64Sub,
+        (IROp::Mul, true) => Instruction::F64Mul,
+        (IROp::Div, true) | (IROp::FloorDiv, true) => Instruction::F64Div,
+        // Anything else (e.g. Pow, bitwise) is uncommon for fields; fall back to
+        // a numeric add so the stack stays balanced.
+        (_, true) => Instruction::F64Add,
+        (_, false) => Instruction::I32Add,
+    };
+    func.instruction(&instr);
+}
+
+/// Load instruction for a field of the given type (f64 for floats, i32 else).
+pub(crate) fn load_field_instr(ty: &IRType, offset: u64) -> Instruction<'static> {
+    let mem = MemArg {
+        offset,
+        align: if matches!(ty, IRType::Float) { 3 } else { 2 },
+        memory_index: 0,
+    };
+    if matches!(ty, IRType::Float) {
+        Instruction::F64Load(mem)
+    } else {
+        Instruction::I32Load(mem)
+    }
+}
+
 /// Get the type of a local variable by its index
 fn get_local_type_by_index(ctx: &CompilationContext, index: u32) -> IRType {
     for local_info in ctx.locals_map.values() {
@@ -278,6 +343,7 @@ pub fn compile_body(
                                 | IRType::Set(_)
                                 | IRType::String
                                 | IRType::Bytes
+                                | IRType::Class(_)
                         )
                     {
                         info.var_type = value_type;
@@ -407,10 +473,19 @@ pub fn compile_body(
             IRStatement::Expression(expr) => {
                 // Discard the result only when the expression actually leaves a
                 // value. Calls like print() return None and push nothing, so an
-                // unconditional drop would underflow the stack.
+                // unconditional drop would underflow the stack. String/bytes
+                // values (e.g. a docstring statement) are an (offset, length)
+                // pair and need two drops.
                 let result_type = emit_expr(expr, func, ctx, memory_layout, None);
-                if !matches!(result_type, IRType::None) {
-                    func.instruction(&Instruction::Drop);
+                match result_type {
+                    IRType::None => {}
+                    IRType::String | IRType::Bytes => {
+                        func.instruction(&Instruction::Drop);
+                        func.instruction(&Instruction::Drop);
+                    }
+                    _ => {
+                        func.instruction(&Instruction::Drop);
+                    }
                 }
             }
             IRStatement::AttributeAssign {
@@ -418,42 +493,27 @@ pub fn compile_body(
                 attribute,
                 value,
             } => {
-                // Emit code for the object (get reference)
+                // Emit the object reference (the store address) first; a WASM
+                // store pops the value, then the address.
                 let obj_type = emit_expr(object, func, ctx, memory_layout, None);
 
-                // Store the object reference temporarily
-                func.instruction(&Instruction::LocalSet(ctx.temp_local));
+                let field = match &obj_type {
+                    IRType::Class(class_name) => lookup_field(ctx, class_name, attribute),
+                    _ => None,
+                };
 
-                // Emit code for the value
-                emit_expr(value, func, ctx, memory_layout, None);
-
-                // Store the value temporarily
-                func.instruction(&Instruction::LocalSet(ctx.temp_local + 1));
-
-                // Load the object reference
-                func.instruction(&Instruction::LocalGet(ctx.temp_local));
-
-                // Check if object is a custom class
-                if let crate::ir::IRType::Class(class_name) = &obj_type {
-                    if let Some(class_info) = ctx.get_class_info(class_name) {
-                        if let Some(&field_offset) = class_info.field_offsets.get(attribute) {
-                            // Stack: object_ptr
-                            // Load the value to store
-                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
-                            // Store value at object_ptr + field_offset
-                            func.instruction(&Instruction::I32Store(MemArg {
-                                offset: field_offset,
-                                align: 2,
-                                memory_index: 0,
-                            }));
-                            return;
-                        }
-                    }
+                if let Some((field_offset, field_ty)) = field {
+                    // Stack: object_ptr. Emit the value coerced to the field's
+                    // type, then store with the matching width (f64 for float
+                    // fields, i32 otherwise).
+                    emit_expr(value, func, ctx, memory_layout, Some(&field_ty));
+                    func.instruction(&store_field_instr(&field_ty, field_offset));
+                } else {
+                    // Unknown field: drop the address and the value.
+                    emit_expr(value, func, ctx, memory_layout, None);
+                    func.instruction(&Instruction::Drop);
+                    func.instruction(&Instruction::Drop);
                 }
-
-                // Fallback: drop everything
-                func.instruction(&Instruction::Drop); // Drop object pointer
-                func.instruction(&Instruction::Drop); // Drop value
             }
 
             IRStatement::AugAssign { target, value, op } => {
@@ -507,22 +567,34 @@ pub fn compile_body(
 
             IRStatement::AttributeAugAssign {
                 object,
-                attribute: _, // Ignore the attribute field for now
+                attribute,
                 value,
-                op: _, // Ignore the operation for now
+                op,
             } => {
-                // This is a simplified implementation that doesn't actually perform the operation
-                // It's just a placeholder to get the code to compile
+                // `obj.field OP= value` -> obj.field = (obj.field OP value).
+                let obj_type = emit_expr(object, func, ctx, memory_layout, None);
+                func.instruction(&Instruction::LocalSet(ctx.temp_local)); // temp = obj_ptr
 
-                // Emit code for the object (get reference)
-                emit_expr(object, func, ctx, memory_layout, None);
+                let field = match &obj_type {
+                    IRType::Class(class_name) => lookup_field(ctx, class_name, attribute),
+                    _ => None,
+                };
 
-                // Emit code for the value
-                emit_expr(value, func, ctx, memory_layout, None);
-
-                // For now, just drop the values - we don't have a proper object system
-                func.instruction(&Instruction::Drop);
-                func.instruction(&Instruction::Drop);
+                if let Some((offset, field_ty)) = field {
+                    let is_float = matches!(field_ty, IRType::Float);
+                    // Store address.
+                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                    // Current field value.
+                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                    func.instruction(&load_field_instr(&field_ty, offset));
+                    // Operand, coerced to the field's type.
+                    emit_expr(value, func, ctx, memory_layout, Some(&field_ty));
+                    emit_arith_op(func, op, is_float);
+                    func.instruction(&store_field_instr(&field_ty, offset));
+                } else {
+                    emit_expr(value, func, ctx, memory_layout, None);
+                    func.instruction(&Instruction::Drop);
+                }
             }
 
             IRStatement::For {

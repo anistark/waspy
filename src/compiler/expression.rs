@@ -1,4 +1,5 @@
 use crate::compiler::context::CompilationContext;
+use crate::compiler::function::{load_field_instr, lookup_field};
 use crate::ir::{IRBoolOp, IRCompareOp, IRConstant, IRExpr, IROp, IRType, IRUnaryOp, MemoryLayout};
 use wasm_encoder::{BlockType, Function, Instruction, MemArg, ValType};
 
@@ -70,8 +71,15 @@ pub fn emit_expr(
         IRExpr::Const(constant) => {
             match constant {
                 IRConstant::Int(i) => {
-                    func.instruction(&Instruction::I32Const(*i));
-                    IRType::Int
+                    // Widen to f64 when a float is expected (e.g. an int literal
+                    // passed to a float parameter or stored in a float field).
+                    if let Some(IRType::Float) = expected_type {
+                        func.instruction(&Instruction::F64Const(f64_const(*i as f64)));
+                        IRType::Float
+                    } else {
+                        func.instruction(&Instruction::I32Const(*i));
+                        IRType::Int
+                    }
                 }
                 IRConstant::Float(f) => {
                     func.instruction(&Instruction::F64Const(f64_const(*f)));
@@ -158,7 +166,11 @@ pub fn emit_expr(
         }
         IRExpr::BinaryOp { left, right, op } => {
             let left_type = emit_expr(left, func, ctx, memory_layout, None);
-            let right_type = emit_expr(right, func, ctx, memory_layout, Some(&left_type));
+            // Emit the right operand at its natural type rather than forcing it to
+            // the left's type: a float right operand under an int left (e.g.
+            // `2 * (a_float + b_float)`) must not be truncated to int — the
+            // int/float widening below promotes whichever side is the integer.
+            let right_type = emit_expr(right, func, ctx, memory_layout, None);
 
             // Handle string and bytes operations
             if left_type == IRType::String || left_type == IRType::Bytes {
@@ -727,40 +739,51 @@ pub fn emit_expr(
             function_name,
             arguments,
         } => {
+            // Class instantiation: `ClassName(args)`. Handled before the generic
+            // argument emission so the instance pointer (`self`) is the first
+            // argument to `__init__` and the user arguments are coerced to their
+            // declared parameter types (e.g. int literals widened to f64).
+            if ctx.get_class_info(function_name).is_some() {
+                let instance_ptr = 65536
+                    + ctx
+                        .get_class_info(function_name)
+                        .map(|c| c.instance_size)
+                        .unwrap_or(0);
+                let init_idx = ctx
+                    .get_class_info(function_name)
+                    .and_then(|c| c.methods.get("__init__").copied());
+
+                if let Some(init_idx) = init_idx {
+                    // __init__ parameter types, `self` first.
+                    let param_types: Vec<IRType> = ctx
+                        .get_function_info(&format!("{function_name}::__init__"))
+                        .map(|f| f.param_types.clone())
+                        .unwrap_or_default();
+                    func.instruction(&Instruction::I32Const(instance_ptr as i32)); // self
+                    for (i, arg) in arguments.iter().enumerate() {
+                        emit_expr(arg, func, ctx, memory_layout, param_types.get(i + 1));
+                    }
+                    func.instruction(&Instruction::Call(init_idx));
+                    func.instruction(&Instruction::Drop); // discard __init__ return
+                } else {
+                    // No constructor: evaluate and discard any arguments.
+                    for arg in arguments {
+                        let t = emit_expr(arg, func, ctx, memory_layout, None);
+                        func.instruction(&Instruction::Drop);
+                        if matches!(t, IRType::String | IRType::Bytes) {
+                            func.instruction(&Instruction::Drop);
+                        }
+                    }
+                }
+                func.instruction(&Instruction::I32Const(instance_ptr as i32)); // result
+                return IRType::Class(function_name.clone());
+            }
+
             // Push arguments onto the stack in order
             let mut arg_types = Vec::new();
             for arg in arguments {
                 let arg_type = emit_expr(arg, func, ctx, memory_layout, None);
                 arg_types.push(arg_type);
-            }
-
-            // Check if this is a class instantiation
-            if let Some(class_info) = ctx.get_class_info(function_name) {
-                // Allocate space for the object instance
-                // For now, use a fixed allocation strategy - sequential allocation
-                let instance_ptr = 65536
-                    + (ctx
-                        .get_class_info(function_name)
-                        .map(|c| c.instance_size)
-                        .unwrap_or(0));
-                func.instruction(&Instruction::I32Const(instance_ptr as i32));
-
-                // Call __init__ method if it exists
-                if let Some(&init_func_idx) = class_info.methods.get("__init__") {
-                    // Stack: ...object_ptr
-                    // Need to pass self as first argument
-                    // Duplicate object pointer to pass to __init__
-                    func.instruction(&Instruction::LocalSet(ctx.temp_local));
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
-
-                    // Now call __init__ with self and other arguments
-                    func.instruction(&Instruction::Call(init_func_idx));
-                    // Drop the return value from __init__
-                    func.instruction(&Instruction::Drop);
-                }
-
-                return IRType::Class(function_name.clone());
             }
 
             // Look up the function index if it exists in our context
@@ -1643,23 +1666,26 @@ pub fn emit_expr(
                 };
             }
 
+            // `ClassName.var` reads a class-level variable; inline its value.
+            if let IRExpr::Variable(class_name) = &**object {
+                if let Some(class_info) = ctx.get_class_info(class_name) {
+                    if let Some(value) = class_info.class_var_values.get(attribute) {
+                        let value = value.clone();
+                        return emit_expr(&value, func, ctx, memory_layout, expected_type);
+                    }
+                }
+            }
+
             let obj_type = emit_expr(object, func, ctx, memory_layout, None);
 
             match &obj_type {
                 IRType::Class(class_name) => {
-                    if let Some(class_info) = ctx.get_class_info(class_name) {
-                        if let Some(&field_offset) = class_info.field_offsets.get(attribute) {
-                            func.instruction(&Instruction::I32Load(MemArg {
-                                offset: field_offset,
-                                align: 2,
-                                memory_index: 0,
-                            }));
-                            IRType::Unknown
-                        } else {
-                            func.instruction(&Instruction::Drop);
-                            func.instruction(&Instruction::I32Const(0));
-                            IRType::Unknown
-                        }
+                    // Instance field read: load with the field's width and report
+                    // its type so float fields participate in f64 arithmetic.
+                    if let Some((field_offset, field_ty)) = lookup_field(ctx, class_name, attribute)
+                    {
+                        func.instruction(&load_field_instr(&field_ty, field_offset));
+                        field_ty
                     } else {
                         func.instruction(&Instruction::Drop);
                         func.instruction(&Instruction::I32Const(0));
@@ -1667,7 +1693,6 @@ pub fn emit_expr(
                     }
                 }
                 _ => {
-                    emit_expr(object, func, ctx, memory_layout, None);
                     func.instruction(&Instruction::Drop);
                     func.instruction(&Instruction::I32Const(0));
                     IRType::Unknown
@@ -3360,30 +3385,26 @@ pub fn emit_expr(
                     emit_tuple_method_call(func, ctx, memory_layout, method_name, arguments)
                 }
                 IRType::Class(class_name) => {
-                    // Custom class method call
-                    if let Some(class_info) = ctx.get_class_info(class_name) {
-                        if let Some(&method_idx) = class_info.methods.get(method_name.as_str()) {
-                            // Stack has object pointer already on top
-                            // Evaluate and push arguments
-                            for arg in arguments {
-                                emit_expr(arg, func, ctx, memory_layout, None);
-                            }
-                            // Call the method
-                            func.instruction(&Instruction::Call(method_idx));
-                            // For now, assume method returns an unknown type
-                            IRType::Unknown
-                        } else {
-                            // Method not found on class
-                            func.instruction(&Instruction::Drop); // drop object
-                            for arg in arguments {
-                                emit_expr(arg, func, ctx, memory_layout, None);
-                                func.instruction(&Instruction::Drop);
-                            }
-                            IRType::Unknown
+                    // Custom class method call. The object pointer (`self`) is
+                    // already on the stack; coerce the user arguments to the
+                    // method's declared parameter types and report its real
+                    // return type so float results flow correctly.
+                    let method_idx = ctx
+                        .get_class_info(class_name)
+                        .and_then(|ci| ci.methods.get(method_name.as_str()).copied());
+                    if let Some(method_idx) = method_idx {
+                        let (param_types, ret) = ctx
+                            .get_function_info(&format!("{class_name}::{method_name}"))
+                            .map(|f| (f.param_types.clone(), f.return_type.clone()))
+                            .unwrap_or((Vec::new(), IRType::Unknown));
+                        for (i, arg) in arguments.iter().enumerate() {
+                            emit_expr(arg, func, ctx, memory_layout, param_types.get(i + 1));
                         }
+                        func.instruction(&Instruction::Call(method_idx));
+                        ret
                     } else {
-                        // Class not found
-                        func.instruction(&Instruction::Drop); // drop object
+                        // Method or class not found: drop the object and args.
+                        func.instruction(&Instruction::Drop);
                         for arg in arguments {
                             emit_expr(arg, func, ctx, memory_layout, None);
                             func.instruction(&Instruction::Drop);

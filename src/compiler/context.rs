@@ -34,6 +34,8 @@ pub struct ClassInfo {
     pub name: String,
     pub methods: HashMap<String, u32>, // method_name -> function_index
     pub field_offsets: HashMap<String, u64>, // field_name -> byte_offset
+    pub field_types: HashMap<String, IRType>, // field_name -> value type (f64 vs i32)
+    pub class_var_values: HashMap<String, IRExpr>, // class-level var name -> initializer
     pub instance_size: u32,            // size of instance in bytes
 }
 

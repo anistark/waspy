@@ -739,6 +739,54 @@ mod collection_tests {
             .expect("call")
     }
 
+    /// A rectangle class with float fields, used by the class+float tests. Each
+    /// test function returns 1 when the float computation matches its expected
+    /// value (the wasmi build in use can't return an f64 directly).
+    const RECT_SRC: &str = "class Rectangle:\n    default_width = 10\n    default_height = 5\n    def __init__(self, width: float, height: float):\n        self.width = width\n        self.height = height\n    def area(self) -> float:\n        return self.width * self.height\n    def perimeter(self) -> float:\n        return 2 * (self.width + self.height)\n    def scale(self, factor: float) -> None:\n        self.width *= factor\n        self.height *= factor\n";
+
+    #[test]
+    fn class_float_fields_and_methods() {
+        // Float instance fields are stored/loaded as f64, and a method returning
+        // a float computes correctly (previously fields read as i32 and the f64
+        // return mismatched).
+        let area = format!(
+            "{RECT_SRC}def f() -> int:\n    r = Rectangle(10.0, 5.0)\n    if r.area() == 50.0:\n        return 1\n    return 0\n"
+        );
+        assert_eq!(call_i32(&area, "f"), 1);
+        // `2 * (a + b)` keeps the float result instead of truncating it to int.
+        let perim = format!(
+            "{RECT_SRC}def f() -> int:\n    r = Rectangle(10.0, 5.0)\n    if r.perimeter() == 30.0:\n        return 1\n    return 0\n"
+        );
+        assert_eq!(call_i32(&perim, "f"), 1);
+    }
+
+    #[test]
+    fn class_int_args_coerced_to_float() {
+        // Int literals passed to float constructor parameters widen to f64.
+        let src = format!(
+            "{RECT_SRC}def f() -> int:\n    r = Rectangle(3, 4)\n    if r.area() == 12.0:\n        return 1\n    return 0\n"
+        );
+        assert_eq!(call_i32(&src, "f"), 1);
+    }
+
+    #[test]
+    fn class_augmented_field_assign() {
+        // `self.width *= factor` performs an f64 load/mul/store (was a no-op).
+        let src = format!(
+            "{RECT_SRC}def f() -> int:\n    r = Rectangle(2.0, 3.0)\n    r.scale(2.0)\n    if r.area() == 24.0:\n        return 1\n    return 0\n"
+        );
+        assert_eq!(call_i32(&src, "f"), 1);
+    }
+
+    #[test]
+    fn class_variable_access() {
+        // `ClassName.classvar` reads the class-level variable's value (10 * 5).
+        let src = format!(
+            "{RECT_SRC}def f() -> int:\n    r = Rectangle(Rectangle.default_width, Rectangle.default_height)\n    if r.area() == 50.0:\n        return 1\n    return 0\n"
+        );
+        assert_eq!(call_i32(&src, "f"), 1);
+    }
+
     #[test]
     fn float_list_roundtrips() {
         // Reads the float element back and compares (returns 1 on match). The
