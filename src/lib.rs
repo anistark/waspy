@@ -795,6 +795,26 @@ mod collection_tests {
     }
 
     #[test]
+    fn descending_range_for_loop_iterates() {
+        // range(start, stop, -step): the loop's break test was ascending-only
+        // (current >= stop), so a descending range exited immediately. The step
+        // also relied on integer unary negation, which evaluated `-x` as `x`.
+        let down = "def f() -> int:\n    t = 0\n    for i in range(10, 0, -1):\n        t = t + i\n    return t\n";
+        assert_eq!(call_i32(down, "f"), 55);
+        let neg = "def f() -> int:\n    t = 0\n    for i in range(20, 5, -3):\n        t = t + i\n    return t\n";
+        assert_eq!(call_i32(neg, "f"), 70);
+        let empty = "def f() -> int:\n    t = 0\n    for i in range(0, 5, -1):\n        t = t + i\n    return t\n";
+        assert_eq!(call_i32(empty, "f"), 0);
+    }
+
+    #[test]
+    fn integer_unary_negation() {
+        // `-x` previously emitted `operand - 0`, leaving the value unchanged.
+        let src = "def f() -> int:\n    x = 7\n    return -x\n";
+        assert_eq!(call_i32(src, "f"), -7);
+    }
+
+    #[test]
     fn nested_range_loops_use_distinct_iterators() {
         let src = "def f() -> int:\n    s = 0\n    for i in range(3):\n        for j in range(4):\n            s = s + 1\n    return s\n";
         assert_eq!(call_i32(src, "f"), 12);

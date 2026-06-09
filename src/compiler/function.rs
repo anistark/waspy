@@ -648,10 +648,29 @@ pub fn compile_body(
                         }));
                         func.instruction(&Instruction::LocalSet(list_length_idx));
 
-                        // Check if current >= stop
+                        // Break condition depends on the sign of step, which may
+                        // be dynamic, so branch on it at runtime:
+                        //   step > 0  -> stop iterating once current >= stop
+                        //   step <= 0 -> stop iterating once current <= stop
+                        // (A single ascending `current >= stop` test would make a
+                        // descending range, e.g. range(10, 0, -1), exit immediately.)
+                        func.instruction(&Instruction::LocalGet(iterator_ptr_idx));
+                        func.instruction(&Instruction::I32Load(MemArg {
+                            offset: 8,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::I32GtS); // step > 0
+                        func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
                         func.instruction(&Instruction::LocalGet(target_idx));
                         func.instruction(&Instruction::LocalGet(list_length_idx));
-                        func.instruction(&Instruction::I32GeS);
+                        func.instruction(&Instruction::I32GeS); // current >= stop
+                        func.instruction(&Instruction::Else);
+                        func.instruction(&Instruction::LocalGet(target_idx));
+                        func.instruction(&Instruction::LocalGet(list_length_idx));
+                        func.instruction(&Instruction::I32LeS); // current <= stop
+                        func.instruction(&Instruction::End);
                         func.instruction(&Instruction::BrIf(1)); // Break if true
 
                         // Execute the loop body
