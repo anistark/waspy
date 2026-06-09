@@ -801,6 +801,51 @@ mod collection_tests {
     }
 
     #[test]
+    fn bytes_local_round_trips() {
+        // A string/bytes value is an (offset, length) pair, but a local holds
+        // one word; without a companion length local the offset was dropped, so
+        // indexing read from offset 0 and len() returned 0.
+        let idx = "def f() -> int:\n    b = b\"hello\"\n    return b[0]\n";
+        assert_eq!(call_i32(idx, "f"), 104); // 'h'
+        let idx1 = "def f() -> int:\n    b = b\"hello\"\n    return b[1]\n";
+        assert_eq!(call_i32(idx1, "f"), 101); // 'e'
+        let length = "def f() -> int:\n    b = b\"hello\"\n    return len(b)\n";
+        assert_eq!(call_i32(length, "f"), 5);
+    }
+
+    #[test]
+    fn string_local_len() {
+        // len() of a string local previously kept the offset, not the length.
+        let src = "def f() -> int:\n    s = \"hello\"\n    return len(s)\n";
+        assert_eq!(call_i32(src, "f"), 5);
+    }
+
+    #[test]
+    fn bytes_slicing_round_trips() {
+        // `Expr::Slice` now lowers, and the slice codegen is branchless so it
+        // validates. Slices share the source bytes' backing memory.
+        let mid = "def f() -> int:\n    b = b\"hello\"\n    s = b[1:4]\n    return s[0]\n";
+        assert_eq!(call_i32(mid, "f"), 101); // b"ell"[0] == 'e'
+        let mid_len = "def f() -> int:\n    b = b\"hello\"\n    s = b[1:4]\n    return len(s)\n";
+        assert_eq!(call_i32(mid_len, "f"), 3);
+        let open_end = "def f() -> int:\n    b = b\"hello\"\n    return len(b[2:])\n";
+        assert_eq!(call_i32(open_end, "f"), 3);
+        let open_start = "def f() -> int:\n    b = b\"hello\"\n    return len(b[:3])\n";
+        assert_eq!(call_i32(open_start, "f"), 3);
+        let negative = "def f() -> int:\n    b = b\"hello\"\n    s = b[-2:]\n    return s[0]\n";
+        assert_eq!(call_i32(negative, "f"), 108); // b"lo"[0] == 'l'
+    }
+
+    #[test]
+    fn bytes_concatenation_round_trips() {
+        let src =
+            "def f() -> int:\n    a = b\"ab\"\n    c = b\"cd\"\n    d = a + c\n    return d[3]\n";
+        assert_eq!(call_i32(src, "f"), 100); // 'd'
+        let len = "def f() -> int:\n    a = b\"ab\"\n    c = b\"cd\"\n    return len(a + c)\n";
+        assert_eq!(call_i32(len, "f"), 4);
+    }
+
+    #[test]
     fn try_except_finally_is_valid_and_runs() {
         // try/except/finally previously emitted an extra End that closed the
         // function frame early ("body shorter than given size").
