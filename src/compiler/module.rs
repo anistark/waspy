@@ -1,5 +1,5 @@
 use crate::compiler::context::{ClassInfo, CompilationContext, COLLECTION_HEAP_BASE};
-use crate::compiler::function::compile_function;
+use crate::compiler::function::{compile_function, resolve_return_type};
 use crate::ir::{IRModule, IRType};
 use std::collections::HashMap;
 use wasm_encoder::{
@@ -32,6 +32,37 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
         ctx.add_module_var(&var.name, var.var_type.clone(), var.value.clone());
     }
 
+    // Resolve each function's (and method's) return type up front, inferring
+    // unannotated ones from their bodies, so the type section, the registered
+    // signatures, and the emitted code all use the same result type. Two passes
+    // let a function's inferred return type depend on a callee resolved later in
+    // the first pass.
+    let mut resolved_returns: HashMap<String, IRType> = HashMap::new();
+    for _ in 0..2 {
+        for func in &ir_module.functions {
+            let rt = resolve_return_type(func, &resolved_returns);
+            resolved_returns.insert(func.name.clone(), rt);
+        }
+        for cls in &ir_module.classes {
+            for method in &cls.methods {
+                let rt = resolve_return_type(method, &resolved_returns);
+                resolved_returns.insert(format!("{}::{}", cls.name, method.name), rt);
+            }
+        }
+    }
+    let module_return = |func: &crate::ir::IRFunction| -> IRType {
+        resolved_returns
+            .get(&func.name)
+            .cloned()
+            .unwrap_or_else(|| func.return_type.clone())
+    };
+    let method_return = |class: &str, method: &crate::ir::IRFunction| -> IRType {
+        resolved_returns
+            .get(&format!("{class}::{}", method.name))
+            .cloned()
+            .unwrap_or_else(|| method.return_type.clone())
+    };
+
     // Build type section
     let mut types = TypeSection::new();
 
@@ -51,7 +82,7 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
             .collect();
 
         // Map IR return type to WebAssembly type
-        let results = vec![ir_type_to_wasm_type(&func.return_type)];
+        let results = vec![ir_type_to_wasm_type(&module_return(func))];
 
         // Add the type to the type section
         types.ty().function(params, results);
@@ -65,7 +96,7 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
                 .iter()
                 .map(|param| ir_type_to_wasm_type(&param.param_type))
                 .collect();
-            let results = vec![ir_type_to_wasm_type(&method.return_type)];
+            let results = vec![ir_type_to_wasm_type(&method_return(&cls.name, method))];
             types.ty().function(params, results);
         }
     }
@@ -88,7 +119,7 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
         // Register function in context
         let param_types = func.params.iter().map(|p| p.param_type.clone()).collect();
 
-        ctx.add_function(&func.name, func_idx, param_types, func.return_type.clone());
+        ctx.add_function(&func.name, func_idx, param_types, module_return(func));
 
         // Export the function
         exports.export(&func.name, wasm_encoder::ExportKind::Func, func_idx);
@@ -124,7 +155,7 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
                 &qualified_name,
                 func_idx,
                 param_types,
-                method.return_type.clone(),
+                method_return(&cls.name, method),
             );
 
             class_info.methods.insert(method.name.clone(), func_idx);
@@ -171,14 +202,16 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
     let mut codes = CodeSection::new();
 
     for func_ir in &ir_module.functions {
-        let compiled_func = compile_function(func_ir, &mut ctx, &memory_layout);
+        let return_type = module_return(func_ir);
+        let compiled_func = compile_function(func_ir, &mut ctx, &memory_layout, &return_type);
         codes.function(&compiled_func);
     }
 
     // Compile class methods
     for cls in &ir_module.classes {
         for method in &cls.methods {
-            let compiled_method = compile_function(method, &mut ctx, &memory_layout);
+            let return_type = method_return(&cls.name, method);
+            let compiled_method = compile_function(method, &mut ctx, &memory_layout, &return_type);
             codes.function(&compiled_method);
         }
     }

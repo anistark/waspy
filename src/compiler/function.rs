@@ -8,6 +8,7 @@ pub fn compile_function(
     ir_func: &IRFunction,
     ctx: &mut CompilationContext,
     memory_layout: &MemoryLayout,
+    return_type: &IRType,
 ) -> Function {
     ctx.locals_map.clear();
     ctx.local_count = 0;
@@ -55,13 +56,12 @@ pub fn compile_function(
     // Compile the function body
     compile_body(&ir_func.body, &mut func, ctx, memory_layout);
 
-    // Add default return value if no explicit return
-    match ir_func.return_type {
+    // Add default return value if no explicit return. Use the resolved return
+    // type (which may have been inferred from the body) so the fall-through
+    // value matches the function's declared WASM result.
+    match return_type {
         IRType::Float => {
             func.instruction(&Instruction::F64Const(0.0_f64.into()));
-        }
-        IRType::None => {
-            func.instruction(&Instruction::I32Const(0));
         }
         _ => {
             func.instruction(&Instruction::I32Const(0));
@@ -110,6 +110,19 @@ fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRType {
             }
         }
         IRExpr::UnaryOp { operand, .. } => infer_value_type(operand, ctx),
+        // Float-valued stdlib constants (e.g. `math.pi`, `math.e`) must make
+        // their local an f64; otherwise the f64 store lands in an i32 slot.
+        IRExpr::Attribute { object, attribute } => match object.as_ref() {
+            IRExpr::Variable(module)
+                if matches!(
+                    crate::stdlib::get_stdlib_attributes(module, attribute),
+                    Some(crate::stdlib::StdlibValue::Float(_))
+                ) =>
+            {
+                IRType::Float
+            }
+            _ => IRType::Unknown,
+        },
         IRExpr::Variable(name) => ctx
             .get_local_info(name)
             .map(|info| info.var_type.clone())
@@ -121,6 +134,70 @@ fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRType {
             .filter(|t| *t == IRType::Float)
             .unwrap_or(IRType::Unknown),
         _ => IRType::Unknown,
+    }
+}
+
+/// Resolve a function's WASM result type. An explicit annotation wins; otherwise
+/// the type is inferred from the body's `return` statements so that, e.g., a
+/// function returning `math.pi` gets an f64 result instead of a default i32 (an
+/// f64 return value into an i32 result fails validation and aborts Binaryen).
+///
+/// `known_returns` carries the already-resolved return types of other functions
+/// so a `return some_call()` resolves; callees defined earlier are resolved
+/// first, and a second resolution pass handles forward references.
+pub(crate) fn resolve_return_type(
+    ir_func: &IRFunction,
+    known_returns: &std::collections::HashMap<String, IRType>,
+) -> IRType {
+    if !matches!(ir_func.return_type, IRType::Unknown) {
+        return ir_func.return_type.clone();
+    }
+
+    // Build a scratch context with the params and known function return types,
+    // then run the local scan so local types (including float stdlib constants)
+    // are available to the return-expression inference.
+    let mut ctx = CompilationContext::new();
+    for (name, ret) in known_returns {
+        ctx.add_function(name, 0, Vec::new(), ret.clone());
+    }
+    for param in &ir_func.params {
+        ctx.add_local(&param.name, param.param_type.clone());
+    }
+    ctx.for_loop_seq = 0;
+    scan_and_allocate_locals(&ir_func.body, &mut ctx);
+
+    let mut inferred = IRType::Unknown;
+    collect_return_type(&ir_func.body, &ctx, &mut inferred);
+    inferred
+}
+
+/// Fold the inferred types of a body's `return` expressions into `out`. A float
+/// return forces an f64 result; otherwise the first concrete type seen wins.
+fn collect_return_type(body: &IRBody, ctx: &CompilationContext, out: &mut IRType) {
+    for stmt in &body.statements {
+        match stmt {
+            IRStatement::Return(Some(expr)) => {
+                let t = infer_value_type(expr, ctx);
+                if t == IRType::Float {
+                    *out = IRType::Float;
+                } else if matches!(out, IRType::Unknown) && !matches!(t, IRType::Unknown) {
+                    *out = t;
+                }
+            }
+            IRStatement::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_return_type(then_body, ctx, out);
+                if let Some(else_body) = else_body {
+                    collect_return_type(else_body, ctx, out);
+                }
+            }
+            IRStatement::While { body, .. } => collect_return_type(body, ctx, out),
+            IRStatement::For { body, .. } => collect_return_type(body, ctx, out),
+            _ => {}
+        }
     }
 }
 
