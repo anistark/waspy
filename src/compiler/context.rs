@@ -14,6 +14,14 @@ pub const SCRATCH_LOCALS: u32 = 8;
 /// literals never overlap them.
 pub const COLLECTION_HEAP_BASE: u32 = 131072;
 
+/// Name of the companion local that holds the length of a string/bytes local.
+/// A string/bytes value is an `(offset, length)` pair but a WASM local holds a
+/// single word, so the offset lives in the named local and the length in this
+/// companion. See the string/bytes handling in assignment and variable reads.
+pub fn strlen_local_name(name: &str) -> String {
+    format!("__strlen_{name}")
+}
+
 /// Local variable
 pub struct LocalInfo {
     pub index: u32,

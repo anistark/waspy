@@ -1,4 +1,4 @@
-use crate::compiler::context::CompilationContext;
+use crate::compiler::context::{strlen_local_name, CompilationContext};
 use crate::ir::{IRBoolOp, IRCompareOp, IRConstant, IRExpr, IROp, IRType, IRUnaryOp, MemoryLayout};
 use wasm_encoder::{BlockType, Function, Instruction, MemArg, ValType};
 
@@ -138,8 +138,18 @@ pub fn emit_expr(
         }
         IRExpr::Param(name) | IRExpr::Variable(name) => {
             if let Some(local_info) = ctx.get_local_info(name) {
-                func.instruction(&Instruction::LocalGet(local_info.index));
-                local_info.var_type.clone()
+                let index = local_info.index;
+                let var_type = local_info.var_type.clone();
+                func.instruction(&Instruction::LocalGet(index));
+                // String/bytes locals hold only the offset; push the length from
+                // the companion local to rebuild the (offset, length) pair the
+                // rest of the pipeline expects.
+                if matches!(var_type, IRType::String | IRType::Bytes) {
+                    if let Some(len_idx) = ctx.get_local_index(&strlen_local_name(name)) {
+                        func.instruction(&Instruction::LocalGet(len_idx));
+                    }
+                }
+                var_type
             } else if let Some((declared, value)) = ctx.get_module_var(name) {
                 // Module-level variable: inline its initializer. Clone first so
                 // the recursive emit does not alias the borrow of `ctx`. Emit at
@@ -779,8 +789,11 @@ pub fn emit_expr(
                         }
                         match &arg_types[0] {
                             IRType::String | IRType::Bytes => {
-                                // (offset, length) on stack; pop offset, keep length
+                                // (offset, length) on stack with length on top.
+                                // Keep the length, discard the offset below it.
+                                func.instruction(&Instruction::LocalSet(ctx.temp_local));
                                 func.instruction(&Instruction::Drop);
+                                func.instruction(&Instruction::LocalGet(ctx.temp_local));
                                 IRType::Int
                             }
                             // Lists, dicts, sets and tuples are all pointers that
@@ -807,8 +820,8 @@ pub fn emit_expr(
                         // Pop the arguments off the stack
                         for arg_type in &arg_types {
                             match arg_type {
-                                IRType::String => {
-                                    // Strings are (offset, length), drop both
+                                IRType::String | IRType::Bytes => {
+                                    // Strings/bytes are (offset, length), drop both
                                     func.instruction(&Instruction::Drop);
                                     func.instruction(&Instruction::Drop);
                                 }
@@ -1391,135 +1404,100 @@ pub fn emit_expr(
 
             match container_type {
                 IRType::String | IRType::Bytes => {
-                    // String/Bytes slicing: str[start:end] or bytes[start:end]
-                    // Stack initially: (offset, length)
-                    // Result: (new_offset, new_length)
+                    // String/Bytes slicing: str[start:end] / bytes[start:end].
+                    // Entry stack: (offset, length). Result: (new_offset,
+                    // new_length) into the same backing memory.
+                    //
+                    // The clamping is fully branchless (i32 `select`), with all
+                    // operands held in locals. An earlier version used
+                    // `If(BlockType::Empty)` blocks that consumed values pushed
+                    // before the block (a net-nonzero stack effect), which failed
+                    // WASM validation.
+                    let off = ctx.temp_local + 5;
+                    let len = ctx.temp_local + 6;
+                    let lo = ctx.temp_local + 2;
+                    let hi = ctx.temp_local + 3;
+                    let scratch = ctx.temp_local + 4;
 
-                    // Save length to temp local
-                    func.instruction(&Instruction::LocalSet(ctx.temp_local));
+                    // Stash (offset, length) into high locals first so any nested
+                    // start/end expression (which may use the low scratch locals)
+                    // cannot clobber them.
+                    func.instruction(&Instruction::LocalSet(len));
+                    func.instruction(&Instruction::LocalSet(off));
 
-                    // Stack: (offset)
-                    // Evaluate start, defaulting to 0
+                    // start, defaulting to 0
                     if let Some(s) = start {
                         emit_expr(s, func, ctx, memory_layout, Some(&IRType::Int));
                     } else {
                         func.instruction(&Instruction::I32Const(0));
-                    };
+                    }
+                    func.instruction(&Instruction::LocalSet(lo));
 
-                    // Stack: (offset, start)
-                    // Evaluate end, defaulting to length
+                    // end, defaulting to length
                     if let Some(e) = end {
                         emit_expr(e, func, ctx, memory_layout, Some(&IRType::Int));
                     } else {
-                        func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                        func.instruction(&Instruction::LocalGet(len));
+                    }
+                    func.instruction(&Instruction::LocalSet(hi));
+
+                    // Normalize negatives and clamp each bound to [0, length].
+                    // `select` pops (v1, v2, cond) and yields v1 when cond != 0.
+                    let normalize_and_clamp = |func: &mut Function, bound: u32| {
+                        // bound = bound < 0 ? bound + length : bound
+                        func.instruction(&Instruction::LocalGet(bound));
+                        func.instruction(&Instruction::LocalGet(len));
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::LocalGet(bound));
+                        func.instruction(&Instruction::LocalGet(bound));
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::I32LtS);
+                        func.instruction(&Instruction::Select);
+                        func.instruction(&Instruction::LocalSet(bound));
+                        // bound = max(bound, 0)
+                        func.instruction(&Instruction::LocalGet(bound));
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::LocalGet(bound));
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::I32GtS);
+                        func.instruction(&Instruction::Select);
+                        func.instruction(&Instruction::LocalSet(bound));
+                        // bound = min(bound, length)
+                        func.instruction(&Instruction::LocalGet(bound));
+                        func.instruction(&Instruction::LocalGet(len));
+                        func.instruction(&Instruction::LocalGet(bound));
+                        func.instruction(&Instruction::LocalGet(len));
+                        func.instruction(&Instruction::I32LtS);
+                        func.instruction(&Instruction::Select);
+                        func.instruction(&Instruction::LocalSet(bound));
                     };
+                    normalize_and_clamp(func, lo);
+                    normalize_and_clamp(func, hi);
 
-                    // Stack: (offset, start, end)
-                    // Save end for later
-                    func.instruction(&Instruction::LocalSet(ctx.temp_local + 1));
-
-                    // Stack: (offset, start)
-                    // Handle negative start index: if start < 0, add length
-                    func.instruction(&Instruction::LocalTee(ctx.temp_local + 2));
-                    func.instruction(&Instruction::I32Const(0));
-                    func.instruction(&Instruction::I32LtS);
-                    func.instruction(&Instruction::If(BlockType::Empty));
-                    // start is negative, so add length
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                    func.instruction(&Instruction::I32Add);
-                    func.instruction(&Instruction::End);
-
-                    // Stack: (offset, normalized_start)
-                    // Clamp start to [0, length]
-                    func.instruction(&Instruction::LocalTee(ctx.temp_local + 2));
-                    func.instruction(&Instruction::I32Const(0));
-                    func.instruction(&Instruction::I32LtS);
-                    func.instruction(&Instruction::If(BlockType::Empty));
-                    func.instruction(&Instruction::Drop);
-                    func.instruction(&Instruction::I32Const(0));
-                    func.instruction(&Instruction::Else);
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                    func.instruction(&Instruction::I32GtS);
-                    func.instruction(&Instruction::If(BlockType::Empty));
-                    func.instruction(&Instruction::Drop);
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                    func.instruction(&Instruction::End);
-                    func.instruction(&Instruction::End);
-
-                    // Stack: (offset, clamped_start)
-                    // Handle end index
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
-
-                    // Stack: (offset, start, end)
-                    // Handle negative end index: if end < 0, add length
-                    func.instruction(&Instruction::LocalTee(ctx.temp_local + 2));
-                    func.instruction(&Instruction::I32Const(0));
-                    func.instruction(&Instruction::I32LtS);
-                    func.instruction(&Instruction::If(BlockType::Empty));
-                    // end is negative, so add length
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                    func.instruction(&Instruction::I32Add);
-                    func.instruction(&Instruction::End);
-
-                    // Stack: (offset, start, normalized_end)
-                    // Clamp end to [0, length]
-                    func.instruction(&Instruction::LocalTee(ctx.temp_local + 2));
-                    func.instruction(&Instruction::I32Const(0));
-                    func.instruction(&Instruction::I32LtS);
-                    func.instruction(&Instruction::If(BlockType::Empty));
-                    func.instruction(&Instruction::Drop);
-                    func.instruction(&Instruction::I32Const(0));
-                    func.instruction(&Instruction::Else);
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                    func.instruction(&Instruction::I32GtS);
-                    func.instruction(&Instruction::If(BlockType::Empty));
-                    func.instruction(&Instruction::Drop);
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                    func.instruction(&Instruction::End);
-                    func.instruction(&Instruction::End);
-
-                    // Stack: (offset, start, end)
-                    // Ensure start <= end for proper slice_length
-                    func.instruction(&Instruction::LocalSet(ctx.temp_local + 1));
-
-                    // Stack: (offset, start)
-                    // Calculate slice_length = end - start
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
+                    // new_length = max(hi - lo, 0)
+                    func.instruction(&Instruction::LocalGet(hi));
+                    func.instruction(&Instruction::LocalGet(lo));
                     func.instruction(&Instruction::I32Sub);
-
-                    // Stack: (offset, start, slice_length)
-                    // Ensure slice_length >= 0
-                    func.instruction(&Instruction::LocalTee(ctx.temp_local + 3));
+                    func.instruction(&Instruction::LocalTee(scratch));
                     func.instruction(&Instruction::I32Const(0));
-                    func.instruction(&Instruction::I32LtS);
-                    func.instruction(&Instruction::If(BlockType::Empty));
-                    func.instruction(&Instruction::Drop);
+                    func.instruction(&Instruction::LocalGet(scratch));
                     func.instruction(&Instruction::I32Const(0));
-                    func.instruction(&Instruction::End);
+                    func.instruction(&Instruction::I32GtS);
+                    func.instruction(&Instruction::Select);
+                    func.instruction(&Instruction::LocalSet(scratch));
 
-                    // Stack: (offset, start, clamped_slice_length)
-                    // Swap to get offset and slice_length for final result
-                    func.instruction(&Instruction::LocalSet(ctx.temp_local + 3));
-
-                    // Stack: (offset, start)
-                    // Calculate new_offset = offset + start
-                    func.instruction(&Instruction::I32Add);
-
-                    // Stack: (new_offset)
-                    // Push new_length
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
-
-                    // Stack: (new_offset, new_length)
-                    // TODO: Handle step parameter properly
-                    // For now, ignore step (default step=1)
-                    if let Some(_s) = step {
-                        // Drop step value if provided
-                        emit_expr(_s, func, ctx, memory_layout, Some(&IRType::Int));
+                    // Step is not yet honoured (default step=1); evaluate and
+                    // discard it so a provided step doesn't unbalance the stack.
+                    if let Some(s) = step {
+                        emit_expr(s, func, ctx, memory_layout, Some(&IRType::Int));
                         func.instruction(&Instruction::Drop);
                     }
+
+                    // Result: (new_offset = offset + lo, new_length)
+                    func.instruction(&Instruction::LocalGet(off));
+                    func.instruction(&Instruction::LocalGet(lo));
+                    func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::LocalGet(scratch));
 
                     container_type.clone()
                 }

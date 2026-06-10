@@ -1,4 +1,4 @@
-use crate::compiler::context::{CompilationContext, SCRATCH_LOCALS};
+use crate::compiler::context::{strlen_local_name, CompilationContext, SCRATCH_LOCALS};
 use crate::compiler::expression::{emit_expr, emit_integer_power_operation};
 use crate::ir::{IRBody, IRConstant, IRExpr, IRFunction, IROp, IRStatement, IRType, MemoryLayout};
 use wasm_encoder::{BlockType, Function, Instruction, MemArg, ValType};
@@ -93,23 +93,41 @@ fn ensure_local(ctx: &mut CompilationContext, name: &str, var_type: IRType) {
     }
 }
 
-/// Best-effort type inference for an unannotated assignment value. Only used to
-/// decide a local's WASM value type (f64 vs i32), so it just needs to recognise
-/// float-producing expressions confidently; anything else is left `Unknown`
-/// (an i32 slot, which collections and pointers also use).
+/// Best-effort type inference for an unannotated assignment value. Used to
+/// decide a local's WASM value type (f64 vs i32) and to recognise string/bytes
+/// locals so a companion length local can be reserved for them. It only needs
+/// to recognise float- and string/bytes-producing expressions confidently;
+/// anything else is left `Unknown` (an i32 slot, which collections and pointers
+/// also use).
 fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRType {
     match value {
         IRExpr::Const(IRConstant::Float(_)) => IRType::Float,
-        IRExpr::BinaryOp { left, right, .. } => {
-            if infer_value_type(left, ctx) == IRType::Float
-                || infer_value_type(right, ctx) == IRType::Float
-            {
+        IRExpr::Const(IRConstant::String(_)) => IRType::String,
+        IRExpr::Const(IRConstant::Bytes(_)) => IRType::Bytes,
+        IRExpr::BinaryOp { left, right, op } => {
+            let lt = infer_value_type(left, ctx);
+            let rt = infer_value_type(right, ctx);
+            if lt == IRType::Float || rt == IRType::Float {
                 IRType::Float
+            } else if matches!(op, IROp::Add) && matches!(lt, IRType::String | IRType::Bytes) {
+                // String/bytes concatenation yields the same kind.
+                lt
             } else {
                 IRType::Unknown
             }
         }
         IRExpr::UnaryOp { operand, .. } => infer_value_type(operand, ctx),
+        // Slicing a string/bytes yields the same kind; indexing a string yields
+        // a one-character string (bytes/list indexing yields a scalar).
+        IRExpr::Slicing { container, .. } => match infer_value_type(container, ctx) {
+            t @ (IRType::String | IRType::Bytes) => t,
+            _ => IRType::Unknown,
+        },
+        IRExpr::Indexing { container, .. }
+            if infer_value_type(container, ctx) == IRType::String =>
+        {
+            IRType::String
+        }
         IRExpr::Variable(name) => ctx
             .get_local_info(name)
             .map(|info| info.var_type.clone())
@@ -139,7 +157,18 @@ pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
                     let var_type = var_type
                         .clone()
                         .unwrap_or_else(|| infer_value_type(value, ctx));
+                    // String/bytes locals carry an (offset, length) pair, so they
+                    // need a companion local for the length. Reserve one for
+                    // `Unknown` locals too: a stdlib call like `os.path.join`
+                    // infers as `Unknown` here but is upgraded to `String` during
+                    // codegen, and the companion can't be added after the local
+                    // vector is fixed.
+                    let needs_companion =
+                        matches!(var_type, IRType::String | IRType::Bytes | IRType::Unknown);
                     ctx.add_local(target, var_type);
+                    if needs_companion {
+                        ctx.add_local(&strlen_local_name(target), IRType::Int);
+                    }
                 }
             }
             IRStatement::TupleUnpack { targets, .. } => {
@@ -280,11 +309,23 @@ pub fn compile_body(
                                 | IRType::Bytes
                         )
                     {
-                        info.var_type = value_type;
+                        info.var_type = value_type.clone();
                     }
                 }
 
                 if let Some(local_idx) = ctx.get_local_index(target) {
+                    // A string/bytes value is an (offset, length) pair with the
+                    // length on top of the stack. Store the length into the
+                    // companion local first, then the offset into the named one.
+                    if matches!(value_type, IRType::String | IRType::Bytes) {
+                        match ctx.get_local_index(&strlen_local_name(target)) {
+                            Some(len_idx) => func.instruction(&Instruction::LocalSet(len_idx)),
+                            // No companion was reserved (inference missed this
+                            // string local); drop the length to keep the stack
+                            // balanced rather than leaving it stranded.
+                            None => func.instruction(&Instruction::Drop),
+                        };
+                    }
                     func.instruction(&Instruction::LocalSet(local_idx));
                 } else {
                     // Handle the case where the variable is not found in the context
