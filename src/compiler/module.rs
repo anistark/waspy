@@ -252,30 +252,45 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
     // Export memory
     exports.export("memory", wasm_encoder::ExportKind::Memory, 0);
 
-    // Data section for string constants
+    // Data section for string and bytes constants.
     let mut data = DataSection::new();
 
-    // Add string data to memory
+    // String data lives from offset 0. Offsets are assigned sequentially as
+    // `len + 1` (a null terminator after each), so emitting the strings in
+    // offset order, each followed by a NUL, reproduces those exact offsets.
     if !memory_layout.string_offsets.is_empty() {
-        let mut all_strings = Vec::new();
-
-        // Sort strings by offset to maintain order
-        let mut offsets: Vec<(String, u32)> = memory_layout
+        let mut offsets: Vec<(&String, u32)> = memory_layout
             .string_offsets
             .iter()
-            .map(|(s, &offset)| (s.clone(), offset))
+            .map(|(s, &offset)| (s, offset))
             .collect();
-
         offsets.sort_by_key(|(_s, offset)| *offset);
 
-        // Concatenate all strings with null terminators
+        let mut all_strings = Vec::new();
         for (s, _) in offsets {
             all_strings.extend_from_slice(s.as_bytes());
             all_strings.push(0); // Null terminator
         }
-
-        // Create an active data segment at offset 0
         data.active(0, &ConstExpr::i32_const(0), all_strings);
+    }
+
+    // Bytes data lives from `next_bytes_offset`'s base (32768). Offsets advance
+    // by exactly the byte length (no terminator), so the values are contiguous
+    // from the lowest assigned offset; emit them in offset order from there.
+    if !memory_layout.bytes_offsets.is_empty() {
+        let mut offsets: Vec<(&Vec<u8>, u32)> = memory_layout
+            .bytes_offsets
+            .iter()
+            .map(|(b, &offset)| (b, offset))
+            .collect();
+        offsets.sort_by_key(|(_b, offset)| *offset);
+
+        let base = offsets[0].1;
+        let mut all_bytes = Vec::new();
+        for (b, _) in offsets {
+            all_bytes.extend_from_slice(b);
+        }
+        data.active(0, &ConstExpr::i32_const(base as i32), all_bytes);
     }
 
     // Code section
