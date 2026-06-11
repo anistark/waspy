@@ -973,6 +973,24 @@ mod collection_tests {
     }
 
     #[test]
+    fn math_float_constant_local() {
+        // `math.pi`/`math.tau` are f64 stdlib constants; their locals must be
+        // f64 (previously an f64 store landed in an i32 slot, which failed
+        // validation and aborted Binaryen during optimization).
+        let src = "import math\ndef f() -> int:\n    pi = math.pi\n    tau = math.tau\n    if tau > pi:\n        return 1\n    return 0\n";
+        assert_eq!(call_i32(src, "f"), 1);
+    }
+
+    #[test]
+    fn unannotated_function_returning_float() {
+        // An unannotated function that returns a float gets an f64 result type
+        // inferred from its body, so a caller sees an f64 (previously the i32
+        // result signature mismatched the f64 return value).
+        let src = "import math\ndef get_pi():\n    pi = math.pi\n    return pi\ndef f() -> int:\n    if get_pi() > 3.0:\n        return 1\n    return 0\n";
+        assert_eq!(call_i32(src, "f"), 1);
+    }
+
+    #[test]
     fn min_and_max_reduce() {
         // The reduction previously left the if/else stack unbalanced.
         let src = "def lo() -> int:\n    return min(5, 3, 8, 1, 9)\ndef hi() -> int:\n    return max(5, 3, 8, 1, 9)\n";
