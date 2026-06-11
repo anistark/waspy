@@ -1,4 +1,5 @@
-use crate::compiler::context::CompilationContext;
+use crate::compiler::context::{strlen_local_name, CompilationContext};
+use crate::compiler::function::{load_field_instr, lookup_field};
 use crate::ir::{IRBoolOp, IRCompareOp, IRConstant, IRExpr, IROp, IRType, IRUnaryOp, MemoryLayout};
 use wasm_encoder::{BlockType, Function, Instruction, MemArg, ValType};
 
@@ -70,8 +71,15 @@ pub fn emit_expr(
         IRExpr::Const(constant) => {
             match constant {
                 IRConstant::Int(i) => {
-                    func.instruction(&Instruction::I32Const(*i));
-                    IRType::Int
+                    // Widen to f64 when a float is expected (e.g. an int literal
+                    // passed to a float parameter or stored in a float field).
+                    if let Some(IRType::Float) = expected_type {
+                        func.instruction(&Instruction::F64Const(f64_const(*i as f64)));
+                        IRType::Float
+                    } else {
+                        func.instruction(&Instruction::I32Const(*i));
+                        IRType::Int
+                    }
                 }
                 IRConstant::Float(f) => {
                     func.instruction(&Instruction::F64Const(f64_const(*f)));
@@ -138,8 +146,18 @@ pub fn emit_expr(
         }
         IRExpr::Param(name) | IRExpr::Variable(name) => {
             if let Some(local_info) = ctx.get_local_info(name) {
-                func.instruction(&Instruction::LocalGet(local_info.index));
-                local_info.var_type.clone()
+                let index = local_info.index;
+                let var_type = local_info.var_type.clone();
+                func.instruction(&Instruction::LocalGet(index));
+                // String/bytes locals hold only the offset; push the length from
+                // the companion local to rebuild the (offset, length) pair the
+                // rest of the pipeline expects.
+                if matches!(var_type, IRType::String | IRType::Bytes) {
+                    if let Some(len_idx) = ctx.get_local_index(&strlen_local_name(name)) {
+                        func.instruction(&Instruction::LocalGet(len_idx));
+                    }
+                }
+                var_type
             } else if let Some((declared, value)) = ctx.get_module_var(name) {
                 // Module-level variable: inline its initializer. Clone first so
                 // the recursive emit does not alias the borrow of `ctx`. Emit at
@@ -158,7 +176,11 @@ pub fn emit_expr(
         }
         IRExpr::BinaryOp { left, right, op } => {
             let left_type = emit_expr(left, func, ctx, memory_layout, None);
-            let right_type = emit_expr(right, func, ctx, memory_layout, Some(&left_type));
+            // Emit the right operand at its natural type rather than forcing it to
+            // the left's type: a float right operand under an int left (e.g.
+            // `2 * (a_float + b_float)`) must not be truncated to int — the
+            // int/float widening below promotes whichever side is the integer.
+            let right_type = emit_expr(right, func, ctx, memory_layout, None);
 
             // Handle string and bytes operations
             if left_type == IRType::String || left_type == IRType::Bytes {
@@ -498,9 +520,12 @@ pub fn emit_expr(
                     // Integer/Boolean operations
                     match op {
                         IRUnaryOp::Neg => {
-                            // Negate: -x = 0 - x
-                            func.instruction(&Instruction::I32Const(0));
-                            func.instruction(&Instruction::I32Sub);
+                            // Negate: -x. The operand is already on the stack, so
+                            // multiply by -1 (mirroring the float path). Emitting
+                            // `i32.const 0; i32.sub` here would instead compute
+                            // `operand - 0`, leaving the value unchanged.
+                            func.instruction(&Instruction::I32Const(-1));
+                            func.instruction(&Instruction::I32Mul);
                             IRType::Int
                         }
                         IRUnaryOp::Not => {
@@ -727,40 +752,51 @@ pub fn emit_expr(
             function_name,
             arguments,
         } => {
+            // Class instantiation: `ClassName(args)`. Handled before the generic
+            // argument emission so the instance pointer (`self`) is the first
+            // argument to `__init__` and the user arguments are coerced to their
+            // declared parameter types (e.g. int literals widened to f64).
+            if ctx.get_class_info(function_name).is_some() {
+                let instance_ptr = 65536
+                    + ctx
+                        .get_class_info(function_name)
+                        .map(|c| c.instance_size)
+                        .unwrap_or(0);
+                let init_idx = ctx
+                    .get_class_info(function_name)
+                    .and_then(|c| c.methods.get("__init__").copied());
+
+                if let Some(init_idx) = init_idx {
+                    // __init__ parameter types, `self` first.
+                    let param_types: Vec<IRType> = ctx
+                        .get_function_info(&format!("{function_name}::__init__"))
+                        .map(|f| f.param_types.clone())
+                        .unwrap_or_default();
+                    func.instruction(&Instruction::I32Const(instance_ptr as i32)); // self
+                    for (i, arg) in arguments.iter().enumerate() {
+                        emit_expr(arg, func, ctx, memory_layout, param_types.get(i + 1));
+                    }
+                    func.instruction(&Instruction::Call(init_idx));
+                    func.instruction(&Instruction::Drop); // discard __init__ return
+                } else {
+                    // No constructor: evaluate and discard any arguments.
+                    for arg in arguments {
+                        let t = emit_expr(arg, func, ctx, memory_layout, None);
+                        func.instruction(&Instruction::Drop);
+                        if matches!(t, IRType::String | IRType::Bytes) {
+                            func.instruction(&Instruction::Drop);
+                        }
+                    }
+                }
+                func.instruction(&Instruction::I32Const(instance_ptr as i32)); // result
+                return IRType::Class(function_name.clone());
+            }
+
             // Push arguments onto the stack in order
             let mut arg_types = Vec::new();
             for arg in arguments {
                 let arg_type = emit_expr(arg, func, ctx, memory_layout, None);
                 arg_types.push(arg_type);
-            }
-
-            // Check if this is a class instantiation
-            if let Some(class_info) = ctx.get_class_info(function_name) {
-                // Allocate space for the object instance
-                // For now, use a fixed allocation strategy - sequential allocation
-                let instance_ptr = 65536
-                    + (ctx
-                        .get_class_info(function_name)
-                        .map(|c| c.instance_size)
-                        .unwrap_or(0));
-                func.instruction(&Instruction::I32Const(instance_ptr as i32));
-
-                // Call __init__ method if it exists
-                if let Some(&init_func_idx) = class_info.methods.get("__init__") {
-                    // Stack: ...object_ptr
-                    // Need to pass self as first argument
-                    // Duplicate object pointer to pass to __init__
-                    func.instruction(&Instruction::LocalSet(ctx.temp_local));
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
-
-                    // Now call __init__ with self and other arguments
-                    func.instruction(&Instruction::Call(init_func_idx));
-                    // Drop the return value from __init__
-                    func.instruction(&Instruction::Drop);
-                }
-
-                return IRType::Class(function_name.clone());
             }
 
             // Look up the function index if it exists in our context
@@ -776,8 +812,11 @@ pub fn emit_expr(
                         }
                         match &arg_types[0] {
                             IRType::String | IRType::Bytes => {
-                                // (offset, length) on stack; pop offset, keep length
+                                // (offset, length) on stack with length on top.
+                                // Keep the length, discard the offset below it.
+                                func.instruction(&Instruction::LocalSet(ctx.temp_local));
                                 func.instruction(&Instruction::Drop);
+                                func.instruction(&Instruction::LocalGet(ctx.temp_local));
                                 IRType::Int
                             }
                             // Lists, dicts, sets and tuples are all pointers that
@@ -804,8 +843,8 @@ pub fn emit_expr(
                         // Pop the arguments off the stack
                         for arg_type in &arg_types {
                             match arg_type {
-                                IRType::String => {
-                                    // Strings are (offset, length), drop both
+                                IRType::String | IRType::Bytes => {
+                                    // Strings/bytes are (offset, length), drop both
                                     func.instruction(&Instruction::Drop);
                                     func.instruction(&Instruction::Drop);
                                 }
@@ -1388,135 +1427,100 @@ pub fn emit_expr(
 
             match container_type {
                 IRType::String | IRType::Bytes => {
-                    // String/Bytes slicing: str[start:end] or bytes[start:end]
-                    // Stack initially: (offset, length)
-                    // Result: (new_offset, new_length)
+                    // String/Bytes slicing: str[start:end] / bytes[start:end].
+                    // Entry stack: (offset, length). Result: (new_offset,
+                    // new_length) into the same backing memory.
+                    //
+                    // The clamping is fully branchless (i32 `select`), with all
+                    // operands held in locals. An earlier version used
+                    // `If(BlockType::Empty)` blocks that consumed values pushed
+                    // before the block (a net-nonzero stack effect), which failed
+                    // WASM validation.
+                    let off = ctx.temp_local + 5;
+                    let len = ctx.temp_local + 6;
+                    let lo = ctx.temp_local + 2;
+                    let hi = ctx.temp_local + 3;
+                    let scratch = ctx.temp_local + 4;
 
-                    // Save length to temp local
-                    func.instruction(&Instruction::LocalSet(ctx.temp_local));
+                    // Stash (offset, length) into high locals first so any nested
+                    // start/end expression (which may use the low scratch locals)
+                    // cannot clobber them.
+                    func.instruction(&Instruction::LocalSet(len));
+                    func.instruction(&Instruction::LocalSet(off));
 
-                    // Stack: (offset)
-                    // Evaluate start, defaulting to 0
+                    // start, defaulting to 0
                     if let Some(s) = start {
                         emit_expr(s, func, ctx, memory_layout, Some(&IRType::Int));
                     } else {
                         func.instruction(&Instruction::I32Const(0));
-                    };
+                    }
+                    func.instruction(&Instruction::LocalSet(lo));
 
-                    // Stack: (offset, start)
-                    // Evaluate end, defaulting to length
+                    // end, defaulting to length
                     if let Some(e) = end {
                         emit_expr(e, func, ctx, memory_layout, Some(&IRType::Int));
                     } else {
-                        func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                        func.instruction(&Instruction::LocalGet(len));
+                    }
+                    func.instruction(&Instruction::LocalSet(hi));
+
+                    // Normalize negatives and clamp each bound to [0, length].
+                    // `select` pops (v1, v2, cond) and yields v1 when cond != 0.
+                    let normalize_and_clamp = |func: &mut Function, bound: u32| {
+                        // bound = bound < 0 ? bound + length : bound
+                        func.instruction(&Instruction::LocalGet(bound));
+                        func.instruction(&Instruction::LocalGet(len));
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::LocalGet(bound));
+                        func.instruction(&Instruction::LocalGet(bound));
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::I32LtS);
+                        func.instruction(&Instruction::Select);
+                        func.instruction(&Instruction::LocalSet(bound));
+                        // bound = max(bound, 0)
+                        func.instruction(&Instruction::LocalGet(bound));
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::LocalGet(bound));
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::I32GtS);
+                        func.instruction(&Instruction::Select);
+                        func.instruction(&Instruction::LocalSet(bound));
+                        // bound = min(bound, length)
+                        func.instruction(&Instruction::LocalGet(bound));
+                        func.instruction(&Instruction::LocalGet(len));
+                        func.instruction(&Instruction::LocalGet(bound));
+                        func.instruction(&Instruction::LocalGet(len));
+                        func.instruction(&Instruction::I32LtS);
+                        func.instruction(&Instruction::Select);
+                        func.instruction(&Instruction::LocalSet(bound));
                     };
+                    normalize_and_clamp(func, lo);
+                    normalize_and_clamp(func, hi);
 
-                    // Stack: (offset, start, end)
-                    // Save end for later
-                    func.instruction(&Instruction::LocalSet(ctx.temp_local + 1));
-
-                    // Stack: (offset, start)
-                    // Handle negative start index: if start < 0, add length
-                    func.instruction(&Instruction::LocalTee(ctx.temp_local + 2));
-                    func.instruction(&Instruction::I32Const(0));
-                    func.instruction(&Instruction::I32LtS);
-                    func.instruction(&Instruction::If(BlockType::Empty));
-                    // start is negative, so add length
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                    func.instruction(&Instruction::I32Add);
-                    func.instruction(&Instruction::End);
-
-                    // Stack: (offset, normalized_start)
-                    // Clamp start to [0, length]
-                    func.instruction(&Instruction::LocalTee(ctx.temp_local + 2));
-                    func.instruction(&Instruction::I32Const(0));
-                    func.instruction(&Instruction::I32LtS);
-                    func.instruction(&Instruction::If(BlockType::Empty));
-                    func.instruction(&Instruction::Drop);
-                    func.instruction(&Instruction::I32Const(0));
-                    func.instruction(&Instruction::Else);
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                    func.instruction(&Instruction::I32GtS);
-                    func.instruction(&Instruction::If(BlockType::Empty));
-                    func.instruction(&Instruction::Drop);
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                    func.instruction(&Instruction::End);
-                    func.instruction(&Instruction::End);
-
-                    // Stack: (offset, clamped_start)
-                    // Handle end index
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
-
-                    // Stack: (offset, start, end)
-                    // Handle negative end index: if end < 0, add length
-                    func.instruction(&Instruction::LocalTee(ctx.temp_local + 2));
-                    func.instruction(&Instruction::I32Const(0));
-                    func.instruction(&Instruction::I32LtS);
-                    func.instruction(&Instruction::If(BlockType::Empty));
-                    // end is negative, so add length
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                    func.instruction(&Instruction::I32Add);
-                    func.instruction(&Instruction::End);
-
-                    // Stack: (offset, start, normalized_end)
-                    // Clamp end to [0, length]
-                    func.instruction(&Instruction::LocalTee(ctx.temp_local + 2));
-                    func.instruction(&Instruction::I32Const(0));
-                    func.instruction(&Instruction::I32LtS);
-                    func.instruction(&Instruction::If(BlockType::Empty));
-                    func.instruction(&Instruction::Drop);
-                    func.instruction(&Instruction::I32Const(0));
-                    func.instruction(&Instruction::Else);
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                    func.instruction(&Instruction::I32GtS);
-                    func.instruction(&Instruction::If(BlockType::Empty));
-                    func.instruction(&Instruction::Drop);
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                    func.instruction(&Instruction::End);
-                    func.instruction(&Instruction::End);
-
-                    // Stack: (offset, start, end)
-                    // Ensure start <= end for proper slice_length
-                    func.instruction(&Instruction::LocalSet(ctx.temp_local + 1));
-
-                    // Stack: (offset, start)
-                    // Calculate slice_length = end - start
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
+                    // new_length = max(hi - lo, 0)
+                    func.instruction(&Instruction::LocalGet(hi));
+                    func.instruction(&Instruction::LocalGet(lo));
                     func.instruction(&Instruction::I32Sub);
-
-                    // Stack: (offset, start, slice_length)
-                    // Ensure slice_length >= 0
-                    func.instruction(&Instruction::LocalTee(ctx.temp_local + 3));
+                    func.instruction(&Instruction::LocalTee(scratch));
                     func.instruction(&Instruction::I32Const(0));
-                    func.instruction(&Instruction::I32LtS);
-                    func.instruction(&Instruction::If(BlockType::Empty));
-                    func.instruction(&Instruction::Drop);
+                    func.instruction(&Instruction::LocalGet(scratch));
                     func.instruction(&Instruction::I32Const(0));
-                    func.instruction(&Instruction::End);
+                    func.instruction(&Instruction::I32GtS);
+                    func.instruction(&Instruction::Select);
+                    func.instruction(&Instruction::LocalSet(scratch));
 
-                    // Stack: (offset, start, clamped_slice_length)
-                    // Swap to get offset and slice_length for final result
-                    func.instruction(&Instruction::LocalSet(ctx.temp_local + 3));
-
-                    // Stack: (offset, start)
-                    // Calculate new_offset = offset + start
-                    func.instruction(&Instruction::I32Add);
-
-                    // Stack: (new_offset)
-                    // Push new_length
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
-
-                    // Stack: (new_offset, new_length)
-                    // TODO: Handle step parameter properly
-                    // For now, ignore step (default step=1)
-                    if let Some(_s) = step {
-                        // Drop step value if provided
-                        emit_expr(_s, func, ctx, memory_layout, Some(&IRType::Int));
+                    // Step is not yet honoured (default step=1); evaluate and
+                    // discard it so a provided step doesn't unbalance the stack.
+                    if let Some(s) = step {
+                        emit_expr(s, func, ctx, memory_layout, Some(&IRType::Int));
                         func.instruction(&Instruction::Drop);
                     }
+
+                    // Result: (new_offset = offset + lo, new_length)
+                    func.instruction(&Instruction::LocalGet(off));
+                    func.instruction(&Instruction::LocalGet(lo));
+                    func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::LocalGet(scratch));
 
                     container_type.clone()
                 }
@@ -1643,23 +1647,26 @@ pub fn emit_expr(
                 };
             }
 
+            // `ClassName.var` reads a class-level variable; inline its value.
+            if let IRExpr::Variable(class_name) = &**object {
+                if let Some(class_info) = ctx.get_class_info(class_name) {
+                    if let Some(value) = class_info.class_var_values.get(attribute) {
+                        let value = value.clone();
+                        return emit_expr(&value, func, ctx, memory_layout, expected_type);
+                    }
+                }
+            }
+
             let obj_type = emit_expr(object, func, ctx, memory_layout, None);
 
             match &obj_type {
                 IRType::Class(class_name) => {
-                    if let Some(class_info) = ctx.get_class_info(class_name) {
-                        if let Some(&field_offset) = class_info.field_offsets.get(attribute) {
-                            func.instruction(&Instruction::I32Load(MemArg {
-                                offset: field_offset,
-                                align: 2,
-                                memory_index: 0,
-                            }));
-                            IRType::Unknown
-                        } else {
-                            func.instruction(&Instruction::Drop);
-                            func.instruction(&Instruction::I32Const(0));
-                            IRType::Unknown
-                        }
+                    // Instance field read: load with the field's width and report
+                    // its type so float fields participate in f64 arithmetic.
+                    if let Some((field_offset, field_ty)) = lookup_field(ctx, class_name, attribute)
+                    {
+                        func.instruction(&load_field_instr(&field_ty, field_offset));
+                        field_ty
                     } else {
                         func.instruction(&Instruction::Drop);
                         func.instruction(&Instruction::I32Const(0));
@@ -1667,7 +1674,6 @@ pub fn emit_expr(
                     }
                 }
                 _ => {
-                    emit_expr(object, func, ctx, memory_layout, None);
                     func.instruction(&Instruction::Drop);
                     func.instruction(&Instruction::I32Const(0));
                     IRType::Unknown
@@ -3360,30 +3366,26 @@ pub fn emit_expr(
                     emit_tuple_method_call(func, ctx, memory_layout, method_name, arguments)
                 }
                 IRType::Class(class_name) => {
-                    // Custom class method call
-                    if let Some(class_info) = ctx.get_class_info(class_name) {
-                        if let Some(&method_idx) = class_info.methods.get(method_name.as_str()) {
-                            // Stack has object pointer already on top
-                            // Evaluate and push arguments
-                            for arg in arguments {
-                                emit_expr(arg, func, ctx, memory_layout, None);
-                            }
-                            // Call the method
-                            func.instruction(&Instruction::Call(method_idx));
-                            // For now, assume method returns an unknown type
-                            IRType::Unknown
-                        } else {
-                            // Method not found on class
-                            func.instruction(&Instruction::Drop); // drop object
-                            for arg in arguments {
-                                emit_expr(arg, func, ctx, memory_layout, None);
-                                func.instruction(&Instruction::Drop);
-                            }
-                            IRType::Unknown
+                    // Custom class method call. The object pointer (`self`) is
+                    // already on the stack; coerce the user arguments to the
+                    // method's declared parameter types and report its real
+                    // return type so float results flow correctly.
+                    let method_idx = ctx
+                        .get_class_info(class_name)
+                        .and_then(|ci| ci.methods.get(method_name.as_str()).copied());
+                    if let Some(method_idx) = method_idx {
+                        let (param_types, ret) = ctx
+                            .get_function_info(&format!("{class_name}::{method_name}"))
+                            .map(|f| (f.param_types.clone(), f.return_type.clone()))
+                            .unwrap_or((Vec::new(), IRType::Unknown));
+                        for (i, arg) in arguments.iter().enumerate() {
+                            emit_expr(arg, func, ctx, memory_layout, param_types.get(i + 1));
                         }
+                        func.instruction(&Instruction::Call(method_idx));
+                        ret
                     } else {
-                        // Class not found
-                        func.instruction(&Instruction::Drop); // drop object
+                        // Method or class not found: drop the object and args.
+                        func.instruction(&Instruction::Drop);
                         for arg in arguments {
                             emit_expr(arg, func, ctx, memory_layout, None);
                             func.instruction(&Instruction::Drop);

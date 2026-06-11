@@ -319,7 +319,15 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
                 Stmt::FunctionDef(method_def) => {
                     // Process method (similar to function but with 'self' parameter)
                     let method_name = method_def.name.to_string();
-                    let params = process_function_params(&method_def.args)?;
+                    let mut params = process_function_params(&method_def.args)?;
+                    // The implicit `self` parameter is untyped in source; type it
+                    // as the enclosing class so attribute access/assignment can
+                    // resolve field offsets and types.
+                    if let Some(first) = params.first_mut() {
+                        if first.name == "self" {
+                            first.param_type = IRType::Class(name.clone());
+                        }
+                    }
                     let return_type = if let Some(returns) = &method_def.returns {
                         type_annotation_to_ir_type(returns)?
                     } else {
@@ -1717,6 +1725,35 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
             Ok(IRExpr::DictLiteral(pairs))
         }
         Expr::Subscript(subscript) => {
+            // A plain `x[a:b:c]` parses as an `Expr::Slice` (lower/upper/step),
+            // distinct from the extended `Expr::Tuple` form handled below.
+            if let Expr::Slice(slice_expr) = &*subscript.slice {
+                let lower = slice_expr
+                    .lower
+                    .as_ref()
+                    .map(|e| lower_expr(e, memory_layout))
+                    .transpose()?
+                    .map(Box::new);
+                let upper = slice_expr
+                    .upper
+                    .as_ref()
+                    .map(|e| lower_expr(e, memory_layout))
+                    .transpose()?
+                    .map(Box::new);
+                let step = slice_expr
+                    .step
+                    .as_ref()
+                    .map(|e| lower_expr(e, memory_layout))
+                    .transpose()?
+                    .map(Box::new);
+                return Ok(IRExpr::Slicing {
+                    container: Box::new(lower_expr(&subscript.value, memory_layout)?),
+                    start: lower,
+                    end: upper,
+                    step,
+                });
+            }
+
             // Check if this is a slice expression (start:end:step)
             // In rustpython, slices are represented as Tuple expressions with None for missing bounds
             if let Expr::Tuple(tuple_expr) = &*subscript.slice {

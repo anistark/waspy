@@ -1,6 +1,6 @@
 use crate::compiler::context::{ClassInfo, CompilationContext, COLLECTION_HEAP_BASE};
 use crate::compiler::function::{compile_function, resolve_return_type};
-use crate::ir::{IRModule, IRType};
+use crate::ir::{IRBody, IRConstant, IRExpr, IRModule, IRStatement, IRType};
 use std::collections::HashMap;
 use wasm_encoder::{
     CodeSection, ConstExpr, DataSection, ExportSection, FunctionSection, MemorySection, MemoryType,
@@ -16,6 +16,78 @@ fn ir_type_to_wasm_type(ir_type: &IRType) -> ValType {
         IRType::List(_) | IRType::Dict(_, _) | IRType::Tuple(_) => ValType::I32, // Collections are pointers
         IRType::Optional(_) | IRType::Union(_) => ValType::I32, // References to optionals/unions
         _ => ValType::I32,
+    }
+}
+
+/// Is this expression a reference to the implicit `self` parameter?
+fn is_self_ref(expr: &IRExpr) -> bool {
+    matches!(expr, IRExpr::Variable(n) | IRExpr::Param(n) if n == "self")
+}
+
+/// Best-effort type inference for a class field initializer. Only needs to
+/// distinguish floats (an f64 slot) from the i32-shaped default; `params` maps
+/// the enclosing method's parameter names to their annotated types so that
+/// `self.width = width` adopts `width`'s declared type.
+fn infer_field_value_type(value: &IRExpr, params: &HashMap<String, IRType>) -> IRType {
+    match value {
+        IRExpr::Const(IRConstant::Float(_)) => IRType::Float,
+        IRExpr::Const(IRConstant::Int(_)) => IRType::Int,
+        IRExpr::Const(IRConstant::Bool(_)) => IRType::Bool,
+        IRExpr::Variable(name) | IRExpr::Param(name) => {
+            params.get(name).cloned().unwrap_or(IRType::Unknown)
+        }
+        IRExpr::BinaryOp { left, right, .. } => {
+            let lt = infer_field_value_type(left, params);
+            let rt = infer_field_value_type(right, params);
+            if lt == IRType::Float || rt == IRType::Float {
+                IRType::Float
+            } else {
+                lt
+            }
+        }
+        IRExpr::UnaryOp { operand, .. } => infer_field_value_type(operand, params),
+        _ => IRType::Unknown,
+    }
+}
+
+/// Collect `self.<field> = value` assignments (including augmented ones) from a
+/// method body, recursing into nested blocks, with each field's inferred type.
+fn collect_self_fields(
+    body: &IRBody,
+    params: &HashMap<String, IRType>,
+    out: &mut Vec<(String, IRType)>,
+) {
+    for stmt in &body.statements {
+        match stmt {
+            IRStatement::AttributeAssign {
+                object,
+                attribute,
+                value,
+            } if is_self_ref(object) => {
+                out.push((attribute.clone(), infer_field_value_type(value, params)));
+            }
+            IRStatement::AttributeAugAssign {
+                object,
+                attribute,
+                value,
+                ..
+            } if is_self_ref(object) => {
+                out.push((attribute.clone(), infer_field_value_type(value, params)));
+            }
+            IRStatement::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_self_fields(then_body, params, out);
+                if let Some(else_body) = else_body {
+                    collect_self_fields(else_body, params, out);
+                }
+            }
+            IRStatement::While { body, .. } => collect_self_fields(body, params, out),
+            IRStatement::For { body, .. } => collect_self_fields(body, params, out),
+            _ => {}
+        }
     }
 }
 
@@ -132,17 +204,56 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
             name: cls.name.clone(),
             methods: HashMap::new(),
             field_offsets: HashMap::new(),
+            field_types: HashMap::new(),
+            class_var_values: HashMap::new(),
             instance_size: 0,
         };
 
-        // Calculate field offsets and instance size
-        let mut current_offset = 4u64; // 4 bytes for type tag at offset 0
+        // Each field is an 8-byte slot (holds an i32 or an f64); the first 4
+        // bytes are reserved for a type tag. `add_field` assigns the next slot
+        // the first time a field name is seen and records its value type.
+        let mut current_offset = 4u64;
+        let add_field = |info: &mut ClassInfo, name: &str, ty: IRType, current_offset: &mut u64| {
+            if !info.field_offsets.contains_key(name) {
+                info.field_offsets.insert(name.to_string(), *current_offset);
+                *current_offset += 8;
+            }
+            // Prefer a concrete type over an earlier `Unknown` inference.
+            let entry = info
+                .field_types
+                .entry(name.to_string())
+                .or_insert(IRType::Unknown);
+            if matches!(entry, IRType::Unknown) {
+                *entry = ty;
+            }
+        };
+
+        // Class-level variables occupy instance slots and are also accessible as
+        // `ClassName.var`; keep their initializers for that read path.
         for var in &cls.class_vars {
+            let ty = var
+                .var_type
+                .clone()
+                .unwrap_or_else(|| infer_field_value_type(&var.value, &HashMap::new()));
+            add_field(&mut class_info, &var.name, ty, &mut current_offset);
             class_info
-                .field_offsets
-                .insert(var.name.clone(), current_offset);
-            // Each field is 8 bytes (can hold i32 or f64)
-            current_offset += 8;
+                .class_var_values
+                .insert(var.name.clone(), var.value.clone());
+        }
+
+        // Instance fields are discovered from `self.<field> = ...` assignments in
+        // method bodies (their types inferred from the method's parameters).
+        for method in &cls.methods {
+            let params: HashMap<String, IRType> = method
+                .params
+                .iter()
+                .map(|p| (p.name.clone(), p.param_type.clone()))
+                .collect();
+            let mut fields = Vec::new();
+            collect_self_fields(&method.body, &params, &mut fields);
+            for (name, ty) in fields {
+                add_field(&mut class_info, &name, ty, &mut current_offset);
+            }
         }
         class_info.instance_size = current_offset as u32;
 
@@ -172,30 +283,45 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
     // Export memory
     exports.export("memory", wasm_encoder::ExportKind::Memory, 0);
 
-    // Data section for string constants
+    // Data section for string and bytes constants.
     let mut data = DataSection::new();
 
-    // Add string data to memory
+    // String data lives from offset 0. Offsets are assigned sequentially as
+    // `len + 1` (a null terminator after each), so emitting the strings in
+    // offset order, each followed by a NUL, reproduces those exact offsets.
     if !memory_layout.string_offsets.is_empty() {
-        let mut all_strings = Vec::new();
-
-        // Sort strings by offset to maintain order
-        let mut offsets: Vec<(String, u32)> = memory_layout
+        let mut offsets: Vec<(&String, u32)> = memory_layout
             .string_offsets
             .iter()
-            .map(|(s, &offset)| (s.clone(), offset))
+            .map(|(s, &offset)| (s, offset))
             .collect();
-
         offsets.sort_by_key(|(_s, offset)| *offset);
 
-        // Concatenate all strings with null terminators
+        let mut all_strings = Vec::new();
         for (s, _) in offsets {
             all_strings.extend_from_slice(s.as_bytes());
             all_strings.push(0); // Null terminator
         }
-
-        // Create an active data segment at offset 0
         data.active(0, &ConstExpr::i32_const(0), all_strings);
+    }
+
+    // Bytes data lives from `next_bytes_offset`'s base (32768). Offsets advance
+    // by exactly the byte length (no terminator), so the values are contiguous
+    // from the lowest assigned offset; emit them in offset order from there.
+    if !memory_layout.bytes_offsets.is_empty() {
+        let mut offsets: Vec<(&Vec<u8>, u32)> = memory_layout
+            .bytes_offsets
+            .iter()
+            .map(|(b, &offset)| (b, offset))
+            .collect();
+        offsets.sort_by_key(|(_b, offset)| *offset);
+
+        let base = offsets[0].1;
+        let mut all_bytes = Vec::new();
+        for (b, _) in offsets {
+            all_bytes.extend_from_slice(b);
+        }
+        data.active(0, &ConstExpr::i32_const(base as i32), all_bytes);
     }
 
     // Code section
