@@ -62,7 +62,7 @@ cargo add waspy
 
 # Or add to your Cargo.toml
 [dependencies]
-waspy = "0.5.0"
+waspy = "0.10.0"
 
 ## Quick Start
 

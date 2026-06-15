@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0](https://github.com/anistark/waspy/releases/tag/v0.10.0) - 2026-06-15
+
 ### Fixed
 - Compiled modules are valid and runnable: Code section before Data, per-function scratch locals, corrected `while` exit test, bare `list`/`dict`/`set`/`tuple` annotations, and `MemoryLayout` propagated to codegen ([#78](https://github.com/anistark/waspy/pull/78))
 - Collection runtime: `dict[key] = value` update/append, set de-duplication, `in`/`not in` for sets and lists, and `len()` for sets/tuples/bytes ([#78](https://github.com/anistark/waspy/pull/78))
@@ -18,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Module-level variables (e.g. `PI = 3.14159`) resolve inside functions by inlining their initializer
 - `int()` / `float()` actually convert (truncate / widen); `min()` / `max()` reduce correctly; `os.path` submodule attributes (e.g. `os.path.sep`) resolve
 - Expression statements no longer emit a stray `drop` after `print()`
+- Descending `range()` loops iterate: the for-range break test is now step-sign-aware (stop once `current >= stop` ascending, or `current <= stop` descending), and integer unary negation is corrected — `-x` previously evaluated to `x` ([#84](https://github.com/anistark/waspy/pull/84))
+- String/bytes locals round-trip: each carries a companion length local so the `(offset, length)` pair survives assignment, `len()` keeps the length, bytes constants are written to the data section, and `x[a:b]` slicing lowers correctly via a branchless clamp ([#85](https://github.com/anistark/waspy/pull/85))
+- Float-aware classes: instance fields are typed (f64 for float fields), `self` resolves as its class, constructor/method arguments coerce to declared parameter types (int literals widen to f64), and augmented field assignment (`self.x *= f`) and class-variable reads (`ClassName.var`) work ([#86](https://github.com/anistark/waspy/pull/86))
+- Float return types are resolved up front — inferred from `return` statements when unannotated — and float-valued stdlib-constant locals (e.g. `pi = math.pi`) are typed `f64`, fixing an f64-into-i32 mismatch that aborted the optimizer ([#87](https://github.com/anistark/waspy/pull/87))
 
 ## [0.9.0](https://github.com/anistark/waspy/releases/tag/v0.9.0) - 2025-12-14
 
