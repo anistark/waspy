@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `break` and `continue` statements in `for` and `while` loops. Each loop body is wrapped in an inner block so `continue` falls through to the iterator step, and a block-depth counter plus loop-context stack compute the correct branch depth so break/continue nested inside `if`/`try` frames or nested loops target the right loop ([#23](https://github.com/anistark/waspy/issues/23))
+
+### Fixed
+- `for x in <list>` read each element from `ptr + i*4` with load offset 0, loading the leading length word as element 0 and dropping the last element; the load now uses a `+4` offset so iteration sees the real elements
+
 ## [0.10.0](https://github.com/anistark/waspy/releases/tag/v0.10.0) - 2026-06-15
 
 ### Fixed

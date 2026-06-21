@@ -32,7 +32,7 @@ Generate & Optimize
 - Compiles Python functions to WebAssembly
 - Supports multiple functions in a single WebAssembly module
 - Compiles multiple files into a single module
-- Handles control flow with if/else and while loops
+- Handles control flow with if/else, while and for loops, including `break` and `continue`
 - Processes variable declarations and assignments
 - Supports type annotations for function parameters and return values
 - Enables function calls between compiled functions
@@ -222,7 +222,9 @@ The type system now includes:
 The compiler supports basic control flow constructs:
 
 - **If/Else Statements**: Conditional execution using WebAssembly's block and branch instructions
-- **While Loops**: Implemented using WebAssembly's loop and branch instructions
+- **While and For Loops**: Implemented using WebAssembly's loop and branch instructions
+- **Break and Continue**: Early loop exit and next-iteration skip, including correct
+  behavior when nested inside `if`/`try` blocks and in nested loops
 - **Comparison Operators**: All standard Python comparison operators
 - **Boolean Operators**: Support for `and` and `or` with short-circuit evaluation
 

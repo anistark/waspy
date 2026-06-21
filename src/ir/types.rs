@@ -113,6 +113,10 @@ pub enum IRStatement {
         module_name: String,
         alias: Option<String>,
     },
+    // Loop control: `break` exits the innermost loop.
+    Break,
+    // Loop control: `continue` jumps to the next iteration of the innermost loop.
+    Continue,
 }
 
 /// Except handler for try-except statements

@@ -846,6 +846,12 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
 
                 ir_statements.push(IRStatement::While { condition, body });
             }
+            Stmt::Break(_) => {
+                ir_statements.push(IRStatement::Break);
+            }
+            Stmt::Continue(_) => {
+                ir_statements.push(IRStatement::Continue);
+            }
             Stmt::Expr(expr_stmt) => {
                 // Check for yield statements
                 if let Expr::Yield(yield_expr) = &*expr_stmt.value {

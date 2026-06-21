@@ -28,6 +28,19 @@ pub struct LocalInfo {
     pub var_type: IRType,
 }
 
+/// Branch targets for an enclosing loop, used to lower `break`/`continue`.
+///
+/// Each field records the value of [`CompilationContext::block_depth`] captured
+/// immediately after the target frame was opened. A branch emitted at the
+/// current depth `c` reaches that frame with `Br(c - level)`, so `break` targets
+/// the loop's outer block and `continue` targets an inner block wrapped around
+/// the loop body (whose end falls through to the iterator step).
+#[derive(Clone, Copy)]
+pub struct LoopContext {
+    pub break_level: u32,
+    pub continue_level: u32,
+}
+
 /// Function
 pub struct FunctionInfo {
     pub index: u32,
@@ -62,6 +75,16 @@ pub struct CompilationContext {
     /// local-allocation scan and by codegen so each loop reuses the iterator
     /// helper locals (`__iter_*_{n}`) reserved for it. Reset per function.
     pub for_loop_seq: u32,
+    /// Number of WASM structured-control frames (`block`/`loop`/`if`) currently
+    /// open at the codegen point. Bumped around the body of each construct that
+    /// can wrap a `break`/`continue` and unwound on the matching `end`. Combined
+    /// with `loop_stack` it yields the relative branch depth for loop control.
+    /// Reset per function.
+    pub block_depth: u32,
+    /// Stack of enclosing loops (innermost last). Empty outside any loop; a
+    /// `break`/`continue` with an empty stack is a compile error (Python would
+    /// raise `SyntaxError`). Reset per function.
+    pub loop_stack: Vec<LoopContext>,
     /// Running high-water mark of the collection heap, in bytes past
     /// `COLLECTION_HEAP_BASE`. Each literal reserves a fresh region here, so it
     /// grows monotonically across the whole module. A `Cell` because codegen
@@ -83,6 +106,8 @@ impl CompilationContext {
             temp_local: 0,
             temp_local_f64: 0,
             for_loop_seq: 0,
+            block_depth: 0,
+            loop_stack: Vec::new(),
             collection_alloc_offset: Cell::new(0),
         }
     }
