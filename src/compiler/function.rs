@@ -1,4 +1,6 @@
-use crate::compiler::context::{strlen_local_name, CompilationContext, SCRATCH_LOCALS};
+use crate::compiler::context::{
+    strlen_local_name, CompilationContext, LoopContext, SCRATCH_LOCALS,
+};
 use crate::compiler::expression::{emit_expr, emit_integer_power_operation};
 use crate::ir::{IRBody, IRConstant, IRExpr, IRFunction, IROp, IRStatement, IRType, MemoryLayout};
 use wasm_encoder::{BlockType, Function, Instruction, MemArg, ValType};
@@ -52,6 +54,10 @@ pub fn compile_function(
     // Replay the same for-loop numbering used by the scan above so codegen
     // resolves the matching iterator helper locals.
     ctx.for_loop_seq = 0;
+
+    // Loop-control bookkeeping starts empty for each function.
+    ctx.block_depth = 0;
+    ctx.loop_stack.clear();
 
     // Compile the function body
     compile_body(&ir_func.body, &mut func, ctx, memory_layout);
@@ -530,6 +536,10 @@ pub fn compile_body(
                 // If-else block with no result value
                 func.instruction(&Instruction::If(BlockType::Empty));
 
+                // The `if`/`else` frame wraps both branches, so a break/continue
+                // nested here is one level deeper than the surrounding loop body.
+                ctx.block_depth += 1;
+
                 // branch
                 compile_body(then_body, func, ctx, memory_layout);
 
@@ -539,6 +549,7 @@ pub fn compile_body(
                     compile_body(else_body, func, ctx, memory_layout);
                 }
 
+                ctx.block_depth -= 1;
                 func.instruction(&Instruction::End);
             }
 
@@ -569,23 +580,45 @@ pub fn compile_body(
             }
 
             IRStatement::While { condition, body } => {
-                // Loop block
+                // Outer block: `break` branches here to exit the loop.
                 func.instruction(&Instruction::Block(BlockType::Empty));
+                ctx.block_depth += 1;
+                let break_level = ctx.block_depth;
+
                 func.instruction(&Instruction::Loop(BlockType::Empty));
+                ctx.block_depth += 1;
 
                 // Condition check: exit the loop when the condition is false.
+                // Emitted before the inner continue block so this `BrIf(1)` still
+                // targets the outer break block from inside the loop.
                 emit_expr(condition, func, ctx, memory_layout, Some(&IRType::Bool));
                 func.instruction(&Instruction::I32Eqz);
                 func.instruction(&Instruction::BrIf(1));
 
+                // Inner block: `continue` branches to its end, which falls through
+                // to the back-edge below and re-evaluates the loop condition.
+                func.instruction(&Instruction::Block(BlockType::Empty));
+                ctx.block_depth += 1;
+                let continue_level = ctx.block_depth;
+
                 // Loop body
+                ctx.loop_stack.push(LoopContext {
+                    break_level,
+                    continue_level,
+                });
                 compile_body(body, func, ctx, memory_layout);
+                ctx.loop_stack.pop();
+
+                ctx.block_depth -= 1;
+                func.instruction(&Instruction::End); // end continue block
 
                 // Jump back to the start of the loop
                 func.instruction(&Instruction::Br(0));
 
-                // End of loop and block
+                // End of loop and outer break block
+                ctx.block_depth -= 1;
                 func.instruction(&Instruction::End);
+                ctx.block_depth -= 1;
                 func.instruction(&Instruction::End);
             }
             IRStatement::Expression(expr) => {
@@ -765,9 +798,12 @@ pub fn compile_body(
                         func.instruction(&Instruction::I32Const(0));
                         func.instruction(&Instruction::LocalSet(loop_counter_idx));
 
-                        // Loop structure
+                        // Loop structure. Outer block is the `break` target.
                         func.instruction(&Instruction::Block(BlockType::Empty));
+                        ctx.block_depth += 1;
+                        let break_level = ctx.block_depth;
                         func.instruction(&Instruction::Loop(BlockType::Empty));
+                        ctx.block_depth += 1;
 
                         // Check if counter >= length
                         func.instruction(&Instruction::LocalGet(loop_counter_idx));
@@ -777,14 +813,16 @@ pub fn compile_body(
 
                         // Load element from list[counter]
                         // Memory: [length:i32][elem0:i32][elem1:i32]...
-                        // Element at index i is at offset 4 + (i * 4)
+                        // Element at index i is at byte offset 4 + (i * 4): the
+                        // base address is ptr + counter*4 and the load skips the
+                        // leading length word with a +4 element offset.
                         func.instruction(&Instruction::LocalGet(iterator_ptr_idx));
                         func.instruction(&Instruction::LocalGet(loop_counter_idx));
                         func.instruction(&Instruction::I32Const(4));
                         func.instruction(&Instruction::I32Mul);
                         func.instruction(&Instruction::I32Add);
                         func.instruction(&Instruction::I32Load(MemArg {
-                            offset: 0,
+                            offset: 4,
                             align: 2,
                             memory_index: 0,
                         }));
@@ -792,8 +830,21 @@ pub fn compile_body(
                         // Store element in target variable
                         func.instruction(&Instruction::LocalSet(target_idx));
 
+                        // Inner block: `continue` lands at its end, which falls
+                        // through to the counter increment below.
+                        func.instruction(&Instruction::Block(BlockType::Empty));
+                        ctx.block_depth += 1;
+                        let continue_level = ctx.block_depth;
+
                         // Execute the loop body
+                        ctx.loop_stack.push(LoopContext {
+                            break_level,
+                            continue_level,
+                        });
                         compile_body(body, func, ctx, memory_layout);
+                        ctx.loop_stack.pop();
+                        ctx.block_depth -= 1;
+                        func.instruction(&Instruction::End); // end continue block
 
                         // Increment counter
                         func.instruction(&Instruction::LocalGet(loop_counter_idx));
@@ -804,8 +855,10 @@ pub fn compile_body(
                         // Loop back
                         func.instruction(&Instruction::Br(0));
 
-                        // End of loop
+                        // End of loop and break block
+                        ctx.block_depth -= 1;
                         func.instruction(&Instruction::End);
+                        ctx.block_depth -= 1;
                         func.instruction(&Instruction::End);
                     }
                     IRType::Range => {
@@ -825,9 +878,12 @@ pub fn compile_body(
                         func.instruction(&Instruction::I32Const(0));
                         func.instruction(&Instruction::LocalSet(loop_counter_idx));
 
-                        // Loop structure
+                        // Loop structure. Outer block is the `break` target.
                         func.instruction(&Instruction::Block(BlockType::Empty));
+                        ctx.block_depth += 1;
+                        let break_level = ctx.block_depth;
                         func.instruction(&Instruction::Loop(BlockType::Empty));
+                        ctx.block_depth += 1;
 
                         // Load stop and step for comparison
                         func.instruction(&Instruction::LocalGet(iterator_ptr_idx));
@@ -863,8 +919,21 @@ pub fn compile_body(
                         func.instruction(&Instruction::End);
                         func.instruction(&Instruction::BrIf(1)); // Break if true
 
+                        // Inner block: `continue` lands at its end, which falls
+                        // through to the step increment below.
+                        func.instruction(&Instruction::Block(BlockType::Empty));
+                        ctx.block_depth += 1;
+                        let continue_level = ctx.block_depth;
+
                         // Execute the loop body
+                        ctx.loop_stack.push(LoopContext {
+                            break_level,
+                            continue_level,
+                        });
                         compile_body(body, func, ctx, memory_layout);
+                        ctx.loop_stack.pop();
+                        ctx.block_depth -= 1;
+                        func.instruction(&Instruction::End); // end continue block
 
                         // Increment by step
                         func.instruction(&Instruction::LocalGet(target_idx));
@@ -880,8 +949,10 @@ pub fn compile_body(
                         // Loop back
                         func.instruction(&Instruction::Br(0));
 
-                        // End of loop
+                        // End of loop and break block
+                        ctx.block_depth -= 1;
                         func.instruction(&Instruction::End);
+                        ctx.block_depth -= 1;
                         func.instruction(&Instruction::End);
                     }
                     _ => {
@@ -889,17 +960,34 @@ pub fn compile_body(
                         // Treat the value as a count (integer)
                         func.instruction(&Instruction::LocalSet(target_idx));
 
-                        // Simple loop: counter from 1 to value
+                        // Simple loop: counter from 1 to value. Outer block is
+                        // the `break` target.
                         func.instruction(&Instruction::Block(BlockType::Empty));
+                        ctx.block_depth += 1;
+                        let break_level = ctx.block_depth;
                         func.instruction(&Instruction::Loop(BlockType::Empty));
+                        ctx.block_depth += 1;
 
                         func.instruction(&Instruction::LocalGet(target_idx));
                         func.instruction(&Instruction::I32Const(0));
                         func.instruction(&Instruction::I32LeS);
                         func.instruction(&Instruction::BrIf(1));
 
+                        // Inner block: `continue` lands at its end, which falls
+                        // through to the decrement below.
+                        func.instruction(&Instruction::Block(BlockType::Empty));
+                        ctx.block_depth += 1;
+                        let continue_level = ctx.block_depth;
+
                         // Execute body
+                        ctx.loop_stack.push(LoopContext {
+                            break_level,
+                            continue_level,
+                        });
                         compile_body(body, func, ctx, memory_layout);
+                        ctx.loop_stack.pop();
+                        ctx.block_depth -= 1;
+                        func.instruction(&Instruction::End); // end continue block
 
                         // Decrement
                         func.instruction(&Instruction::LocalGet(target_idx));
@@ -908,7 +996,10 @@ pub fn compile_body(
                         func.instruction(&Instruction::LocalSet(target_idx));
 
                         func.instruction(&Instruction::Br(0));
+                        // End of loop and break block
+                        ctx.block_depth -= 1;
                         func.instruction(&Instruction::End);
+                        ctx.block_depth -= 1;
                         func.instruction(&Instruction::End);
                     }
                 }
@@ -943,6 +1034,9 @@ pub fn compile_body(
 
                 // If no exception (flag == 0), skip all except handlers and go to finally
                 func.instruction(&Instruction::If(BlockType::Empty));
+                // The dispatch if/else frame wraps every handler body, so a
+                // break/continue inside a handler is one level deeper.
+                ctx.block_depth += 1;
 
                 // If an exception occurred, check handlers
                 func.instruction(&Instruction::Else);
@@ -985,6 +1079,8 @@ pub fn compile_body(
                         };
 
                         func.instruction(&Instruction::Block(BlockType::Empty));
+                        // This per-handler block wraps the handler body.
+                        ctx.block_depth += 1;
 
                         // Check if exception type matches
                         func.instruction(&Instruction::LocalGet(exception_type_idx));
@@ -1008,6 +1104,7 @@ pub fn compile_body(
                         func.instruction(&Instruction::I32Const(0));
                         func.instruction(&Instruction::LocalSet(exception_flag_idx));
 
+                        ctx.block_depth -= 1;
                         func.instruction(&Instruction::End);
                     }
 
@@ -1022,6 +1119,7 @@ pub fn compile_body(
                 // Close the exception-dispatch if/else. Each typed handler opens
                 // and closes its own block, so only this `If` remains open here;
                 // a second `End` would close the function frame early.
+                ctx.block_depth -= 1;
                 func.instruction(&Instruction::End);
 
                 // If there's a finally block, always execute it
@@ -1322,6 +1420,25 @@ pub fn compile_body(
                 // Full implementation would load and execute the module
                 func.instruction(&Instruction::I32Const(0));
                 func.instruction(&Instruction::LocalSet(_local_idx));
+            }
+
+            IRStatement::Break => {
+                // Branch out of the innermost loop's outer block. The relative
+                // depth accounts for any `if`/`try` frames between here and the
+                // loop. A `break` outside any loop is invalid Python; the parser
+                // rejects it, so emit nothing rather than a malformed branch.
+                if let Some(loop_ctx) = ctx.loop_stack.last().copied() {
+                    func.instruction(&Instruction::Br(ctx.block_depth - loop_ctx.break_level));
+                }
+            }
+
+            IRStatement::Continue => {
+                // Branch to the end of the innermost loop's continue block, which
+                // falls through to the iterator step / back-edge so the next
+                // iteration runs.
+                if let Some(loop_ctx) = ctx.loop_stack.last().copied() {
+                    func.instruction(&Instruction::Br(ctx.block_depth - loop_ctx.continue_level));
+                }
             }
         }
     }
