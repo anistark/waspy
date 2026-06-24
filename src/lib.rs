@@ -809,6 +809,58 @@ mod collection_tests {
     }
 
     #[test]
+    fn string_read_back_from_list_has_length() {
+        // A string element stores only its offset; reading it back rebuilds the
+        // (offset, length) pair from the blob's length prefix. Previously this
+        // dropped the length, so binding it to a local emitted invalid WASM
+        // ("not enough arguments on the stack for local.set").
+        let src =
+            "def f() -> int:\n    xs = [\"alpha\", \"beta\", \"gamma\"]\n    w = xs[1]\n    return len(w)\n";
+        assert_eq!(call_i32(src, "f"), 4);
+    }
+
+    #[test]
+    fn string_read_back_from_tuple_has_length() {
+        let src =
+            "def f() -> int:\n    t = (\"one\", \"three\", \"x\")\n    w = t[1]\n    return len(w)\n";
+        assert_eq!(call_i32(src, "f"), 5);
+    }
+
+    #[test]
+    fn string_read_back_preserves_identity() {
+        // The recovered offset is the interned one, so membership (offset
+        // comparison) still finds the value pulled back out of the list.
+        let src = "def f() -> int:\n    xs = [\"alpha\", \"beta\", \"gamma\"]\n    w = xs[1]\n    if w in xs:\n        return 1\n    return 0\n";
+        assert_eq!(call_i32(src, "f"), 1);
+    }
+
+    #[test]
+    fn string_membership_unaffected_by_read_back() {
+        // Reading strings out of collections must not regress offset-based
+        // membership/dedup, which the length-prefix layout leaves untouched.
+        let present =
+            "def f() -> int:\n    xs = [\"a\", \"b\", \"c\"]\n    if \"b\" in xs:\n        return 1\n    return 0\n";
+        assert_eq!(call_i32(present, "f"), 1);
+        let absent =
+            "def f() -> int:\n    xs = [\"a\", \"b\", \"c\"]\n    if \"z\" in xs:\n        return 1\n    return 0\n";
+        assert_eq!(call_i32(absent, "f"), 0);
+        let set_dedup =
+            "def f() -> int:\n    s = {\"x\", \"y\", \"x\", \"z\"}\n    return len(s)\n";
+        assert_eq!(call_i32(set_dedup, "f"), 3);
+    }
+
+    #[test]
+    fn string_concatenation_round_trips() {
+        // Real runtime concatenation: `__alloc` a fresh blob and copy both
+        // operands in (was a placeholder that aliased the left operand).
+        let len = "def f() -> int:\n    a = \"foo\"\n    b = \"barbar\"\n    return len(a + b)\n";
+        assert_eq!(call_i32(len, "f"), 9);
+        // The concatenated string round-trips through a list slot too.
+        let via_list = "def f() -> int:\n    a = \"foo\"\n    b = \"bar\"\n    xs = [a + b]\n    w = xs[0]\n    return len(w)\n";
+        assert_eq!(call_i32(via_list, "f"), 6);
+    }
+
+    #[test]
     fn distinct_collections_do_not_alias() {
         // Both lists previously shared one address (base + local_count*100).
         let src =

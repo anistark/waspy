@@ -1,6 +1,9 @@
 use crate::compiler::context::{strlen_local_name, CompilationContext};
 use crate::compiler::function::{load_field_instr, lookup_field};
-use crate::ir::{IRBoolOp, IRCompareOp, IRConstant, IRExpr, IROp, IRType, IRUnaryOp, MemoryLayout};
+use crate::ir::{
+    IRBoolOp, IRCompareOp, IRConstant, IRExpr, IROp, IRType, IRUnaryOp, MemoryLayout,
+    STRING_LEN_PREFIX,
+};
 use wasm_encoder::{BlockType, Function, Instruction, MemArg, ValType};
 
 // Helper to convert f64 to Ieee64
@@ -40,22 +43,47 @@ fn store_collection_word(func: &mut Function, elem_type: &IRType) {
     }
 }
 
-/// Load a 4-byte collection slot (address on top of the stack), widening f32
-/// float slots back to the f64 the rest of the compiler works with.
-fn load_collection_word(func: &mut Function, elem_type: &IRType) {
-    if matches!(elem_type, IRType::Float) {
-        func.instruction(&Instruction::F32Load(MemArg {
-            offset: 0,
-            align: 2,
-            memory_index: 0,
-        }));
-        func.instruction(&Instruction::F64PromoteF32);
-    } else {
-        func.instruction(&Instruction::I32Load(MemArg {
-            offset: 0,
-            align: 2,
-            memory_index: 0,
-        }));
+/// Load a collection slot (address on top of the stack) as a runtime value.
+///
+/// Floats are widened from their f32 slot back to f64. String/bytes slots hold
+/// only the value's offset, so the companion length is recovered from the blob's
+/// length prefix (`load(offset - STRING_LEN_PREFIX)`) and the `(offset, length)`
+/// pair the rest of the compiler expects is rebuilt; `scratch` is an i32 scratch
+/// local used to hold the offset while doing so. Everything else is a plain i32.
+fn load_collection_word(func: &mut Function, elem_type: &IRType, scratch: u32) {
+    match elem_type {
+        IRType::Float => {
+            func.instruction(&Instruction::F32Load(MemArg {
+                offset: 0,
+                align: 2,
+                memory_index: 0,
+            }));
+            func.instruction(&Instruction::F64PromoteF32);
+        }
+        IRType::String | IRType::Bytes => {
+            // Slot holds the offset; rebuild (offset, length).
+            func.instruction(&Instruction::I32Load(MemArg {
+                offset: 0,
+                align: 2,
+                memory_index: 0,
+            }));
+            func.instruction(&Instruction::LocalTee(scratch)); // keep offset, save it
+            func.instruction(&Instruction::LocalGet(scratch));
+            func.instruction(&Instruction::I32Const(STRING_LEN_PREFIX as i32));
+            func.instruction(&Instruction::I32Sub);
+            func.instruction(&Instruction::I32Load(MemArg {
+                offset: 0,
+                align: 2,
+                memory_index: 0,
+            }));
+        }
+        _ => {
+            func.instruction(&Instruction::I32Load(MemArg {
+                offset: 0,
+                align: 2,
+                memory_index: 0,
+            }));
+        }
     }
 }
 
@@ -189,45 +217,89 @@ pub fn emit_expr(
                         if (left_type == IRType::String && right_type == IRType::String)
                             || (left_type == IRType::Bytes && right_type == IRType::Bytes)
                         {
-                            // String/Bytes concatenation: stack has (left_offset, left_len, right_offset, right_len)
-                            // We need to return (concat_offset, concat_len)
-                            // Stack: (left_offset, left_len, right_offset, right_len)
+                            // String/Bytes concatenation. Stack on entry:
+                            //   (left_offset, left_len, right_offset, right_len)
+                            // A new `[len:i32][bytes][nul?]` blob is allocated at
+                            // runtime via `__alloc`, both operands are copied in
+                            // with `memory.copy`, and the result `(offset, len)`
+                            // (offset past the length prefix) is left on the
+                            // stack. Strings get a trailing NUL; bytes do not.
+                            let is_string = left_type == IRType::String;
+                            let prefix = STRING_LEN_PREFIX as i32;
 
-                            // Save right side to temps
                             func.instruction(&Instruction::LocalSet(ctx.temp_local + 1)); // right_len
                             func.instruction(&Instruction::LocalSet(ctx.temp_local + 2)); // right_offset
-
-                            // Stack: (left_offset, left_len)
-                            // Save left side to temps
                             func.instruction(&Instruction::LocalSet(ctx.temp_local + 3)); // left_len
                             func.instruction(&Instruction::LocalSet(ctx.temp_local + 4)); // left_offset
 
-                            // Calculate concatenated length = left_len + right_len
+                            // total_len = left_len + right_len
                             func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
                             func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
                             func.instruction(&Instruction::I32Add);
-                            func.instruction(&Instruction::LocalSet(ctx.temp_local)); // concat_len
+                            func.instruction(&Instruction::LocalSet(ctx.temp_local + 5)); // total_len
 
-                            // For runtime concatenation, we need to:
-                            // 1. Calculate where to put the result in memory
-                            // 2. Copy left string/bytes
-                            // 3. Copy right string/bytes
-                            // Since we don't have dynamic allocation, we use the end of current data
-                            // For now, we'll implement a simplified version that works for small data
+                            // block = __alloc(prefix + total_len [+ 1 for NUL])
+                            func.instruction(&Instruction::I32Const(prefix));
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 5));
+                            func.instruction(&Instruction::I32Add);
+                            if is_string {
+                                func.instruction(&Instruction::I32Const(1));
+                                func.instruction(&Instruction::I32Add);
+                            }
+                            func.instruction(&Instruction::Call(ctx.alloc_func_index));
+                            func.instruction(&Instruction::LocalSet(ctx.temp_local + 6)); // block
 
-                            // Get left offset and length
+                            // Write the length prefix at the block start.
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 6));
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 5));
+                            func.instruction(&Instruction::I32Store(MemArg {
+                                offset: 0,
+                                align: 2,
+                                memory_index: 0,
+                            }));
+
+                            // data_ptr = block + prefix (the value's offset)
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 6));
+                            func.instruction(&Instruction::I32Const(prefix));
+                            func.instruction(&Instruction::I32Add);
+                            func.instruction(&Instruction::LocalSet(ctx.temp_local + 6)); // data_ptr
+
+                            // memory.copy(data_ptr, left_offset, left_len)
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 6));
                             func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
                             func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
+                            func.instruction(&Instruction::MemoryCopy {
+                                src_mem: 0,
+                                dst_mem: 0,
+                            });
 
-                            // Stack: (left_offset, left_len)
-                            // The concatenated data will be stored after all current data
-                            // Use a heuristic: place result at a fixed high offset (TODO: improve)
-                            // For now, return a dummy concatenation using the left data as base
-                            // Drop the length and return (left_offset, concat_len)
-                            func.instruction(&Instruction::Drop);
-                            func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                            // memory.copy(data_ptr + left_len, right_offset, right_len)
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 6));
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
+                            func.instruction(&Instruction::I32Add);
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
+                            func.instruction(&Instruction::MemoryCopy {
+                                src_mem: 0,
+                                dst_mem: 0,
+                            });
 
-                            // Stack: (left_offset, concat_len)
+                            // Strings are NUL-terminated; write it past the data.
+                            if is_string {
+                                func.instruction(&Instruction::LocalGet(ctx.temp_local + 6));
+                                func.instruction(&Instruction::LocalGet(ctx.temp_local + 5));
+                                func.instruction(&Instruction::I32Add);
+                                func.instruction(&Instruction::I32Const(0));
+                                func.instruction(&Instruction::I32Store8(MemArg {
+                                    offset: 0,
+                                    align: 0,
+                                    memory_index: 0,
+                                }));
+                            }
+
+                            // Result: (data_ptr, total_len)
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 6));
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 5));
                             return left_type.clone();
                         }
                     }
@@ -1295,7 +1367,7 @@ pub fn emit_expr(
                     func.instruction(&Instruction::I32Add); // index*4 + 4
                     func.instruction(&Instruction::I32Add); // list_ptr + index*4 + 4
 
-                    load_collection_word(func, element_type.as_ref());
+                    load_collection_word(func, element_type.as_ref(), ctx.temp_local + 1);
 
                     element_type.as_ref().clone()
                 }
@@ -1406,7 +1478,7 @@ pub fn emit_expr(
                         IRType::Unknown
                     };
 
-                    load_collection_word(func, &elem_type);
+                    load_collection_word(func, &elem_type, ctx.temp_local + 1);
 
                     elem_type
                 }
