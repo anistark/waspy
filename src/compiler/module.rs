@@ -1,10 +1,11 @@
 use crate::compiler::context::{ClassInfo, CompilationContext, COLLECTION_HEAP_BASE};
 use crate::compiler::function::{compile_function, resolve_return_type};
-use crate::ir::{IRBody, IRConstant, IRExpr, IRModule, IRStatement, IRType};
+use crate::ir::{IRBody, IRConstant, IRExpr, IRModule, IRStatement, IRType, STRING_LEN_PREFIX};
 use std::collections::HashMap;
 use wasm_encoder::{
-    CodeSection, ConstExpr, DataSection, ExportSection, FunctionSection, MemorySection, MemoryType,
-    Module, TypeSection, ValType,
+    BlockType, CodeSection, ConstExpr, DataSection, ExportSection, Function, FunctionSection,
+    GlobalSection, GlobalType, Instruction, MemorySection, MemoryType, Module, TypeSection,
+    ValType,
 };
 
 /// Map IR type to WebAssembly ValType
@@ -91,6 +92,66 @@ fn collect_self_fields(
     }
 }
 
+/// Build the runtime bump allocator `__alloc(size: i32) -> i32`.
+///
+/// The next-free pointer lives in global 0 (initialized to the post-codegen
+/// high-water mark). Each call rounds `size` up to 8 bytes, grows linear memory
+/// if the request would run past the current end, advances the global, and
+/// returns the old pointer. There is no `free`; this is a monotonic bump
+/// allocator backing runtime-built strings/bytes (e.g. concatenation results).
+fn build_alloc_function() -> Function {
+    // locals 1..4 (local 0 is the `size` parameter): aligned size, old ptr,
+    // new ptr, current memory size in bytes.
+    let mut f = Function::new([(4u32, ValType::I32)]);
+
+    // aligned = (size + 7) & ~7  -> local 1
+    f.instruction(&Instruction::LocalGet(0));
+    f.instruction(&Instruction::I32Const(7));
+    f.instruction(&Instruction::I32Add);
+    f.instruction(&Instruction::I32Const(!7));
+    f.instruction(&Instruction::I32And);
+    f.instruction(&Instruction::LocalSet(1));
+
+    // old = global 0 -> local 2
+    f.instruction(&Instruction::GlobalGet(0));
+    f.instruction(&Instruction::LocalSet(2));
+
+    // new = old + aligned -> local 3
+    f.instruction(&Instruction::LocalGet(2));
+    f.instruction(&Instruction::LocalGet(1));
+    f.instruction(&Instruction::I32Add);
+    f.instruction(&Instruction::LocalSet(3));
+
+    // cur_bytes = memory.size * 65536 -> local 4
+    f.instruction(&Instruction::MemorySize(0));
+    f.instruction(&Instruction::I32Const(16));
+    f.instruction(&Instruction::I32Shl);
+    f.instruction(&Instruction::LocalSet(4));
+
+    // if new > cur_bytes: grow by ceil((new - cur_bytes) / 65536) pages
+    f.instruction(&Instruction::LocalGet(3));
+    f.instruction(&Instruction::LocalGet(4));
+    f.instruction(&Instruction::I32GtU);
+    f.instruction(&Instruction::If(BlockType::Empty));
+    f.instruction(&Instruction::LocalGet(3));
+    f.instruction(&Instruction::LocalGet(4));
+    f.instruction(&Instruction::I32Sub);
+    f.instruction(&Instruction::I32Const(65535));
+    f.instruction(&Instruction::I32Add);
+    f.instruction(&Instruction::I32Const(16));
+    f.instruction(&Instruction::I32ShrU);
+    f.instruction(&Instruction::MemoryGrow(0));
+    f.instruction(&Instruction::Drop); // grow failure (-1) is left to trap on use
+    f.instruction(&Instruction::End);
+
+    // global 0 = new; return old
+    f.instruction(&Instruction::LocalGet(3));
+    f.instruction(&Instruction::GlobalSet(0));
+    f.instruction(&Instruction::LocalGet(2));
+    f.instruction(&Instruction::End);
+    f
+}
+
 /// Compile an IR module into WebAssembly binary format
 pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
     let mut module = Module::new();
@@ -144,6 +205,11 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
         total_function_count += cls.methods.len();
     }
 
+    // The runtime allocator `__alloc` is appended after all user functions and
+    // methods, so it takes the next function (and type) index. Record it so
+    // codegen can emit `call $__alloc`.
+    ctx.alloc_func_index = total_function_count as u32;
+
     // Create function types for module functions
     for func in &ir_module.functions {
         // Map IR parameter types to WebAssembly types
@@ -173,13 +239,18 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
         }
     }
 
+    // Type for the runtime allocator `__alloc(size: i32) -> i32`.
+    types.ty().function([ValType::I32], [ValType::I32]);
+
     module.section(&types);
 
-    // Build function section
+    // Build function section (one entry per user function/method, referencing
+    // the matching type, plus a trailing entry for `__alloc`).
     let mut functions = FunctionSection::new();
     for _ in 0..total_function_count {
         functions.function(functions.len());
     }
+    functions.function(total_function_count as u32); // __alloc
     module.section(&functions);
 
     // Export section - export both functions and memory
@@ -286,9 +357,12 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
     // Data section for string and bytes constants.
     let mut data = DataSection::new();
 
-    // String data lives from offset 0. Offsets are assigned sequentially as
-    // `len + 1` (a null terminator after each), so emitting the strings in
-    // offset order, each followed by a NUL, reproduces those exact offsets.
+    // String data lives from offset 0. Each blob is `[len:i32][bytes][nul]`;
+    // the recorded offset points at the bytes (past the length prefix), so
+    // emitting the strings in offset order — each prefixed by its length and
+    // followed by a NUL — reproduces those exact offsets. The prefix lets a
+    // string's length be recovered as `load(offset - 4)` when only its offset
+    // word survives (e.g. read back out of a collection slot).
     if !memory_layout.string_offsets.is_empty() {
         let mut offsets: Vec<(&String, u32)> = memory_layout
             .string_offsets
@@ -299,15 +373,16 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
 
         let mut all_strings = Vec::new();
         for (s, _) in offsets {
+            all_strings.extend_from_slice(&(s.len() as u32).to_le_bytes()); // length prefix
             all_strings.extend_from_slice(s.as_bytes());
             all_strings.push(0); // Null terminator
         }
         data.active(0, &ConstExpr::i32_const(0), all_strings);
     }
 
-    // Bytes data lives from `next_bytes_offset`'s base (32768). Offsets advance
-    // by exactly the byte length (no terminator), so the values are contiguous
-    // from the lowest assigned offset; emit them in offset order from there.
+    // Bytes data lives from `next_bytes_offset`'s base (32768). Each blob is
+    // `[len:i32][bytes]` (no terminator); the recorded offset points at the
+    // bytes, so the data segment starts one prefix before the lowest offset.
     if !memory_layout.bytes_offsets.is_empty() {
         let mut offsets: Vec<(&Vec<u8>, u32)> = memory_layout
             .bytes_offsets
@@ -316,9 +391,10 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
             .collect();
         offsets.sort_by_key(|(_b, offset)| *offset);
 
-        let base = offsets[0].1;
+        let base = offsets[0].1 - STRING_LEN_PREFIX;
         let mut all_bytes = Vec::new();
         for (b, _) in offsets {
+            all_bytes.extend_from_slice(&(b.len() as u32).to_le_bytes()); // length prefix
             all_bytes.extend_from_slice(b);
         }
         data.active(0, &ConstExpr::i32_const(base as i32), all_bytes);
@@ -342,12 +418,17 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
         }
     }
 
+    // Runtime allocator, last so its index matches `ctx.alloc_func_index`.
+    codes.function(&build_alloc_function());
+
     // Memory must hold the static data (strings/bytes/object instances) plus
     // every collection region handed out during codegen. The collection heap
     // grows from COLLECTION_HEAP_BASE, so size memory to cover its high-water
-    // mark (at least the base region).
+    // mark (at least the base region). The runtime bump allocator starts just
+    // past that mark and grows memory on demand.
     let heap_end = COLLECTION_HEAP_BASE + ctx.collection_alloc_offset.get();
-    let min_pages = (((heap_end as u64) + 65535) / 65536).max(2);
+    let runtime_heap_base = (heap_end + 7) & !7;
+    let min_pages = (((runtime_heap_base as u64) + 65535) / 65536).max(2);
     let mut memories = MemorySection::new();
     memories.memory(MemoryType {
         minimum: min_pages,
@@ -357,10 +438,22 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
         page_size_log2: None,
     });
 
-    // Section order follows the WASM spec: Memory (5), Export (7), Code (10),
-    // Data (11). Code must precede Data or strict validators (and Binaryen's
-    // reader) reject the module, which previously disabled optimization.
+    // Global 0: the runtime allocator's next-free pointer.
+    let mut globals = GlobalSection::new();
+    globals.global(
+        GlobalType {
+            val_type: ValType::I32,
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::i32_const(runtime_heap_base as i32),
+    );
+
+    // Section order follows the WASM spec: Memory (5), Global (6), Export (7),
+    // Code (10), Data (11). Code must precede Data or strict validators (and
+    // Binaryen's reader) reject the module, which previously disabled optimization.
     module.section(&memories);
+    module.section(&globals);
     module.section(&exports);
     module.section(&codes);
     module.section(&data);

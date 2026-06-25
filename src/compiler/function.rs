@@ -420,7 +420,14 @@ pub fn compile_body(
         match stmt {
             IRStatement::Return(expr_opt) => {
                 if let Some(expr) = expr_opt {
-                    emit_expr(expr, func, ctx, memory_layout, None);
+                    let ty = emit_expr(expr, func, ctx, memory_layout, None);
+                    // A string/bytes value is an (offset, length) pair, but a
+                    // function returns a single word. Drop the length (on top)
+                    // and return the offset; the length-prefixed blob lets a
+                    // caller recover the length via `load(offset - 4)`.
+                    if matches!(ty, IRType::String | IRType::Bytes) {
+                        func.instruction(&Instruction::Drop);
+                    }
                 } else {
                     func.instruction(&Instruction::I32Const(0));
                 }

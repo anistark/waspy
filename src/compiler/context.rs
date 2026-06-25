@@ -90,6 +90,10 @@ pub struct CompilationContext {
     /// grows monotonically across the whole module. A `Cell` because codegen
     /// holds `&CompilationContext` while allocating.
     pub collection_alloc_offset: Cell<u32>,
+    /// WASM function index of the runtime bump allocator `__alloc(size) -> ptr`.
+    /// Emitted after all user functions/methods, so callers (e.g. string/bytes
+    /// concatenation) reference it by this index. Set during module assembly.
+    pub alloc_func_index: u32,
 }
 
 impl CompilationContext {
@@ -109,6 +113,7 @@ impl CompilationContext {
             block_depth: 0,
             loop_stack: Vec::new(),
             collection_alloc_offset: Cell::new(0),
+            alloc_func_index: 0,
         }
     }
 

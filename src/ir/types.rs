@@ -342,6 +342,13 @@ pub enum IRBoolOp {
     Or,  // or
 }
 
+/// Number of bytes reserved before each interned string/bytes blob to hold its
+/// length (an i32). A blob's recorded offset points just past this prefix, so
+/// `load(offset - STRING_LEN_PREFIX)` recovers its length even when only the
+/// offset word survives (e.g. read back out of a collection slot). Runtime
+/// strings built by `__alloc` use the same layout.
+pub const STRING_LEN_PREFIX: u32 = 4;
+
 /// Memory layout information for string and object storage
 #[derive(Debug, Clone)]
 pub struct MemoryLayout {
@@ -380,11 +387,14 @@ impl MemoryLayout {
             return offset;
         }
 
-        let offset = self.next_string_offset;
+        // Each blob is laid out as [len:i32][bytes...][nul]; the returned offset
+        // points at the bytes (past the length prefix), so the length is
+        // recoverable as load(offset - STRING_LEN_PREFIX).
+        let offset = self.next_string_offset + STRING_LEN_PREFIX;
         self.string_offsets.insert(s.to_string(), offset);
 
-        // Advance offset by string length + null terminator
-        self.next_string_offset += (s.len() + 1) as u32;
+        // Advance past the prefix, the bytes, and the null terminator.
+        self.next_string_offset += STRING_LEN_PREFIX + (s.len() + 1) as u32;
 
         offset
     }
@@ -395,11 +405,13 @@ impl MemoryLayout {
             return offset;
         }
 
-        let offset = self.next_bytes_offset;
+        // Same [len:i32][bytes...] layout as strings (no null terminator); the
+        // returned offset points at the bytes, past the length prefix.
+        let offset = self.next_bytes_offset + STRING_LEN_PREFIX;
         self.bytes_offsets.insert(b.to_vec(), offset);
 
-        // Advance offset by bytes length
-        self.next_bytes_offset += b.len() as u32;
+        // Advance past the prefix and the bytes.
+        self.next_bytes_offset += STRING_LEN_PREFIX + b.len() as u32;
 
         offset
     }
