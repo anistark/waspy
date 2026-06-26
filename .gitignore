@@ -12,6 +12,6 @@ examples/*.html
 .DS_Store
 
 # Custom
-NOTES.md
 .claude
 .pi
+plan

@@ -93,7 +93,7 @@ Do not consider a change complete until these pass cleanly.
 - **When the user asks to commit**, review all staged/unstaged changes and prepare:
   - A **brief title** following conventional commits (`feat:`, `fix:`, `chore:`, etc.).
   - A **detailed description** summarizing what changed and why.
-- **`NOTES.md` is gitignored** — it's a local-only working/status doc. Never try to commit it.
+- **`plan/` is gitignored** — it's a local-only, internal directory for working and roadmap notes (each contributor may keep their own). Never try to commit it.
 
 ---
 
@@ -389,7 +389,7 @@ test: description          # Adding/fixing tests
 - **stdlib support is an allowlist.** Only modules in `is_stdlib_module()` are recognized; everything else is treated as user code or an unsupported import.
 - **MSRV vs CI mismatch.** `Cargo.toml` declares MSRV 1.70 but CI builds and lints with Rust 1.88. Don't rely on >1.70 features without bumping the declared `rust-version`.
 - **clippy must pass with zero warnings** — CI enforces `-D warnings` on `--all-targets --all-features`.
-- **`examples/output/`, `examples/*.wasm`, `examples/*.html`, and `NOTES.md` are gitignored.** Don't try to commit generated artifacts or the local notes file.
+- **`examples/output/`, `examples/*.wasm`, `examples/*.html`, and `plan/` are gitignored.** Don't try to commit generated artifacts or the local planning directory.
 
 ---
 
