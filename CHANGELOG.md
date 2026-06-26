@@ -7,11 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0](https://github.com/anistark/waspy/releases/tag/v0.11.0) - 2026-06-26
+
 ### Added
 - `break` and `continue` statements in `for` and `while` loops. Each loop body is wrapped in an inner block so `continue` falls through to the iterator step, and a block-depth counter plus loop-context stack compute the correct branch depth so break/continue nested inside `if`/`try` frames or nested loops target the right loop ([#23](https://github.com/anistark/waspy/issues/23))
 - Runtime bump allocator (`__alloc(size) -> ptr`) over a mutable global heap pointer that grows linear memory on demand (no `free`), emitted after the user functions; backs runtime-built strings/bytes such as concatenation results
+- Integration test harness (`tests/integration/`, `tests/utils/`, registered as the `integration_examples` test target): compiles every `examples/*.py`, validates and instantiates the module with `wasmi`, and asserts runtime results (e.g. `break`/`continue` and multi-file cross-calls). The sweep immediately surfaced the two parameter/`raise` fixes below
 
 ### Fixed
+- String/bytes function parameters now form a complete `(offset, length)` pair. Referencing a `str`/`bytes` parameter (e.g. `op == "add"`) pushed only its offset, so consumers like `==` underflowed the stack into invalid WASM; the length is recovered from the blob prefix (`load(offset - 4)`) when there is no companion length local. Passing a string/bytes value as an argument to a user function now narrows it to the single offset word each parameter slot holds (the callee recovers the length), fixing an out-of-bounds read that previously passed the length as the offset
+- `raise ExceptionType(arg)` (e.g. `raise ValueError("msg")`) emitted the constructor call and left its argument on the stack, producing invalid WASM ("values remaining on stack"); the raised exception is now resolved to its integer type code by name, shared with the `except` handler dispatch so the two cannot diverge
 - `for x in <list>` read each element from `ptr + i*4` with load offset 0, loading the leading length word as element 0 and dropping the last element; the load now uses a `+4` offset so iteration sees the real elements
 - Reading a string/bytes value out of a list or tuple rebuilds its `(offset, length)` pair instead of emitting invalid WASM (a `local.set` stack underflow): each interned string/bytes blob is laid out as `[len:i32][bytes][nul?]` with its recorded offset pointing past the prefix, so the length is recovered via `load(offset - 4)`; the stored slot stays the interned offset, so offset-based membership and set de-duplication are unchanged
 - String/bytes concatenation (`+`) copies both operands into a freshly allocated, length-prefixed blob via `memory.copy`, replacing the placeholder that returned the left operand's offset with the combined length (correct only when literals happened to be adjacent in memory)

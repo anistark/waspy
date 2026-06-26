@@ -45,14 +45,19 @@ Generate & Optimize
 - Performs automatic WebAssembly optimization using Binaryen
 - Detects and handles project structure and dependencies
 - Supports module-level variables and basic class definitions
+- Handles collections: lists, dicts, sets, tuples, and ranges (literals, indexing, methods, membership)
+- Supports exception handling with `try`/`except`/`finally` and `raise`
+- Implements lambdas, basic closures, and list comprehensions
+- Provides runtime support for many standard-library modules (`math`, `os`, `sys`, `json`, `re`, `datetime`, `random`, and more)
 
 ## Limitations
 
-- Limited standard library support
-- Only basic memory management
-- No complex data structures yet (limited support for lists, dicts)
-- No closures or higher-order functions
-- No exception handling
+- Objects are single-instance: one live instance per class at a fixed address.
+- Collections store one word per element; floats are stored as `f32`, and set membership/dedup use linear scans rather than a hash table.
+- Generators parse and compile, but do not yet preserve execution state.
+- Closures work for simple cases but lack full capture/escape analysis.
+- Only standard-library modules import; user-written `.py` modules and file I/O are not yet supported.
+- The bump allocator never frees — there is no garbage collection or reference counting.
 
 ## Installation
 
@@ -62,7 +67,7 @@ cargo add waspy
 
 # Or add to your Cargo.toml
 [dependencies]
-waspy = "0.10.0"
+waspy = "0.11.0"
 
 ## Quick Start
 
@@ -272,14 +277,18 @@ Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for details on
 
 ## Roadmap
 
-- Complete support for all Python data types (lists, dicts, sets, etc.)
-- Classes and object-oriented programming features
-- Exception handling
-- More comprehensive standard library support
-- Memory management improvements
-- Modules and imports
-- Optimization improvements specific to Python patterns
-- Enhanced type inference
+Work toward a stable 1.0 is organized as themed minor releases:
+
+- Collections robustness and memory correctness
+- A heap-allocated, multi-instance object model
+- Class inheritance, method resolution, and method kinds (`staticmethod`, `classmethod`, `property`)
+- Dataclasses and abstract base classes
+- Comprehensions, unpacking, and full closures
+- Generators and the iterator protocol
+- User-defined modules and file I/O
+- Test suite, documentation, and API hardening, then 1.0
+
+Beyond 1.0: web integration, async/await, threading, and support for multiple Python versions.
 
 ![waspy](./assets/waspy.png)
 
