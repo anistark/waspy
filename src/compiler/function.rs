@@ -79,6 +79,22 @@ pub fn compile_function(
     func
 }
 
+/// Map a built-in exception type name to the integer code used by the
+/// try/except dispatch. Shared by `raise` and the handler matching so the two
+/// always agree. Unknown names get a sentinel that no specific handler matches.
+fn exception_type_code(name: &str) -> i32 {
+    match name {
+        "ZeroDivisionError" => 1,
+        "ValueError" => 2,
+        "TypeError" => 3,
+        "KeyError" => 4,
+        "IndexError" => 5,
+        "AttributeError" => 6,
+        "RuntimeError" => 7,
+        _ => 99,
+    }
+}
+
 /// Resolve a class field to its `(byte offset, value type)`, if known.
 pub(crate) fn lookup_field(
     ctx: &CompilationContext,
@@ -571,12 +587,24 @@ pub fn compile_body(
                     .unwrap_or_else(|| ctx.add_local("__exception_type", IRType::Int));
 
                 if let Some(exc_expr) = exception {
-                    // Evaluate exception expression to get exception code/type
-                    emit_expr(exc_expr, func, ctx, memory_layout, None);
-                    // Store as exception type code
+                    // Resolve the exception to its type code by name — the same
+                    // table the handler dispatch uses — instead of emitting the
+                    // expression. We do not model exception objects, and emitting
+                    // a constructor like `ValueError("msg")` would leave its string
+                    // argument on the stack (invalid WASM). Both a bare name
+                    // (`raise ValueError`) and a constructor call
+                    // (`raise ValueError("msg")`) resolve by name.
+                    let code = match exc_expr {
+                        IRExpr::FunctionCall { function_name, .. } => {
+                            exception_type_code(function_name)
+                        }
+                        IRExpr::Variable(name) | IRExpr::Param(name) => exception_type_code(name),
+                        _ => 0,
+                    };
+                    func.instruction(&Instruction::I32Const(code));
                     func.instruction(&Instruction::LocalSet(exception_type_idx));
                 } else {
-                    // Generic exception code
+                    // Bare `raise`: generic exception code.
                     func.instruction(&Instruction::I32Const(0));
                     func.instruction(&Instruction::LocalSet(exception_type_idx));
                 }
@@ -1072,18 +1100,8 @@ pub fn compile_body(
                         func.instruction(&Instruction::I32Const(0));
                         func.instruction(&Instruction::LocalSet(exception_flag_idx));
                     } else if let Some(exc_type) = &handler.exception_type {
-                        // Typed exception handler
-                        // Map exception type names to codes
-                        let exc_code = match exc_type.as_str() {
-                            "ZeroDivisionError" => 1,
-                            "ValueError" => 2,
-                            "TypeError" => 3,
-                            "KeyError" => 4,
-                            "IndexError" => 5,
-                            "AttributeError" => 6,
-                            "RuntimeError" => 7,
-                            _ => 99, // Unknown exception type
-                        };
+                        // Typed exception handler: match by the shared type code.
+                        let exc_code = exception_type_code(exc_type.as_str());
 
                         func.instruction(&Instruction::Block(BlockType::Empty));
                         // This per-handler block wraps the handler body.

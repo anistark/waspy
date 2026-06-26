@@ -177,12 +177,27 @@ pub fn emit_expr(
                 let index = local_info.index;
                 let var_type = local_info.var_type.clone();
                 func.instruction(&Instruction::LocalGet(index));
-                // String/bytes locals hold only the offset; push the length from
-                // the companion local to rebuild the (offset, length) pair the
-                // rest of the pipeline expects.
+                // String/bytes values are an (offset, length) pair but the local
+                // holds only the offset; push the length to rebuild the pair the
+                // rest of the pipeline expects. A local assigned in the body has a
+                // companion length local; a str/bytes *parameter* does not, so its
+                // length is recovered from the blob prefix via
+                // load(offset - STRING_LEN_PREFIX). Without this, referencing a
+                // string parameter left one word on the stack instead of two,
+                // underflowing later consumers (e.g. `==`) into invalid WASM.
                 if matches!(var_type, IRType::String | IRType::Bytes) {
                     if let Some(len_idx) = ctx.get_local_index(&strlen_local_name(name)) {
                         func.instruction(&Instruction::LocalGet(len_idx));
+                    } else {
+                        func.instruction(&Instruction::LocalTee(ctx.temp_local));
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                        func.instruction(&Instruction::I32Const(STRING_LEN_PREFIX as i32));
+                        func.instruction(&Instruction::I32Sub);
+                        func.instruction(&Instruction::I32Load(MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
                     }
                 }
                 var_type
@@ -965,10 +980,21 @@ pub fn emit_expr(
                 return IRType::Class(function_name.clone());
             }
 
-            // Push arguments onto the stack in order
+            // Push arguments onto the stack in order. For a call to a known user
+            // function, a string/bytes argument must be narrowed to its single
+            // offset word: each parameter is one i32 slot, so the callee recovers
+            // the length from the blob prefix (load(offset - STRING_LEN_PREFIX))
+            // rather than receiving it as a second word. Without this drop the
+            // length (top of the pair) is passed as the offset, so the callee
+            // loads out of bounds. Built-in calls keep the full (offset, length)
+            // pair their lowering expects.
+            let is_user_fn = ctx.get_function_info(function_name.as_str()).is_some();
             let mut arg_types = Vec::new();
             for arg in arguments {
                 let arg_type = emit_expr(arg, func, ctx, memory_layout, None);
+                if is_user_fn && matches!(arg_type, IRType::String | IRType::Bytes) {
+                    func.instruction(&Instruction::Drop);
+                }
                 arg_types.push(arg_type);
             }
 
