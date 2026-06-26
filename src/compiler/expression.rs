@@ -712,6 +712,107 @@ pub fn emit_expr(
             let left_type = emit_expr(left, func, ctx, memory_layout, None);
             let right_type = emit_expr(right, func, ctx, memory_layout, Some(&left_type));
 
+            // String/bytes comparison: each operand is an (offset, length) pair,
+            // so the stack holds (left_off, left_len, right_off, right_len). The
+            // numeric paths below assume single-word scalars and would compare
+            // only the top word (the right operand's length) while stranding the
+            // left pair. Handle str/bytes here: Eq/NotEq compare contents
+            // byte-for-byte — interned constants share an offset, but
+            // runtime-built strings (concatenation, slices) do not, so an offset
+            // compare is insufficient. Ordering/identity comparisons aren't
+            // supported yet and yield a constant after balancing the stack. See #90.
+            if matches!(left_type, IRType::String | IRType::Bytes)
+                && matches!(right_type, IRType::String | IRType::Bytes)
+            {
+                match op {
+                    IRCompareOp::Eq | IRCompareOp::NotEq => {
+                        let left_off = ctx.temp_local;
+                        let left_len = ctx.temp_local + 1;
+                        let right_off = ctx.temp_local + 2;
+                        let right_len = ctx.temp_local + 3;
+                        let result = ctx.temp_local + 4;
+                        let counter = ctx.temp_local + 5;
+
+                        func.instruction(&Instruction::LocalSet(right_len));
+                        func.instruction(&Instruction::LocalSet(right_off));
+                        func.instruction(&Instruction::LocalSet(left_len));
+                        func.instruction(&Instruction::LocalSet(left_off));
+
+                        // result = 1 (equal until a mismatch is found)
+                        func.instruction(&Instruction::I32Const(1));
+                        func.instruction(&Instruction::LocalSet(result));
+
+                        func.instruction(&Instruction::Block(BlockType::Empty));
+                        // Different lengths => not equal.
+                        func.instruction(&Instruction::LocalGet(left_len));
+                        func.instruction(&Instruction::LocalGet(right_len));
+                        func.instruction(&Instruction::I32Ne);
+                        func.instruction(&Instruction::If(BlockType::Empty));
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::LocalSet(result));
+                        func.instruction(&Instruction::Br(1)); // exit outer block
+                        func.instruction(&Instruction::End);
+
+                        // Compare bytes until the end or a mismatch.
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::LocalSet(counter));
+                        func.instruction(&Instruction::Loop(BlockType::Empty));
+                        // counter >= len => every byte matched; result stays 1.
+                        func.instruction(&Instruction::LocalGet(counter));
+                        func.instruction(&Instruction::LocalGet(left_len));
+                        func.instruction(&Instruction::I32GeS);
+                        func.instruction(&Instruction::BrIf(1)); // exit outer block
+                                                                 // left[counter]
+                        func.instruction(&Instruction::LocalGet(left_off));
+                        func.instruction(&Instruction::LocalGet(counter));
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::I32Load8U(MemArg {
+                            offset: 0,
+                            align: 0,
+                            memory_index: 0,
+                        }));
+                        // right[counter]
+                        func.instruction(&Instruction::LocalGet(right_off));
+                        func.instruction(&Instruction::LocalGet(counter));
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::I32Load8U(MemArg {
+                            offset: 0,
+                            align: 0,
+                            memory_index: 0,
+                        }));
+                        func.instruction(&Instruction::I32Ne);
+                        func.instruction(&Instruction::If(BlockType::Empty));
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::LocalSet(result));
+                        func.instruction(&Instruction::Br(2)); // exit outer block
+                        func.instruction(&Instruction::End);
+                        // counter += 1
+                        func.instruction(&Instruction::LocalGet(counter));
+                        func.instruction(&Instruction::I32Const(1));
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::LocalSet(counter));
+                        func.instruction(&Instruction::Br(0)); // continue loop
+                        func.instruction(&Instruction::End); // loop
+                        func.instruction(&Instruction::End); // block
+
+                        func.instruction(&Instruction::LocalGet(result));
+                        if matches!(op, IRCompareOp::NotEq) {
+                            func.instruction(&Instruction::I32Eqz);
+                        }
+                    }
+                    _ => {
+                        // Ordering/identity on str/bytes isn't supported yet; drop
+                        // both (offset, length) pairs and yield a constant.
+                        func.instruction(&Instruction::Drop);
+                        func.instruction(&Instruction::Drop);
+                        func.instruction(&Instruction::Drop);
+                        func.instruction(&Instruction::Drop);
+                        func.instruction(&Instruction::I32Const(0));
+                    }
+                }
+                return IRType::Bool;
+            }
+
             // Handle type coercion for comparison
             if left_type == IRType::Float && right_type == IRType::Int {
                 func.instruction(&Instruction::F64ConvertI32S);
@@ -1453,8 +1554,21 @@ pub fn emit_expr(
                     func.instruction(&Instruction::End);
                     func.instruction(&Instruction::End);
 
-                    // Push the looked-up value (0 if the key was not found)
+                    // Push the looked-up value (0 if the key was not found).
                     func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
+                    // For string/bytes values the word is the blob offset; rebuild
+                    // the (offset, length) pair from the length prefix, matching
+                    // list/tuple read-back in `load_collection_word`. See #91.
+                    if matches!(value_type.as_ref(), IRType::String | IRType::Bytes) {
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
+                        func.instruction(&Instruction::I32Const(STRING_LEN_PREFIX as i32));
+                        func.instruction(&Instruction::I32Sub);
+                        func.instruction(&Instruction::I32Load(MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                    }
 
                     value_type.as_ref().clone()
                 }
@@ -1588,10 +1702,74 @@ pub fn emit_expr(
                         func.instruction(&Instruction::Drop);
                     }
 
-                    // Result: (new_offset = offset + lo, new_length)
+                    // A slice's bytes live inside the source blob, so its offset
+                    // points partway into that blob rather than past a length
+                    // prefix. Allocate a fresh `[len:i32][bytes][nul?]` blob and
+                    // copy the slice into it (mirroring concatenation) so the
+                    // value carries a recoverable length prefix — the layout the
+                    // rest of the compiler assumes for collection read-back
+                    // (`load(offset - 4)`). See #92. `scratch` holds new_length.
+                    let is_string = matches!(container_type, IRType::String);
+                    let prefix = STRING_LEN_PREFIX as i32;
+                    let src = ctx.temp_local; // slice source offset
+                    let blk = ctx.temp_local + 1; // allocated block / data ptr
+
+                    // src = offset + lo
                     func.instruction(&Instruction::LocalGet(off));
                     func.instruction(&Instruction::LocalGet(lo));
                     func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::LocalSet(src));
+
+                    // block = __alloc(prefix + new_length [+ 1 for NUL])
+                    func.instruction(&Instruction::I32Const(prefix));
+                    func.instruction(&Instruction::LocalGet(scratch));
+                    func.instruction(&Instruction::I32Add);
+                    if is_string {
+                        func.instruction(&Instruction::I32Const(1));
+                        func.instruction(&Instruction::I32Add);
+                    }
+                    func.instruction(&Instruction::Call(ctx.alloc_func_index));
+                    func.instruction(&Instruction::LocalSet(blk));
+
+                    // Write the length prefix at the block start.
+                    func.instruction(&Instruction::LocalGet(blk));
+                    func.instruction(&Instruction::LocalGet(scratch));
+                    func.instruction(&Instruction::I32Store(MemArg {
+                        offset: 0,
+                        align: 2,
+                        memory_index: 0,
+                    }));
+
+                    // data_ptr = block + prefix (the value's offset)
+                    func.instruction(&Instruction::LocalGet(blk));
+                    func.instruction(&Instruction::I32Const(prefix));
+                    func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::LocalSet(blk)); // data_ptr
+
+                    // memory.copy(data_ptr, src, new_length)
+                    func.instruction(&Instruction::LocalGet(blk));
+                    func.instruction(&Instruction::LocalGet(src));
+                    func.instruction(&Instruction::LocalGet(scratch));
+                    func.instruction(&Instruction::MemoryCopy {
+                        src_mem: 0,
+                        dst_mem: 0,
+                    });
+
+                    // Strings are NUL-terminated; write it past the data.
+                    if is_string {
+                        func.instruction(&Instruction::LocalGet(blk));
+                        func.instruction(&Instruction::LocalGet(scratch));
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::I32Store8(MemArg {
+                            offset: 0,
+                            align: 0,
+                            memory_index: 0,
+                        }));
+                    }
+
+                    // Result: (data_ptr, new_length)
+                    func.instruction(&Instruction::LocalGet(blk));
                     func.instruction(&Instruction::LocalGet(scratch));
 
                     container_type.clone()

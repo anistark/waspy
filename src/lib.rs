@@ -1056,4 +1056,63 @@ mod collection_tests {
         // underflowed the stack; it now resolves the submodule attribute.
         instantiate("import os\ndef f():\n    print(\"sep:\", os.path.sep)\n");
     }
+
+    #[test]
+    fn string_equality_compares_contents() {
+        // `==`/`!=` on str/bytes previously fell through to the integer path,
+        // which compared only the top word (the right operand's length) and
+        // stranded the left pair, so even equal strings compared unequal (#90).
+        let eq =
+            "def f() -> int:\n    a = \"hello\"\n    b = \"hello\"\n    if a == b:\n        return 1\n    return 0\n";
+        assert_eq!(call_i32(eq, "f"), 1);
+        let ne_same =
+            "def f() -> int:\n    a = \"hello\"\n    b = \"hello\"\n    if a != b:\n        return 1\n    return 0\n";
+        assert_eq!(call_i32(ne_same, "f"), 0);
+        let neq =
+            "def f() -> int:\n    a = \"hello\"\n    b = \"world\"\n    if a == b:\n        return 1\n    return 0\n";
+        assert_eq!(call_i32(neq, "f"), 0);
+        // Different lengths short-circuit before the byte loop.
+        let diff_len =
+            "def f() -> int:\n    a = \"hi\"\n    b = \"hello\"\n    if a == b:\n        return 1\n    return 0\n";
+        assert_eq!(call_i32(diff_len, "f"), 0);
+        // A runtime-built operand (concatenation) has a distinct offset, so a
+        // content compare — not an offset compare — is required.
+        let runtime =
+            "def f() -> int:\n    a = \"foo\" + \"bar\"\n    b = \"foobar\"\n    if a == b:\n        return 1\n    return 0\n";
+        assert_eq!(call_i32(runtime, "f"), 1);
+        let bytes_eq =
+            "def f() -> int:\n    a = b\"abc\"\n    b = b\"abc\"\n    if a == b:\n        return 1\n    return 0\n";
+        assert_eq!(call_i32(bytes_eq, "f"), 1);
+    }
+
+    #[test]
+    fn dict_string_value_read_back_has_length() {
+        // Reading a str/bytes value out of a dict dropped its length (#91): the
+        // matched value word is the blob offset, so rebuild (offset, length)
+        // from the length prefix like list/tuple read-back does.
+        let src =
+            "def f() -> int:\n    d = {1: \"value\", 2: \"xy\"}\n    w = d[1]\n    return len(w)\n";
+        assert_eq!(call_i32(src, "f"), 5);
+        let other =
+            "def f() -> int:\n    d = {1: \"value\", 2: \"xy\"}\n    w = d[2]\n    return len(w)\n";
+        assert_eq!(call_i32(other, "f"), 2);
+    }
+
+    #[test]
+    fn string_slice_into_collection_has_length() {
+        // A slice's offset points into the source blob, not past a fresh length
+        // prefix, so collection read-back (load(offset - 4)) read the source's
+        // length. Slicing now allocates a prefixed blob (#92).
+        let into_list =
+            "def f() -> int:\n    s = \"hello world\"\n    part = s[0:5]\n    xs = [part]\n    w = xs[0]\n    return len(w)\n";
+        assert_eq!(call_i32(into_list, "f"), 5);
+        let bytes_into_tuple =
+            "def f() -> int:\n    b = b\"hello world\"\n    part = b[6:11]\n    t = (part,)\n    w = t[0]\n    return len(w)\n";
+        assert_eq!(call_i32(bytes_into_tuple, "f"), 5);
+        // The relocated blob still holds the right bytes (bytes indexing
+        // returns the byte value; string indexing would return a char offset).
+        let content =
+            "def f() -> int:\n    b = b\"hello world\"\n    part = b[6:11]\n    return part[0]\n";
+        assert_eq!(call_i32(content, "f"), 119); // 'w'
+    }
 }
