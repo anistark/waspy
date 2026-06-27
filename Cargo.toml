@@ -1,6 +1,6 @@
 [package]
 name = "waspy"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
 rust-version = "1.70.0"
 description = "A Python interpreter written in Rust, designed for WebAssembly."
@@ -9,7 +9,7 @@ repository = "https://github.com/anistark/waspy"
 keywords = ["python", "interpreter", "webassembly", "wasm", "compiler"]
 categories = ["compilers", "wasm", "web-programming", "development-tools"]
 readme = "README.md"
-documentation = "https://docs.rs/wasmrun"
+documentation = "https://docs.rs/waspy"
 authors = ["Kumar Anirudha <hi@anirudha.dev>"]
 include = [
     "src/**/*.rs",
