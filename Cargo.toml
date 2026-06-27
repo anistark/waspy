@@ -12,11 +12,11 @@ readme = "README.md"
 documentation = "https://docs.rs/waspy"
 authors = ["Kumar Anirudha <hi@anirudha.dev>"]
 include = [
-    "src/**/*.rs",
-    "Cargo.toml",
-    "README.md",
-    "LICENSE",
-    "CONTRIBUTING.md",
+    "/src/**/*.rs",
+    "/Cargo.toml",
+    "/README.md",
+    "/LICENSE",
+    "/CONTRIBUTING.md",
 ]
 
 [features]
