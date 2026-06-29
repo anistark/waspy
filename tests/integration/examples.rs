@@ -129,3 +129,41 @@ fn break_exits_innermost_loop_only() {
     let src = read_example("loop_control.py");
     assert_eq!(call_i32(&src, "count_inner_breaks"), 3);
 }
+
+/// Statically nested list-of-lists: each inner literal occupies its own region,
+/// so `grid[0][1] + grid[1][0]` reads 2 + 3 = 5 (Issue #14).
+#[test]
+fn nested_list_indexing() {
+    let src = read_example("nested_collections.py");
+    assert_eq!(call_i32(&src, "nested_grid"), 5);
+}
+
+/// A list literal built inside a loop that escapes must get a fresh region per
+/// iteration, allocated from the runtime heap rather than the one compile-time
+/// region every iteration would otherwise share. `grid[0][0]` stays 0 and
+/// `grid[2][0]` is 2, so the result is 0*100 + 2 = 2; aliasing would give 202
+/// (every row pointing at the last iteration's data). Issue #14.
+#[test]
+fn per_iteration_collection_does_not_alias() {
+    let src = read_example("nested_collections.py");
+    assert_eq!(call_i32(&src, "loop_escape"), 2);
+}
+
+/// Float dict values round-trip through the one-word slot (stored as f32 and
+/// widened back to f64 on read): `d[1] + d[2]` = 3.5 + 7.5 = 11.0, truncated to
+/// 11. Before this fix the dict store emitted an `i32.store` of an `f64`,
+/// producing an invalid module.
+#[test]
+fn float_dict_values_round_trip() {
+    let src = read_example("nested_collections.py");
+    assert_eq!(call_i32(&src, "float_dict_sum"), 11);
+}
+
+/// Float set members de-duplicate by value: `{1.5, 1.5, 2.5}` has two distinct
+/// members. The float is narrowed to its f32 bit pattern so the i32 dedup
+/// search compares it correctly (and the module stays valid).
+#[test]
+fn float_set_members_dedup() {
+    let src = read_example("nested_collections.py");
+    assert_eq!(call_i32(&src, "float_set_size"), 2);
+}

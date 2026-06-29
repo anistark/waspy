@@ -22,6 +22,25 @@ fn narrow_element_to_word(func: &mut Function, elem_type: &IRType) {
     }
 }
 
+/// Reduce a freshly emitted collection element to the single i32 word that is
+/// its stored representation, leaving that word on the stack. Floats become
+/// their f32 bit pattern (so an i32 local/store/compare handles them uniformly,
+/// e.g. set dedup by bit equality); string/bytes collapse to their interned
+/// offset (the length is recovered on read-back); ints/bools are already i32.
+/// Read-back paths reinterpret the word according to the element type.
+fn narrow_element_to_i32_word(func: &mut Function, elem_type: &IRType) {
+    match elem_type {
+        IRType::Float => {
+            func.instruction(&Instruction::F32DemoteF64);
+            func.instruction(&Instruction::I32ReinterpretF32);
+        }
+        IRType::String | IRType::Bytes => {
+            func.instruction(&Instruction::Drop);
+        }
+        _ => {}
+    }
+}
+
 /// Store the value on top of the stack into a 4-byte collection slot (the
 /// destination address must be pushed first). Floats are narrowed to f32 so
 /// they fit the one-word-per-element layout; everything else is already an
@@ -85,6 +104,51 @@ fn load_collection_word(func: &mut Function, elem_type: &IRType, scratch: u32) {
             }));
         }
     }
+}
+
+/// Finalize a collection literal that was built into the compile-time template
+/// region at `template_ptr` (the `size` bytes reserved by `alloc_collection`),
+/// leaving the pointer the expression evaluates to on the stack.
+///
+/// Outside any loop the template region is unique to this literal, so the
+/// template pointer is the result directly (the historical behavior). Inside a
+/// loop the single template is rebuilt every iteration, so a per-iteration
+/// literal that escapes the loop would alias every other iteration's. Copy the
+/// freshly built region into a runtime `__alloc` block and return that pointer
+/// instead, giving each iteration its own region (#14). Nested literals compose:
+/// an inner literal stores its own runtime pointer into the outer template
+/// before the outer region is copied out.
+fn emit_collection_result(
+    func: &mut Function,
+    ctx: &CompilationContext,
+    template_ptr: u32,
+    size: u32,
+) {
+    if ctx.loop_stack.is_empty() {
+        func.instruction(&Instruction::I32Const(template_ptr as i32));
+        return;
+    }
+
+    // Round to the same 8-byte granularity `alloc_collection` used so the copy
+    // stays inside the reserved template and the runtime block is aligned.
+    let aligned = (size + 7) & !7;
+    let dst = ctx.temp_local + 7;
+
+    // dst = __alloc(aligned)
+    func.instruction(&Instruction::I32Const(aligned as i32));
+    func.instruction(&Instruction::Call(ctx.alloc_func_index));
+    func.instruction(&Instruction::LocalSet(dst));
+
+    // memory.copy(dst, template_ptr, aligned)
+    func.instruction(&Instruction::LocalGet(dst));
+    func.instruction(&Instruction::I32Const(template_ptr as i32));
+    func.instruction(&Instruction::I32Const(aligned as i32));
+    func.instruction(&Instruction::MemoryCopy {
+        src_mem: 0,
+        dst_mem: 0,
+    });
+
+    func.instruction(&Instruction::LocalGet(dst));
 }
 
 /// Emit WebAssembly instructions for an IR expression
@@ -1187,11 +1251,12 @@ pub fn emit_expr(
                     align: 2,
                     memory_index: 0,
                 }));
-                func.instruction(&Instruction::I32Const(list_ptr as i32));
+                emit_collection_result(func, ctx, list_ptr, 4);
                 return IRType::List(Box::new(IRType::Unknown));
             }
 
-            let list_ptr = ctx.alloc_collection(4 + elements.len() as u32 * 4);
+            let list_size = 4 + elements.len() as u32 * 4;
+            let list_ptr = ctx.alloc_collection(list_size);
 
             // Store length at the beginning
             func.instruction(&Instruction::I32Const(list_ptr as i32));
@@ -1221,7 +1286,7 @@ pub fn emit_expr(
             }
 
             // Return pointer to the list
-            func.instruction(&Instruction::I32Const(list_ptr as i32));
+            emit_collection_result(func, ctx, list_ptr, list_size);
             IRType::List(Box::new(elem_type))
         }
         IRExpr::SetLiteral(elements) => {
@@ -1240,11 +1305,12 @@ pub fn emit_expr(
                     align: 2,
                     memory_index: 0,
                 }));
-                func.instruction(&Instruction::I32Const(set_ptr as i32));
+                emit_collection_result(func, ctx, set_ptr, 4);
                 return IRType::Set(Box::new(IRType::Unknown));
             }
 
-            let set_ptr = ctx.alloc_collection(4 + elements.len() as u32 * 4);
+            let set_size = 4 + elements.len() as u32 * 4;
+            let set_ptr = ctx.alloc_collection(set_size);
 
             // Start with an empty set (count = 0).
             func.instruction(&Instruction::I32Const(set_ptr as i32));
@@ -1258,9 +1324,11 @@ pub fn emit_expr(
             let mut elem_type = IRType::Unknown;
             for (i, elem) in elements.iter().enumerate() {
                 // Evaluate the element first (this may use scratch locals), then
-                // stash it before running the dedup search.
+                // stash it before running the dedup search. The element is
+                // reduced to its i32 stored word so the i32 store/compare dedup
+                // below works uniformly (floats dedup by f32 bit equality).
                 let ty = emit_expr(elem, func, ctx, memory_layout, None);
-                narrow_element_to_word(func, &ty);
+                narrow_element_to_i32_word(func, &ty);
                 if i == 0 {
                     elem_type = ty;
                 }
@@ -1342,7 +1410,7 @@ pub fn emit_expr(
             }
 
             // Return pointer to the set
-            func.instruction(&Instruction::I32Const(set_ptr as i32));
+            emit_collection_result(func, ctx, set_ptr, set_size);
             IRType::Set(Box::new(elem_type))
         }
         IRExpr::TupleLiteral(elements) => {
@@ -1357,11 +1425,12 @@ pub fn emit_expr(
                     align: 2,
                     memory_index: 0,
                 }));
-                func.instruction(&Instruction::I32Const(tuple_ptr as i32));
+                emit_collection_result(func, ctx, tuple_ptr, 4);
                 return IRType::Tuple(vec![]);
             }
 
-            let tuple_ptr = ctx.alloc_collection(4 + elements.len() as u32 * 4);
+            let tuple_size = 4 + elements.len() as u32 * 4;
+            let tuple_ptr = ctx.alloc_collection(tuple_size);
 
             // Store length at the beginning
             func.instruction(&Instruction::I32Const(tuple_ptr as i32));
@@ -1387,12 +1456,13 @@ pub fn emit_expr(
                 element_types.push(elem_type);
             }
 
-            func.instruction(&Instruction::I32Const(tuple_ptr as i32));
+            emit_collection_result(func, ctx, tuple_ptr, tuple_size);
             IRType::Tuple(element_types)
         }
         IRExpr::DictLiteral(pairs) => {
             // Dict layout in memory: [num_entries:i32][key0:i32][val0:i32][key1:i32][val1:i32]...
-            let dict_ptr = ctx.alloc_collection(4 + pairs.len() as u32 * 8);
+            let dict_size = 4 + pairs.len() as u32 * 8;
+            let dict_ptr = ctx.alloc_collection(dict_size);
 
             // Store number of entries
             func.instruction(&Instruction::I32Const(dict_ptr as i32));
@@ -1421,29 +1491,22 @@ pub fn emit_expr(
                 let key_addr = dict_ptr + 4 + (i as u32 * 8); // length + i*8 (key + value)
                 let val_addr = dict_ptr + 8 + (i as u32 * 8);
 
-                // Store key
+                // Store key (one word per slot; floats narrow to f32, matching
+                // list/tuple element storage so reads recover the value).
                 func.instruction(&Instruction::I32Const(key_addr as i32));
                 let k_type = emit_expr(key_expr, func, ctx, memory_layout, None);
                 narrow_element_to_word(func, &k_type);
-                func.instruction(&Instruction::I32Store(MemArg {
-                    offset: 0,
-                    align: 2,
-                    memory_index: 0,
-                }));
+                store_collection_word(func, &k_type);
 
                 // Store value
                 func.instruction(&Instruction::I32Const(val_addr as i32));
                 let v_type = emit_expr(val_expr, func, ctx, memory_layout, None);
                 narrow_element_to_word(func, &v_type);
-                func.instruction(&Instruction::I32Store(MemArg {
-                    offset: 0,
-                    align: 2,
-                    memory_index: 0,
-                }));
+                store_collection_word(func, &v_type);
             }
 
             // Return pointer to the dict
-            func.instruction(&Instruction::I32Const(dict_ptr as i32));
+            emit_collection_result(func, ctx, dict_ptr, dict_size);
             IRType::Dict(Box::new(key_type), Box::new(value_type))
         }
         IRExpr::Indexing { container, index } => {
@@ -1580,20 +1643,35 @@ pub fn emit_expr(
                     func.instruction(&Instruction::End);
                     func.instruction(&Instruction::End);
 
-                    // Push the looked-up value (0 if the key was not found).
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
-                    // For string/bytes values the word is the blob offset; rebuild
-                    // the (offset, length) pair from the length prefix, matching
-                    // list/tuple read-back in `load_collection_word`. See #91.
-                    if matches!(value_type.as_ref(), IRType::String | IRType::Bytes) {
-                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
-                        func.instruction(&Instruction::I32Const(STRING_LEN_PREFIX as i32));
-                        func.instruction(&Instruction::I32Sub);
-                        func.instruction(&Instruction::I32Load(MemArg {
-                            offset: 0,
-                            align: 2,
-                            memory_index: 0,
-                        }));
+                    // Push the looked-up value (0 / 0.0 if the key was not found).
+                    // The slot holds one raw word; rebuild the runtime value from
+                    // it according to the value type.
+                    match value_type.as_ref() {
+                        // Float values are stored as f32 bits (one word), like
+                        // list/tuple slots; reinterpret and widen back to f64.
+                        IRType::Float => {
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
+                            func.instruction(&Instruction::F32ReinterpretI32);
+                            func.instruction(&Instruction::F64PromoteF32);
+                        }
+                        // For string/bytes values the word is the blob offset;
+                        // rebuild the (offset, length) pair from the length prefix,
+                        // matching list/tuple read-back in `load_collection_word`.
+                        // See #91.
+                        IRType::String | IRType::Bytes => {
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
+                            func.instruction(&Instruction::I32Const(STRING_LEN_PREFIX as i32));
+                            func.instruction(&Instruction::I32Sub);
+                            func.instruction(&Instruction::I32Load(MemArg {
+                                offset: 0,
+                                align: 2,
+                                memory_index: 0,
+                            }));
+                        }
+                        _ => {
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
+                        }
                     }
 
                     value_type.as_ref().clone()
