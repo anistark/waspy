@@ -139,6 +139,69 @@ fn store_stashed_needle(
     }
 }
 
+// --- Set hash table (#P3) ------------------------------------------------
+//
+// A set is an open-addressing hash table with linear probing, so membership and
+// construction dedup are (amortised) constant time instead of linear scans:
+//
+//   [count:i32][cap:i32][bucket0][bucket1]...[bucket_{cap-1}]
+//
+// `cap` is a power of two (so the bucket index is `hash & (cap-1)`) and is
+// always strictly greater than the member count, which guarantees that probing
+// always meets an empty bucket and therefore terminates. Each bucket is
+//
+//   [state:i32][_pad:i32][value:8 bytes]
+//
+// where state 0 = empty and 1 = occupied; the value slot holds a full f64 (or an
+// i32 in its low word), matching the element widths used elsewhere. The member
+// count stays at offset 0, so `len(set)` is unchanged. Sets are only ever built
+// as literals and then queried with `in`/`len` (no iteration, no `.add`), so the
+// table never needs to grow or rehash.
+
+/// Bytes of set header: `count` then `cap`, both i32.
+const SET_HEADER: u32 = 8;
+/// Bytes per bucket: `state` (i32) + padding + an 8-byte value.
+const SET_BUCKET: u32 = 16;
+/// Byte offset of the value within a bucket (past the state word + padding).
+const SET_BUCKET_VALUE: u32 = 8;
+
+/// Power-of-two capacity for a set literal of `n` elements. Kept at >= 2*n (load
+/// factor <= 0.5) and >= 1 so a probe always finds an empty bucket.
+fn set_capacity(n: usize) -> u32 {
+    let target = (n as u32).saturating_mul(2).max(1);
+    let mut cap = 1u32;
+    while cap < target {
+        cap <<= 1;
+    }
+    cap
+}
+
+/// Push the i32 hash of the needle stashed by [`stash_search_needle`]. For floats
+/// the f64 bit pattern's two halves are folded together (small floats like 1.5 /
+/// 2.5 share their low 32 bits, so hashing only the low word would collide every
+/// one). The caller masks the result with `cap - 1`.
+fn emit_set_hash(
+    func: &mut Function,
+    ctx: &CompilationContext,
+    elem_type: &IRType,
+    needle_i32: u32,
+) {
+    if matches!(elem_type, IRType::Float) {
+        // high32(bits) ^ low32(bits)
+        func.instruction(&Instruction::LocalGet(ctx.temp_local_f64));
+        func.instruction(&Instruction::I64ReinterpretF64);
+        func.instruction(&Instruction::I64Const(32));
+        func.instruction(&Instruction::I64ShrU);
+        func.instruction(&Instruction::I32WrapI64);
+        func.instruction(&Instruction::LocalGet(ctx.temp_local_f64));
+        func.instruction(&Instruction::I64ReinterpretF64);
+        func.instruction(&Instruction::I32WrapI64);
+        func.instruction(&Instruction::I32Xor);
+    } else {
+        func.instruction(&Instruction::LocalGet(needle_i32));
+    }
+}
+
 /// Finalize a collection literal that was built into the compile-time template
 /// region at `template_ptr` (the `size` bytes reserved by `alloc_collection`),
 /// leaving the pointer the expression evaluates to on the stack.
@@ -747,10 +810,10 @@ pub fn emit_expr(
                 stash_search_needle(func, ctx, &elem_type, ctx.temp_local + 1);
                 let container_type = emit_expr(right, func, ctx, memory_layout, None);
 
-                // Sets and lists share the [count:i32][elem0][elem1]... layout, so
-                // one linear scan covers both. Other containers fall back to a
-                // conservative constant result.
-                let searchable = matches!(container_type, IRType::Set(_) | IRType::List(_));
+                // A set is a hash table (constant-time probe); a list is a linear
+                // scan. Other containers fall back to a conservative constant.
+                let is_set = matches!(container_type, IRType::Set(_));
+                let searchable = is_set || matches!(container_type, IRType::List(_));
 
                 if !searchable {
                     func.instruction(&Instruction::Drop); // container pointer
@@ -763,45 +826,119 @@ pub fn emit_expr(
 
                 // Stack: (container_ptr); the needle is already stashed.
                 func.instruction(&Instruction::LocalSet(ctx.temp_local)); // container_ptr
-
-                // count = load(container_ptr)
-                func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                func.instruction(&Instruction::I32Load(slot_arg()));
-                func.instruction(&Instruction::LocalSet(ctx.temp_local + 2)); // count
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::LocalSet(ctx.temp_local + 3)); // counter
                 func.instruction(&Instruction::I32Const(0));
                 func.instruction(&Instruction::LocalSet(ctx.temp_local + 4)); // found
 
-                func.instruction(&Instruction::Block(BlockType::Empty));
-                func.instruction(&Instruction::Loop(BlockType::Empty));
-                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
-                func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
-                func.instruction(&Instruction::I32GeS);
-                func.instruction(&Instruction::BrIf(1));
-                // slot address = container_ptr + HEADER + counter*SLOT
-                func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
-                func.instruction(&Instruction::I32Add);
-                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
-                func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
-                func.instruction(&Instruction::I32Mul);
-                func.instruction(&Instruction::I32Add);
-                emit_slot_eq_needle(func, ctx, &elem_type, ctx.temp_local + 1);
-                func.instruction(&Instruction::If(BlockType::Empty));
-                func.instruction(&Instruction::I32Const(1));
-                func.instruction(&Instruction::LocalSet(ctx.temp_local + 4)); // found = 1
-                func.instruction(&Instruction::Br(2));
-                func.instruction(&Instruction::End);
-                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
-                func.instruction(&Instruction::I32Const(1));
-                func.instruction(&Instruction::I32Add);
-                func.instruction(&Instruction::LocalSet(ctx.temp_local + 3));
-                func.instruction(&Instruction::Br(0));
-                func.instruction(&Instruction::End); // loop
-                func.instruction(&Instruction::End); // block
+                if is_set {
+                    // Hash-table membership: probe from the home bucket until the
+                    // value is found or an empty bucket is reached.
+                    let mask = ctx.temp_local + 2;
+                    let idx = ctx.temp_local + 3;
+                    let bucket = ctx.temp_local + 5;
+                    let probes = ctx.temp_local + 6;
 
-                func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
+                    // mask = cap - 1  (cap at container_ptr + 4)
+                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                    func.instruction(&Instruction::I32Const(4));
+                    func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::I32Load(slot_arg()));
+                    func.instruction(&Instruction::I32Const(1));
+                    func.instruction(&Instruction::I32Sub);
+                    func.instruction(&Instruction::LocalSet(mask));
+                    // idx = hash(needle) & mask
+                    emit_set_hash(func, ctx, &elem_type, ctx.temp_local + 1);
+                    func.instruction(&Instruction::LocalGet(mask));
+                    func.instruction(&Instruction::I32And);
+                    func.instruction(&Instruction::LocalSet(idx));
+                    // probes = 0
+                    func.instruction(&Instruction::I32Const(0));
+                    func.instruction(&Instruction::LocalSet(probes));
+
+                    func.instruction(&Instruction::Block(BlockType::Empty));
+                    func.instruction(&Instruction::Loop(BlockType::Empty));
+                    // Examined every bucket without a match -> stop.
+                    func.instruction(&Instruction::LocalGet(probes));
+                    func.instruction(&Instruction::LocalGet(mask));
+                    func.instruction(&Instruction::I32GtU);
+                    func.instruction(&Instruction::BrIf(1));
+                    // bucket = container_ptr + SET_HEADER + idx*SET_BUCKET
+                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                    func.instruction(&Instruction::I32Const(SET_HEADER as i32));
+                    func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::LocalGet(idx));
+                    func.instruction(&Instruction::I32Const(SET_BUCKET as i32));
+                    func.instruction(&Instruction::I32Mul);
+                    func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::LocalSet(bucket));
+                    // Empty bucket -> not present, stop.
+                    func.instruction(&Instruction::LocalGet(bucket));
+                    func.instruction(&Instruction::I32Load(slot_arg())); // state
+                    func.instruction(&Instruction::I32Eqz);
+                    func.instruction(&Instruction::If(BlockType::Empty));
+                    func.instruction(&Instruction::Br(2));
+                    func.instruction(&Instruction::End);
+                    // Value matches -> found, stop.
+                    func.instruction(&Instruction::LocalGet(bucket));
+                    func.instruction(&Instruction::I32Const(SET_BUCKET_VALUE as i32));
+                    func.instruction(&Instruction::I32Add);
+                    emit_slot_eq_needle(func, ctx, &elem_type, ctx.temp_local + 1);
+                    func.instruction(&Instruction::If(BlockType::Empty));
+                    func.instruction(&Instruction::I32Const(1));
+                    func.instruction(&Instruction::LocalSet(ctx.temp_local + 4)); // found
+                    func.instruction(&Instruction::Br(2));
+                    func.instruction(&Instruction::End);
+                    // idx = (idx + 1) & mask; probes += 1
+                    func.instruction(&Instruction::LocalGet(idx));
+                    func.instruction(&Instruction::I32Const(1));
+                    func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::LocalGet(mask));
+                    func.instruction(&Instruction::I32And);
+                    func.instruction(&Instruction::LocalSet(idx));
+                    func.instruction(&Instruction::LocalGet(probes));
+                    func.instruction(&Instruction::I32Const(1));
+                    func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::LocalSet(probes));
+                    func.instruction(&Instruction::Br(0));
+                    func.instruction(&Instruction::End); // loop
+                    func.instruction(&Instruction::End); // block
+                } else {
+                    // List membership: linear scan over [count][elem0][elem1]...
+                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                    func.instruction(&Instruction::I32Load(slot_arg()));
+                    func.instruction(&Instruction::LocalSet(ctx.temp_local + 2)); // count
+                    func.instruction(&Instruction::I32Const(0));
+                    func.instruction(&Instruction::LocalSet(ctx.temp_local + 3)); // counter
+
+                    func.instruction(&Instruction::Block(BlockType::Empty));
+                    func.instruction(&Instruction::Loop(BlockType::Empty));
+                    func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
+                    func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
+                    func.instruction(&Instruction::I32GeS);
+                    func.instruction(&Instruction::BrIf(1));
+                    // slot address = container_ptr + HEADER + counter*SLOT
+                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                    func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
+                    func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
+                    func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+                    func.instruction(&Instruction::I32Mul);
+                    func.instruction(&Instruction::I32Add);
+                    emit_slot_eq_needle(func, ctx, &elem_type, ctx.temp_local + 1);
+                    func.instruction(&Instruction::If(BlockType::Empty));
+                    func.instruction(&Instruction::I32Const(1));
+                    func.instruction(&Instruction::LocalSet(ctx.temp_local + 4)); // found = 1
+                    func.instruction(&Instruction::Br(2));
+                    func.instruction(&Instruction::End);
+                    func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
+                    func.instruction(&Instruction::I32Const(1));
+                    func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::LocalSet(ctx.temp_local + 3));
+                    func.instruction(&Instruction::Br(0));
+                    func.instruction(&Instruction::End); // loop
+                    func.instruction(&Instruction::End); // block
+                }
+
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 4)); // found
                 if matches!(op, IRCompareOp::NotIn) {
                     func.instruction(&Instruction::I32Eqz);
                 }
@@ -1303,95 +1440,99 @@ pub fn emit_expr(
             IRType::List(Box::new(elem_type))
         }
         IRExpr::SetLiteral(elements) => {
-            // Set layout in memory: [num_elements:i32][elem0][elem1]... Each
-            // member occupies one COLLECTION_SLOT. A set drops duplicate
-            // elements, so the stored count is computed at runtime as elements
-            // are inserted (it may be smaller than the literal element count).
-
-            // Empty set: store a count of 0 so membership tests read a valid header.
-            if elements.is_empty() {
-                let set_ptr = ctx.alloc_collection(COLLECTION_HEADER);
-                func.instruction(&Instruction::I32Const(set_ptr as i32));
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::I32Store(slot_arg()));
-                emit_collection_result(func, ctx, set_ptr, COLLECTION_HEADER);
-                return IRType::Set(Box::new(IRType::Unknown));
-            }
-
-            let set_size = COLLECTION_HEADER + elements.len() as u32 * COLLECTION_SLOT;
+            // Build the set as an open-addressing hash table (see the SET_*
+            // helpers): dedup-on-insert and `in` are constant time instead of
+            // linear scans. `cap` is a compile-time power of two >= 2*len, so a
+            // probe always meets an empty bucket.
+            let cap = set_capacity(elements.len());
+            let mask = (cap - 1) as i32;
+            let set_size = SET_HEADER + cap * SET_BUCKET;
             let set_ptr = ctx.alloc_collection(set_size);
 
-            // Start with an empty set (count = 0).
+            // Zero the whole region so every bucket starts empty (state 0) and
+            // count is 0. This also clears any stale state when the same template
+            // region is rebuilt on each iteration of an enclosing loop.
             func.instruction(&Instruction::I32Const(set_ptr as i32));
             func.instruction(&Instruction::I32Const(0));
+            func.instruction(&Instruction::I32Const(set_size as i32));
+            func.instruction(&Instruction::MemoryFill(0));
+            // Store the capacity at offset 4 (count at offset 0 stays 0).
+            func.instruction(&Instruction::I32Const((set_ptr + 4) as i32));
+            func.instruction(&Instruction::I32Const(cap as i32));
             func.instruction(&Instruction::I32Store(slot_arg()));
+
+            let idx = ctx.temp_local + 2;
+            let bucket = ctx.temp_local + 3;
 
             let mut elem_type = IRType::Unknown;
             for (i, elem) in elements.iter().enumerate() {
-                // Evaluate the element first (this may use scratch locals), then
-                // stash it before running the dedup search. The needle lands in
-                // a type-appropriate scratch local (f64 for floats) so the
-                // compare below dedups floats by value, not a lossy bit pattern.
+                // Evaluate the element, stash it as a needle (f64 for floats), and
+                // compute its home bucket: idx = hash(elem) & (cap - 1).
                 let ty = emit_expr(elem, func, ctx, memory_layout, None);
                 if i == 0 {
                     elem_type = ty.clone();
                 }
                 stash_search_needle(func, ctx, &ty, ctx.temp_local + 1);
+                emit_set_hash(func, ctx, &ty, ctx.temp_local + 1);
+                func.instruction(&Instruction::I32Const(mask));
+                func.instruction(&Instruction::I32And);
+                func.instruction(&Instruction::LocalSet(idx));
 
-                // count = load(set_ptr)
-                func.instruction(&Instruction::I32Const(set_ptr as i32));
-                func.instruction(&Instruction::I32Load(slot_arg()));
-                func.instruction(&Instruction::LocalSet(ctx.temp_local + 2)); // count
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::LocalSet(ctx.temp_local + 3)); // counter
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::LocalSet(ctx.temp_local + 4)); // found
+                // Linear-probe to the home bucket or a free one (skip on dup).
+                func.instruction(&Instruction::Block(BlockType::Empty)); // $done
+                func.instruction(&Instruction::Loop(BlockType::Empty)); // $probe
 
-                // Search the existing elements for a duplicate.
-                func.instruction(&Instruction::Block(BlockType::Empty));
-                func.instruction(&Instruction::Loop(BlockType::Empty));
-                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
-                func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
-                func.instruction(&Instruction::I32GeS);
-                func.instruction(&Instruction::BrIf(1));
-                // existing slot address = set_ptr + HEADER + counter*SLOT
-                func.instruction(&Instruction::I32Const((set_ptr + COLLECTION_HEADER) as i32));
-                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
-                func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+                // bucket = set_ptr + SET_HEADER + idx*SET_BUCKET
+                func.instruction(&Instruction::I32Const((set_ptr + SET_HEADER) as i32));
+                func.instruction(&Instruction::LocalGet(idx));
+                func.instruction(&Instruction::I32Const(SET_BUCKET as i32));
                 func.instruction(&Instruction::I32Mul);
                 func.instruction(&Instruction::I32Add);
-                emit_slot_eq_needle(func, ctx, &ty, ctx.temp_local + 1);
-                func.instruction(&Instruction::If(BlockType::Empty));
-                func.instruction(&Instruction::I32Const(1));
-                func.instruction(&Instruction::LocalSet(ctx.temp_local + 4)); // found = 1
-                func.instruction(&Instruction::Br(2));
-                func.instruction(&Instruction::End);
-                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
-                func.instruction(&Instruction::I32Const(1));
-                func.instruction(&Instruction::I32Add);
-                func.instruction(&Instruction::LocalSet(ctx.temp_local + 3));
-                func.instruction(&Instruction::Br(0));
-                func.instruction(&Instruction::End); // loop
-                func.instruction(&Instruction::End); // block
+                func.instruction(&Instruction::LocalSet(bucket));
 
-                // If not already present, append at slot `count` and bump count.
-                func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
+                // Empty bucket? -> occupy it and bump count, then exit.
+                func.instruction(&Instruction::LocalGet(bucket));
+                func.instruction(&Instruction::I32Load(slot_arg())); // state
                 func.instruction(&Instruction::I32Eqz);
                 func.instruction(&Instruction::If(BlockType::Empty));
-                // address = set_ptr + HEADER + count*SLOT
-                func.instruction(&Instruction::I32Const((set_ptr + COLLECTION_HEADER) as i32));
-                func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
-                func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
-                func.instruction(&Instruction::I32Mul);
+                // state = 1
+                func.instruction(&Instruction::LocalGet(bucket));
+                func.instruction(&Instruction::I32Const(1));
+                func.instruction(&Instruction::I32Store(slot_arg()));
+                // value = needle (at bucket + SET_BUCKET_VALUE)
+                func.instruction(&Instruction::LocalGet(bucket));
+                func.instruction(&Instruction::I32Const(SET_BUCKET_VALUE as i32));
                 func.instruction(&Instruction::I32Add);
                 store_stashed_needle(func, ctx, &ty, ctx.temp_local + 1);
                 // count += 1
                 func.instruction(&Instruction::I32Const(set_ptr as i32));
-                func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
+                func.instruction(&Instruction::I32Const(set_ptr as i32));
+                func.instruction(&Instruction::I32Load(slot_arg()));
                 func.instruction(&Instruction::I32Const(1));
                 func.instruction(&Instruction::I32Add);
                 func.instruction(&Instruction::I32Store(slot_arg()));
+                func.instruction(&Instruction::Br(2)); // $done
                 func.instruction(&Instruction::End);
+
+                // Occupied by the same value? -> already a member, exit.
+                func.instruction(&Instruction::LocalGet(bucket));
+                func.instruction(&Instruction::I32Const(SET_BUCKET_VALUE as i32));
+                func.instruction(&Instruction::I32Add);
+                emit_slot_eq_needle(func, ctx, &ty, ctx.temp_local + 1);
+                func.instruction(&Instruction::If(BlockType::Empty));
+                func.instruction(&Instruction::Br(2)); // $done
+                func.instruction(&Instruction::End);
+
+                // Collision: advance idx = (idx + 1) & mask and re-probe.
+                func.instruction(&Instruction::LocalGet(idx));
+                func.instruction(&Instruction::I32Const(1));
+                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::I32Const(mask));
+                func.instruction(&Instruction::I32And);
+                func.instruction(&Instruction::LocalSet(idx));
+                func.instruction(&Instruction::Br(0)); // $probe
+                func.instruction(&Instruction::End); // loop
+                func.instruction(&Instruction::End); // block
             }
 
             // Return pointer to the set

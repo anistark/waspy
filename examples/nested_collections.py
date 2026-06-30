@@ -76,6 +76,55 @@ def float_loop_sum() -> float:
     return total
 
 
+def int_set_dedup() -> int:
+    # The set hash table drops duplicates on insert: {1, 2, 2, 3, 1} -> 3.
+    s = {1, 2, 2, 3, 1}
+    return len(s)
+
+
+def set_membership() -> int:
+    # `in` / `not in` probe the hash table.
+    s = {1, 3, 5, 7}
+    found = 0
+    if 5 in s:
+        found = found + 1
+    if 4 not in s:
+        found = found + 1
+    return found
+
+
+def set_collision_probe() -> int:
+    # With capacity 8, the values 0, 8 and 16 all hash to bucket 0, so insertion
+    # and lookup must walk the linear probe chain. All three stay distinct and
+    # are found; 24 (also bucket 0) is absent. Result: 3*10 + 1 + 1 == 32.
+    s = {0, 8, 16}
+    result = len(s) * 10
+    if 8 in s:
+        result = result + 1
+    if 24 not in s:
+        result = result + 1
+    return result
+
+
+def float_set_membership() -> int:
+    # Float set members are hashed and compared at full f64 width.
+    s = {1.5, 2.5, 3.5}
+    if 2.5 in s:
+        return 1
+    return 0
+
+
+def set_loop_fresh() -> int:
+    # A set rebuilt each iteration must start empty (stale bucket state from the
+    # previous iteration is cleared), so each pass counts exactly two distinct
+    # members: 2 * 3 == 6.
+    total = 0
+    for i in range(3):
+        s = {i, i + 100}
+        total = total + len(s)
+    return total
+
+
 def main():
     print(nested_grid())
     print(loop_escape())

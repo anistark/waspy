@@ -158,11 +158,29 @@ fn float_dict_values_round_trip() {
 }
 
 /// Float set members de-duplicate by value: `{1.5, 1.5, 2.5}` has two distinct
-/// members. Members are compared at full f64 width in the dedup search.
+/// members. Members are hashed and compared at full f64 width.
 #[test]
 fn float_set_members_dedup() {
     let src = read_example("nested_collections.py");
     assert_eq!(call_i32(&src, "float_set_size"), 2);
+}
+
+/// Set hash table (v0.12.0 P3): dedup on insert, `in`/`not in` membership, the
+/// linear-probe collision chain, float members, and stale-state clearing when a
+/// set literal is rebuilt each loop iteration.
+#[test]
+fn set_hash_table() {
+    let src = read_example("nested_collections.py");
+    // {1, 2, 2, 3, 1} dedups to 3 members.
+    assert_eq!(call_i32(&src, "int_set_dedup"), 3);
+    // `5 in s` and `4 not in s` both hold -> 2.
+    assert_eq!(call_i32(&src, "set_membership"), 2);
+    // 0, 8, 16 collide in bucket 0: probing keeps them distinct and findable.
+    assert_eq!(call_i32(&src, "set_collision_probe"), 32);
+    // `2.5 in {1.5, 2.5, 3.5}` via the f64-hashed probe.
+    assert_eq!(call_i32(&src, "float_set_membership"), 1);
+    // Each loop iteration rebuilds a 2-member set from a cleared region: 2*3.
+    assert_eq!(call_i32(&src, "set_loop_fresh"), 6);
 }
 
 /// f64 values round-trip through collection slots without precision loss (the
