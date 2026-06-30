@@ -14,6 +14,24 @@ pub const SCRATCH_LOCALS: u32 = 8;
 /// literals never overlap them.
 pub const COLLECTION_HEAP_BASE: u32 = 131072;
 
+/// Bytes reserved at the start of every collection region for its element/entry
+/// count (an `i32` at offset 0). The first slot follows immediately after.
+pub const COLLECTION_HEADER: u32 = 4;
+
+/// Bytes per collection element slot. Wide enough to hold an `f64` without loss,
+/// so float elements round-trip exactly; narrower values (i32 ints/bools,
+/// interned string/bytes offsets, collection pointers) occupy the low 4 bytes
+/// and ignore the high 4. List/tuple/set element `i` lives at
+/// `COLLECTION_HEADER + i*COLLECTION_SLOT`; a dict entry is two consecutive
+/// slots (key then value), so entry `i` starts at
+/// `COLLECTION_HEADER + i*2*COLLECTION_SLOT`. Slots sit at 4-byte (not 8-byte)
+/// alignment, which WASM permits — alignment in a load/store is only an
+/// optimization hint and never affects correctness.
+pub const COLLECTION_SLOT: u32 = 8;
+
+/// Byte stride between consecutive dict entries (a key slot plus a value slot).
+pub const DICT_ENTRY: u32 = COLLECTION_SLOT * 2;
+
 /// Name of the companion local that holds the length of a string/bytes local.
 /// A string/bytes value is an `(offset, length)` pair but a WASM local holds a
 /// single word, so the offset lives in the named local and the length in this

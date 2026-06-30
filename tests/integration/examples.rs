@@ -17,8 +17,8 @@
 mod harness;
 
 use harness::{
-    call_i32, call_i32_2, example_python_files, instantiate_wasm, read_example, try_compile,
-    try_compile_multi, try_instantiate, MULTI_FILE_ONLY,
+    call_f64, call_i32, call_i32_2, example_python_files, instantiate_wasm, read_example,
+    try_compile, try_compile_multi, try_instantiate, MULTI_FILE_ONLY,
 };
 
 /// Every standalone-compilable example compiles, validates, and instantiates.
@@ -149,10 +149,8 @@ fn per_iteration_collection_does_not_alias() {
     assert_eq!(call_i32(&src, "loop_escape"), 2);
 }
 
-/// Float dict values round-trip through the one-word slot (stored as f32 and
-/// widened back to f64 on read): `d[1] + d[2]` = 3.5 + 7.5 = 11.0, truncated to
-/// 11. Before this fix the dict store emitted an `i32.store` of an `f64`,
-/// producing an invalid module.
+/// Float dict values round-trip through their 8-byte slot: `d[1] + d[2]` =
+/// 3.5 + 7.5 = 11.0, truncated to 11.
 #[test]
 fn float_dict_values_round_trip() {
     let src = read_example("nested_collections.py");
@@ -160,10 +158,46 @@ fn float_dict_values_round_trip() {
 }
 
 /// Float set members de-duplicate by value: `{1.5, 1.5, 2.5}` has two distinct
-/// members. The float is narrowed to its f32 bit pattern so the i32 dedup
-/// search compares it correctly (and the module stays valid).
+/// members. Members are compared at full f64 width in the dedup search.
 #[test]
 fn float_set_members_dedup() {
     let src = read_example("nested_collections.py");
     assert_eq!(call_i32(&src, "float_set_size"), 2);
+}
+
+/// f64 values round-trip through collection slots without precision loss (the
+/// v0.12.0 P2 layout). Each value below needs more than f32's ~7 significant
+/// digits, so an exact compare fails if the slot were a lossy 4-byte f32.
+#[test]
+fn float_collections_are_lossless() {
+    let src = read_example("nested_collections.py");
+    // The Python literal 3.141592653589793 is exactly the f64 value of PI; an
+    // f32 slot would round it to ~3.1415927 and fail this exact compare.
+    let pi = std::f64::consts::PI;
+    // Pi to full f64 precision out of a list slot.
+    assert_eq!(call_f64(&src, "float_list_roundtrip"), pi);
+    // The classic 0.1 + 0.2 low bits only survive with full-width storage.
+    assert_eq!(call_f64(&src, "float_list_sum"), 0.1_f64 + 0.2_f64);
+    // Dict value lookup keeps full precision.
+    assert_eq!(call_f64(&src, "float_dict_precise"), pi);
+    // Float tuple member.
+    assert_eq!(call_f64(&src, "float_tuple_roundtrip"), pi);
+}
+
+/// `in` over a float list matches by value at full width.
+#[test]
+fn float_list_membership() {
+    let src = read_example("nested_collections.py");
+    assert_eq!(call_i32(&src, "float_membership"), 1);
+}
+
+/// Iterating a float list literal binds each element as an f64 loop variable, so
+/// the running sum is exact: 0.1 + 0.2 + 0.3 == 0.6000000000000001 in f64.
+#[test]
+fn float_list_iteration_binds_f64() {
+    let src = read_example("nested_collections.py");
+    assert_eq!(
+        call_f64(&src, "float_loop_sum"),
+        0.1_f64 + 0.2_f64 + 0.3_f64
+    );
 }
