@@ -202,6 +202,20 @@ fn float_collections_are_lossless() {
     assert_eq!(call_f64(&src, "float_tuple_roundtrip"), pi);
 }
 
+/// Float dict *keys* (v0.12.0 follow-up) match at full f64 width, both on
+/// lookup and on in-place assignment. 1.5 and 2.5 share their low 32 bits, so a
+/// lossy i32-word key compare could not tell them apart.
+#[test]
+fn float_dict_keys_are_width_aware() {
+    let src = read_example("nested_collections.py");
+    // d[1.5]==10 and d[2.5]==20 resolve distinctly: 10 + 20*100.
+    assert_eq!(call_i32(&src, "float_dict_key_lookup"), 2010);
+    // Float key, int value: d[2.5]==9.
+    assert_eq!(call_i32(&src, "float_dict_key_int_value"), 9);
+    // Assigning through a float key updates in place: 99 + 10.
+    assert_eq!(call_i32(&src, "float_dict_key_assign"), 109);
+}
+
 /// `in` over a float list matches by value at full width.
 #[test]
 fn float_list_membership() {

@@ -89,6 +89,10 @@ pub struct CompilationContext {
     pub module_vars: HashMap<String, (Option<IRType>, IRExpr)>,
     pub temp_local: u32,     // For temporary calculations (i32 scratch)
     pub temp_local_f64: u32, // Single f64 scratch local (operand juggling for coercions)
+    /// Second f64 scratch local. Needed where two f64 values must be live at
+    /// once, e.g. indexing a float-keyed *and* float-valued dict: the key needle
+    /// sits here while the looked-up value uses `temp_local_f64`.
+    pub temp_local_f64_2: u32,
     /// Sequence counter for `for` loops, advanced in identical pre-order by the
     /// local-allocation scan and by codegen so each loop reuses the iterator
     /// helper locals (`__iter_*_{n}`) reserved for it. Reset per function.
@@ -127,6 +131,7 @@ impl CompilationContext {
             module_vars: HashMap::new(),
             temp_local: 0,
             temp_local_f64: 0,
+            temp_local_f64_2: 0,
             for_loop_seq: 0,
             block_depth: 0,
             loop_stack: Vec::new(),

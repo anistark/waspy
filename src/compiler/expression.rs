@@ -1632,8 +1632,16 @@ pub fn emit_expr(
         }
         IRExpr::Indexing { container, index } => {
             let container_type = emit_expr(container, func, ctx, memory_layout, None);
-            // TODO: Handle type for index for non-integer types
-            let _index_type = emit_expr(index, func, ctx, memory_layout, Some(&IRType::Int));
+            // Hint the index with the container's key type. List/tuple/string
+            // indices are ints; a float-keyed dict wants the key kept as an f64 so
+            // it isn't coerced to int and mis-compared (`{1.5: ...}[1.5]`).
+            let index_hint = match &container_type {
+                IRType::Dict(key_type, _) if matches!(key_type.as_ref(), IRType::Float) => {
+                    IRType::Float
+                }
+                _ => IRType::Int,
+            };
+            let _index_type = emit_expr(index, func, ctx, memory_layout, Some(&index_hint));
 
             match container_type {
                 IRType::String => {
@@ -1682,15 +1690,22 @@ pub fn emit_expr(
 
                     element_type.as_ref().clone()
                 }
-                IRType::Dict(_key_type, value_type) => {
+                IRType::Dict(key_type, value_type) => {
                     // Dictionary indexing using linear search.
                     // Dict layout: [num_entries:i32][key0][val0][key1][val1]...
                     // (each key/value is one COLLECTION_SLOT). Stack: (dict_ptr,
-                    // search_key) with search_key on top. Keys are still compared
-                    // as i32 — float keys are coerced to int on the way in, a
-                    // documented follow-up; only the value path is width-aware.
+                    // search_key) with search_key on top. Keys and values are both
+                    // compared at their natural width: a float key is an f64 (kept
+                    // in the second f64 scratch so it can coexist with a float
+                    // value in `temp_local_f64`); everything else is an i32 word.
+                    let is_float_key = matches!(key_type.as_ref(), IRType::Float);
                     let is_float_value = matches!(value_type.as_ref(), IRType::Float);
-                    func.instruction(&Instruction::LocalSet(ctx.temp_local + 1)); // search_key
+                    // Stash the search key at its natural width.
+                    if is_float_key {
+                        func.instruction(&Instruction::LocalSet(ctx.temp_local_f64_2));
+                    } else {
+                        func.instruction(&Instruction::LocalSet(ctx.temp_local + 1));
+                    }
                     func.instruction(&Instruction::LocalSet(ctx.temp_local)); // dict_ptr
 
                     // Load the number of entries
@@ -1731,12 +1746,17 @@ pub fn emit_expr(
                     func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
                     func.instruction(&Instruction::I32Add);
                     func.instruction(&Instruction::I32Add);
-                    func.instruction(&Instruction::I32Load(slot_arg()));
-                    // Stack: (loaded_key)
-
-                    // Compare with search_key
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
-                    func.instruction(&Instruction::I32Eq);
+                    // Load the slot's key and compare with search_key at the key's
+                    // natural width (f64 for float keys, i32 word otherwise).
+                    if is_float_key {
+                        func.instruction(&Instruction::F64Load(slot_arg()));
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local_f64_2));
+                        func.instruction(&Instruction::F64Eq);
+                    } else {
+                        func.instruction(&Instruction::I32Load(slot_arg()));
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
+                        func.instruction(&Instruction::I32Eq);
+                    }
 
                     // If equal, capture the value and break out of the loop.
                     // Value slot = dict_ptr + HEADER + counter*DICT_ENTRY + SLOT.

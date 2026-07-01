@@ -125,6 +125,31 @@ def set_loop_fresh() -> int:
     return total
 
 
+def float_dict_key_lookup() -> int:
+    # Float dict *keys* match at full f64 width. 1.5 and 2.5 share their low 32
+    # bits (both 0x00000000), so an i32-word key compare could not tell them
+    # apart; an f64 compare resolves d[1.5]==10 and d[2.5]==20 distinctly, so
+    # 10 + 20*100 == 2010.
+    d = {1.5: 10.0, 2.5: 20.0}
+    return int(d[1.5]) + int(d[2.5]) * 100
+
+
+def float_dict_key_int_value() -> int:
+    # A float key paired with an int value: the key matches at f64 width while
+    # the value stays an i32 word. d[2.5] == 9.
+    d = {1.5: 7, 2.5: 9}
+    return d[2.5]
+
+
+def float_dict_key_assign() -> int:
+    # Assigning through a float key updates the matching entry in place (both
+    # keys already exist, so no append). d[2.5] becomes 99, d[1.5] stays 10, so
+    # 99 + 10 == 109. A key coerced to int would miss and leave d[2.5] at 20.
+    d = {1.5: 10.0, 2.5: 20.0}
+    d[2.5] = 99.0
+    return int(d[2.5]) + int(d[1.5])
+
+
 def main():
     print(nested_grid())
     print(loop_escape())

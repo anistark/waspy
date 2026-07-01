@@ -32,6 +32,7 @@ pub fn compile_function(
     ctx.temp_local = ctx.local_count;
     ctx.local_count += SCRATCH_LOCALS;
     ctx.temp_local_f64 = ctx.add_local("__f64_scratch", IRType::Float);
+    ctx.temp_local_f64_2 = ctx.add_local("__f64_scratch2", IRType::Float);
 
     // Declare locals in index order, coalescing adjacent same-type runs. The
     // local index assigned by `add_local` must match the WASM declaration
@@ -1289,11 +1290,28 @@ pub fn compile_body(
                 // Save container pointer
                 func.instruction(&Instruction::LocalSet(ctx.temp_local));
 
-                // Emit index expression
-                emit_expr(index, func, ctx, memory_layout, Some(&IRType::Int));
+                // A float-keyed dict keeps its key as an f64 so `d[1.5] = x`
+                // matches the f64-stored key; list/tuple indices and other dict
+                // keys stay i32. Hint the index accordingly.
+                let key_is_float = matches!(
+                    &container_type,
+                    IRType::Dict(k, _) if matches!(k.as_ref(), IRType::Float)
+                );
+                let index_hint = if key_is_float {
+                    IRType::Float
+                } else {
+                    IRType::Int
+                };
+                emit_expr(index, func, ctx, memory_layout, Some(&index_hint));
 
-                // Save index
-                func.instruction(&Instruction::LocalSet(ctx.temp_local + 1));
+                // Save index / key at its natural width. A float key is an f64 in
+                // the second f64 scratch, leaving `temp_local_f64` free for a
+                // float value below.
+                if key_is_float {
+                    func.instruction(&Instruction::LocalSet(ctx.temp_local_f64_2));
+                } else {
+                    func.instruction(&Instruction::LocalSet(ctx.temp_local + 1));
+                }
 
                 // Emit value expression, then stash it in a type-appropriate
                 // scratch local: a float value is an f64 and must live in the
@@ -1322,6 +1340,49 @@ pub fn compile_body(
                         }));
                     } else {
                         func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
+                        func.instruction(&Instruction::I32Store(MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                    }
+                };
+
+                // Load the dict key at the address on top of the stack and push 1
+                // if it equals the stashed search key, else 0 — at the key's
+                // natural width (f64 for a float key, i32 word otherwise).
+                let cmp_key = |func: &mut Function| {
+                    if key_is_float {
+                        func.instruction(&Instruction::F64Load(MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local_f64_2));
+                        func.instruction(&Instruction::F64Eq);
+                    } else {
+                        func.instruction(&Instruction::I32Load(MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
+                        func.instruction(&Instruction::I32Eq);
+                    }
+                };
+
+                // Store the stashed search key into the slot at the address on top
+                // of the stack (used when appending a new entry), width-aware.
+                let store_key = |func: &mut Function| {
+                    if key_is_float {
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local_f64_2));
+                        func.instruction(&Instruction::F64Store(MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                    } else {
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
                         func.instruction(&Instruction::I32Store(MemArg {
                             offset: 0,
                             align: 2,
@@ -1379,7 +1440,7 @@ pub fn compile_body(
                         func.instruction(&Instruction::I32GeS);
                         func.instruction(&Instruction::BrIf(1));
 
-                        // key_at = load(dict_ptr + HEADER + counter*DICT_ENTRY)
+                        // key address = dict_ptr + HEADER + counter*DICT_ENTRY
                         func.instruction(&Instruction::LocalGet(ctx.temp_local));
                         func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
                         func.instruction(&Instruction::I32Const(DICT_ENTRY as i32));
@@ -1387,15 +1448,9 @@ pub fn compile_body(
                         func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
                         func.instruction(&Instruction::I32Add);
                         func.instruction(&Instruction::I32Add);
-                        func.instruction(&Instruction::I32Load(MemArg {
-                            offset: 0,
-                            align: 2,
-                            memory_index: 0,
-                        }));
 
                         // if key_at == key: update value and break
-                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
-                        func.instruction(&Instruction::I32Eq);
+                        cmp_key(func);
                         func.instruction(&Instruction::If(BlockType::Empty));
                         // value address = dict_ptr + HEADER + counter*DICT_ENTRY + SLOT
                         func.instruction(&Instruction::LocalGet(ctx.temp_local));
@@ -1435,12 +1490,8 @@ pub fn compile_body(
                         func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
                         func.instruction(&Instruction::I32Add);
                         func.instruction(&Instruction::I32Add);
-                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 1)); // key
-                        func.instruction(&Instruction::I32Store(MemArg {
-                            offset: 0,
-                            align: 2,
-                            memory_index: 0,
-                        }));
+                        store_key(func); // key (width-aware)
+
                         // store value at dict_ptr + HEADER + num_entries*DICT_ENTRY + SLOT
                         func.instruction(&Instruction::LocalGet(ctx.temp_local));
                         func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
