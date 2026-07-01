@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
-use wasmi::{Engine, Instance, Linker, Store};
+use wasmi::{Engine, Instance, Linker, Store, Value};
 use waspy::{
     compile_multiple_python_files_with_options, compile_python_to_wasm_with_options,
     CompilerOptions,
@@ -117,6 +117,23 @@ pub fn call_i32(source: &str, func: &str) -> i32 {
         .unwrap_or_else(|_| panic!("exported i32 fn `{func}`"))
         .call(&mut store, ())
         .expect("call")
+}
+
+/// Call an exported zero-argument function returning `f64`. Used to assert that
+/// float values round-trip with full f64 precision (an f32 slot would lose the
+/// low bits and fail an exact-equality check). wasmi 0.31's typed API does not
+/// bind a bare `f64` result, so this uses the untyped call path.
+pub fn call_f64(source: &str, func: &str) -> f64 {
+    let (instance, mut store) = instantiate(source);
+    let f = instance
+        .get_func(&store, func)
+        .unwrap_or_else(|| panic!("exported fn `{func}`"));
+    let mut results = [Value::F64(0.0.into())];
+    f.call(&mut store, &[], &mut results).expect("call");
+    match results[0] {
+        Value::F64(v) => f64::from(v),
+        ref other => panic!("expected f64 result, got {other:?}"),
+    }
 }
 
 /// Call an exported function taking two `i32` arguments and returning `i32`.

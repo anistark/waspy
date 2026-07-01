@@ -1,5 +1,6 @@
 use crate::compiler::context::{
-    strlen_local_name, CompilationContext, LoopContext, SCRATCH_LOCALS,
+    strlen_local_name, CompilationContext, LoopContext, COLLECTION_HEADER, COLLECTION_SLOT,
+    DICT_ENTRY, SCRATCH_LOCALS,
 };
 use crate::compiler::expression::{emit_expr, emit_integer_power_operation};
 use crate::ir::{IRBody, IRConstant, IRExpr, IRFunction, IROp, IRStatement, IRType, MemoryLayout};
@@ -31,6 +32,7 @@ pub fn compile_function(
     ctx.temp_local = ctx.local_count;
     ctx.local_count += SCRATCH_LOCALS;
     ctx.temp_local_f64 = ctx.add_local("__f64_scratch", IRType::Float);
+    ctx.temp_local_f64_2 = ctx.add_local("__f64_scratch2", IRType::Float);
 
     // Declare locals in index order, coalescing adjacent same-type runs. The
     // local index assigned by `add_local` must match the WASM declaration
@@ -242,6 +244,25 @@ fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRType {
     }
 }
 
+/// Best-effort element type of a `for`-loop iterable, used to decide whether the
+/// loop variable must be an f64 local. Only literal iterables (and already-typed
+/// collection locals) are resolved; anything else is `Unknown`, which keeps the
+/// historical i32 binding. List/set vars are still `Unknown` during the scan, so
+/// `for x in <float-list-variable>` is not yet recognised.
+fn infer_iterable_elem_type(iterable: &IRExpr, ctx: &CompilationContext) -> IRType {
+    match iterable {
+        IRExpr::ListLiteral(elems) | IRExpr::SetLiteral(elems) => elems
+            .first()
+            .map(|e| infer_value_type(e, ctx))
+            .unwrap_or(IRType::Unknown),
+        IRExpr::Variable(name) => match ctx.get_local_info(name).map(|i| i.var_type.clone()) {
+            Some(IRType::List(t)) | Some(IRType::Set(t)) => *t,
+            _ => IRType::Unknown,
+        },
+        _ => IRType::Unknown,
+    }
+}
+
 /// Resolve a function's WASM result type. An explicit annotation wins; otherwise
 /// the type is inferred from the body's `return` statements so that, e.g., a
 /// function returning `math.pi` gets an f64 result instead of a default i32 (an
@@ -357,13 +378,23 @@ pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
             }
             IRStatement::For {
                 target,
+                iterable,
                 body,
                 else_body,
-                ..
             } => {
-                // Allocate the loop variable
+                // Allocate the loop variable. Iterating a float collection binds
+                // each element as an f64, so the loop variable must be a float
+                // local; otherwise its WASM type (fixed here) would mismatch the
+                // f64 the element load pushes. Only literal iterables are typed
+                // confidently at scan time (list vars are still Unknown here), so
+                // `for x in some_float_list` remains an i32 bind for now.
                 if ctx.get_local_index(target).is_none() {
-                    ctx.add_local(target, IRType::Unknown);
+                    let target_ty = if infer_iterable_elem_type(iterable, ctx) == IRType::Float {
+                        IRType::Float
+                    } else {
+                        IRType::Unknown
+                    };
+                    ctx.add_local(target, target_ty);
                 }
                 // Reserve this loop's iterator helper locals up front (codegen
                 // can't add locals after the function's local vector is fixed).
@@ -524,13 +555,19 @@ pub fn compile_body(
                 // Error case: tuple size mismatch - for now just continue
                 func.instruction(&Instruction::End);
 
-                // Extract each element from the tuple and assign to target variables
+                // Extract each element from the tuple and assign to target
+                // variables. Element i sits at HEADER + i*SLOT. A float target
+                // would need an f64 load here; tuple-unpack targets are not yet
+                // type-inferred, so float members still bind as their i32 low
+                // word (a documented follow-up, mirroring the loop-var case).
                 for (i, target) in targets.iter().enumerate() {
                     // Load tuple pointer
                     func.instruction(&Instruction::LocalGet(ctx.temp_local));
 
-                    // Add offset to get element (4 + i*4)
-                    func.instruction(&Instruction::I32Const(4 + (i as i32) * 4));
+                    // Add offset to get element (HEADER + i*SLOT)
+                    func.instruction(&Instruction::I32Const(
+                        (COLLECTION_HEADER + (i as u32) * COLLECTION_SLOT) as i32,
+                    ));
                     func.instruction(&Instruction::I32Add);
 
                     // Load element value
@@ -816,7 +853,15 @@ pub fn compile_body(
                 let iterable_type = emit_expr(iterable, func, ctx, memory_layout, None);
 
                 match iterable_type {
-                    IRType::List(_) | IRType::String => {
+                    ref iter_ty @ (IRType::List(_) | IRType::String) => {
+                        // Lists store one COLLECTION_SLOT (8 bytes) per element;
+                        // strings keep their legacy 4-byte-per-codepoint stride.
+                        let is_list = matches!(iter_ty, IRType::List(_));
+                        let elem_stride = if is_list { COLLECTION_SLOT as i32 } else { 4 };
+                        // A float list binds each element as f64 (the loop var was
+                        // typed Float by the scan); everything else loads an i32.
+                        let target_is_float =
+                            matches!(get_local_type_by_index(ctx, target_idx), IRType::Float);
                         // Store the pointer to the list/string
                         func.instruction(&Instruction::LocalSet(iterator_ptr_idx));
 
@@ -847,20 +892,25 @@ pub fn compile_body(
                         func.instruction(&Instruction::BrIf(1)); // Break if true
 
                         // Load element from list[counter]
-                        // Memory: [length:i32][elem0:i32][elem1:i32]...
-                        // Element at index i is at byte offset 4 + (i * 4): the
-                        // base address is ptr + counter*4 and the load skips the
-                        // leading length word with a +4 element offset.
+                        // Memory: [length:i32][elem0][elem1]... Element i sits at
+                        // byte offset HEADER + i*stride: the base address is
+                        // ptr + counter*stride and the load skips the leading
+                        // length word with a +HEADER (4) element offset.
                         func.instruction(&Instruction::LocalGet(iterator_ptr_idx));
                         func.instruction(&Instruction::LocalGet(loop_counter_idx));
-                        func.instruction(&Instruction::I32Const(4));
+                        func.instruction(&Instruction::I32Const(elem_stride));
                         func.instruction(&Instruction::I32Mul);
                         func.instruction(&Instruction::I32Add);
-                        func.instruction(&Instruction::I32Load(MemArg {
-                            offset: 4,
+                        let elem_arg = MemArg {
+                            offset: COLLECTION_HEADER as u64,
                             align: 2,
                             memory_index: 0,
-                        }));
+                        };
+                        if target_is_float {
+                            func.instruction(&Instruction::F64Load(elem_arg));
+                        } else {
+                            func.instruction(&Instruction::I32Load(elem_arg));
+                        }
 
                         // Store element in target variable
                         func.instruction(&Instruction::LocalSet(target_idx));
@@ -1240,49 +1290,120 @@ pub fn compile_body(
                 // Save container pointer
                 func.instruction(&Instruction::LocalSet(ctx.temp_local));
 
-                // Emit index expression
-                emit_expr(index, func, ctx, memory_layout, Some(&IRType::Int));
+                // A float-keyed dict keeps its key as an f64 so `d[1.5] = x`
+                // matches the f64-stored key; list/tuple indices and other dict
+                // keys stay i32. Hint the index accordingly.
+                let key_is_float = matches!(
+                    &container_type,
+                    IRType::Dict(k, _) if matches!(k.as_ref(), IRType::Float)
+                );
+                let index_hint = if key_is_float {
+                    IRType::Float
+                } else {
+                    IRType::Int
+                };
+                emit_expr(index, func, ctx, memory_layout, Some(&index_hint));
 
-                // Save index
-                func.instruction(&Instruction::LocalSet(ctx.temp_local + 1));
+                // Save index / key at its natural width. A float key is an f64 in
+                // the second f64 scratch, leaving `temp_local_f64` free for a
+                // float value below.
+                if key_is_float {
+                    func.instruction(&Instruction::LocalSet(ctx.temp_local_f64_2));
+                } else {
+                    func.instruction(&Instruction::LocalSet(ctx.temp_local + 1));
+                }
 
-                // Emit value expression
+                // Emit value expression, then stash it in a type-appropriate
+                // scratch local: a float value is an f64 and must live in the
+                // dedicated f64 scratch, not an i32 local. String/bytes values
+                // collapse to their offset word (the length on top is dropped).
                 let value_type = emit_expr(value, func, ctx, memory_layout, None);
+                let value_is_float = matches!(value_type, IRType::Float);
+                if value_is_float {
+                    func.instruction(&Instruction::LocalSet(ctx.temp_local_f64));
+                } else {
+                    if matches!(value_type, IRType::String | IRType::Bytes) {
+                        func.instruction(&Instruction::Drop); // length
+                    }
+                    func.instruction(&Instruction::LocalSet(ctx.temp_local + 2));
+                }
 
-                // Save value
-                func.instruction(&Instruction::LocalSet(ctx.temp_local + 2));
+                // Push the stashed value (matching its width) onto the stack; the
+                // caller has already pushed the destination address.
+                let push_value = |func: &mut Function| {
+                    if value_is_float {
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local_f64));
+                        func.instruction(&Instruction::F64Store(MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                    } else {
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
+                        func.instruction(&Instruction::I32Store(MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                    }
+                };
+
+                // Load the dict key at the address on top of the stack and push 1
+                // if it equals the stashed search key, else 0 — at the key's
+                // natural width (f64 for a float key, i32 word otherwise).
+                let cmp_key = |func: &mut Function| {
+                    if key_is_float {
+                        func.instruction(&Instruction::F64Load(MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local_f64_2));
+                        func.instruction(&Instruction::F64Eq);
+                    } else {
+                        func.instruction(&Instruction::I32Load(MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
+                        func.instruction(&Instruction::I32Eq);
+                    }
+                };
+
+                // Store the stashed search key into the slot at the address on top
+                // of the stack (used when appending a new entry), width-aware.
+                let store_key = |func: &mut Function| {
+                    if key_is_float {
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local_f64_2));
+                        func.instruction(&Instruction::F64Store(MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                    } else {
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
+                        func.instruction(&Instruction::I32Store(MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                    }
+                };
 
                 match container_type {
                     IRType::List(_) => {
-                        // Calculate address: container_ptr + 4 + (index * 4)
+                        // Address: container_ptr + HEADER + (index * SLOT)
                         func.instruction(&Instruction::LocalGet(ctx.temp_local)); // container_ptr
                         func.instruction(&Instruction::LocalGet(ctx.temp_local + 1)); // index
-                        func.instruction(&Instruction::I32Const(4));
-                        func.instruction(&Instruction::I32Mul); // index * 4
-                        func.instruction(&Instruction::I32Const(4)); // skip length field
-                        func.instruction(&Instruction::I32Add); // + 4
-                        func.instruction(&Instruction::I32Add); // container_ptr + 4 + (index * 4)
+                        func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+                        func.instruction(&Instruction::I32Mul); // index * SLOT
+                        func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
+                        func.instruction(&Instruction::I32Add); // + HEADER
+                        func.instruction(&Instruction::I32Add); // container_ptr + HEADER + index*SLOT
 
-                        // Restore value
-                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
-
-                        // Store based on value type
-                        match value_type {
-                            IRType::Float => {
-                                func.instruction(&Instruction::F64Store(MemArg {
-                                    offset: 0,
-                                    align: 3,
-                                    memory_index: 0,
-                                }));
-                            }
-                            _ => {
-                                func.instruction(&Instruction::I32Store(MemArg {
-                                    offset: 0,
-                                    align: 2,
-                                    memory_index: 0,
-                                }));
-                            }
-                        }
+                        // Store the value at its natural width.
+                        push_value(func);
                     }
                     IRType::Dict(_key_type, _value_type) => {
                         // Dictionary assignment via linear search.
@@ -1319,38 +1440,29 @@ pub fn compile_body(
                         func.instruction(&Instruction::I32GeS);
                         func.instruction(&Instruction::BrIf(1));
 
-                        // key_at = load(dict_ptr + counter*8 + 4)
+                        // key address = dict_ptr + HEADER + counter*DICT_ENTRY
                         func.instruction(&Instruction::LocalGet(ctx.temp_local));
                         func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
-                        func.instruction(&Instruction::I32Const(8));
+                        func.instruction(&Instruction::I32Const(DICT_ENTRY as i32));
                         func.instruction(&Instruction::I32Mul);
-                        func.instruction(&Instruction::I32Const(4));
+                        func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
                         func.instruction(&Instruction::I32Add);
                         func.instruction(&Instruction::I32Add);
-                        func.instruction(&Instruction::I32Load(MemArg {
-                            offset: 0,
-                            align: 2,
-                            memory_index: 0,
-                        }));
 
                         // if key_at == key: update value and break
-                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
-                        func.instruction(&Instruction::I32Eq);
+                        cmp_key(func);
                         func.instruction(&Instruction::If(BlockType::Empty));
-                        // address = dict_ptr + counter*8 + 8
+                        // value address = dict_ptr + HEADER + counter*DICT_ENTRY + SLOT
                         func.instruction(&Instruction::LocalGet(ctx.temp_local));
                         func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
-                        func.instruction(&Instruction::I32Const(8));
+                        func.instruction(&Instruction::I32Const(DICT_ENTRY as i32));
                         func.instruction(&Instruction::I32Mul);
-                        func.instruction(&Instruction::I32Const(8));
+                        func.instruction(&Instruction::I32Const(
+                            (COLLECTION_HEADER + COLLECTION_SLOT) as i32,
+                        ));
                         func.instruction(&Instruction::I32Add);
                         func.instruction(&Instruction::I32Add);
-                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 2)); // value
-                        func.instruction(&Instruction::I32Store(MemArg {
-                            offset: 0,
-                            align: 2,
-                            memory_index: 0,
-                        }));
+                        push_value(func); // value (width-aware)
                         func.instruction(&Instruction::I32Const(1));
                         func.instruction(&Instruction::LocalSet(ctx.temp_local + 5)); // found = 1
                         func.instruction(&Instruction::Br(2)); // exit the loop
@@ -1370,35 +1482,28 @@ pub fn compile_body(
                         func.instruction(&Instruction::LocalGet(ctx.temp_local + 5));
                         func.instruction(&Instruction::I32Eqz);
                         func.instruction(&Instruction::If(BlockType::Empty));
-                        // store key at dict_ptr + num_entries*8 + 4
+                        // store key at dict_ptr + HEADER + num_entries*DICT_ENTRY
                         func.instruction(&Instruction::LocalGet(ctx.temp_local));
                         func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
-                        func.instruction(&Instruction::I32Const(8));
+                        func.instruction(&Instruction::I32Const(DICT_ENTRY as i32));
                         func.instruction(&Instruction::I32Mul);
-                        func.instruction(&Instruction::I32Const(4));
+                        func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
                         func.instruction(&Instruction::I32Add);
                         func.instruction(&Instruction::I32Add);
-                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 1)); // key
-                        func.instruction(&Instruction::I32Store(MemArg {
-                            offset: 0,
-                            align: 2,
-                            memory_index: 0,
-                        }));
-                        // store value at dict_ptr + num_entries*8 + 8
+                        store_key(func); // key (width-aware)
+
+                        // store value at dict_ptr + HEADER + num_entries*DICT_ENTRY + SLOT
                         func.instruction(&Instruction::LocalGet(ctx.temp_local));
                         func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
-                        func.instruction(&Instruction::I32Const(8));
+                        func.instruction(&Instruction::I32Const(DICT_ENTRY as i32));
                         func.instruction(&Instruction::I32Mul);
-                        func.instruction(&Instruction::I32Const(8));
+                        func.instruction(&Instruction::I32Const(
+                            (COLLECTION_HEADER + COLLECTION_SLOT) as i32,
+                        ));
                         func.instruction(&Instruction::I32Add);
                         func.instruction(&Instruction::I32Add);
-                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 2)); // value
-                        func.instruction(&Instruction::I32Store(MemArg {
-                            offset: 0,
-                            align: 2,
-                            memory_index: 0,
-                        }));
-                        // num_entries += 1; store back to dict_ptr
+                        push_value(func); // value (width-aware)
+                                          // num_entries += 1; store back to dict_ptr
                         func.instruction(&Instruction::LocalGet(ctx.temp_local));
                         func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
                         func.instruction(&Instruction::I32Const(1));
