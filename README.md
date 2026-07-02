@@ -53,7 +53,7 @@ Generate & Optimize
 ## Limitations
 
 - Objects are single-instance / fixed-address — one instance at a time
-- Collection literals built inside a loop can still alias; each element is one word (floats stored as f32, ~7 significant digits)
+- Collections have a fixed compile-time capacity — growing one past its initial size (e.g. `.append` beyond a literal's length) overflows into the next region; runtime growth/reallocation is not yet implemented
 - Generators do not preserve execution state — `yield` compiles as a placeholder
 - Closures lack full variable-capture analysis
 - Only stdlib modules import; user-written `.py` modules and file I/O are not supported
@@ -281,7 +281,7 @@ Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for details on
 The path to 1.0 focuses on the remaining correctness and runtime gaps:
 
 - Multiple object instances (heap-allocated, beyond the current single fixed address)
-- Non-aliasing per-iteration collections, non-lossy `f64` collection layout, and hashed set/dict lookups
+- Growable collections (runtime reallocation past a literal's fixed capacity) and hashed `dict` lookups (sets already use an open-addressing table)
 - Generators that preserve execution state
 - Full closure capture analysis
 - User-written `.py` module imports, module caching, and file I/O
