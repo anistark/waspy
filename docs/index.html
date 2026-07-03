@@ -1,1269 +1,34 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Waspy - Python to WebAssembly Compiler</title>
+    <meta name="description" content="Compile Python functions to WebAssembly. Built in Rust for performance and reliability.">
     <link rel="icon" href="https://raw.githubusercontent.com/anistark/waspy/4e205230f4e029cf5e16a28a75de0ddc06498726/assets/logo.png" type="image/png">
 
-    <!-- Fonts -->
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <script>
+        (function () {
+            var t = localStorage.getItem('theme');
+            if (!t) t = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+            document.documentElement.setAttribute('data-theme', t);
+        })();
+    </script>
 
-    <!-- Prism.js for code highlighting -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700;12..96,800&family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
     <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet">
-
-    <style>
-        :root {
-            --bg-primary: #0d1117;
-            --bg-secondary: rgba(22, 27, 34, 0.8);
-            --bg-tertiary: rgba(33, 38, 45, 0.6);
-            --bg-glass: rgba(22, 27, 34, 0.4);
-            --text-primary: #f0f6fc;
-            --text-secondary: #8b949e;
-            --text-muted: #656d76;
-            --accent-python: #3776ab;
-            --accent-wasm: #654ff0;
-            --accent-success: #238636;
-            --accent-warning: #d29922;
-            --border-color: rgba(48, 54, 61, 0.8);
-            --shadow-light: rgba(0, 0, 0, 0.1);
-            --shadow-heavy: rgba(0, 0, 0, 0.3);
-            --glass-border: rgba(255, 255, 255, 0.1);
-        }
-
-        [data-theme="light"] {
-            --bg-primary: #ffffff;
-            --bg-secondary: rgba(248, 249, 250, 0.8);
-            --bg-tertiary: rgba(241, 243, 244, 0.6);
-            --bg-glass: rgba(255, 255, 255, 0.4);
-            --text-primary: #24292f;
-            --text-secondary: #656d76;
-            --text-muted: #8b949e;
-            --accent-python: #3776ab;
-            --accent-wasm: #654ff0;
-            --accent-success: #238636;
-            --accent-warning: #d29922;
-            --border-color: rgba(208, 215, 222, 0.8);
-            --shadow-light: rgba(0, 0, 0, 0.05);
-            --shadow-heavy: rgba(0, 0, 0, 0.15);
-            --glass-border: rgba(0, 0, 0, 0.1);
-        }
-
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
-        body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-            background: var(--bg-primary);
-            color: var(--text-primary);
-            line-height: 1.6;
-            overflow-x: hidden;
-            position: relative;
-        }
-
-        /* Background pattern */
-        body::before {
-            content: '';
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background:
-                radial-gradient(circle at 20% 50%, rgba(55, 118, 171, 0.1) 0%, transparent 50%),
-                radial-gradient(circle at 80% 20%, rgba(101, 79, 240, 0.1) 0%, transparent 50%),
-                radial-gradient(circle at 40% 80%, rgba(35, 134, 54, 0.05) 0%, transparent 50%);
-            pointer-events: none;
-            z-index: -1;
-            transition: opacity 0.3s ease;
-        }
-
-        [data-theme="light"] body::before {
-            background:
-                radial-gradient(circle at 20% 50%, rgba(55, 118, 171, 0.05) 0%, transparent 50%),
-                radial-gradient(circle at 80% 20%, rgba(101, 79, 240, 0.05) 0%, transparent 50%),
-                radial-gradient(circle at 40% 80%, rgba(35, 134, 54, 0.03) 0%, transparent 50%);
-        }
-
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 0 20px;
-        }
-
-        .glass {
-            background: var(--bg-glass);
-            backdrop-filter: blur(12px);
-            border: 1px solid var(--glass-border);
-            border-radius: 12px;
-        }
-
-        /* Header */
-        header {
-            position: fixed;
-            top: 0;
-            width: 100%;
-            background: color-mix(in srgb, var(--bg-primary) 85%, transparent);
-            backdrop-filter: blur(20px);
-            -webkit-backdrop-filter: blur(20px);
-            z-index: 1000;
-            border-bottom: 1px solid var(--glass-border);
-            transition: background 0.3s ease;
-        }
-
-        nav {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 0.85rem 0;
-        }
-
-        .nav-right {
-            display: flex;
-            align-items: center;
-            gap: 2rem;
-        }
-
-        /* Theme Toggle */
-        .theme-toggle {
-            background: var(--bg-glass);
-            backdrop-filter: blur(12px);
-            border: 1px solid var(--glass-border);
-            border-radius: 20px;
-            padding: 0.25rem;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            transition: all 0.3s ease;
-            position: relative;
-            width: 60px;
-            height: 32px;
-        }
-
-        .theme-toggle:hover {
-            border-color: var(--accent-python);
-        }
-
-        .theme-icon {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            width: 24px;
-            height: 24px;
-            border-radius: 50%;
-            background: var(--accent-python);
-            color: white;
-            font-size: 12px;
-            transition: all 0.3s ease;
-            position: absolute;
-            top: 3px;
-            left: 3px;
-        }
-
-        [data-theme="light"] .theme-icon {
-            transform: translateX(28px);
-        }
-
-        .theme-icon svg {
-            width: 14px;
-            height: 14px;
-        }
-
-        .logo-container {
-            display: flex;
-            align-items: center;
-            gap: 0.6rem;
-        }
-
-        .logo-img {
-            width: 34px;
-            height: 34px;
-            border-radius: 8px;
-        }
-
-        .logo {
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 1.5rem;
-            font-weight: 600;
-            background: linear-gradient(135deg, var(--accent-python), var(--accent-wasm));
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-        }
-
-        .nav-links {
-            display: flex;
-            gap: 0.25rem;
-            list-style: none;
-        }
-
-        .nav-links a {
-            color: var(--text-secondary);
-            text-decoration: none;
-            font-weight: 500;
-            font-size: 0.9rem;
-            padding: 0.4rem 0.85rem;
-            border-radius: 8px;
-            transition: all 0.25s ease;
-            position: relative;
-        }
-
-        .nav-links a:hover {
-            color: var(--text-primary);
-            background: color-mix(in srgb, var(--accent-python) 8%, transparent);
-        }
-
-        .nav-links a::after {
-            content: none;
-        }
-
-        /* Hero Section */
-        .hero {
-            padding: 7.5rem 0 3rem;
-            text-align: center;
-            position: relative;
-        }
-
-        .hero h1 {
-            font-size: clamp(2.5rem, 5vw, 3.75rem);
-            font-weight: 800;
-            margin-bottom: 1rem;
-            letter-spacing: -0.02em;
-            color: var(--text-primary);
-            -webkit-text-fill-color: var(--text-primary);
-        }
-
-        .hero h1 .arrow {
-            background: linear-gradient(135deg, var(--accent-python), var(--accent-wasm));
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-        }
-
-        .hero .subtitle {
-            font-size: 1.15rem;
-            color: var(--text-secondary);
-            margin-bottom: 2.5rem;
-            max-width: 520px;
-            margin-left: auto;
-            margin-right: auto;
-            line-height: 1.7;
-        }
-
-        .hero-logo {
-            max-width: 140px;
-            height: auto;
-            margin: 1.5rem auto 2rem;
-            display: block;
-            animation: float 4s ease-in-out infinite;
-            filter: drop-shadow(0 8px 24px rgba(55, 118, 171, 0.15));
-        }
-
-        @keyframes float {
-            0%, 100% { transform: translateY(0px); }
-            50% { transform: translateY(-8px); }
-        }
-
-        .cta-buttons {
-            display: flex;
-            gap: 0.75rem;
-            justify-content: center;
-            flex-wrap: wrap;
-            margin-bottom: 3rem;
-        }
-
-        .btn {
-            padding: 0.7rem 1.6rem;
-            border: none;
-            border-radius: 10px;
-            font-weight: 600;
-            font-size: 0.92rem;
-            text-decoration: none;
-            transition: all 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
-            cursor: pointer;
-            display: inline-flex;
-            align-items: center;
-            gap: 0.5rem;
-        }
-
-        .btn-primary {
-            background: linear-gradient(135deg, var(--accent-python), #2d5f8f);
-            color: white;
-            border: 1px solid rgba(55, 118, 171, 0.3);
-            box-shadow: 0 4px 14px rgba(55, 118, 171, 0.2);
-        }
-
-        .btn-primary:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 8px 24px rgba(55, 118, 171, 0.35);
-        }
-
-        .btn-secondary {
-            background: transparent;
-            color: var(--text-primary);
-            border: 1px solid var(--glass-border);
-        }
-
-        .btn-secondary:hover {
-            background: color-mix(in srgb, var(--accent-python) 6%, transparent);
-            border-color: color-mix(in srgb, var(--accent-python) 30%, var(--glass-border));
-            transform: translateY(-2px);
-        }
-
-        /* Status Badge */
-        .status-badge {
-            display: inline-flex;
-            align-items: center;
-            gap: 0.5rem;
-            background: color-mix(in srgb, var(--accent-success) 6%, transparent);
-            border: 1px solid color-mix(in srgb, var(--accent-success) 20%, var(--glass-border));
-            padding: 0.4rem 1rem;
-            border-radius: 20px;
-            margin-bottom: 1.5rem;
-            font-size: 0.85rem;
-            color: var(--text-secondary);
-        }
-
-        .status-dot {
-            width: 7px;
-            height: 7px;
-            background: var(--accent-success);
-            border-radius: 50%;
-            animation: pulse 2s infinite;
-            box-shadow: 0 0 6px var(--accent-success);
-        }
-
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.4; }
-        }
-
-        /* Code Demo */
-        .code-demo {
-            background: var(--bg-glass);
-            backdrop-filter: blur(12px);
-            border-radius: 14px;
-            padding: 0;
-            margin: 2rem 0 0;
-            border: 1px solid var(--glass-border);
-            position: relative;
-            overflow: hidden;
-            text-align: left;
-        }
-
-        .code-demo::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            height: 3px;
-            background: linear-gradient(90deg, var(--accent-python), var(--accent-wasm), var(--accent-success));
-        }
-
-        .code-tabs {
-            display: flex;
-            gap: 0;
-            margin-bottom: 0;
-            padding: 0 1.5rem;
-            padding-top: 0.75rem;
-            border-bottom: 1px solid var(--glass-border);
-            background: color-mix(in srgb, var(--bg-tertiary) 50%, transparent);
-        }
-
-        .code-tab {
-            padding: 0.6rem 1.1rem;
-            background: none;
-            border: none;
-            color: var(--text-muted);
-            cursor: pointer;
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 0.82rem;
-            font-weight: 500;
-            border-bottom: 2px solid transparent;
-            transition: all 0.25s ease;
-            margin-bottom: -1px;
-        }
-
-        .code-tab:hover {
-            color: var(--text-secondary);
-        }
-
-        .code-tab.active {
-            color: var(--text-primary);
-            border-bottom-color: var(--accent-python);
-        }
-
-        .code-content {
-            position: relative;
-            padding: 1.25rem 1.5rem;
-        }
-
-        .code-panel {
-            display: none;
-        }
-
-        .code-panel.active {
-            display: block;
-        }
-
-        pre {
-            margin: 0;
-            background: transparent !important;
-            border-radius: 8px;
-            overflow-x: auto;
-            border: none;
-            transition: background-color 0.3s ease;
-        }
-
-        [data-theme="light"] pre {
-            background: transparent !important;
-        }
-
-        code {
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 0.85rem;
-            line-height: 1.7;
-        }
-
-        /* How It Works */
-        .how-it-works {
-            padding: 5rem 0 3rem;
-        }
-
-        .how-it-works-header {
-            text-align: center;
-            margin-bottom: 3rem;
-        }
-
-        .how-it-works h2 {
-            text-align: center;
-            margin-bottom: 0.6rem;
-            font-size: 2.5rem;
-            font-weight: 700;
-        }
-
-        .how-it-works-subtitle {
-            color: var(--text-secondary);
-            font-size: 1rem;
-        }
-
-        .pipeline {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 1rem;
-            margin: 0 0 3rem;
-            flex-wrap: wrap;
-        }
-
-        .pipeline-step {
-            --step-accent: var(--accent-python);
-            background: var(--bg-glass);
-            backdrop-filter: blur(12px);
-            border: 1px solid var(--glass-border);
-            padding: 1.75rem 1.5rem;
-            border-radius: 14px;
-            text-align: center;
-            min-width: 160px;
-            flex: 1;
-            max-width: 200px;
-            transition: all 0.35s cubic-bezier(0.25, 0.46, 0.45, 0.94);
-            position: relative;
-            overflow: hidden;
-        }
-
-        .pipeline-step::before {
-            content: '';
-            position: absolute;
-            top: 0; left: 0; right: 0;
-            height: 3px;
-            background: var(--step-accent);
-            transform: scaleX(0);
-            transform-origin: left;
-            transition: transform 0.4s ease;
-        }
-
-        .pipeline-step:hover::before {
-            transform: scaleX(1);
-        }
-
-        .pipeline-step:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 12px 32px var(--shadow-heavy);
-            border-color: color-mix(in srgb, var(--step-accent) 30%, var(--glass-border));
-        }
-
-        .pipeline-step:nth-child(1) { --step-accent: #3776ab; }
-        .pipeline-step:nth-child(3) { --step-accent: #654ff0; }
-        .pipeline-step:nth-child(5) { --step-accent: #ff8c00; }
-        .pipeline-step:nth-child(7) { --step-accent: #238636; }
-
-        .pipeline-step .step-icon-wrap {
-            width: 48px;
-            height: 48px;
-            margin: 0 auto 1rem;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            border-radius: 12px;
-            background: color-mix(in srgb, var(--step-accent) 12%, transparent);
-            border: 1px solid color-mix(in srgb, var(--step-accent) 20%, transparent);
-            font-size: 1.4rem;
-            transition: all 0.35s ease;
-        }
-
-        .pipeline-step:hover .step-icon-wrap {
-            transform: scale(1.1);
-            background: color-mix(in srgb, var(--step-accent) 20%, transparent);
-        }
-
-        .pipeline-step .icon {
-            font-size: 2rem;
-            margin-bottom: 1rem;
-            display: block;
-        }
-
-        .pipeline-step h3 {
-            font-size: 1rem;
-            font-weight: 600;
-            margin-bottom: 0.35rem;
-        }
-
-        .pipeline-step p {
-            font-size: 0.82rem;
-            color: var(--text-muted);
-        }
-
-        .pipeline-arrow {
-            font-size: 1.25rem;
-            color: var(--text-muted);
-            flex-shrink: 0;
-        }
-
-        /* Comparison Table */
-        .comparison {
-            padding: 3rem 0;
-            background: transparent;
-            border-radius: 0;
-            margin: 2rem 0;
-            border: none;
-        }
-
-        .comparison-header {
-            text-align: center;
-            margin-bottom: 2.5rem;
-        }
-
-        .comparison h2 {
-            text-align: center;
-            margin-bottom: 0.6rem;
-            font-size: 2rem;
-            font-weight: 700;
-        }
-
-        .comparison-subtitle {
-            color: var(--text-secondary);
-            font-size: 0.95rem;
-        }
-
-        .comparison-table {
-            overflow-x: auto;
-            border-radius: 12px;
-            border: 1px solid var(--glass-border);
-            scrollbar-width: thin;
-            scrollbar-color: var(--border-color) transparent;
-        }
-
-        .comparison-table::-webkit-scrollbar {
-            height: 6px;
-        }
-        .comparison-table::-webkit-scrollbar-thumb {
-            background: var(--border-color);
-            border-radius: 3px;
-        }
-
-        table {
-            width: 100%;
-            border-collapse: separate;
-            border-spacing: 0;
-            background: transparent;
-            min-width: 720px;
-        }
-
-        thead th {
-            padding: 1rem 1.15rem;
-            text-align: left;
-            font-weight: 600;
-            font-size: 0.85rem;
-            text-transform: uppercase;
-            letter-spacing: 0.06em;
-            color: var(--text-secondary);
-            background: var(--bg-tertiary);
-            border-bottom: 2px solid var(--glass-border);
-            position: sticky;
-            top: 0;
-            z-index: 2;
-        }
-
-        thead th:first-child {
-            border-top-left-radius: 12px;
-        }
-
-        thead th:last-child {
-            border-top-right-radius: 12px;
-        }
-
-        /* Waspy column highlight */
-        thead th.col-waspy {
-            color: var(--accent-python);
-            background: color-mix(in srgb, var(--accent-python) 8%, var(--bg-tertiary));
-        }
-
-        td {
-            padding: 0.9rem 1.15rem;
-            color: var(--text-secondary);
-            font-size: 0.9rem;
-            border-bottom: 1px solid var(--glass-border);
-            transition: background 0.2s ease;
-        }
-
-        /* Waspy column highlight */
-        td.col-waspy {
-            background: color-mix(in srgb, var(--accent-python) 4%, transparent);
-            color: var(--text-primary);
-            font-weight: 500;
-        }
-
-        /* Row feature label */
-        td.row-label {
-            font-weight: 600;
-            color: var(--text-primary);
-            white-space: nowrap;
-            font-size: 0.88rem;
-        }
-
-        tbody tr {
-            transition: background 0.2s ease;
-        }
-
-        tbody tr:hover td {
-            background: color-mix(in srgb, var(--accent-python) 4%, transparent);
-        }
-
-        tbody tr:hover td.col-waspy {
-            background: color-mix(in srgb, var(--accent-python) 10%, transparent);
-        }
-
-        tbody tr:last-child td:first-child {
-            border-bottom-left-radius: 12px;
-        }
-
-        tbody tr:last-child td:last-child {
-            border-bottom-right-radius: 12px;
-        }
-
-        /* Status indicators */
-        .feature-check,
-        .feature-partial,
-        .feature-no {
-            display: inline-flex;
-            align-items: center;
-            gap: 0.4rem;
-            font-weight: 600;
-            font-size: 0.85rem;
-        }
-
-        .feature-check {
-            color: var(--accent-success);
-        }
-
-        .feature-check::before {
-            content: '✓';
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            width: 18px;
-            height: 18px;
-            border-radius: 50%;
-            background: color-mix(in srgb, var(--accent-success) 15%, transparent);
-            font-size: 0.7rem;
-            flex-shrink: 0;
-        }
-
-        .feature-partial {
-            color: var(--accent-warning);
-        }
-
-        .feature-partial::before {
-            content: '~';
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            width: 18px;
-            height: 18px;
-            border-radius: 50%;
-            background: color-mix(in srgb, var(--accent-warning) 15%, transparent);
-            font-size: 0.75rem;
-            font-weight: 700;
-            flex-shrink: 0;
-        }
-
-        .feature-no {
-            color: var(--text-muted);
-        }
-
-        .feature-no::before {
-            content: '✕';
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            width: 18px;
-            height: 18px;
-            border-radius: 50%;
-            background: color-mix(in srgb, var(--text-muted) 12%, transparent);
-            font-size: 0.65rem;
-            flex-shrink: 0;
-        }
-
-        /* Waspy column check gets extra emphasis */
-        td.col-waspy .feature-check {
-            color: var(--accent-success);
-            font-weight: 700;
-        }
-
-        td.col-waspy .feature-check::before {
-            background: color-mix(in srgb, var(--accent-success) 25%, transparent);
-        }
-
-        /* Legend */
-        .comparison-legend {
-            display: flex;
-            justify-content: center;
-            gap: 2rem;
-            margin-top: 1.25rem;
-            flex-wrap: wrap;
-        }
-
-        .legend-item {
-            display: flex;
-            align-items: center;
-            gap: 0.4rem;
-            font-size: 0.8rem;
-            color: var(--text-muted);
-        }
-
-        .legend-dot {
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-        }
-
-        .legend-dot.green { background: var(--accent-success); }
-        .legend-dot.yellow { background: var(--accent-warning); }
-        .legend-dot.gray { background: var(--text-muted); }
-
-        /* Features Grid */
-        .features {
-            padding: 5rem 0;
-        }
-
-        .features-header {
-            text-align: center;
-            margin-bottom: 3.5rem;
-        }
-
-        .features h2 {
-            text-align: center;
-            margin-bottom: 0.75rem;
-            font-size: 2.5rem;
-            font-weight: 700;
-        }
-
-        .features-subtitle {
-            color: var(--text-secondary);
-            font-size: 1.1rem;
-            max-width: 550px;
-            margin: 0 auto;
-            line-height: 1.6;
-        }
-
-        .features-grid {
-            display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 1.5rem;
-        }
-
-        .feature-card {
-            --card-accent: var(--accent-python);
-            background: var(--bg-glass);
-            backdrop-filter: blur(12px);
-            padding: 2rem 1.75rem;
-            border-radius: 16px;
-            border: 1px solid var(--glass-border);
-            transition: all 0.35s cubic-bezier(0.25, 0.46, 0.45, 0.94);
-            position: relative;
-            overflow: hidden;
-        }
-
-        .feature-card::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            height: 3px;
-            background: var(--card-accent);
-            transform: scaleX(0);
-            transform-origin: left;
-            transition: transform 0.4s ease;
-        }
-
-        .feature-card::after {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: radial-gradient(ellipse at 30% 0%, color-mix(in srgb, var(--card-accent) 8%, transparent) 0%, transparent 70%);
-            opacity: 0;
-            transition: opacity 0.4s ease;
-            pointer-events: none;
-        }
-
-        .feature-card:hover::before {
-            transform: scaleX(1);
-        }
-
-        .feature-card:hover::after {
-            opacity: 1;
-        }
-
-        .feature-card:hover {
-            transform: translateY(-6px);
-            box-shadow: 0 16px 40px rgba(0, 0, 0, 0.25);
-            border-color: color-mix(in srgb, var(--card-accent) 30%, var(--glass-border));
-        }
-
-        .feature-card[data-accent="python"]  { --card-accent: #3776ab; }
-        .feature-card[data-accent="wasm"]    { --card-accent: #654ff0; }
-        .feature-card[data-accent="success"] { --card-accent: #238636; }
-        .feature-card[data-accent="orange"]  { --card-accent: #ff8c00; }
-        .feature-card[data-accent="cyan"]    { --card-accent: #00b4d8; }
-        .feature-card[data-accent="pink"]    { --card-accent: #e040fb; }
-        .feature-card[data-accent="yellow"]  { --card-accent: #d4a017; }
-        .feature-card[data-accent="red"]     { --card-accent: #f85149; }
-        .feature-card[data-accent="teal"]    { --card-accent: #2dd4bf; }
-
-        .feature-icon-wrapper {
-            width: 52px;
-            height: 52px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            border-radius: 14px;
-            background: color-mix(in srgb, var(--card-accent) 12%, transparent);
-            border: 1px solid color-mix(in srgb, var(--card-accent) 20%, transparent);
-            margin-bottom: 1.25rem;
-            font-size: 1.5rem;
-            transition: all 0.35s ease;
-        }
-
-        .feature-card:hover .feature-icon-wrapper {
-            background: color-mix(in srgb, var(--card-accent) 20%, transparent);
-            border-color: color-mix(in srgb, var(--card-accent) 40%, transparent);
-            transform: scale(1.08);
-        }
-
-        .feature-card h3 {
-            margin-bottom: 0.6rem;
-            font-size: 1.15rem;
-            font-weight: 600;
-            color: var(--text-primary);
-        }
-
-        .feature-card p {
-            color: var(--text-secondary);
-            line-height: 1.65;
-            font-size: 0.92rem;
-        }
-
-        .feature-tag {
-            display: inline-block;
-            margin-top: 1rem;
-            padding: 0.2rem 0.65rem;
-            border-radius: 6px;
-            font-size: 0.7rem;
-            font-weight: 600;
-            letter-spacing: 0.04em;
-            text-transform: uppercase;
-            background: color-mix(in srgb, var(--card-accent) 15%, transparent);
-            color: var(--card-accent);
-            border: 1px solid color-mix(in srgb, var(--card-accent) 25%, transparent);
-        }
-
-        /* Installation */
-        .installation {
-            padding: 5rem 0;
-            background: transparent;
-            border-radius: 0;
-            border: none;
-            margin: 0;
-        }
-
-        .install-header {
-            text-align: center;
-            margin-bottom: 3rem;
-        }
-
-        .installation h2 {
-            text-align: center;
-            margin-bottom: 0.6rem;
-            font-size: 2.25rem;
-            font-weight: 700;
-        }
-
-        .install-subtitle {
-            color: var(--text-secondary);
-            font-size: 1rem;
-        }
-
-        .install-steps {
-            max-width: 700px;
-            margin: 0 auto;
-            position: relative;
-        }
-
-        /* Vertical timeline line */
-        .install-steps::before {
-            content: '';
-            position: absolute;
-            left: 22px;
-            top: 12px;
-            bottom: 12px;
-            width: 2px;
-            background: linear-gradient(to bottom, var(--accent-python), var(--accent-wasm), var(--accent-success));
-            border-radius: 2px;
-            opacity: 0.3;
-        }
-
-        .install-step {
-            margin-bottom: 1.5rem;
-            background: var(--bg-glass);
-            backdrop-filter: blur(12px);
-            padding: 1.5rem 1.5rem 1.5rem 3.5rem;
-            border-radius: 14px;
-            border: 1px solid var(--glass-border);
-            border-left: none;
-            position: relative;
-            transition: all 0.3s ease;
-        }
-
-        .install-step:hover {
-            border-color: color-mix(in srgb, var(--accent-python) 25%, var(--glass-border));
-            box-shadow: 0 8px 24px var(--shadow-heavy);
-        }
-
-        /* Step number dot */
-        .install-step::before {
-            content: attr(data-step);
-            position: absolute;
-            left: -11px;
-            top: 1.5rem;
-            width: 24px;
-            height: 24px;
-            border-radius: 50%;
-            background: var(--accent-python);
-            color: white;
-            font-size: 0.7rem;
-            font-weight: 700;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            box-shadow: 0 0 0 4px var(--bg-primary);
-        }
-
-        .install-step:nth-child(2)::before { background: var(--accent-wasm); }
-        .install-step:nth-child(3)::before { background: #ff8c00; }
-        .install-step:nth-child(4)::before { background: var(--accent-success); }
-
-        .install-step h3 {
-            margin-bottom: 0.3rem;
-            font-size: 1.05rem;
-            font-weight: 600;
-        }
-
-        .install-step > p {
-            color: var(--text-secondary);
-            font-size: 0.9rem;
-            margin-bottom: 0.75rem;
-        }
-
-        .install-command {
-            background: color-mix(in srgb, var(--bg-primary) 80%, transparent);
-            padding: 0.85rem 1rem;
-            border-radius: 10px;
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 0.85rem;
-            margin: 0;
-            border: 1px solid var(--glass-border);
-            position: relative;
-            color: var(--text-primary);
-        }
-
-        .copy-btn {
-            position: absolute;
-            top: 0.55rem;
-            right: 0.55rem;
-            background: color-mix(in srgb, var(--accent-python) 10%, transparent);
-            border: 1px solid color-mix(in srgb, var(--accent-python) 20%, transparent);
-            color: var(--text-secondary);
-            padding: 0.2rem 0.55rem;
-            border-radius: 6px;
-            font-size: 0.75rem;
-            font-weight: 500;
-            cursor: pointer;
-            transition: all 0.25s ease;
-        }
-
-        .copy-btn:hover {
-            color: var(--text-primary);
-            background: color-mix(in srgb, var(--accent-python) 18%, transparent);
-        }
-
-        /* Footer */
-        footer {
-            background: transparent;
-            border: none;
-            border-radius: 0;
-            border-top: 1px solid var(--glass-border);
-            margin: 3rem 0 0;
-            padding: 3.5rem 0 2rem;
-        }
-
-        .footer-content {
-            display: grid;
-            grid-template-columns: 1.5fr repeat(3, 1fr);
-            gap: 2.5rem;
-            margin-bottom: 2.5rem;
-        }
-
-        .footer-section h3 {
-            margin-bottom: 1.1rem;
-            font-size: 0.8rem;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 0.06em;
-            color: var(--text-primary);
-        }
-
-        .footer-section.footer-brand h3 {
-            font-size: 1.1rem;
-            text-transform: none;
-            letter-spacing: 0;
-        }
-
-        .footer-section p {
-            color: var(--text-secondary);
-            line-height: 1.6;
-            font-size: 0.9rem;
-        }
-
-        .footer-section .footer-link {
-            display: block;
-            color: var(--text-secondary);
-            text-decoration: none;
-            padding: 0.25rem 0;
-            font-size: 0.88rem;
-            transition: all 0.2s ease;
-        }
-
-        .footer-section .footer-link:hover {
-            color: var(--accent-python);
-            transform: translateX(3px);
-        }
-
-        .footer-section a {
-            color: var(--text-secondary);
-            text-decoration: none;
-            transition: color 0.2s ease;
-        }
-
-        .footer-section a:hover {
-            color: var(--accent-python);
-        }
-
-        .social-links {
-            display: flex;
-            gap: 0.6rem;
-            margin-top: 1.25rem;
-        }
-
-        .social-link {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            width: 36px;
-            height: 36px;
-            background: transparent;
-            border: 1px solid var(--glass-border);
-            border-radius: 10px;
-            color: var(--text-muted);
-            text-decoration: none;
-            transition: all 0.3s ease;
-        }
-
-        .social-link:hover {
-            color: var(--accent-python);
-            border-color: color-mix(in srgb, var(--accent-python) 30%, var(--glass-border));
-            background: color-mix(in srgb, var(--accent-python) 6%, transparent);
-            transform: translateY(-2px);
-        }
-
-        .footer-bottom {
-            text-align: center;
-            padding-top: 2rem;
-            border-top: 1px solid var(--glass-border);
-            color: var(--text-muted);
-            font-size: 0.85rem;
-        }
-
-        .footer-bottom a {
-            transition: color 0.2s ease;
-        }
-
-        /* Responsive */
-        @media (max-width: 1024px) {
-            .features-grid {
-                grid-template-columns: repeat(2, 1fr);
-            }
-        }
-
-        @media (max-width: 768px) {
-            .nav-right {
-                gap: 1rem;
-            }
-
-            .nav-links {
-                display: none;
-            }
-
-            .theme-toggle {
-                width: 50px;
-                height: 28px;
-            }
-
-            .theme-icon {
-                width: 20px;
-                height: 20px;
-                top: 3px;
-                left: 3px;
-            }
-
-            [data-theme="light"] .theme-icon {
-                transform: translateX(22px);
-            }
-
-            .hero {
-                padding: 6rem 0 2rem;
-            }
-
-            .cta-buttons {
-                flex-direction: column;
-                align-items: center;
-            }
-
-            .features-grid {
-                grid-template-columns: 1fr;
-                gap: 1rem;
-            }
-
-            .feature-card {
-                padding: 1.5rem;
-            }
-
-            .pipeline {
-                flex-direction: column;
-                gap: 0.5rem;
-            }
-
-            .pipeline-step {
-                max-width: 100%;
-                min-width: auto;
-            }
-
-            .pipeline-arrow {
-                transform: rotate(90deg);
-            }
-
-            .footer-content {
-                grid-template-columns: 1fr;
-                gap: 2rem;
-            }
-
-            .install-steps::before {
-                left: 18px;
-            }
-
-            .install-step {
-                padding-left: 3rem;
-            }
-
-            .install-step::before {
-                left: -7px;
-                width: 20px;
-                height: 20px;
-                font-size: 0.65rem;
-            }
-        }
-
-        /* Animations */
-        @keyframes fadeInUp {
-            from {
-                opacity: 0;
-                transform: translateY(30px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
-
-        .fade-in-up {
-            animation: fadeInUp 0.6s ease forwards;
-        }
-
-        /* Scrollbar */
-        ::-webkit-scrollbar {
-            width: 8px;
-        }
-
-        ::-webkit-scrollbar-track {
-            background: var(--bg-secondary);
-        }
-
-        ::-webkit-scrollbar-thumb {
-            background: var(--border-color);
-            border-radius: 4px;
-        }
-
-        ::-webkit-scrollbar-thumb:hover {
-            background: var(--text-muted);
-        }
-    </style>
+    <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <header>
+    <header class="site-header">
         <nav class="container">
-            <div class="logo-container">
+            <a class="logo-container" href="index.html">
                 <img src="https://raw.githubusercontent.com/anistark/waspy/4e205230f4e029cf5e16a28a75de0ddc06498726/assets/logo.png" alt="Waspy Logo" class="logo-img">
                 <div class="logo">waspy</div>
-            </div>
+            </a>
             <div class="nav-right">
                 <ul class="nav-links">
                     <li><a href="#how-it-works">How It Works</a></li>
@@ -1274,12 +39,12 @@
                     <li><a href="https://github.com/anistark/waspy">GitHub</a></li>
                 </ul>
 
-                <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">
+                <button class="theme-toggle" id="themeToggle" title="Toggle theme" aria-label="Toggle theme">
                     <div class="theme-icon">
-                        <svg class="sun-icon" viewBox="0 0 24 24" fill="currentColor">
+                        <svg class="sun-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                             <path d="M12 2.25a.75.75 0 01.75.75v2.25a.75.75 0 01-1.5 0V3a.75.75 0 01.75-.75zM7.5 12a4.5 4.5 0 119 0 4.5 4.5 0 01-9 0zM18.894 6.166a.75.75 0 00-1.06-1.06l-1.591 1.59a.75.75 0 101.06 1.061l1.591-1.59zM21.75 12a.75.75 0 01-.75.75h-2.25a.75.75 0 010-1.5H21a.75.75 0 01.75.75zM17.834 18.894a.75.75 0 001.06-1.06l-1.59-1.591a.75.75 0 10-1.061 1.06l1.59 1.591zM12 18a.75.75 0 01.75.75V21a.75.75 0 01-1.5 0v-2.25A.75.75 0 0112 18zM7.758 17.303a.75.75 0 00-1.061-1.06l-1.591 1.59a.75.75 0 001.06 1.061l1.591-1.59zM6 12a.75.75 0 01-.75.75H3a.75.75 0 010-1.5h2.25A.75.75 0 016 12zM6.697 7.757a.75.75 0 001.06-1.06l-1.59-1.591a.75.75 0 00-1.061 1.06l1.59 1.591z"/>
                         </svg>
-                        <svg class="moon-icon" viewBox="0 0 24 24" fill="currentColor" style="display: none;">
+                        <svg class="moon-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                             <path d="M9.528 1.718a.75.75 0 01.162.819A8.97 8.97 0 009 6a9 9 0 009 9 8.97 8.97 0 003.463-.69.75.75 0 01.981.98 10.503 10.503 0 01-9.694 6.46c-5.799 0-10.5-4.701-10.5-10.5 0-4.368 2.667-8.112 6.46-9.694a.75.75 0 01.818.162z"/>
                         </svg>
                     </div>
@@ -1290,20 +55,24 @@
 
     <main>
         <section class="hero">
-            <div class="container fade-in-up">
-                <div class="status-badge">
-                    <span class="status-dot"></span>
-                    <span>v0.11.0 • Actively Developed • <a href="/modules" style="color: var(--accent-python);">View Modules</a></span>
+            <div class="container">
+                <div class="hero-seq">
+                    <div class="status-badge">
+                        <span class="status-dot"></span>
+                        <span>v0.11.0 • Actively Developed • <a href="modules.html">View Modules</a></span>
+                    </div>
                 </div>
 
-                <h1>Python <span class="arrow">→</span> WebAssembly</h1>
-                <img src="https://raw.githubusercontent.com/anistark/waspy/4e205230f4e029cf5e16a28a75de0ddc06498726/assets/logo.png" alt="Waspy Logo" class="hero-logo">
-                <p class="subtitle">
+                <h1 class="hero-seq">Python <span class="arrow">→</span> WebAssembly</h1>
+                <div class="hero-seq">
+                    <img src="https://raw.githubusercontent.com/anistark/waspy/4e205230f4e029cf5e16a28a75de0ddc06498726/assets/logo.png" alt="Waspy Logo" class="hero-logo">
+                </div>
+                <p class="subtitle hero-seq">
                     Compile Python functions to WebAssembly with ease.
                     Built in Rust for performance and reliability.
                 </p>
 
-                <div class="cta-buttons">
+                <div class="cta-buttons hero-seq">
                     <a href="#install" class="btn btn-primary">
                         🚀 Get Started
                     </a>
@@ -1312,11 +81,14 @@
                     </a>
                 </div>
 
-                <div class="code-demo glass">
-                    <div class="code-tabs">
-                        <button class="code-tab active" data-tab="python">Python</button>
-                        <button class="code-tab" data-tab="rust">Rust</button>
-                        <button class="code-tab" data-tab="js">JavaScript</button>
+                <div class="code-demo hero-seq">
+                    <div class="code-titlebar">
+                        <div class="window-dots"><span></span><span></span><span></span></div>
+                        <div class="code-tabs">
+                            <button class="code-tab active" data-tab="python">Python</button>
+                            <button class="code-tab" data-tab="rust">Rust</button>
+                            <button class="code-tab" data-tab="js">JavaScript</button>
+                        </div>
                     </div>
 
                     <div class="code-content">
@@ -1365,43 +137,44 @@ WebAssembly.instantiate(wasmBuffer).then(result => {
             </div>
         </section>
 
-        <section class="how-it-works" id="how-it-works">
+        <section class="section" id="how-it-works">
             <div class="container">
-                <div class="how-it-works-header">
+                <div class="section-header reveal">
+                    <span class="kicker">Pipeline</span>
                     <h2>How Waspy Works</h2>
-                    <p class="how-it-works-subtitle">From Python source to optimized WebAssembly in four steps.</p>
+                    <p class="section-subtitle">From Python source to optimized WebAssembly in four steps.</p>
                 </div>
 
-                <div class="pipeline fade-in-up">
-                    <div class="pipeline-step">
-                        <div class="step-icon-wrap">🐍</div>
+                <div class="pipeline">
+                    <div class="pipeline-step reveal" style="--step-accent: var(--teal); --d: 0;">
+                        <div class="hex"><span>🐍</span></div>
                         <h3>Python AST</h3>
                         <p>Parse with RustPython</p>
                     </div>
-                    <span class="pipeline-arrow">→</span>
-                    <div class="pipeline-step">
-                        <div class="step-icon-wrap">⚙️</div>
+                    <span class="pipeline-arrow reveal" style="--d: 1;">→</span>
+                    <div class="pipeline-step reveal" style="--step-accent: var(--honey); --d: 2;">
+                        <div class="hex"><span>⚙️</span></div>
                         <h3>Custom IR</h3>
                         <p>Intermediate Rep.</p>
                     </div>
-                    <span class="pipeline-arrow">→</span>
-                    <div class="pipeline-step">
-                        <div class="step-icon-wrap">🔧</div>
+                    <span class="pipeline-arrow reveal" style="--d: 3;">→</span>
+                    <div class="pipeline-step reveal" style="--step-accent: var(--amber); --d: 4;">
+                        <div class="hex"><span>🔧</span></div>
                         <h3>WASM Binary</h3>
                         <p>wasm-encoder</p>
                     </div>
-                    <span class="pipeline-arrow">→</span>
-                    <div class="pipeline-step">
-                        <div class="step-icon-wrap">⚡</div>
+                    <span class="pipeline-arrow reveal" style="--d: 5;">→</span>
+                    <div class="pipeline-step reveal" style="--step-accent: var(--ember); --d: 6;">
+                        <div class="hex"><span>⚡</span></div>
                         <h3>Optimized</h3>
                         <p>Binaryen</p>
                     </div>
                 </div>
 
-                <div class="comparison glass">
-                    <div class="comparison-header">
-                        <h2>Waspy vs Other Python Implementations</h2>
-                        <p class="comparison-subtitle">See how Waspy compares across performance, safety, and portability.</p>
+                <div class="comparison glass reveal">
+                    <div class="section-header">
+                        <h2 style="font-size: 1.75rem;">Waspy vs Other Python Implementations</h2>
+                        <p class="section-subtitle">See how Waspy compares across performance, safety, and portability.</p>
                     </div>
                     <div class="comparison-table">
                         <table>
@@ -1500,71 +273,72 @@ WebAssembly.instantiate(wasmBuffer).then(result => {
             </div>
         </section>
 
-        <section class="features" id="features">
+        <section class="section" id="features">
             <div class="container">
-                <div class="features-header">
+                <div class="section-header reveal">
+                    <span class="kicker">Features</span>
                     <h2>Why Waspy?</h2>
-                    <p class="features-subtitle">Everything you need to compile Python to WebAssembly — fast, safe, and ready for production.</p>
+                    <p class="section-subtitle">Everything you need to compile Python to WebAssembly — fast, safe, and ready for production.</p>
                 </div>
                 <div class="features-grid">
-                    <div class="feature-card glass fade-in-up" data-accent="python">
-                        <div class="feature-icon-wrapper">🚀</div>
+                    <div class="feature-card reveal" data-accent="amber" style="--d: 0;">
+                        <div class="hex"><span>🚀</span></div>
                         <h3>Fast Compilation</h3>
                         <p>Built in Rust for blazing-fast compilation times. Transform your Python functions to optimized WebAssembly in milliseconds.</p>
                         <span class="feature-tag">Rust-powered</span>
                     </div>
 
-                    <div class="feature-card glass fade-in-up" data-accent="cyan">
-                        <div class="feature-icon-wrapper">🎯</div>
+                    <div class="feature-card reveal" data-accent="teal" style="--d: 1;">
+                        <div class="hex"><span>🎯</span></div>
                         <h3>Type Safety</h3>
                         <p>Full support for Python type annotations. Get compile-time type checking and better WebAssembly optimization.</p>
                         <span class="feature-tag">Compile-time</span>
                     </div>
 
-                    <div class="feature-card glass fade-in-up" data-accent="orange">
-                        <div class="feature-icon-wrapper">⚡</div>
+                    <div class="feature-card reveal" data-accent="ember" style="--d: 2;">
+                        <div class="hex"><span>⚡</span></div>
                         <h3>High Performance</h3>
                         <p>Optimized WebAssembly output with Binaryen. Your Python functions run at near-native speed in any environment.</p>
                         <span class="feature-tag">Binaryen</span>
                     </div>
 
-                    <div class="feature-card glass fade-in-up" data-accent="success">
-                        <div class="feature-icon-wrapper">🔧</div>
+                    <div class="feature-card reveal" data-accent="green" style="--d: 0;">
+                        <div class="hex"><span>🔧</span></div>
                         <h3>Easy Integration</h3>
                         <p>Simple API that works with your existing Python code. No need to rewrite — just compile and deploy.</p>
                         <span class="feature-tag">Drop-in</span>
                     </div>
 
-                    <div class="feature-card glass fade-in-up" data-accent="wasm">
-                        <div class="feature-icon-wrapper">🌐</div>
+                    <div class="feature-card reveal" data-accent="honey" style="--d: 1;">
+                        <div class="hex"><span>🌐</span></div>
                         <h3>Universal Runtime</h3>
                         <p>Run anywhere WebAssembly is supported: browsers, Node.js, serverless, edge computing, and more.</p>
                         <span class="feature-tag">Run anywhere</span>
                     </div>
 
-                    <div class="feature-card glass fade-in-up" data-accent="pink">
-                        <div class="feature-icon-wrapper">🛠️</div>
+                    <div class="feature-card reveal" data-accent="teal" style="--d: 2;">
+                        <div class="hex"><span>🛠️</span></div>
                         <h3>Rich Features</h3>
                         <p>Control flow, function calls, decorators, classes, and more. Comprehensive Python language support.</p>
                         <span class="feature-tag">Full language</span>
                     </div>
 
-                    <div class="feature-card glass fade-in-up" data-accent="yellow">
-                        <div class="feature-icon-wrapper">📦</div>
+                    <div class="feature-card reveal" data-accent="honey" style="--d: 0;">
+                        <div class="hex"><span>📦</span></div>
                         <h3>Multi-File Support</h3>
                         <p>Compile entire Python projects with multiple files, dependencies, and entry points into single WASM modules.</p>
                         <span class="feature-tag">Project-wide</span>
                     </div>
 
-                    <div class="feature-card glass fade-in-up" data-accent="red">
-                        <div class="feature-icon-wrapper">🔍</div>
+                    <div class="feature-card reveal" data-accent="red" style="--d: 1;">
+                        <div class="hex"><span>🔍</span></div>
                         <h3>Project Analysis</h3>
                         <p>Built-in import analysis, circular dependency detection, and project structure understanding.</p>
                         <span class="feature-tag">Smart analysis</span>
                     </div>
 
-                    <div class="feature-card glass fade-in-up" data-accent="teal">
-                        <div class="feature-icon-wrapper">🎨</div>
+                    <div class="feature-card reveal" data-accent="ember" style="--d: 2;">
+                        <div class="hex"><span>🎨</span></div>
                         <h3>Decorator Support</h3>
                         <p>Function decorators including memoization, debugging, timing, and custom decorator registry.</p>
                         <span class="feature-tag">Extensible</span>
@@ -1573,352 +347,178 @@ WebAssembly.instantiate(wasmBuffer).then(result => {
             </div>
         </section>
 
-        <section class="features" id="architecture">
+        <section class="section" id="architecture">
             <div class="container">
-                <h2>Architecture</h2>
+                <div class="section-header reveal">
+                    <span class="kicker">Under the hood</span>
+                    <h2>Architecture</h2>
+                    <p class="section-subtitle">Hover any node to see what happens at that stage.</p>
+                </div>
+                <div class="architecture-panel reveal">
                 <div class="flowchart-wrapper">
                     <svg class="flowchart-svg" id="flowchartSvg" viewBox="0 0 900 1150" preserveAspectRatio="xMidYMid meet">
                         <defs>
-                            <!-- Glow filters -->
-                            <filter id="glow-yellow" x="-30%" y="-30%" width="160%" height="160%">
+                            <filter id="glow-amber" x="-30%" y="-30%" width="160%" height="160%">
                                 <feGaussianBlur stdDeviation="6" result="blur"/>
-                                <feFlood flood-color="#d4a017" flood-opacity="0.6" result="color"/>
+                                <feFlood flood-color="#f2a83b" flood-opacity="0.55" result="color"/>
                                 <feComposite in="color" in2="blur" operator="in" result="shadow"/>
                                 <feMerge><feMergeNode in="shadow"/><feMergeNode in="SourceGraphic"/></feMerge>
                             </filter>
                             <filter id="glow-green" x="-30%" y="-30%" width="160%" height="160%">
                                 <feGaussianBlur stdDeviation="6" result="blur"/>
-                                <feFlood flood-color="#39ff14" flood-opacity="0.5" result="color"/>
+                                <feFlood flood-color="#97c464" flood-opacity="0.5" result="color"/>
                                 <feComposite in="color" in2="blur" operator="in" result="shadow"/>
                                 <feMerge><feMergeNode in="shadow"/><feMergeNode in="SourceGraphic"/></feMerge>
                             </filter>
-                            <filter id="glow-orange" x="-30%" y="-30%" width="160%" height="160%">
+                            <filter id="glow-ember" x="-30%" y="-30%" width="160%" height="160%">
                                 <feGaussianBlur stdDeviation="6" result="blur"/>
-                                <feFlood flood-color="#ff8c00" flood-opacity="0.5" result="color"/>
+                                <feFlood flood-color="#ec6a3f" flood-opacity="0.5" result="color"/>
                                 <feComposite in="color" in2="blur" operator="in" result="shadow"/>
                                 <feMerge><feMergeNode in="shadow"/><feMergeNode in="SourceGraphic"/></feMerge>
                             </filter>
-                            <filter id="glow-cyan" x="-30%" y="-30%" width="160%" height="160%">
+                            <filter id="glow-teal" x="-30%" y="-30%" width="160%" height="160%">
                                 <feGaussianBlur stdDeviation="6" result="blur"/>
-                                <feFlood flood-color="#00e5ff" flood-opacity="0.5" result="color"/>
+                                <feFlood flood-color="#43aebc" flood-opacity="0.5" result="color"/>
                                 <feComposite in="color" in2="blur" operator="in" result="shadow"/>
                                 <feMerge><feMergeNode in="shadow"/><feMergeNode in="SourceGraphic"/></feMerge>
                             </filter>
-                            <filter id="glow-purple" x="-30%" y="-30%" width="160%" height="160%">
-                                <feGaussianBlur stdDeviation="6" result="blur"/>
-                                <feFlood flood-color="#b46eff" flood-opacity="0.5" result="color"/>
-                                <feComposite in="color" in2="blur" operator="in" result="shadow"/>
-                                <feMerge><feMergeNode in="shadow"/><feMergeNode in="SourceGraphic"/></feMerge>
-                            </filter>
-                            <!-- Animated arrow marker -->
-                            <marker id="arrowhead-cyan" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-                                <polygon points="0 0, 10 3.5, 0 7" fill="#00e5ff"/>
+                            <marker id="arrowhead-teal" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+                                <polygon points="0 0, 10 3.5, 0 7" fill="#43aebc"/>
                             </marker>
-                            <marker id="arrowhead-orange" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-                                <polygon points="0 0, 10 3.5, 0 7" fill="#ff8c00"/>
+                            <marker id="arrowhead-ember" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+                                <polygon points="0 0, 10 3.5, 0 7" fill="#ec6a3f"/>
                             </marker>
                         </defs>
 
-                        <!-- CONNECTION LINES (drawn first, behind nodes) -->
-                        <!-- 1→2 -->
-                        <line class="flow-line" x1="450" y1="75" x2="450" y2="130" stroke="#00e5ff" stroke-width="2" marker-end="url(#arrowhead-cyan)" opacity="0.7"/>
-                        <!-- 2→3 -->
-                        <line class="flow-line" x1="450" y1="195" x2="450" y2="250" stroke="#00e5ff" stroke-width="2" marker-end="url(#arrowhead-cyan)" opacity="0.7"/>
-                        <!-- 3→loop -->
-                        <line class="flow-line" x1="450" y1="315" x2="450" y2="365" stroke="#ff8c00" stroke-width="2" stroke-dasharray="6,4" marker-end="url(#arrowhead-orange)" opacity="0.7"/>
-                        <!-- loop→5 -->
-                        <line class="flow-line" x1="450" y1="485" x2="450" y2="530" stroke="#ff8c00" stroke-width="2" stroke-dasharray="6,4" marker-end="url(#arrowhead-orange)" opacity="0.7"/>
-                        <!-- 5→6 -->
-                        <line class="flow-line" x1="450" y1="600" x2="450" y2="645" stroke="#00e5ff" stroke-width="2" marker-end="url(#arrowhead-cyan)" opacity="0.7"/>
-                        <!-- 6→7 -->
-                        <line class="flow-line" x1="450" y1="715" x2="450" y2="760" stroke="#00e5ff" stroke-width="2" marker-end="url(#arrowhead-cyan)" opacity="0.7"/>
-                        <!-- 7→8 (split left: Compilation Context) -->
-                        <path class="flow-line" d="M 350 830 Q 350 870 250 900" fill="none" stroke="#00e5ff" stroke-width="2" marker-end="url(#arrowhead-cyan)" opacity="0.7"/>
-                        <!-- 7→9 (split right: WASM) -->
-                        <path class="flow-line" d="M 550 830 Q 550 870 650 900" fill="none" stroke="#00e5ff" stroke-width="2" marker-end="url(#arrowhead-cyan)" opacity="0.7"/>
-                        <!-- 9 WASM → Optimized WASM -->
-                        <line class="flow-line" x1="650" y1="970" x2="650" y2="1040" stroke="#00e5ff" stroke-width="2" marker-end="url(#arrowhead-cyan)" opacity="0.7"/>
-                        <text x="660" y="1015" fill="#8b949e" font-size="11" font-family="JetBrains Mono, monospace" opacity="0.8">Binaryen</text>
+                        <line class="flow-line" x1="450" y1="75" x2="450" y2="130" stroke="#43aebc" stroke-width="2" marker-end="url(#arrowhead-teal)" opacity="0.7"/>
+                        <line class="flow-line" x1="450" y1="195" x2="450" y2="250" stroke="#43aebc" stroke-width="2" marker-end="url(#arrowhead-teal)" opacity="0.7"/>
+                        <line class="flow-line" x1="450" y1="315" x2="450" y2="365" stroke="#ec6a3f" stroke-width="2" stroke-dasharray="6,4" marker-end="url(#arrowhead-ember)" opacity="0.7"/>
+                        <line class="flow-line" x1="450" y1="485" x2="450" y2="530" stroke="#ec6a3f" stroke-width="2" stroke-dasharray="6,4" marker-end="url(#arrowhead-ember)" opacity="0.7"/>
+                        <line class="flow-line" x1="450" y1="600" x2="450" y2="645" stroke="#43aebc" stroke-width="2" marker-end="url(#arrowhead-teal)" opacity="0.7"/>
+                        <line class="flow-line" x1="450" y1="715" x2="450" y2="760" stroke="#43aebc" stroke-width="2" marker-end="url(#arrowhead-teal)" opacity="0.7"/>
+                        <path class="flow-line" d="M 350 830 Q 350 870 250 900" fill="none" stroke="#43aebc" stroke-width="2" marker-end="url(#arrowhead-teal)" opacity="0.7"/>
+                        <path class="flow-line" d="M 550 830 Q 550 870 650 900" fill="none" stroke="#43aebc" stroke-width="2" marker-end="url(#arrowhead-teal)" opacity="0.7"/>
+                        <line class="flow-line" x1="650" y1="970" x2="650" y2="1040" stroke="#43aebc" stroke-width="2" marker-end="url(#arrowhead-teal)" opacity="0.7"/>
+                        <text x="660" y="1015" fill="#a89478" font-size="11" font-family="JetBrains Mono, monospace" opacity="0.85">Binaryen</text>
 
-                        <!-- EDGE LABELS -->
-                        <text x="620" y="118" fill="#8b949e" font-size="11" font-family="JetBrains Mono, monospace" text-anchor="start">core::config::load_project_config</text>
-                        <text x="620" y="238" fill="#8b949e" font-size="11" font-family="JetBrains Mono, monospace" text-anchor="start">analysis::project::analyze_dependencies</text>
-                        <text x="455" y="510" fill="#ff8c00" font-size="11" font-family="JetBrains Mono, monospace" opacity="0.8">Combine All IRModules</text>
-                        <text x="455" y="755" fill="#8b949e" font-size="11" font-family="Inter, sans-serif" opacity="0.8">Same as Single File from here</text>
+                        <text x="620" y="118" fill="#a89478" font-size="11" font-family="JetBrains Mono, monospace" text-anchor="start">core::config::load_project_config</text>
+                        <text x="620" y="238" fill="#a89478" font-size="11" font-family="JetBrains Mono, monospace" text-anchor="start">analysis::project::analyze_dependencies</text>
+                        <text x="455" y="510" fill="#ec6a3f" font-size="11" font-family="JetBrains Mono, monospace" opacity="0.85">Combine All IRModules</text>
+                        <text x="455" y="755" fill="#a89478" font-size="11" font-family="Instrument Sans, sans-serif" opacity="0.85">Same as Single File from here</text>
 
-                        <!-- NODE 1: Project Directory -->
                         <g class="flow-node" data-step="1" data-info="The entry point — your Python project directory containing source files and configuration.">
-                            <rect x="285" y="20" width="330" height="55" rx="27" ry="27" fill="transparent" stroke="#d4a017" stroke-width="2" filter="url(#glow-yellow)"/>
-                            <text x="450" y="54" fill="#f5d76e" font-size="18" font-weight="600" font-family="Inter, sans-serif" text-anchor="middle">📁 Project Directory</text>
+                            <rect x="285" y="20" width="330" height="55" rx="27" ry="27" fill="transparent" stroke="#f2a83b" stroke-width="2" filter="url(#glow-amber)"/>
+                            <text x="450" y="54" fill="#ffd28a" font-size="18" font-weight="600" font-family="Instrument Sans, sans-serif" text-anchor="middle">📁 Project Directory</text>
                         </g>
 
-                        <!-- NODE 2: Project Config + File List -->
                         <g class="flow-node" data-step="2" data-info="Loads project configuration (waspy.toml) and discovers all Python files to compile.">
-                            <rect x="245" y="130" width="410" height="65" rx="12" fill="transparent" stroke="#39ff14" stroke-width="2" filter="url(#glow-green)"/>
-                            <text x="450" y="170" fill="#a4f785" font-size="17" font-weight="600" font-family="Inter, sans-serif" text-anchor="middle">⚙️ Project Config + File List</text>
+                            <rect x="245" y="130" width="410" height="65" rx="12" fill="transparent" stroke="#97c464" stroke-width="2" filter="url(#glow-green)"/>
+                            <text x="450" y="170" fill="#c3e39a" font-size="17" font-weight="600" font-family="Instrument Sans, sans-serif" text-anchor="middle">⚙️ Project Config + File List</text>
                         </g>
 
-                        <!-- NODE 3: Dependency Graph + Import Analysis -->
                         <g class="flow-node" data-step="3" data-info="Analyzes all import statements across files to build a full dependency graph.">
-                            <rect x="195" y="250" width="510" height="65" rx="12" fill="transparent" stroke="#ff8c00" stroke-width="2" filter="url(#glow-orange)"/>
-                            <text x="450" y="290" fill="#ffc170" font-size="17" font-weight="600" font-family="Inter, sans-serif" text-anchor="middle">🔗 Dependency Graph + Import Analysis</text>
+                            <rect x="195" y="250" width="510" height="65" rx="12" fill="transparent" stroke="#ec6a3f" stroke-width="2" filter="url(#glow-ember)"/>
+                            <text x="450" y="290" fill="#ffa985" font-size="17" font-weight="600" font-family="Instrument Sans, sans-serif" text-anchor="middle">🔗 Dependency Graph + Import Analysis</text>
                         </g>
 
-                        <!-- "For Each Python File" label outside the box, alongside the arrow -->
-                        <text x="560" y="355" fill="#ff8c00" font-size="12" font-family="Inter, sans-serif" font-style="italic">For Each Python File</text>
+                        <text x="560" y="355" fill="#ec6a3f" font-size="12" font-family="Instrument Sans, sans-serif" font-style="italic">For Each Python File</text>
 
-                        <!-- LOOP BOX -->
                         <g class="flow-node" data-step="4" data-info="For each Python file: parse source into AST (via RustPython), then lower the AST into Waspy's Intermediate Representation (IRModule).">
-                            <rect x="120" y="365" width="660" height="120" rx="14" fill="rgba(255,140,0,0.06)" stroke="#ff8c00" stroke-width="2" stroke-dasharray="8,5" filter="url(#glow-orange)"/>
-                            <!-- Python Source -->
-                            <rect x="140" y="400" width="175" height="70" rx="10" fill="transparent" stroke="#00e5ff" stroke-width="2"/>
-                            <text x="228" y="442" fill="#7fefff" font-size="15" font-weight="600" font-family="Inter, sans-serif" text-anchor="middle">🐍 Python Source</text>
-                            <!-- Arrow -->
-                            <line x1="320" y1="435" x2="365" y2="435" stroke="#00e5ff" stroke-width="2" marker-end="url(#arrowhead-cyan)" opacity="0.7"/>
-                            <!-- AST -->
-                            <rect x="370" y="400" width="130" height="70" rx="10" fill="transparent" stroke="#b46eff" stroke-width="2"/>
-                            <text x="435" y="442" fill="#d4a8ff" font-size="15" font-weight="600" font-family="Inter, sans-serif" text-anchor="middle">🌳 AST</text>
-                            <!-- Arrow -->
-                            <line x1="505" y1="435" x2="545" y2="435" stroke="#00e5ff" stroke-width="2" marker-end="url(#arrowhead-cyan)" opacity="0.7"/>
-                            <!-- IRModule -->
-                            <rect x="550" y="400" width="210" height="70" rx="10" fill="transparent" stroke="#ff8c00" stroke-width="2"/>
-                            <text x="655" y="442" fill="#ffc170" font-size="15" font-weight="600" font-family="Inter, sans-serif" text-anchor="middle">📦 IRModule</text>
+                            <rect x="120" y="365" width="660" height="120" rx="14" fill="rgba(236,106,63,0.06)" stroke="#ec6a3f" stroke-width="2" stroke-dasharray="8,5" filter="url(#glow-ember)"/>
+                            <rect x="140" y="400" width="175" height="70" rx="10" fill="transparent" stroke="#43aebc" stroke-width="2"/>
+                            <text x="228" y="442" fill="#8fdbe6" font-size="15" font-weight="600" font-family="Instrument Sans, sans-serif" text-anchor="middle">🐍 Python Source</text>
+                            <line x1="320" y1="435" x2="365" y2="435" stroke="#43aebc" stroke-width="2" marker-end="url(#arrowhead-teal)" opacity="0.7"/>
+                            <rect x="370" y="400" width="130" height="70" rx="10" fill="transparent" stroke="#97c464" stroke-width="2"/>
+                            <text x="435" y="442" fill="#c3e39a" font-size="15" font-weight="600" font-family="Instrument Sans, sans-serif" text-anchor="middle">🌳 AST</text>
+                            <line x1="505" y1="435" x2="545" y2="435" stroke="#43aebc" stroke-width="2" marker-end="url(#arrowhead-teal)" opacity="0.7"/>
+                            <rect x="550" y="400" width="210" height="70" rx="10" fill="transparent" stroke="#ec6a3f" stroke-width="2"/>
+                            <text x="655" y="442" fill="#ffa985" font-size="15" font-weight="600" font-family="Instrument Sans, sans-serif" text-anchor="middle">📦 IRModule</text>
                         </g>
 
-                        <!-- NODE 5: Resolve Circular Dependencies -->
                         <g class="flow-node" data-step="5" data-info="Detects and resolves circular dependencies between modules using topological sorting.">
-                            <rect x="195" y="530" width="510" height="70" rx="12" fill="transparent" stroke="#ff8c00" stroke-width="2" filter="url(#glow-orange)"/>
-                            <text x="450" y="572" fill="#ffc170" font-size="17" font-weight="600" font-family="Inter, sans-serif" text-anchor="middle">🔀 Resolve Circular Dependencies</text>
+                            <rect x="195" y="530" width="510" height="70" rx="12" fill="transparent" stroke="#ec6a3f" stroke-width="2" filter="url(#glow-ember)"/>
+                            <text x="450" y="572" fill="#ffa985" font-size="17" font-weight="600" font-family="Instrument Sans, sans-serif" text-anchor="middle">🔀 Resolve Circular Dependencies</text>
                         </g>
 
-                        <!-- NODE 6: Resolved IRModule -->
                         <g class="flow-node" data-step="6" data-info="A single, unified intermediate representation with all dependencies resolved and modules merged.">
-                            <rect x="245" y="645" width="410" height="70" rx="12" fill="transparent" stroke="#b46eff" stroke-width="2" filter="url(#glow-purple)"/>
-                            <text x="450" y="687" fill="#d4a8ff" font-size="17" font-weight="600" font-family="Inter, sans-serif" text-anchor="middle">📦 Resolved IRModule</text>
+                            <rect x="245" y="645" width="410" height="70" rx="12" fill="transparent" stroke="#f2a83b" stroke-width="2" filter="url(#glow-amber)"/>
+                            <text x="450" y="687" fill="#ffd28a" font-size="17" font-weight="600" font-family="Instrument Sans, sans-serif" text-anchor="middle">📦 Resolved IRModule</text>
                         </g>
 
-                        <!-- NODE 7: IRModule + Entry Points -->
                         <g class="flow-node" data-step="7" data-info="Identifies exported entry point functions and prepares the IRModule for final code generation.">
-                            <rect x="235" y="760" width="430" height="70" rx="12" fill="transparent" stroke="#b46eff" stroke-width="2" filter="url(#glow-purple)"/>
-                            <text x="450" y="802" fill="#d4a8ff" font-size="17" font-weight="600" font-family="Inter, sans-serif" text-anchor="middle">🚪 IRModule + Entry Points</text>
+                            <rect x="235" y="760" width="430" height="70" rx="12" fill="transparent" stroke="#f2a83b" stroke-width="2" filter="url(#glow-amber)"/>
+                            <text x="450" y="802" fill="#ffd28a" font-size="17" font-weight="600" font-family="Instrument Sans, sans-serif" text-anchor="middle">🚪 IRModule + Entry Points</text>
                         </g>
 
-                        <!-- NODE 8: Compilation Context (left, same level as WASM) -->
                         <g class="flow-node" data-step="8" data-info="The compilation context manages type tables, function indices, memory layout, and emits raw WASM binary via wasm-encoder.">
-                            <rect x="110" y="900" width="280" height="70" rx="12" fill="transparent" stroke="#39ff14" stroke-width="2" filter="url(#glow-green)"/>
-                            <text x="250" y="942" fill="#a4f785" font-size="16" font-weight="600" font-family="Inter, sans-serif" text-anchor="middle">⚙️ Compilation Context</text>
+                            <rect x="110" y="900" width="280" height="70" rx="12" fill="transparent" stroke="#97c464" stroke-width="2" filter="url(#glow-green)"/>
+                            <text x="250" y="942" fill="#c3e39a" font-size="16" font-weight="600" font-family="Instrument Sans, sans-serif" text-anchor="middle">⚙️ Compilation Context</text>
                         </g>
 
-                        <!-- NODE 9: WASM (right, same level as Compilation Context) -->
                         <g class="flow-node" data-step="9" data-info="The compiled WebAssembly binary (.wasm) generated from the IR via wasm-encoder.">
-                            <rect x="510" y="900" width="280" height="70" rx="12" fill="transparent" stroke="#654ff0" stroke-width="2" filter="url(#glow-purple)"/>
-                            <text x="650" y="942" fill="#d4a8ff" font-size="18" font-weight="700" font-family="Inter, sans-serif" text-anchor="middle">WASM</text>
+                            <rect x="510" y="900" width="280" height="70" rx="12" fill="transparent" stroke="#43aebc" stroke-width="2" filter="url(#glow-teal)"/>
+                            <text x="650" y="942" fill="#8fdbe6" font-size="18" font-weight="700" font-family="Instrument Sans, sans-serif" text-anchor="middle">WASM</text>
                         </g>
 
-                        <!-- NODE 10: Optimized WASM (final step, below WASM) -->
                         <g class="flow-node" data-step="10" data-info="Binaryen applies optimization passes: dead code elimination, constant folding, inlining, and more for a smaller, faster binary.">
-                            <rect x="510" y="1040" width="280" height="70" rx="12" fill="transparent" stroke="#ff8c00" stroke-width="2" filter="url(#glow-orange)"/>
-                            <text x="650" y="1082" fill="#ffc170" font-size="16" font-weight="600" font-family="Inter, sans-serif" text-anchor="middle">🚀 Optimized WASM</text>
+                            <rect x="510" y="1040" width="280" height="70" rx="12" fill="transparent" stroke="#ec6a3f" stroke-width="2" filter="url(#glow-ember)"/>
+                            <text x="650" y="1082" fill="#ffa985" font-size="16" font-weight="600" font-family="Instrument Sans, sans-serif" text-anchor="middle">🚀 Optimized WASM</text>
                         </g>
 
-                        <!-- Animated pulse dot travelling along main path -->
-                        <circle class="pulse-dot" r="4" fill="#00e5ff" opacity="0.9">
+                        <circle class="pulse-dot" r="4" fill="#ffce7a" opacity="0.9">
                             <animateMotion dur="7s" repeatCount="1" fill="freeze" path="M 450 75 L 450 130 L 450 195 L 450 250 L 450 315 L 450 365 L 450 485 L 450 530 L 450 600 L 450 645 L 450 715 L 450 760 L 450 830 L 650 900 L 650 970 L 650 1040 L 650 1110"/>
                             <animate attributeName="opacity" begin="7s" dur="0.5s" from="0.9" to="0" fill="freeze"/>
                         </circle>
                     </svg>
 
-                    <!-- Tooltip -->
                     <div class="flow-tooltip" id="flowTooltip"></div>
                 </div>
+                </div>
             </div>
-
-            <style>
-                .flowchart-wrapper {
-                    position: relative;
-                    max-width: 900px;
-                    margin: 2rem auto 0;
-                    padding: 2rem 1rem;
-                    overflow: visible;
-                }
-                .flowchart-svg {
-                    width: 100%;
-                    height: auto;
-                    display: block;
-                }
-                .flow-node {
-                    cursor: pointer;
-                    transition: transform 0.2s ease;
-                }
-                .flow-node:hover rect {
-                    stroke-width: 3;
-                }
-                .flow-node.active rect {
-                    stroke-width: 3.5;
-                    fill: rgba(255,255,255,0.04);
-                }
-                .flow-line {
-                    transition: opacity 0.3s ease;
-                }
-                .flow-tooltip {
-                    position: absolute;
-                    display: none;
-                    background: rgba(22,27,34,0.95);
-                    backdrop-filter: blur(16px);
-                    border: 1px solid rgba(100,180,255,0.3);
-                    border-radius: 10px;
-                    padding: 14px 18px;
-                    color: #f0f6fc;
-                    font-size: 0.9rem;
-                    line-height: 1.5;
-                    max-width: 340px;
-                    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
-                    z-index: 100;
-                    pointer-events: none;
-                    animation: tooltipIn 0.2s ease;
-                }
-                [data-theme="light"] .flow-tooltip {
-                    background: rgba(255,255,255,0.95);
-                    color: #24292f;
-                    border-color: rgba(55,118,171,0.3);
-                }
-                .flow-tooltip .step-label {
-                    font-weight: 700;
-                    font-size: 0.8rem;
-                    text-transform: uppercase;
-                    letter-spacing: 0.05em;
-                    color: #00e5ff;
-                    margin-bottom: 6px;
-                }
-                [data-theme="light"] .flow-tooltip .step-label {
-                    color: var(--accent-python);
-                }
-                @keyframes tooltipIn {
-                    from { opacity: 0; transform: translateY(6px); }
-                    to { opacity: 1; transform: translateY(0); }
-                }
-                .pulse-dot {
-                    filter: drop-shadow(0 0 6px #00e5ff);
-                }
-                @media (max-width: 768px) {
-                    .flowchart-wrapper { padding: 1rem 0.25rem; }
-                }
-            </style>
-
-            <script>
-            (function() {
-                const tooltip = document.getElementById('flowTooltip');
-                const svg = document.getElementById('flowchartSvg');
-                const nodes = svg.querySelectorAll('.flow-node');
-                const stepNames = {
-                    1: 'Project Directory',
-                    2: 'Project Config + File List',
-                    3: 'Dependency Graph',
-                    4: 'File Processing Loop',
-                    5: 'Resolve Circular Deps',
-                    6: 'Resolved IRModule',
-                    7: 'IRModule + Entry Points',
-                    8: 'Compilation Context',
-                    9: 'WASM',
-                    10: 'Optimized WASM'
-                };
-
-                function showTooltip(node, e) {
-                    const step = node.getAttribute('data-step');
-                    const info = node.getAttribute('data-info');
-                    tooltip.innerHTML = '<div class="step-label">Step ' + step + ' — ' + (stepNames[step] || '') + '</div>' + info;
-                    tooltip.style.display = 'block';
-                    positionTooltip(e);
-                }
-
-                function positionTooltip(e) {
-                    const wrapper = document.querySelector('.flowchart-wrapper');
-                    const rect = wrapper.getBoundingClientRect();
-                    let x = e.clientX - rect.left + 16;
-                    let y = e.clientY - rect.top + 16;
-                    if (x + 340 > rect.width) x = e.clientX - rect.left - 356;
-                    if (y + 120 > rect.height) y = e.clientY - rect.top - 80;
-                    tooltip.style.left = x + 'px';
-                    tooltip.style.top = y + 'px';
-                }
-
-                nodes.forEach(function(node) {
-                    node.addEventListener('mouseenter', function(e) {
-                        nodes.forEach(function(n) { n.classList.remove('active'); });
-                        node.classList.add('active');
-                        showTooltip(node, e);
-                    });
-                    node.addEventListener('mousemove', function(e) {
-                        positionTooltip(e);
-                    });
-                    node.addEventListener('mouseleave', function() {
-                        node.classList.remove('active');
-                        tooltip.style.display = 'none';
-                    });
-                    // Touch support
-                    node.addEventListener('click', function(e) {
-                        var wasActive = node.classList.contains('active');
-                        nodes.forEach(function(n) { n.classList.remove('active'); });
-                        tooltip.style.display = 'none';
-                        if (!wasActive) {
-                            node.classList.add('active');
-                            showTooltip(node, e);
-                        }
-                    });
-                });
-
-                // Dismiss tooltip on outside click
-                document.addEventListener('click', function(e) {
-                    if (!e.target.closest('.flow-node')) {
-                        nodes.forEach(function(n) { n.classList.remove('active'); });
-                        tooltip.style.display = 'none';
-                    }
-                });
-            })();
-            </script>
         </section>
 
-        <section class="installation" id="install">
+        <section class="section" id="install">
             <div class="container">
-                <div class="install-header">
+                <div class="section-header reveal">
+                    <span class="kicker">Install</span>
                     <h2>Get Started in Minutes</h2>
-                    <p class="install-subtitle">Four steps from zero to compiled WebAssembly.</p>
+                    <p class="section-subtitle">Four steps from zero to compiled WebAssembly.</p>
                 </div>
 
                 <div class="install-steps">
-                    <div class="install-step fade-in-up" data-step="1">
+                    <div class="install-step reveal" data-step="1" style="--d: 0;">
                         <h3>Install Waspy</h3>
                         <p>Add Waspy to your Rust project:</p>
                         <div class="install-command">
                             <code>cargo add waspy</code>
-                            <button class="copy-btn" onclick="copyToClipboard('cargo add waspy')">Copy</button>
+                            <button class="copy-btn" data-copy="cargo add waspy">Copy</button>
                         </div>
                     </div>
 
-                    <div class="install-step fade-in-up" data-step="2">
+                    <div class="install-step reveal" data-step="2" style="--d: 1;">
                         <h3>Compile Python to WASM</h3>
                         <p>Use the simple API to compile your Python functions:</p>
                         <div class="install-command">
                             <code>let wasm = waspy::compile_python_to_wasm(python_code)?;</code>
-                            <button class="copy-btn" onclick="copyToClipboard('let wasm = waspy::compile_python_to_wasm(python_code)?;')">Copy</button>
+                            <button class="copy-btn" data-copy="let wasm = waspy::compile_python_to_wasm(python_code)?;">Copy</button>
                         </div>
                     </div>
 
-                    <div class="install-step fade-in-up" data-step="3">
+                    <div class="install-step reveal" data-step="3" style="--d: 2;">
                         <h3>Advanced Features</h3>
                         <p>Compile entire projects with options:</p>
                         <div class="install-command">
                             <code>let wasm = waspy::compile_python_project("./my_project", true)?;</code>
-                            <button class="copy-btn" onclick="copyToClipboard('let wasm = waspy::compile_python_project(\"./my_project\", true)?;')">Copy</button>
+                            <button class="copy-btn" data-copy='let wasm = waspy::compile_python_project("./my_project", true)?;'>Copy</button>
                         </div>
                     </div>
 
-                    <div class="install-step fade-in-up" data-step="4">
+                    <div class="install-step reveal" data-step="4" style="--d: 3;">
                         <h3>Run Anywhere</h3>
                         <p>Execute your compiled WebAssembly in any environment:</p>
                         <div class="install-command">
                             <code>WebAssembly.instantiate(wasm).then(instance => { /* magic */ });</code>
-                            <button class="copy-btn" onclick="copyToClipboard('WebAssembly.instantiate(wasm).then(instance => { /* magic */ });')">Copy</button>
+                            <button class="copy-btn" data-copy="WebAssembly.instantiate(wasm).then(instance => { /* magic */ });">Copy</button>
                         </div>
                     </div>
                 </div>
@@ -1926,11 +526,11 @@ WebAssembly.instantiate(wasmBuffer).then(result => {
         </section>
     </main>
 
-    <footer>
+    <footer class="site-footer">
         <div class="container">
             <div class="footer-content">
                 <div class="footer-section footer-brand">
-                    <h3>Waspy</h3>
+                    <h3>waspy</h3>
                     <p>A Python to WebAssembly compiler written in Rust, designed for performance and simplicity.</p>
                     <div class="social-links">
                         <a href="https://github.com/anistark/waspy" class="social-link" title="GitHub">
@@ -1943,9 +543,9 @@ WebAssembly.instantiate(wasmBuffer).then(result => {
                                 <path d="M12 0L1.608 6v12L12 24l10.392-6V6L12 0zm-1.601 8.4l-2.4 1.385v2.77l2.4 1.385 2.4-1.385v-2.77L10.399 8.4zm3.601 0l-2.4 1.385v2.77l2.4 1.385 2.4-1.385v-2.77L14 8.4z"/>
                             </svg>
                         </a>
-                        <a href="https://x.com/kranirudha" class="social-link" title="Twitter">
+                        <a href="https://x.com/kranirudha" class="social-link" title="X (Twitter)">
                             <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-                                <path d="M23.953 4.57a10 10 0 01-2.825.775 4.958 4.958 0 002.163-2.723c-.951.555-2.005.959-3.127 1.184a4.92 4.92 0 00-8.384 4.482C7.69 8.095 4.067 6.13 1.64 3.162a4.822 4.822 0 00-.666 2.475c0 1.71.87 3.213 2.188 4.096a4.904 4.904 0 01-2.228-.616v.06a4.923 4.923 0 003.946 4.827 4.996 4.996 0 01-2.212.085 4.936 4.936 0 004.604 3.417 9.867 9.867 0 01-6.102 2.105c-.39 0-.779-.023-1.17-.067a13.995 13.995 0 007.557 2.209c9.053 0 13.998-7.496 13.998-13.985 0-.21 0-.42-.015-.63A9.935 9.935 0 0024 4.59z"/>
+                                <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24h-6.514l-5.106-6.674-5.829 6.674h-3.306l7.73-8.835L.424 2.25h6.679l4.882 6.268 5.259-6.268zM17.364 20.033h1.828L6.817 3.897H4.881z"/>
                             </svg>
                         </a>
                         <a href="https://linkedin.com/in/kranirudha" class="social-link" title="LinkedIn">
@@ -1982,7 +582,7 @@ WebAssembly.instantiate(wasmBuffer).then(result => {
             </div>
 
             <div class="footer-bottom">
-                <p>&copy; 2025 Waspy. Made with 💙 by <a href="https://github.com/anistark" style="color: var(--accent-python);">Kumar Anirudha</a> &amp; <a href="https://github.com/farhaanbukhsh" style="color: var(--accent-python);">Farhaan Bukhsh</a></p>
+                <p>&copy; 2025 Waspy. Made with 💛 by <a href="https://github.com/anistark">Kumar Anirudha</a> &amp; <a href="https://github.com/farhaanbukhsh">Farhaan Bukhsh</a></p>
                 <p>MIT License • v0.11.0 • Actively Developed</p>
             </div>
         </div>
@@ -1990,129 +590,83 @@ WebAssembly.instantiate(wasmBuffer).then(result => {
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+    <script src="main.js"></script>
 
     <script>
-        // Theme functionality
-        function toggleTheme() {
-            const html = document.documentElement;
-            const currentTheme = html.getAttribute('data-theme');
-            const newTheme = currentTheme === 'light' ? 'dark' : 'light';
-
-            html.setAttribute('data-theme', newTheme);
-            localStorage.setItem('theme', newTheme);
-
-            // Update theme toggle icons
-            const sunIcon = document.querySelector('.sun-icon');
-            const moonIcon = document.querySelector('.moon-icon');
-
-            if (newTheme === 'light') {
-                sunIcon.style.display = 'none';
-                moonIcon.style.display = 'block';
-            } else {
-                sunIcon.style.display = 'block';
-                moonIcon.style.display = 'none';
-            }
-        }
-
-        // Initialize theme
-        function initTheme() {
-            const savedTheme = localStorage.getItem('theme');
-            const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-            const theme = savedTheme || (prefersDark ? 'dark' : 'light');
-
-            document.documentElement.setAttribute('data-theme', theme);
-
-            // Update theme toggle icons
-            const sunIcon = document.querySelector('.sun-icon');
-            const moonIcon = document.querySelector('.moon-icon');
-
-            if (theme === 'light') {
-                sunIcon.style.display = 'none';
-                moonIcon.style.display = 'block';
-            } else {
-                sunIcon.style.display = 'block';
-                moonIcon.style.display = 'none';
-            }
-        }
-
-        // Initialize theme on page load
-        document.addEventListener('DOMContentLoaded', initTheme);
-
-        // Tab functionality
         document.querySelectorAll('.code-tab').forEach(tab => {
             tab.addEventListener('click', () => {
-                // Remove active class from all tabs and panels
                 document.querySelectorAll('.code-tab').forEach(t => t.classList.remove('active'));
                 document.querySelectorAll('.code-panel').forEach(p => p.classList.remove('active'));
-
-                // Add active class to clicked tab and corresponding panel
                 tab.classList.add('active');
                 document.getElementById(tab.dataset.tab).classList.add('active');
             });
         });
 
-        // Copy to clipboard functionality
-        function copyToClipboard(text) {
-            navigator.clipboard.writeText(text).then(() => {
-                // Show feedback
-                const btn = event.target;
-                const originalText = btn.textContent;
-                btn.textContent = 'Copied!';
-                btn.style.color = 'var(--accent-success)';
+        (function () {
+            const tooltip = document.getElementById('flowTooltip');
+            const svg = document.getElementById('flowchartSvg');
+            const nodes = svg.querySelectorAll('.flow-node');
+            const stepNames = {
+                1: 'Project Directory',
+                2: 'Project Config + File List',
+                3: 'Dependency Graph',
+                4: 'File Processing Loop',
+                5: 'Resolve Circular Deps',
+                6: 'Resolved IRModule',
+                7: 'IRModule + Entry Points',
+                8: 'Compilation Context',
+                9: 'WASM',
+                10: 'Optimized WASM'
+            };
 
-                setTimeout(() => {
-                    btn.textContent = originalText;
-                    btn.style.color = '';
-                }, 2000);
-            });
-        }
-
-        // Smooth scrolling for anchor links
-        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
-            anchor.addEventListener('click', function (e) {
-                e.preventDefault();
-                const target = document.querySelector(this.getAttribute('href'));
-                if (target) {
-                    target.scrollIntoView({
-                        behavior: 'smooth',
-                        block: 'start'
-                    });
-                }
-            });
-        });
-
-        // Add fade-in animation on scroll
-        const observerOptions = {
-            threshold: 0.1,
-            rootMargin: '0px 0px -50px 0px'
-        };
-
-        const observer = new IntersectionObserver((entries) => {
-            entries.forEach(entry => {
-                if (entry.isIntersecting) {
-                    entry.target.style.opacity = '1';
-                    entry.target.style.transform = 'translateY(0)';
-                }
-            });
-        }, observerOptions);
-
-        // Observe all fade-in-up elements
-        document.querySelectorAll('.fade-in-up').forEach(el => {
-            el.style.opacity = '0';
-            el.style.transform = 'translateY(30px)';
-            el.style.transition = 'opacity 0.6s ease, transform 0.6s ease';
-            observer.observe(el);
-        });
-
-        // Add parallax effect to background
-        window.addEventListener('scroll', () => {
-            const scrolled = window.pageYOffset;
-            const parallax = document.querySelector('body::before');
-            if (parallax) {
-                const speed = scrolled * 0.5;
-                parallax.style.transform = `translateY(${speed}px)`;
+            function showTooltip(node, e) {
+                const step = node.getAttribute('data-step');
+                const info = node.getAttribute('data-info');
+                tooltip.innerHTML = '<div class="step-label">Step ' + step + ' — ' + (stepNames[step] || '') + '</div>' + info;
+                tooltip.style.display = 'block';
+                positionTooltip(e);
             }
-        });
+
+            function positionTooltip(e) {
+                const wrapper = document.querySelector('.flowchart-wrapper');
+                const rect = wrapper.getBoundingClientRect();
+                let x = e.clientX - rect.left + 16;
+                let y = e.clientY - rect.top + 16;
+                if (x + 340 > rect.width) x = e.clientX - rect.left - 356;
+                if (y + 120 > rect.height) y = e.clientY - rect.top - 80;
+                tooltip.style.left = x + 'px';
+                tooltip.style.top = y + 'px';
+            }
+
+            nodes.forEach(function (node) {
+                node.addEventListener('mouseenter', function (e) {
+                    nodes.forEach(function (n) { n.classList.remove('active'); });
+                    node.classList.add('active');
+                    showTooltip(node, e);
+                });
+                node.addEventListener('mousemove', positionTooltip);
+                node.addEventListener('mouseleave', function () {
+                    node.classList.remove('active');
+                    tooltip.style.display = 'none';
+                });
+                node.addEventListener('click', function (e) {
+                    var wasActive = node.classList.contains('active');
+                    nodes.forEach(function (n) { n.classList.remove('active'); });
+                    tooltip.style.display = 'none';
+                    if (!wasActive) {
+                        node.classList.add('active');
+                        showTooltip(node, e);
+                    }
+                });
+            });
+
+            document.addEventListener('click', function (e) {
+                if (!e.target.closest('.flow-node')) {
+                    nodes.forEach(function (n) { n.classList.remove('active'); });
+                    tooltip.style.display = 'none';
+                }
+            });
+        })();
     </script>
 </body>
 </html>
