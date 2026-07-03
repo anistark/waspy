@@ -280,68 +280,84 @@ WebAssembly.instantiate(wasmBuffer).then(result => {
                     <h2>Why Waspy?</h2>
                     <p class="section-subtitle">Everything you need to compile Python to WebAssembly — fast, safe, and ready for production.</p>
                 </div>
-                <div class="features-grid">
-                    <div class="feature-card reveal" data-accent="amber" style="--d: 0;">
-                        <div class="hex"><span>🚀</span></div>
-                        <h3>Fast Compilation</h3>
-                        <p>Built in Rust for blazing-fast compilation times. Transform your Python functions to optimized WebAssembly in milliseconds.</p>
-                        <span class="feature-tag">Rust-powered</span>
+                <div class="hive">
+                    <div class="hive-row">
+                        <div class="hex-cell reveal" data-accent="amber" style="--d: 0;">
+                            <div class="hex-card">
+                                <div class="hex"><span>🚀</span></div>
+                                <h3>Fast Compilation</h3>
+                                <p>Built in Rust — transform Python functions to optimized WebAssembly in milliseconds.</p>
+                                <span class="feature-tag">Rust-powered</span>
+                            </div>
+                        </div>
+                        <div class="hex-cell reveal" data-accent="teal" style="--d: 1;">
+                            <div class="hex-card">
+                                <div class="hex"><span>🎯</span></div>
+                                <h3>Type Safety</h3>
+                                <p>Python type annotations give compile-time checking and better WASM optimization.</p>
+                                <span class="feature-tag">Compile-time</span>
+                            </div>
+                        </div>
+                        <div class="hex-cell reveal" data-accent="ember" style="--d: 2;">
+                            <div class="hex-card">
+                                <div class="hex"><span>⚡</span></div>
+                                <h3>High Performance</h3>
+                                <p>Binaryen-optimized output that runs at near-native speed in any environment.</p>
+                                <span class="feature-tag">Binaryen</span>
+                            </div>
+                        </div>
+                        <div class="hex-cell reveal" data-accent="green" style="--d: 3;">
+                            <div class="hex-card">
+                                <div class="hex"><span>🔧</span></div>
+                                <h3>Easy Integration</h3>
+                                <p>A simple API for your existing Python code — no rewrite, just compile and deploy.</p>
+                                <span class="feature-tag">Drop-in</span>
+                            </div>
+                        </div>
                     </div>
-
-                    <div class="feature-card reveal" data-accent="teal" style="--d: 1;">
-                        <div class="hex"><span>🎯</span></div>
-                        <h3>Type Safety</h3>
-                        <p>Full support for Python type annotations. Get compile-time type checking and better WebAssembly optimization.</p>
-                        <span class="feature-tag">Compile-time</span>
+                    <div class="hive-row">
+                        <div class="hex-cell reveal" data-accent="honey" style="--d: 1;">
+                            <div class="hex-card">
+                                <div class="hex"><span>🌐</span></div>
+                                <h3>Universal Runtime</h3>
+                                <p>Run anywhere WebAssembly is supported: browsers, Node.js, serverless, and edge.</p>
+                                <span class="feature-tag">Run anywhere</span>
+                            </div>
+                        </div>
+                        <div class="hex-cell reveal" data-accent="teal" style="--d: 2;">
+                            <div class="hex-card">
+                                <div class="hex"><span>🛠️</span></div>
+                                <h3>Rich Features</h3>
+                                <p>Control flow, function calls, decorators, classes, and more Python language support.</p>
+                                <span class="feature-tag">Full language</span>
+                            </div>
+                        </div>
+                        <div class="hex-cell reveal" data-accent="honey" style="--d: 3;">
+                            <div class="hex-card">
+                                <div class="hex"><span>📦</span></div>
+                                <h3>Multi-File Support</h3>
+                                <p>Compile whole projects — many files, dependencies, entry points — into one WASM module.</p>
+                                <span class="feature-tag">Project-wide</span>
+                            </div>
+                        </div>
                     </div>
-
-                    <div class="feature-card reveal" data-accent="ember" style="--d: 2;">
-                        <div class="hex"><span>⚡</span></div>
-                        <h3>High Performance</h3>
-                        <p>Optimized WebAssembly output with Binaryen. Your Python functions run at near-native speed in any environment.</p>
-                        <span class="feature-tag">Binaryen</span>
-                    </div>
-
-                    <div class="feature-card reveal" data-accent="green" style="--d: 0;">
-                        <div class="hex"><span>🔧</span></div>
-                        <h3>Easy Integration</h3>
-                        <p>Simple API that works with your existing Python code. No need to rewrite — just compile and deploy.</p>
-                        <span class="feature-tag">Drop-in</span>
-                    </div>
-
-                    <div class="feature-card reveal" data-accent="honey" style="--d: 1;">
-                        <div class="hex"><span>🌐</span></div>
-                        <h3>Universal Runtime</h3>
-                        <p>Run anywhere WebAssembly is supported: browsers, Node.js, serverless, edge computing, and more.</p>
-                        <span class="feature-tag">Run anywhere</span>
-                    </div>
-
-                    <div class="feature-card reveal" data-accent="teal" style="--d: 2;">
-                        <div class="hex"><span>🛠️</span></div>
-                        <h3>Rich Features</h3>
-                        <p>Control flow, function calls, decorators, classes, and more. Comprehensive Python language support.</p>
-                        <span class="feature-tag">Full language</span>
-                    </div>
-
-                    <div class="feature-card reveal" data-accent="honey" style="--d: 0;">
-                        <div class="hex"><span>📦</span></div>
-                        <h3>Multi-File Support</h3>
-                        <p>Compile entire Python projects with multiple files, dependencies, and entry points into single WASM modules.</p>
-                        <span class="feature-tag">Project-wide</span>
-                    </div>
-
-                    <div class="feature-card reveal" data-accent="red" style="--d: 1;">
-                        <div class="hex"><span>🔍</span></div>
-                        <h3>Project Analysis</h3>
-                        <p>Built-in import analysis, circular dependency detection, and project structure understanding.</p>
-                        <span class="feature-tag">Smart analysis</span>
-                    </div>
-
-                    <div class="feature-card reveal" data-accent="ember" style="--d: 2;">
-                        <div class="hex"><span>🎨</span></div>
-                        <h3>Decorator Support</h3>
-                        <p>Function decorators including memoization, debugging, timing, and custom decorator registry.</p>
-                        <span class="feature-tag">Extensible</span>
+                    <div class="hive-row">
+                        <div class="hex-cell reveal" data-accent="red" style="--d: 2;">
+                            <div class="hex-card">
+                                <div class="hex"><span>🔍</span></div>
+                                <h3>Project Analysis</h3>
+                                <p>Built-in import analysis, circular dependency detection, and structure understanding.</p>
+                                <span class="feature-tag">Smart analysis</span>
+                            </div>
+                        </div>
+                        <div class="hex-cell reveal" data-accent="ember" style="--d: 3;">
+                            <div class="hex-card">
+                                <div class="hex"><span>🎨</span></div>
+                                <h3>Decorator Support</h3>
+                                <p>Memoization, debugging, and timing decorators, plus a custom decorator registry.</p>
+                                <span class="feature-tag">Extensible</span>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
