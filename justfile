@@ -97,8 +97,12 @@ clean:
     cargo clean
     rm -rf examples/output || true
 
-# Generate documentation and open in browser
-docs:
+# Serve the docs website locally
+docs port="8000":
+    python3 -m http.server {{port}} --directory docs
+
+# Generate rustdoc API documentation and open in browser
+docs-rs:
     cargo doc --all-features --no-deps --open
 
 # Check documentation build
