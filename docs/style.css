@@ -652,6 +652,15 @@ code {
     margin: 0 auto;
 }
 
+.section-subtitle a {
+    color: var(--amber);
+    text-decoration: none;
+}
+
+.section-subtitle a:hover {
+    text-decoration: underline;
+}
+
 /* Pipeline */
 .pipeline {
     display: flex;
@@ -958,28 +967,17 @@ tbody tr:hover td.col-waspy {
     z-index: 1;
 }
 
-.hex-card .hex {
-    --hex-accent: var(--card-accent);
-    width: 46px;
-    height: 51px;
-    font-size: 1.15rem;
-    margin-bottom: 0.75rem;
-}
-
-.hex-cell:hover .hex-card .hex {
-    transform: scale(1.1) rotate(6deg);
-}
-
 .hex-card h3 {
-    font-size: 1.02rem;
+    font-size: 1.05rem;
     font-weight: 700;
-    margin-bottom: 0.4rem;
+    margin-bottom: 0.5rem;
+    color: var(--card-accent);
 }
 
 .hex-card p {
     color: var(--text-1);
-    font-size: 0.78rem;
-    line-height: 1.55;
+    font-size: 0.8rem;
+    line-height: 1.6;
 }
 
 .feature-tag {

@@ -277,85 +277,76 @@ WebAssembly.instantiate(wasmBuffer).then(result => {
             <div class="container">
                 <div class="section-header reveal">
                     <span class="kicker">Features</span>
-                    <h2>Why Waspy?</h2>
-                    <p class="section-subtitle">Everything you need to compile Python to WebAssembly — fast, safe, and ready for production.</p>
+                    <h2>What Waspy Does</h2>
+                    <p class="section-subtitle">What the compiler supports today, from parser to binary. Full per-feature status lives on the <a href="modules.html">modules board</a>.</p>
                 </div>
                 <div class="hive">
                     <div class="hive-row">
                         <div class="hex-cell reveal" data-accent="amber" style="--d: 0;">
                             <div class="hex-card">
-                                <div class="hex"><span>🚀</span></div>
-                                <h3>Fast Compilation</h3>
-                                <p>Built in Rust — transform Python functions to optimized WebAssembly in milliseconds.</p>
-                                <span class="feature-tag">Rust-powered</span>
+                                <h3>Ahead-of-Time Compilation</h3>
+                                <p>Python compiles to a WASM binary before it runs — no interpreter or VM in the output.</p>
+                                <span class="feature-tag">no runtime VM</span>
                             </div>
                         </div>
                         <div class="hex-cell reveal" data-accent="teal" style="--d: 1;">
                             <div class="hex-card">
-                                <div class="hex"><span>🎯</span></div>
-                                <h3>Type Safety</h3>
-                                <p>Python type annotations give compile-time checking and better WASM optimization.</p>
-                                <span class="feature-tag">Compile-time</span>
+                                <h3>Typed Code Generation</h3>
+                                <p>Type annotations map to WASM value types (i32, i64, f32, f64), checked at compile time.</p>
+                                <span class="feature-tag">annotations</span>
                             </div>
                         </div>
                         <div class="hex-cell reveal" data-accent="ember" style="--d: 2;">
                             <div class="hex-card">
-                                <div class="hex"><span>⚡</span></div>
-                                <h3>High Performance</h3>
-                                <p>Binaryen-optimized output that runs at near-native speed in any environment.</p>
-                                <span class="feature-tag">Binaryen</span>
+                                <h3>Binaryen Optimization</h3>
+                                <p>The binary runs through Binaryen passes: dead-code elimination, inlining, constant folding.</p>
+                                <span class="feature-tag">optimizer</span>
                             </div>
                         </div>
                         <div class="hex-cell reveal" data-accent="green" style="--d: 3;">
                             <div class="hex-card">
-                                <div class="hex"><span>🔧</span></div>
-                                <h3>Easy Integration</h3>
-                                <p>A simple API for your existing Python code — no rewrite, just compile and deploy.</p>
-                                <span class="feature-tag">Drop-in</span>
+                                <h3>Small Rust API</h3>
+                                <p>compile_python_to_wasm() for one source string; compile_python_project() for a directory.</p>
+                                <span class="feature-tag">rust crate</span>
                             </div>
                         </div>
                     </div>
                     <div class="hive-row">
                         <div class="hex-cell reveal" data-accent="honey" style="--d: 1;">
                             <div class="hex-card">
-                                <div class="hex"><span>🌐</span></div>
-                                <h3>Universal Runtime</h3>
-                                <p>Run anywhere WebAssembly is supported: browsers, Node.js, serverless, and edge.</p>
-                                <span class="feature-tag">Run anywhere</span>
+                                <h3>Standard WASM Output</h3>
+                                <p>Emits plain .wasm modules that load in browsers, Node.js, wasmtime, and edge runtimes.</p>
+                                <span class="feature-tag">.wasm</span>
                             </div>
                         </div>
                         <div class="hex-cell reveal" data-accent="teal" style="--d: 2;">
                             <div class="hex-card">
-                                <div class="hex"><span>🛠️</span></div>
-                                <h3>Rich Features</h3>
-                                <p>Control flow, function calls, decorators, classes, and more Python language support.</p>
-                                <span class="feature-tag">Full language</span>
+                                <h3>Language Coverage</h3>
+                                <p>Classes, closures, lambdas, generators, comprehensions, exceptions, f-strings, decorators.</p>
+                                <span class="feature-tag">python 3 syntax</span>
                             </div>
                         </div>
                         <div class="hex-cell reveal" data-accent="honey" style="--d: 3;">
                             <div class="hex-card">
-                                <div class="hex"><span>📦</span></div>
-                                <h3>Multi-File Support</h3>
-                                <p>Compile whole projects — many files, dependencies, entry points — into one WASM module.</p>
-                                <span class="feature-tag">Project-wide</span>
+                                <h3>Project Compilation</h3>
+                                <p>Multi-file input with import resolution, __main__.py entry detection, pyproject.toml config.</p>
+                                <span class="feature-tag">one .wasm out</span>
                             </div>
                         </div>
                     </div>
                     <div class="hive-row">
                         <div class="hex-cell reveal" data-accent="red" style="--d: 2;">
                             <div class="hex-card">
-                                <div class="hex"><span>🔍</span></div>
-                                <h3>Project Analysis</h3>
-                                <p>Built-in import analysis, circular dependency detection, and structure understanding.</p>
-                                <span class="feature-tag">Smart analysis</span>
+                                <h3>Import Analysis</h3>
+                                <p>Builds the full module dependency graph and resolves circular imports by topological sort.</p>
+                                <span class="feature-tag">dep graph</span>
                             </div>
                         </div>
                         <div class="hex-cell reveal" data-accent="ember" style="--d: 3;">
                             <div class="hex-card">
-                                <div class="hex"><span>🎨</span></div>
-                                <h3>Decorator Support</h3>
-                                <p>Memoization, debugging, and timing decorators, plus a custom decorator registry.</p>
-                                <span class="feature-tag">Extensible</span>
+                                <h3>Standard Library</h3>
+                                <p>math, json, re, datetime, random, collections, itertools, functools, and logging implemented.</p>
+                                <span class="feature-tag">stdlib subset</span>
                             </div>
                         </div>
                     </div>
