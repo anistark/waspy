@@ -44,7 +44,7 @@ Generate & Optimize
 - Provides improved error handling with detailed error messages
 - Performs automatic WebAssembly optimization using Binaryen
 - Detects and handles project structure and dependencies
-- Supports module-level variables and basic class definitions
+- Supports module-level variables and class definitions with heap-allocated instances — multiple live instances per class, usable as function arguments and return values
 - Collections: lists, dicts, sets, tuples, and ranges — literals, indexing, methods, and membership (`in`/`not in`)
 - Exception handling with `try`/`except`/`finally` and `raise`
 - Lambdas, basic closures, and list comprehensions
@@ -52,7 +52,7 @@ Generate & Optimize
 
 ## Limitations
 
-- Objects are single-instance / fixed-address — one instance at a time
+- Object instances are never reclaimed — the bump allocator has no `free`, so every instance lives until the module is torn down and `__del__` is not invoked
 - Collections have a fixed compile-time capacity — growing one past its initial size (e.g. `.append` beyond a literal's length) overflows into the next region; runtime growth/reallocation is not yet implemented
 - Generators do not preserve execution state — `yield` compiles as a placeholder
 - Closures lack full variable-capture analysis
@@ -280,7 +280,7 @@ Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for details on
 
 The path to 1.0 focuses on the remaining correctness and runtime gaps:
 
-- Multiple object instances (heap-allocated, beyond the current single fixed address)
+- Object model completion (inheritance, classmethod/staticmethod, dataclasses) on top of the heap-allocated instances
 - Growable collections (runtime reallocation past a literal's fixed capacity) and hashed `dict` lookups (sets already use an open-addressing table)
 - Generators that preserve execution state
 - Full closure capture analysis

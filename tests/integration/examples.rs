@@ -233,3 +233,63 @@ fn float_list_iteration_binds_f64() {
         0.1_f64 + 0.2_f64 + 0.3_f64
     );
 }
+
+/// Heap-allocated instances (v0.13.0 P0): two live `Counter` instances mutate
+/// independently. Under the old fixed-address model both names aliased one
+/// instance, so the second constructor call clobbered the first's state.
+#[test]
+fn two_instances_have_independent_state() {
+    let src = read_example("oop_objects.py");
+    // a: 10 -> 12 via two increments; b: 100 -> 103 via add(3).
+    assert_eq!(call_i32(&src, "two_counters_independent"), 1303);
+}
+
+/// Every `ClassName(...)` allocates a fresh zeroed block, so a second instance
+/// starts from its own `__init__` state rather than the first's leftovers.
+#[test]
+fn each_instantiation_gets_a_fresh_instance() {
+    let src = read_example("oop_objects.py");
+    assert_eq!(call_i32(&src, "fresh_instance_per_call"), 2);
+}
+
+/// An instance returned from a factory function stays live and mutable in the
+/// caller (the pointer is a first-class value).
+#[test]
+fn instance_returned_from_factory() {
+    let src = read_example("oop_objects.py");
+    assert_eq!(call_i32(&src, "counter_from_factory"), 42);
+}
+
+/// An instance passed as a function argument is mutated through the shared
+/// pointer, so the caller observes the callee's writes: 5 + 4 increments = 9.
+#[test]
+fn instance_passed_as_argument_shares_state() {
+    let src = read_example("oop_objects.py");
+    assert_eq!(call_i32(&src, "counter_as_argument"), 9);
+}
+
+/// Instances stored in a list read back as live pointers: mutating the
+/// read-back instance (via `+=` on a field) is visible through the original
+/// name. (7+5) + 30 = 42.
+#[test]
+fn instances_stored_in_list_read_back() {
+    let src = read_example("oop_objects.py");
+    assert_eq!(call_i32(&src, "instances_in_a_list"), 42);
+}
+
+/// Instances stored in a tuple and a dict read back as live pointers, the same
+/// slot convention as lists. Both sum to 42.
+#[test]
+fn instances_stored_in_tuple_and_dict() {
+    let src = read_example("oop_objects.py");
+    assert_eq!(call_i32(&src, "instances_in_a_tuple"), 42);
+    assert_eq!(call_i32(&src, "instances_in_a_dict"), 42);
+}
+
+/// Float (f64) fields remain per-instance: scaling one `Point` leaves the
+/// other untouched. (1.5+2.5)*2 + 10.0 + 20.0 = 38.0.
+#[test]
+fn float_fields_are_per_instance() {
+    let src = read_example("oop_objects.py");
+    assert_eq!(call_f64(&src, "float_fields_two_instances"), 38.0);
+}

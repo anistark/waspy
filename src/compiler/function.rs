@@ -16,6 +16,13 @@ pub fn compile_function(
     ctx.locals_map.clear();
     ctx.local_count = 0;
 
+    // An `__init__` method returns `self` (its first parameter) so the
+    // instantiation site receives the freshly allocated instance pointer as
+    // the constructor call's result. Python guarantees `__init__` returns
+    // None, so no user return value competes with this.
+    ctx.return_self = ir_func.name == "__init__"
+        && matches!(ir_func.params.first(), Some(p) if matches!(p.param_type, IRType::Class(_)));
+
     for param in &ir_func.params {
         ctx.add_local(&param.name, param.param_type.clone());
     }
@@ -66,10 +73,14 @@ pub fn compile_function(
 
     // Add default return value if no explicit return. Use the resolved return
     // type (which may have been inferred from the body) so the fall-through
-    // value matches the function's declared WASM result.
+    // value matches the function's declared WASM result. `__init__` falls
+    // through to `self` so instantiation receives the instance pointer.
     match return_type {
         IRType::Float => {
             func.instruction(&Instruction::F64Const(0.0_f64.into()));
+        }
+        _ if ctx.return_self => {
+            func.instruction(&Instruction::LocalGet(0));
         }
         _ => {
             func.instruction(&Instruction::I32Const(0));
@@ -466,7 +477,26 @@ pub fn compile_body(
     for stmt in &body.statements {
         match stmt {
             IRStatement::Return(expr_opt) => {
-                if let Some(expr) = expr_opt {
+                if ctx.return_self {
+                    // Inside `__init__` every return yields `self` (local 0) so
+                    // the instantiation site receives the instance pointer.
+                    // Python only allows `return` / `return None` here; any
+                    // expression is still evaluated for effect, then discarded.
+                    if let Some(expr) = expr_opt {
+                        let ty = emit_expr(expr, func, ctx, memory_layout, None);
+                        match ty {
+                            IRType::None => {}
+                            IRType::String | IRType::Bytes => {
+                                func.instruction(&Instruction::Drop);
+                                func.instruction(&Instruction::Drop);
+                            }
+                            _ => {
+                                func.instruction(&Instruction::Drop);
+                            }
+                        }
+                    }
+                    func.instruction(&Instruction::LocalGet(0));
+                } else if let Some(expr) = expr_opt {
                     let ty = emit_expr(expr, func, ctx, memory_layout, None);
                     // A string/bytes value is an (offset, length) pair, but a
                     // function returns a single word. Drop the length (on top)
