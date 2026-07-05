@@ -9,9 +9,10 @@ use std::collections::HashMap;
 /// offset emitted anywhere in the compiler.
 pub const SCRATCH_LOCALS: u32 = 8;
 
-/// Base address of the collection heap. Sits above the string (from 0), bytes
-/// (from 32768), and object-instance (from 65536) regions so collection
-/// literals never overlap them.
+/// Base address of the collection heap. Sits above the string (from 0) and
+/// bytes (from 32768) regions so collection literals never overlap them. (The
+/// 65536..131072 range was once a fixed object-instance region; instances are
+/// now heap-allocated via `__alloc`, so it is simply unused static space.)
 pub const COLLECTION_HEAP_BASE: u32 = 131072;
 
 /// Bytes reserved at the start of every collection region for its element/entry
@@ -116,6 +117,12 @@ pub struct CompilationContext {
     /// Emitted after all user functions/methods, so callers (e.g. string/bytes
     /// concatenation) reference it by this index. Set during module assembly.
     pub alloc_func_index: u32,
+    /// True while compiling an `__init__` method. Its `return` paths (explicit
+    /// bare `return` and the implicit fall-through) yield `self` (local 0)
+    /// instead of the usual 0, so `ClassName(...)` receives the instance
+    /// pointer directly as the constructor call's result. Set per function in
+    /// `compile_function`.
+    pub return_self: bool,
 }
 
 impl CompilationContext {
@@ -137,6 +144,7 @@ impl CompilationContext {
             loop_stack: Vec::new(),
             collection_alloc_offset: Cell::new(0),
             alloc_func_index: 0,
+            return_self: false,
         }
     }
 

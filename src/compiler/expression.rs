@@ -1165,12 +1165,19 @@ pub fn emit_expr(
             // argument emission so the instance pointer (`self`) is the first
             // argument to `__init__` and the user arguments are coerced to their
             // declared parameter types (e.g. int literals widened to f64).
+            //
+            // Each instantiation calls the runtime bump allocator
+            // `__alloc(instance_size)`, so every `ClassName(...)` yields a
+            // distinct heap pointer and multiple instances coexist. The
+            // sequence is stack-only (alloc result -> self arg -> `__init__`
+            // returns `self` back), so nested instantiations in the argument
+            // list compose without clobbering any scratch local. Fresh heap
+            // memory is zero, so unassigned fields read as 0/0.0.
             if ctx.get_class_info(function_name).is_some() {
-                let instance_ptr = 65536
-                    + ctx
-                        .get_class_info(function_name)
-                        .map(|c| c.instance_size)
-                        .unwrap_or(0);
+                let instance_size = ctx
+                    .get_class_info(function_name)
+                    .map(|c| c.instance_size)
+                    .unwrap_or(0);
                 let init_idx = ctx
                     .get_class_info(function_name)
                     .and_then(|c| c.methods.get("__init__").copied());
@@ -1181,14 +1188,26 @@ pub fn emit_expr(
                         .get_function_info(&format!("{function_name}::__init__"))
                         .map(|f| f.param_types.clone())
                         .unwrap_or_default();
-                    func.instruction(&Instruction::I32Const(instance_ptr as i32)); // self
+                    // self = __alloc(instance_size), left on the stack as the
+                    // first argument to __init__.
+                    func.instruction(&Instruction::I32Const(instance_size as i32));
+                    func.instruction(&Instruction::Call(ctx.alloc_func_index));
                     for (i, arg) in arguments.iter().enumerate() {
-                        emit_expr(arg, func, ctx, memory_layout, param_types.get(i + 1));
+                        let t = emit_expr(arg, func, ctx, memory_layout, param_types.get(i + 1));
+                        // A string/bytes argument is an (offset, length) pair
+                        // but each parameter is one i32 slot; narrow it to the
+                        // offset word (the callee recovers the length from the
+                        // blob prefix), matching the user-function convention.
+                        if matches!(t, IRType::String | IRType::Bytes) {
+                            func.instruction(&Instruction::Drop);
+                        }
                     }
+                    // __init__ is compiled to return `self`, so the call's
+                    // result is the freshly allocated instance pointer.
                     func.instruction(&Instruction::Call(init_idx));
-                    func.instruction(&Instruction::Drop); // discard __init__ return
                 } else {
-                    // No constructor: evaluate and discard any arguments.
+                    // No constructor: evaluate and discard any arguments, then
+                    // allocate the (zeroed) instance.
                     for arg in arguments {
                         let t = emit_expr(arg, func, ctx, memory_layout, None);
                         func.instruction(&Instruction::Drop);
@@ -1196,8 +1215,9 @@ pub fn emit_expr(
                             func.instruction(&Instruction::Drop);
                         }
                     }
+                    func.instruction(&Instruction::I32Const(instance_size as i32));
+                    func.instruction(&Instruction::Call(ctx.alloc_func_index));
                 }
-                func.instruction(&Instruction::I32Const(instance_ptr as i32)); // result
                 return IRType::Class(function_name.clone());
             }
 
