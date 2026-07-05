@@ -298,7 +298,7 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
         let name = classdef.name.to_string();
 
         // Extract base classes
-        let bases = classdef
+        let bases: Vec<String> = classdef
             .bases
             .iter()
             .filter_map(|base| {
@@ -309,6 +309,21 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
                 }
             })
             .collect();
+
+        // Only single inheritance is supported: reject multiple bases loudly
+        // rather than silently compiling a class with a broken field layout.
+        // `object` is every class's implicit root, so it doesn't count.
+        let real_bases: Vec<&String> = bases.iter().filter(|b| b.as_str() != "object").collect();
+        if real_bases.len() > 1 {
+            return Err(anyhow!(
+                "class '{name}' declares multiple base classes ({}); only single inheritance is supported",
+                real_bases
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
 
         let mut methods = Vec::new();
         let mut class_vars = Vec::new();

@@ -152,6 +152,35 @@ fn build_alloc_function() -> Function {
     f
 }
 
+/// Build `__alloc_obj(size: i32, class_id: i32) -> i32`: allocate an instance
+/// via `__alloc` and stamp `class_id` into the tag word at offset 0 (the slot
+/// every instance layout reserves), returning the instance pointer. Doing the
+/// stamp in a helper keeps the `ClassName(...)` call sequence stack-only, so
+/// nested instantiations compose without any scratch local.
+fn build_alloc_obj_function(alloc_func_index: u32) -> Function {
+    // local 2 (locals 0-1 are the parameters): the allocated pointer.
+    let mut f = Function::new([(1u32, ValType::I32)]);
+
+    // ptr = __alloc(size) -> local 2
+    f.instruction(&Instruction::LocalGet(0));
+    f.instruction(&Instruction::Call(alloc_func_index));
+    f.instruction(&Instruction::LocalSet(2));
+
+    // *(ptr + 0) = class_id
+    f.instruction(&Instruction::LocalGet(2));
+    f.instruction(&Instruction::LocalGet(1));
+    f.instruction(&Instruction::I32Store(wasm_encoder::MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
+
+    // return ptr
+    f.instruction(&Instruction::LocalGet(2));
+    f.instruction(&Instruction::End);
+    f
+}
+
 /// Compile an IR module into WebAssembly binary format
 pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
     let mut module = Module::new();
@@ -205,10 +234,12 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
         total_function_count += cls.methods.len();
     }
 
-    // The runtime allocator `__alloc` is appended after all user functions and
-    // methods, so it takes the next function (and type) index. Record it so
-    // codegen can emit `call $__alloc`.
+    // The runtime allocator `__alloc` and the instance allocator `__alloc_obj`
+    // are appended after all user functions and methods, so they take the next
+    // two function (and type) indices. Record them so codegen can emit
+    // `call $__alloc` / `call $__alloc_obj`.
     ctx.alloc_func_index = total_function_count as u32;
+    ctx.alloc_obj_func_index = total_function_count as u32 + 1;
 
     // Create function types for module functions
     for func in &ir_module.functions {
@@ -239,18 +270,23 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
         }
     }
 
-    // Type for the runtime allocator `__alloc(size: i32) -> i32`.
+    // Types for the runtime allocator `__alloc(size: i32) -> i32` and the
+    // instance allocator `__alloc_obj(size: i32, class_id: i32) -> i32`.
     types.ty().function([ValType::I32], [ValType::I32]);
+    types
+        .ty()
+        .function([ValType::I32, ValType::I32], [ValType::I32]);
 
     module.section(&types);
 
     // Build function section (one entry per user function/method, referencing
-    // the matching type, plus a trailing entry for `__alloc`).
+    // the matching type, plus trailing entries for `__alloc` / `__alloc_obj`).
     let mut functions = FunctionSection::new();
     for _ in 0..total_function_count {
         functions.function(functions.len());
     }
     functions.function(total_function_count as u32); // __alloc
+    functions.function(total_function_count as u32 + 1); // __alloc_obj
     module.section(&functions);
 
     // Export section - export both functions and memory
@@ -269,21 +305,54 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
         func_idx += 1;
     }
 
-    // Register and export class methods
+    // Register and export class methods. Classes appear in source order and
+    // Python requires a base to be defined before a subclass references it, so
+    // a base's ClassInfo is always registered by the time its subclass is
+    // processed.
+    let mut next_class_id = 1i32;
     for cls in &ir_module.classes {
+        // Single inheritance: resolve the (at most one, enforced during IR
+        // conversion) base class. `object` is the implicit root, not a base.
+        let base = cls
+            .bases
+            .iter()
+            .find(|b| b.as_str() != "object" && ctx.get_class_info(b).is_some())
+            .cloned();
+
         let mut class_info = ClassInfo {
             name: cls.name.clone(),
+            base: base.clone(),
+            class_id: next_class_id,
             methods: HashMap::new(),
+            method_owner: HashMap::new(),
             field_offsets: HashMap::new(),
             field_types: HashMap::new(),
             class_var_values: HashMap::new(),
             instance_size: 0,
         };
+        next_class_id += 1;
 
         // Each field is an 8-byte slot (holds an i32 or an f64); the first 4
-        // bytes are reserved for a type tag. `add_field` assigns the next slot
-        // the first time a field name is seen and records its value type.
+        // bytes hold the class-id tag stamped by `__alloc_obj`. `add_field`
+        // assigns the next slot the first time a field name is seen and
+        // records its value type.
+        //
+        // A subclass inherits its base's layout as a prefix: base fields keep
+        // their exact offsets and the subclass's own fields append after
+        // `base.instance_size`, so a base method reading `self.x` works
+        // unchanged on a subclass instance. Inherited methods are seeded with
+        // the base's already-resolved function indices (the same compiled WASM
+        // function — safe because of the prefix layout); the subclass's own
+        // registration below overwrites any it redefines (override).
         let mut current_offset = 4u64;
+        if let Some(base_info) = base.as_deref().and_then(|b| ctx.get_class_info(b)) {
+            class_info.field_offsets = base_info.field_offsets.clone();
+            class_info.field_types = base_info.field_types.clone();
+            class_info.class_var_values = base_info.class_var_values.clone();
+            class_info.methods = base_info.methods.clone();
+            class_info.method_owner = base_info.method_owner.clone();
+            current_offset = base_info.instance_size as u64;
+        }
         let add_field = |info: &mut ClassInfo, name: &str, ty: IRType, current_offset: &mut u64| {
             if !info.field_offsets.contains_key(name) {
                 info.field_offsets.insert(name.to_string(), *current_offset);
@@ -341,6 +410,9 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
             );
 
             class_info.methods.insert(method.name.clone(), func_idx);
+            class_info
+                .method_owner
+                .insert(method.name.clone(), cls.name.clone());
 
             // Export method with qualified name
             exports.export(&qualified_name, wasm_encoder::ExportKind::Func, func_idx);
@@ -405,7 +477,7 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
 
     for func_ir in &ir_module.functions {
         let return_type = module_return(func_ir);
-        let compiled_func = compile_function(func_ir, &mut ctx, &memory_layout, &return_type);
+        let compiled_func = compile_function(func_ir, &mut ctx, &memory_layout, &return_type, None);
         codes.function(&compiled_func);
     }
 
@@ -413,13 +485,21 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
     for cls in &ir_module.classes {
         for method in &cls.methods {
             let return_type = method_return(&cls.name, method);
-            let compiled_method = compile_function(method, &mut ctx, &memory_layout, &return_type);
+            let compiled_method = compile_function(
+                method,
+                &mut ctx,
+                &memory_layout,
+                &return_type,
+                Some(&cls.name),
+            );
             codes.function(&compiled_method);
         }
     }
 
-    // Runtime allocator, last so its index matches `ctx.alloc_func_index`.
+    // Runtime allocators, last so their indices match `ctx.alloc_func_index`
+    // and `ctx.alloc_obj_func_index`.
     codes.function(&build_alloc_function());
+    codes.function(&build_alloc_obj_function(ctx.alloc_func_index));
 
     // Memory must hold the static data (strings/bytes/object instances) plus
     // every collection region handed out during codegen. The collection heap
