@@ -55,7 +55,10 @@ pub fn try_compile(source: &str) -> Result<Vec<u8>, String> {
         optimize: false,
         ..CompilerOptions::default()
     };
-    compile_python_to_wasm_with_options(source, &options).map_err(|e| e.to_string())
+    // `{:#}` includes the anyhow cause chain, so a test can assert on the
+    // root cause (e.g. "single inheritance") rather than only the outermost
+    // "Failed to convert Python AST to IR" context.
+    compile_python_to_wasm_with_options(source, &options).map_err(|e| format!("{e:#}"))
 }
 
 /// Validate the bytes as a WASM module and instantiate them under an empty

@@ -1166,32 +1166,40 @@ pub fn emit_expr(
             // argument to `__init__` and the user arguments are coerced to their
             // declared parameter types (e.g. int literals widened to f64).
             //
-            // Each instantiation calls the runtime bump allocator
-            // `__alloc(instance_size)`, so every `ClassName(...)` yields a
-            // distinct heap pointer and multiple instances coexist. The
+            // Each instantiation calls the runtime instance allocator
+            // `__alloc_obj(instance_size, class_id)`, so every `ClassName(...)`
+            // yields a distinct heap pointer (tagged with its class id at
+            // offset 0 for `isinstance`) and multiple instances coexist. The
             // sequence is stack-only (alloc result -> self arg -> `__init__`
             // returns `self` back), so nested instantiations in the argument
             // list compose without clobbering any scratch local. Fresh heap
             // memory is zero, so unassigned fields read as 0/0.0.
             if ctx.get_class_info(function_name).is_some() {
-                let instance_size = ctx
+                let (instance_size, class_id) = ctx
                     .get_class_info(function_name)
-                    .map(|c| c.instance_size)
-                    .unwrap_or(0);
+                    .map(|c| (c.instance_size, c.class_id))
+                    .unwrap_or((0, 0));
                 let init_idx = ctx
                     .get_class_info(function_name)
                     .and_then(|c| c.methods.get("__init__").copied());
+                // The class that textually defines `__init__` — the subclass
+                // itself, or the base it inherits the constructor from.
+                let init_owner = ctx
+                    .get_class_info(function_name)
+                    .and_then(|c| c.method_owner.get("__init__").cloned())
+                    .unwrap_or_else(|| function_name.clone());
 
                 if let Some(init_idx) = init_idx {
                     // __init__ parameter types, `self` first.
                     let param_types: Vec<IRType> = ctx
-                        .get_function_info(&format!("{function_name}::__init__"))
+                        .get_function_info(&format!("{init_owner}::__init__"))
                         .map(|f| f.param_types.clone())
                         .unwrap_or_default();
-                    // self = __alloc(instance_size), left on the stack as the
-                    // first argument to __init__.
+                    // self = __alloc_obj(instance_size, class_id), left on the
+                    // stack as the first argument to __init__.
                     func.instruction(&Instruction::I32Const(instance_size as i32));
-                    func.instruction(&Instruction::Call(ctx.alloc_func_index));
+                    func.instruction(&Instruction::I32Const(class_id));
+                    func.instruction(&Instruction::Call(ctx.alloc_obj_func_index));
                     for (i, arg) in arguments.iter().enumerate() {
                         let t = emit_expr(arg, func, ctx, memory_layout, param_types.get(i + 1));
                         // A string/bytes argument is an (offset, length) pair
@@ -1207,7 +1215,7 @@ pub fn emit_expr(
                     func.instruction(&Instruction::Call(init_idx));
                 } else {
                     // No constructor: evaluate and discard any arguments, then
-                    // allocate the (zeroed) instance.
+                    // allocate the (zeroed, tagged) instance.
                     for arg in arguments {
                         let t = emit_expr(arg, func, ctx, memory_layout, None);
                         func.instruction(&Instruction::Drop);
@@ -1216,9 +1224,90 @@ pub fn emit_expr(
                         }
                     }
                     func.instruction(&Instruction::I32Const(instance_size as i32));
-                    func.instruction(&Instruction::Call(ctx.alloc_func_index));
+                    func.instruction(&Instruction::I32Const(class_id));
+                    func.instruction(&Instruction::Call(ctx.alloc_obj_func_index));
                 }
                 return IRType::Class(function_name.clone());
+            }
+
+            // `issubclass(Sub, Base)` — both arguments are bare class-name
+            // tokens, so the answer folds to a compile-time constant and no
+            // argument code is emitted at all. Handled before the generic
+            // argument emission below, which would treat the class names as
+            // unknown variables.
+            if function_name == "issubclass" {
+                if let (Some(IRExpr::Variable(sub)), Some(IRExpr::Variable(base))) =
+                    (arguments.first(), arguments.get(1))
+                {
+                    if ctx.get_class_info(sub).is_some() && ctx.get_class_info(base).is_some() {
+                        let result = ctx.is_class_or_subclass(sub, base);
+                        func.instruction(&Instruction::I32Const(result as i32));
+                        return IRType::Bool;
+                    }
+                }
+                func.instruction(&Instruction::I32Const(0));
+                return IRType::Bool;
+            }
+
+            // `isinstance(obj, ClassName)` — the second argument is a bare
+            // class-name token (never emitted); the first is evaluated and, if
+            // it is a class instance, its tag word (class id at offset 0,
+            // stamped by `__alloc_obj`) is compared against the ids assignable
+            // to `ClassName` (itself plus every subclass). Also handled before
+            // the generic argument emission.
+            if function_name == "isinstance" {
+                if let (Some(obj), Some(IRExpr::Variable(target))) =
+                    (arguments.first(), arguments.get(1))
+                {
+                    if ctx.get_class_info(target).is_some() {
+                        let obj_type = emit_expr(obj, func, ctx, memory_layout, None);
+                        return match obj_type {
+                            IRType::Class(_) => {
+                                // tag = *(obj + 0); fold `tag == id` over the
+                                // assignable ids with `or`. The tag sits in a
+                                // scratch local only while the flat comparison
+                                // chain is emitted (no nested emit_expr).
+                                let ids = ctx.assignable_class_ids(target);
+                                func.instruction(&Instruction::I32Load(MemArg {
+                                    offset: 0,
+                                    align: 2,
+                                    memory_index: 0,
+                                }));
+                                func.instruction(&Instruction::LocalSet(ctx.temp_local));
+                                func.instruction(&Instruction::I32Const(0));
+                                for id in ids {
+                                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                                    func.instruction(&Instruction::I32Const(id));
+                                    func.instruction(&Instruction::I32Eq);
+                                    func.instruction(&Instruction::I32Or);
+                                }
+                                IRType::Bool
+                            }
+                            // A non-instance value is never an instance of a
+                            // user class: discard it and answer False.
+                            IRType::String | IRType::Bytes => {
+                                func.instruction(&Instruction::Drop);
+                                func.instruction(&Instruction::Drop);
+                                func.instruction(&Instruction::I32Const(0));
+                                IRType::Bool
+                            }
+                            IRType::Float => {
+                                func.instruction(&Instruction::Drop);
+                                func.instruction(&Instruction::I32Const(0));
+                                IRType::Bool
+                            }
+                            _ => {
+                                func.instruction(&Instruction::Drop);
+                                func.instruction(&Instruction::I32Const(0));
+                                IRType::Bool
+                            }
+                        };
+                    }
+                }
+                // Unknown target (e.g. `isinstance(x, int)`): not supported
+                // yet; answer False without emitting the arguments.
+                func.instruction(&Instruction::I32Const(0));
+                return IRType::Bool;
             }
 
             // Push arguments onto the stack in order. For a call to a known user
@@ -2212,6 +2301,58 @@ pub fn emit_expr(
             method_name,
             arguments,
         } => {
+            // `super().method(...)` / `super().__init__(...)`: static dispatch
+            // to the immediate base class of the class whose method is being
+            // compiled. `super()` itself is never evaluated — `self` is always
+            // local 0 in a method — so the sequence stays stack-only. Because
+            // each ClassInfo's method table already contains its base's fully
+            // resolved methods, this composes across deeper hierarchies.
+            if let IRExpr::FunctionCall {
+                function_name,
+                arguments: super_args,
+            } = &**object
+            {
+                if function_name == "super" && super_args.is_empty() {
+                    let base = ctx
+                        .current_class
+                        .as_ref()
+                        .and_then(|c| ctx.get_class_info(c))
+                        .and_then(|ci| ci.base.clone());
+                    let resolved = base.as_deref().and_then(|b| {
+                        let ci = ctx.get_class_info(b)?;
+                        let idx = ci.methods.get(method_name.as_str()).copied()?;
+                        let owner = ci
+                            .method_owner
+                            .get(method_name.as_str())
+                            .cloned()
+                            .unwrap_or_else(|| b.to_string());
+                        Some((idx, owner))
+                    });
+                    if let Some((method_idx, owner)) = resolved {
+                        let (param_types, ret) = ctx
+                            .get_function_info(&format!("{owner}::{method_name}"))
+                            .map(|f| (f.param_types.clone(), f.return_type.clone()))
+                            .unwrap_or((Vec::new(), IRType::Unknown));
+                        func.instruction(&Instruction::LocalGet(0)); // self
+                        for (i, arg) in arguments.iter().enumerate() {
+                            let t =
+                                emit_expr(arg, func, ctx, memory_layout, param_types.get(i + 1));
+                            // Narrow a string/bytes argument to its offset
+                            // word, matching the calling convention used at
+                            // instantiation sites.
+                            if matches!(t, IRType::String | IRType::Bytes) {
+                                func.instruction(&Instruction::Drop);
+                            }
+                        }
+                        func.instruction(&Instruction::Call(method_idx));
+                        return ret;
+                    }
+                    // No base or unknown method: evaluate nothing, yield 0.
+                    func.instruction(&Instruction::I32Const(0));
+                    return IRType::Unknown;
+                }
+            }
+
             // Check if this is a stdlib module method call (e.g., os.getcwd())
             if let IRExpr::Variable(module_name) = &**object {
                 if crate::stdlib::is_stdlib_module(module_name) {
@@ -3882,13 +4023,20 @@ pub fn emit_expr(
                     // Custom class method call. The object pointer (`self`) is
                     // already on the stack; coerce the user arguments to the
                     // method's declared parameter types and report its real
-                    // return type so float results flow correctly.
+                    // return type so float results flow correctly. The
+                    // parameter/return lookup goes through `method_owner`: an
+                    // inherited method is registered as `Base::method`, not
+                    // `Sub::method`.
                     let method_idx = ctx
                         .get_class_info(class_name)
                         .and_then(|ci| ci.methods.get(method_name.as_str()).copied());
                     if let Some(method_idx) = method_idx {
+                        let owner = ctx
+                            .get_class_info(class_name)
+                            .and_then(|ci| ci.method_owner.get(method_name.as_str()).cloned())
+                            .unwrap_or_else(|| class_name.clone());
                         let (param_types, ret) = ctx
-                            .get_function_info(&format!("{class_name}::{method_name}"))
+                            .get_function_info(&format!("{owner}::{method_name}"))
                             .map(|f| (f.param_types.clone(), f.return_type.clone()))
                             .unwrap_or((Vec::new(), IRType::Unknown));
                         for (i, arg) in arguments.iter().enumerate() {

@@ -293,3 +293,82 @@ fn float_fields_are_per_instance() {
     let src = read_example("oop_objects.py");
     assert_eq!(call_f64(&src, "float_fields_two_instances"), 38.0);
 }
+
+/// A subclass override replaces the base implementation at call sites typed as
+/// the subclass, while the base keeps its own: Animal.speak()=1, Dog.speak()=2.
+#[test]
+fn subclass_overrides_method() {
+    let src = read_example("oop_inheritance.py");
+    assert_eq!(call_i32(&src, "override_wins"), 12);
+}
+
+/// A method defined only on the base is callable on a subclass instance and
+/// reads the inherited field laid out in the base prefix: leg_count() = 4.
+#[test]
+fn subclass_inherits_unoverridden_method() {
+    let src = read_example("oop_inheritance.py");
+    assert_eq!(call_i32(&src, "inherited_method_on_subclass"), 4);
+}
+
+/// `super().__init__(...)` chains construction: base fields (legs, energy) are
+/// set by the base constructor and the subclass's own field appends after the
+/// base prefix. 4 + 10 + 3 = 17.
+#[test]
+fn super_init_chains_construction() {
+    let src = read_example("oop_inheritance.py");
+    assert_eq!(call_i32(&src, "super_init_chains"), 17);
+}
+
+/// `super().method(...)` dispatches to the base implementation even when the
+/// subclass overrides it: Dog's speak_like_parent() gets Animal's 1.
+#[test]
+fn super_method_call_dispatches_to_base() {
+    let src = read_example("oop_inheritance.py");
+    assert_eq!(call_i32(&src, "super_method_call"), 1);
+}
+
+/// A two-level hierarchy chains construction through both bases:
+/// Puppy -> Dog -> Animal. 4 + 10 = 14.
+#[test]
+fn two_level_inheritance_chain() {
+    let src = read_example("oop_inheritance.py");
+    assert_eq!(call_i32(&src, "two_level_chain"), 14);
+}
+
+/// `isinstance` is true for the instance's own class and every ancestor, and
+/// false for an unrelated subclass: 1 + 10 + 100 = 111.
+#[test]
+fn isinstance_across_two_level_hierarchy() {
+    let src = read_example("oop_inheritance.py");
+    assert_eq!(call_i32(&src, "isinstance_across_hierarchy"), 111);
+}
+
+/// `issubclass` folds to a compile-time constant over the declared hierarchy:
+/// transitive (Puppy <= Animal) and reflexive (Dog <= Dog) are true, the
+/// reverse direction is false. 1 + 10 = 11.
+#[test]
+fn issubclass_folds_at_compile_time() {
+    let src = read_example("oop_inheritance.py");
+    assert_eq!(call_i32(&src, "issubclass_checks"), 11);
+}
+
+/// `isinstance` consults the runtime class-id tag, not the static type: a
+/// factory annotated `-> Animal` that actually returns a Dog still answers
+/// `isinstance(a, Dog)` with True.
+#[test]
+fn isinstance_uses_runtime_tag_not_static_type() {
+    let src = read_example("oop_inheritance.py");
+    assert_eq!(call_i32(&src, "runtime_type_check"), 1);
+}
+
+/// Multiple inheritance is rejected with a compile error rather than silently
+/// compiling a class with a broken field layout.
+#[test]
+fn multiple_inheritance_is_rejected() {
+    let src = "class A:\n    def ping(self) -> int:\n        return 1\n\nclass B:\n    def pong(self) -> int:\n        return 2\n\nclass C(A, B):\n    def both(self) -> int:\n        return 3\n";
+    let err = try_compile(src).expect_err("multiple inheritance must not compile");
+    assert!(
+        err.contains("single inheritance"),
+        "unexpected error message: {err}"
+    );
+}

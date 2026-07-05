@@ -72,11 +72,23 @@ pub struct FunctionInfo {
 /// Class information for instantiation and method dispatch
 pub struct ClassInfo {
     pub name: String,
+    /// Immediate base class, if any (`object` doesn't count). A subclass lays
+    /// its base's fields out as a prefix (same offsets) and appends its own, so
+    /// a base method reading `self.x` works unchanged on a subclass instance.
+    pub base: Option<String>,
+    /// Small integer identifying this class at runtime. Stamped into the tag
+    /// word at offset 0 of every instance by `__alloc_obj`, and compared by
+    /// `isinstance`. Ids start at 1 so zeroed memory never matches a class.
+    pub class_id: i32,
     pub methods: HashMap<String, u32>, // method_name -> function_index
+    /// Which class textually defines each method. For an inherited method this
+    /// names the base, so the `Owner::method` qualified lookup (parameter and
+    /// return types) resolves even though `Sub::method` was never registered.
+    pub method_owner: HashMap<String, String>,
     pub field_offsets: HashMap<String, u64>, // field_name -> byte_offset
     pub field_types: HashMap<String, IRType>, // field_name -> value type (f64 vs i32)
     pub class_var_values: HashMap<String, IRExpr>, // class-level var name -> initializer
-    pub instance_size: u32,            // size of instance in bytes
+    pub instance_size: u32,                  // size of instance in bytes
 }
 
 /// Compiled Local variables and function types
@@ -117,12 +129,21 @@ pub struct CompilationContext {
     /// Emitted after all user functions/methods, so callers (e.g. string/bytes
     /// concatenation) reference it by this index. Set during module assembly.
     pub alloc_func_index: u32,
+    /// WASM function index of `__alloc_obj(size, class_id) -> ptr`, which
+    /// allocates an instance and stamps its class id into the tag word at
+    /// offset 0. A separate helper (rather than inline stamping) keeps the
+    /// instantiation sequence stack-only, so nested instantiations compose
+    /// without touching any scratch local. Set during module assembly.
+    pub alloc_obj_func_index: u32,
     /// True while compiling an `__init__` method. Its `return` paths (explicit
     /// bare `return` and the implicit fall-through) yield `self` (local 0)
     /// instead of the usual 0, so `ClassName(...)` receives the instance
     /// pointer directly as the constructor call's result. Set per function in
     /// `compile_function`.
     pub return_self: bool,
+    /// Name of the class whose method is currently being compiled, if any.
+    /// `super().method(...)` resolves the base class through this.
+    pub current_class: Option<String>,
 }
 
 impl CompilationContext {
@@ -144,8 +165,37 @@ impl CompilationContext {
             loop_stack: Vec::new(),
             collection_alloc_offset: Cell::new(0),
             alloc_func_index: 0,
+            alloc_obj_func_index: 0,
             return_self: false,
+            current_class: None,
         }
+    }
+
+    /// True if `sub` is `base` or reaches `base` by walking single-inheritance
+    /// `base` links. Both must be known classes.
+    pub fn is_class_or_subclass(&self, sub: &str, base: &str) -> bool {
+        let mut current = Some(sub.to_string());
+        while let Some(name) = current {
+            if name == base {
+                return true;
+            }
+            current = self.class_map.get(&name).and_then(|info| info.base.clone());
+        }
+        false
+    }
+
+    /// Class ids of `target` and every known subclass of it — the id set an
+    /// instance tag may hold when the value `isinstance`-checks against
+    /// `target`. Sorted for deterministic codegen.
+    pub fn assignable_class_ids(&self, target: &str) -> Vec<i32> {
+        let mut ids: Vec<i32> = self
+            .class_map
+            .values()
+            .filter(|info| self.is_class_or_subclass(&info.name, target))
+            .map(|info| info.class_id)
+            .collect();
+        ids.sort_unstable();
+        ids
     }
 
     /// Reserve a fresh, uniquely addressed region of `size` bytes for a

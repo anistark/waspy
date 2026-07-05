@@ -12,6 +12,7 @@ pub fn compile_function(
     ctx: &mut CompilationContext,
     memory_layout: &MemoryLayout,
     return_type: &IRType,
+    owning_class: Option<&str>,
 ) -> Function {
     ctx.locals_map.clear();
     ctx.local_count = 0;
@@ -22,6 +23,10 @@ pub fn compile_function(
     // None, so no user return value competes with this.
     ctx.return_self = ir_func.name == "__init__"
         && matches!(ir_func.params.first(), Some(p) if matches!(p.param_type, IRType::Class(_)));
+
+    // `super().method(...)` resolves the base class of the class whose method
+    // body is being compiled.
+    ctx.current_class = owning_class.map(str::to_string);
 
     for param in &ir_func.params {
         ctx.add_local(&param.name, param.param_type.clone());
