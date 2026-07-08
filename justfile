@@ -97,9 +97,9 @@ clean:
     cargo clean
     rm -rf examples/output || true
 
-# Serve the docs website locally
-docs port="8000":
-    python3 -m http.server {{port}} --directory docs
+# Serve the docs website locally (set host to 0.0.0.0 or a tailscale IP to share over the network)
+docs port="8000" host="0.0.0.0":
+    python3 -m http.server {{port}} --bind {{host}} --directory docs
 
 # Generate rustdoc API documentation and open in browser
 docs-rs:
