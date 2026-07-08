@@ -1,3 +1,4 @@
+use crate::ir::decorators::MethodKind;
 use crate::ir::types::*;
 use anyhow::{anyhow, Context, Result};
 use rustpython_parser::ast::{ArgWithDefault, Arguments, ExceptHandler, Expr, Stmt, Suite};
@@ -327,6 +328,8 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
 
         let mut methods = Vec::new();
         let mut class_vars = Vec::new();
+        // (method name, kind) in source order, for post-validation below.
+        let mut method_kinds: Vec<(String, MethodKind)> = Vec::new();
 
         // Process class body
         for stmt in &classdef.body {
@@ -335,31 +338,56 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
                     // Process method (similar to function but with 'self' parameter)
                     let method_name = method_def.name.to_string();
                     let mut params = process_function_params(&method_def.args)?;
-                    // The implicit `self` parameter is untyped in source; type it
+
+                    // Capture both bare-name decorators (`@property`) and the
+                    // attribute form used by property setters (`@radius.setter`).
+                    let decorators: Vec<String> = method_def
+                        .decorator_list
+                        .iter()
+                        .filter_map(|dec| match dec {
+                            Expr::Name(name) => Some(name.id.to_string()),
+                            Expr::Attribute(attr) => match &*attr.value {
+                                Expr::Name(base) => Some(format!("{}.{}", base.id, attr.attr)),
+                                _ => None,
+                            },
+                            _ => None,
+                        })
+                        .collect();
+
+                    // Classify the method's binding up front so an unsupported
+                    // or conflicting decorator stack fails compilation with a
+                    // clear error instead of mis-dispatching at call sites.
+                    let kind =
+                        crate::ir::decorators::method_kind(&name, &method_name, &decorators)?;
+
+                    // The implicit first parameter is untyped in source; type it
                     // as the enclosing class so attribute access/assignment can
-                    // resolve field offsets and types.
-                    if let Some(first) = params.first_mut() {
-                        if first.name == "self" {
-                            first.param_type = IRType::Class(name.clone());
+                    // resolve field offsets and types. `cls` in a classmethod is
+                    // typed the same way, which lets `cls(...)`/`cls.attr` inside
+                    // the body resolve to the defining class (static dispatch).
+                    // Static methods have no implicit parameter.
+                    match kind {
+                        MethodKind::Static => {}
+                        MethodKind::Class => {
+                            if let Some(first) = params.first_mut() {
+                                first.param_type = IRType::Class(name.clone());
+                            }
+                        }
+                        _ => {
+                            if let Some(first) = params.first_mut() {
+                                if first.name == "self" {
+                                    first.param_type = IRType::Class(name.clone());
+                                }
+                            }
                         }
                     }
+                    method_kinds.push((method_name.clone(), kind));
+
                     let return_type = if let Some(returns) = &method_def.returns {
                         type_annotation_to_ir_type(returns)?
                     } else {
                         IRType::Unknown
                     };
-
-                    let decorators = method_def
-                        .decorator_list
-                        .iter()
-                        .filter_map(|dec| {
-                            if let Expr::Name(name) = dec {
-                                Some(name.id.to_string())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
 
                     let body = lower_function_body(&method_def.body, memory_layout)?;
 
@@ -386,6 +414,26 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
                 _ => {
                     // Ignore other class body statements for now
                 }
+            }
+        }
+
+        // A setter is reachable only through attribute assignment, which
+        // resolves the property via its getter; a setter without a matching
+        // `@property` getter can never fire, so reject it loudly.
+        for (method_name, kind) in &method_kinds {
+            if *kind == MethodKind::PropertySetter
+                && !method_kinds
+                    .iter()
+                    .any(|(n, k)| n == method_name && *k == MethodKind::PropertyGetter)
+            {
+                return Err(crate::core::errors::unsupported_feature(
+                    format!(
+                        "setter '@{method_name}.setter' in class '{name}' has no matching \
+                         '@property' getter named '{method_name}'"
+                    ),
+                    None,
+                )
+                .into());
             }
         }
 
@@ -561,6 +609,13 @@ fn process_import_from(
 /// Convert type annotations to IR types
 fn type_annotation_to_ir_type(expr: &Expr) -> Result<IRType> {
     match expr {
+        // A quoted forward reference (`-> "Counter"`) names a class defined
+        // in the same module; treat it exactly like the bare name.
+        Expr::Constant(c) => match &c.value {
+            rustpython_parser::ast::Constant::Str(s) => Ok(IRType::Class(s.to_string())),
+            rustpython_parser::ast::Constant::None => Ok(IRType::None),
+            _ => Ok(IRType::Any),
+        },
         Expr::Name(name) => match name.id.to_string().as_str() {
             "int" => Ok(IRType::Int),
             "float" => Ok(IRType::Float),

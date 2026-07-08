@@ -755,6 +755,29 @@ pub fn compile_body(
                 // store pops the value, then the address.
                 let obj_type = emit_expr(object, func, ctx, memory_layout, None);
 
+                // `obj.attr = v` where `attr` is a `@property` compiles to its
+                // setter: the instance pointer is already on the stack, so the
+                // coerced value completes the (self, value) argument pair.
+                if let IRType::Class(class_name) = &obj_type {
+                    if let Some((setter_idx, owner)) = ctx
+                        .get_class_info(class_name)
+                        .and_then(|ci| ci.property_setters.get(attribute.as_str()).cloned())
+                    {
+                        let param_types = ctx
+                            .get_function_info(&format!("{owner}::{attribute}::setter"))
+                            .map(|f| f.param_types.clone())
+                            .unwrap_or_default();
+                        let t = emit_expr(value, func, ctx, memory_layout, param_types.get(1));
+                        if matches!(t, IRType::String | IRType::Bytes) {
+                            func.instruction(&Instruction::Drop);
+                        }
+                        func.instruction(&Instruction::Call(setter_idx));
+                        // The setter's WASM result (implicit 0) is unused.
+                        func.instruction(&Instruction::Drop);
+                        continue;
+                    }
+                }
+
                 let field = match &obj_type {
                     IRType::Class(class_name) => lookup_field(ctx, class_name, attribute),
                     _ => None,
@@ -832,6 +855,44 @@ pub fn compile_body(
                 // `obj.field OP= value` -> obj.field = (obj.field OP value).
                 let obj_type = emit_expr(object, func, ctx, memory_layout, None);
                 func.instruction(&Instruction::LocalSet(ctx.temp_local)); // temp = obj_ptr
+
+                // `obj.attr OP= v` on a `@property` reads through the getter
+                // and writes back through the setter (both exist: a setter
+                // without a getter is rejected during IR conversion).
+                if let IRType::Class(class_name) = &obj_type {
+                    let class_info = ctx.get_class_info(class_name);
+                    let setter = class_info
+                        .and_then(|ci| ci.property_setters.get(attribute.as_str()).cloned());
+                    let getter = class_info.and_then(|ci| {
+                        ci.methods.get(attribute.as_str()).copied().map(|idx| {
+                            let owner = ci
+                                .method_owner
+                                .get(attribute.as_str())
+                                .cloned()
+                                .unwrap_or_else(|| class_name.clone());
+                            (idx, owner)
+                        })
+                    });
+                    if let (Some((setter_idx, _)), Some((getter_idx, getter_owner))) =
+                        (setter, getter)
+                    {
+                        let value_ty = ctx
+                            .get_function_info(&format!("{getter_owner}::{attribute}"))
+                            .map(|f| f.return_type.clone())
+                            .unwrap_or(IRType::Unknown);
+                        let is_float = matches!(value_ty, IRType::Float);
+                        // self for the setter call, then self for the getter.
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                        func.instruction(&Instruction::Call(getter_idx)); // current value
+                        emit_expr(value, func, ctx, memory_layout, Some(&value_ty));
+                        emit_arith_op(func, op, is_float);
+                        func.instruction(&Instruction::Call(setter_idx));
+                        // The setter's WASM result (implicit 0) is unused.
+                        func.instruction(&Instruction::Drop);
+                        continue;
+                    }
+                }
 
                 let field = match &obj_type {
                     IRType::Class(class_name) => lookup_field(ctx, class_name, attribute),

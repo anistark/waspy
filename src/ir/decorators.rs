@@ -1,5 +1,92 @@
 use crate::ir::{IRBody, IRConstant, IRExpr, IRFunction, IRStatement, IRType};
+use anyhow::Result;
 use std::collections::HashMap;
+
+/// How a method binds its first argument, derived from the standard method
+/// decorators. Plain (undecorated) methods bind `self`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MethodKind {
+    /// Ordinary method: implicit `self` instance pointer.
+    Instance,
+    /// `@staticmethod`: no implicit first argument.
+    Static,
+    /// `@classmethod`: implicit `cls`, bound to the class itself.
+    Class,
+    /// `@property`: `obj.attr` reads compile to a call of this method.
+    PropertyGetter,
+    /// `@<name>.setter`: `obj.attr = v` assignments compile to a call.
+    PropertySetter,
+}
+
+/// Classify a method by its decorator stack, rejecting unsupported or
+/// conflicting combinations (e.g. `@staticmethod` + `@classmethod`) with a
+/// clear error instead of silently compiling the wrong dispatch.
+///
+/// Decorators that don't affect binding (user-defined names) are ignored here;
+/// only the standard method-kind decorators participate.
+pub fn method_kind(
+    class_name: &str,
+    method_name: &str,
+    decorators: &[String],
+) -> Result<MethodKind> {
+    let mut kind: Option<(MethodKind, &str)> = None;
+
+    for dec in decorators {
+        let new_kind = match dec.as_str() {
+            "staticmethod" => Some(MethodKind::Static),
+            "classmethod" => Some(MethodKind::Class),
+            "property" => Some(MethodKind::PropertyGetter),
+            d if d.ends_with(".setter") || d.ends_with(".getter") => {
+                let (prop, suffix) = d.rsplit_once('.').expect("checked by ends_with");
+                if prop != method_name {
+                    return Err(crate::core::errors::unsupported_feature(
+                        format!(
+                            "decorator '@{d}' on method '{class_name}.{method_name}' must match \
+                             the property name (expected '@{method_name}.{suffix}')"
+                        ),
+                        None,
+                    )
+                    .into());
+                }
+                Some(if suffix == "setter" {
+                    MethodKind::PropertySetter
+                } else {
+                    MethodKind::PropertyGetter
+                })
+            }
+            d if d.ends_with(".deleter") => {
+                return Err(crate::core::errors::unsupported_feature(
+                    format!(
+                        "property deleters are not supported: '@{d}' on method \
+                         '{class_name}.{method_name}'"
+                    ),
+                    None,
+                )
+                .into());
+            }
+            _ => None,
+        };
+
+        if let Some(new_kind) = new_kind {
+            if let Some((prev_kind, prev_dec)) = kind {
+                if prev_kind != new_kind {
+                    return Err(crate::core::errors::unsupported_feature(
+                        format!(
+                            "method '{class_name}.{method_name}' combines decorators '@{prev_dec}' \
+                             and '@{dec}'; only one of @staticmethod, @classmethod, @property, or \
+                             @<name>.setter is supported per method"
+                        ),
+                        None,
+                    )
+                    .into());
+                }
+            }
+            kind = Some((new_kind, dec.as_str()));
+        }
+    }
+
+    Ok(kind.map(|(k, _)| k).unwrap_or(MethodKind::Instance))
+}
 
 /// Types of built-in decorators
 #[derive(Debug, Clone, PartialEq)]
