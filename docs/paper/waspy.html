@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Waspy: Direct Ahead-of-Time Compilation of Typed Python to Compact WebAssembly</title>
+<meta name="description" content="The Waspy paper: direct ahead-of-time compilation of typed Python to compact WebAssembly.">
+<link rel="icon" href="https://raw.githubusercontent.com/anistark/waspy/4e205230f4e029cf5e16a28a75de0ddc06498726/assets/logo.png" type="image/png">
+
+<script>
+    (function () {
+        var t = localStorage.getItem('theme');
+        if (!t) t = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+        document.documentElement.setAttribute('data-theme', t);
+    })();
+</script>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700;12..96,800&family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" media="screen">
+<link rel="stylesheet" href="../style.css" media="screen">
+
+<style>
+  /* ============ Print (PDF) layout: academic single column ============ */
+  @page {
+    size: A4;
+    margin: 24mm 25mm 26mm 25mm;
+  }
+  @media print {
+    * { box-sizing: border-box; }
+    .no-print { display: none !important; }
+    html, body {
+      margin: 0; padding: 0;
+      font-family: "Times New Roman", Times, serif;
+      font-size: 10.5pt;
+      line-height: 1.38;
+      color: #000;
+      background: #fff;
+    }
+    .titleblock {
+      text-align: center;
+      margin-bottom: 6mm;
+    }
+    .titleblock h1 {
+      font-size: 17pt;
+      font-weight: bold;
+      margin: 0 0 4mm 0;
+      line-height: 1.25;
+    }
+    .authors { font-size: 11pt; margin: 0 0 1mm 0; }
+    .affil { font-size: 9.5pt; font-style: italic; margin: 0 0 1mm 0; }
+
+    .cols {
+      text-align: justify;
+      hyphens: auto;
+    }
+    .cols h2 {
+      font-size: 11.5pt;
+      font-weight: bold;
+      margin: 4mm 0 1.5mm 0;
+      break-after: avoid;
+    }
+    .cols h3 {
+      font-size: 10pt;
+      font-weight: bold;
+      font-style: italic;
+      margin: 3mm 0 1mm 0;
+      break-after: avoid;
+    }
+    .cols p { margin: 0 0 1.6mm 0; }
+    .cols p + p { text-indent: 4mm; margin-top: 0; }
+
+    .abstract {
+      width: 82%;
+      margin: 0 auto 6mm auto;
+      font-size: 9.5pt;
+    }
+    .abstract .abstitle {
+      text-align: center;
+      font-weight: bold;
+      font-size: 11pt;
+      margin: 0 0 2mm 0;
+    }
+
+    code, pre {
+      font-family: "Courier New", Courier, monospace;
+      font-size: 8.5pt;
+    }
+    .figure {
+      break-inside: avoid;
+      margin: 2.5mm 0;
+      text-align: center;
+    }
+    .figcaption {
+      font-size: 8.5pt;
+      margin-top: 1.5mm;
+      text-align: center;
+    }
+    .figcaption b { font-weight: bold; }
+
+    .pipe {
+      display: inline-block;
+      text-align: center;
+      font-size: 8.5pt;
+    }
+    .pipe .stage {
+      border: 0.5pt solid #000;
+      padding: 1.2mm 2mm;
+      margin: 0 auto;
+      width: 52mm;
+      background: #fafafa;
+    }
+    .pipe .arrow {
+      line-height: 1.1;
+      padding: 0.4mm 0;
+      font-size: 9pt;
+    }
+    .pipe .note {
+      font-size: 7.5pt;
+      color: #333;
+      font-family: "Courier New", monospace;
+    }
+
+    table {
+      border-collapse: collapse;
+      margin: 0 auto;
+      font-size: 9pt;
+      break-inside: avoid;
+    }
+    th, td {
+      max-width: 70mm;
+      border-top: 0.5pt solid #000;
+      padding: 0.8mm 1.5mm;
+      text-align: left;
+      vertical-align: top;
+    }
+    thead th { border-top: 1pt solid #000; border-bottom: 0.5pt solid #000; }
+    tbody tr:last-child td { border-bottom: 1pt solid #000; }
+    td.num, th.num { text-align: right; }
+
+    a { color: #000; text-decoration: none; }
+    .refs {
+      font-size: 8.5pt;
+      margin: 0; padding: 0;
+    }
+    .refs li {
+      margin: 0 0 1.2mm 0;
+      list-style-position: outside;
+    }
+    ol.refs { padding-left: 5mm; }
+    ul.tight { margin: 1mm 0 2mm 0; padding-left: 5mm; }
+    ul.tight li { margin-bottom: 0.8mm; }
+  }
+
+  /* ============ Screen layout: site design system ============ */
+  @media screen {
+    .print-only { display: none !important; }
+
+    .paper-page {
+      max-width: 880px;
+      margin: 0 auto;
+      padding: 0 24px 96px;
+    }
+    .page-hero h1 .accent-green {
+      background: linear-gradient(120deg, var(--green), var(--teal));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .paper-hero-meta {
+      color: var(--text-2);
+      font-size: 0.95rem;
+      margin-top: 0.5rem;
+    }
+    .paper-hero-meta a {
+      color: var(--text-1);
+      text-decoration: none;
+      border-bottom: 1px solid color-mix(in srgb, var(--amber) 35%, transparent);
+    }
+    .paper-hero-meta a:hover {
+      color: var(--amber);
+      border-bottom-color: var(--amber);
+    }
+    .cols {
+      color: var(--text-1);
+      font-size: 1.02rem;
+      line-height: 1.75;
+    }
+    .cols h2 {
+      font-family: var(--font-display);
+      color: var(--text-0);
+      font-size: 1.45rem;
+      margin: 2.6rem 0 0.9rem;
+    }
+    .cols h3 {
+      font-family: var(--font-display);
+      color: var(--text-0);
+      font-size: 1.1rem;
+      margin: 1.8rem 0 0.6rem;
+    }
+    .cols p { margin: 0 0 1rem; }
+    .cols b { color: var(--text-0); font-weight: 600; }
+    .cols code {
+      font-family: var(--font-mono);
+      font-size: 0.83em;
+      color: var(--text-0);
+      background: var(--bg-glass);
+      border: 1px solid var(--glass-border);
+      border-radius: 6px;
+      padding: 0.08em 0.4em;
+      white-space: nowrap;
+    }
+    .abstract {
+      background: var(--bg-glass);
+      border: 1px solid var(--glass-border);
+      border-radius: 18px;
+      box-shadow: inset 0 1px 0 var(--glass-highlight);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      padding: 1.7rem 2rem;
+      margin: 0 0 2.2rem;
+      font-size: 0.98rem;
+    }
+    .abstract .abstitle {
+      font-family: var(--font-display);
+      color: var(--text-0);
+      font-size: 1.2rem;
+      font-weight: 700;
+      text-align: center;
+      margin: 0 0 0.9rem;
+    }
+
+    .figure {
+      margin: 1.8rem 0;
+      text-align: center;
+      overflow-x: auto;
+    }
+    .figcaption {
+      color: var(--text-2);
+      font-size: 0.86rem;
+      margin-top: 0.7rem;
+      text-align: center;
+    }
+    .figcaption b { color: var(--text-1); }
+
+    .pipe {
+      display: inline-block;
+      text-align: center;
+      font-size: 0.88rem;
+    }
+    .pipe .stage {
+      background: var(--bg-glass);
+      border: 1px solid var(--glass-border);
+      border-radius: 12px;
+      box-shadow: inset 0 1px 0 var(--glass-highlight);
+      width: 320px;
+      max-width: 80vw;
+      margin: 0 auto;
+      padding: 0.55rem 0.9rem;
+      color: var(--text-0);
+    }
+    .pipe .arrow {
+      color: var(--amber);
+      padding: 0.15rem 0;
+      font-size: 1rem;
+    }
+    .pipe .note {
+      font-family: var(--font-mono);
+      font-size: 0.74rem;
+      color: var(--text-2);
+    }
+
+    table {
+      border-collapse: collapse;
+      margin: 0 auto;
+      font-size: 0.9rem;
+      text-align: left;
+    }
+    th, td {
+      border-top: 1px solid var(--glass-border);
+      padding: 0.45rem 0.9rem;
+      vertical-align: top;
+      color: var(--text-1);
+    }
+    thead th {
+      color: var(--text-0);
+      font-weight: 600;
+      border-top: 2px solid var(--glass-border);
+      border-bottom: 1px solid var(--glass-border);
+    }
+    tbody tr:last-child td { border-bottom: 2px solid var(--glass-border); }
+    td.num, th.num { text-align: right; font-family: var(--font-mono); font-size: 0.85em; }
+    td b { color: var(--amber); }
+
+    ul.tight { margin: 0 0 1.2rem; padding-left: 1.5rem; }
+    ul.tight li { margin-bottom: 0.5rem; }
+
+    .refs {
+      color: var(--text-2);
+      font-size: 0.88rem;
+      margin: 0;
+      padding-left: 1.6rem;
+    }
+    .refs li { margin-bottom: 0.55rem; }
+    .cols a {
+      color: var(--amber);
+      text-decoration: none;
+      border-bottom: 1px solid color-mix(in srgb, var(--amber) 35%, transparent);
+      overflow-wrap: anywhere;
+    }
+    .cols a:hover { border-bottom-color: var(--amber); }
+    .cols a code { color: var(--amber); }
+  }
+</style>
+</head>
+<body>
+
+<header class="site-header no-print">
+    <nav class="container">
+        <a class="logo-container" href="../index.html">
+            <img src="https://raw.githubusercontent.com/anistark/waspy/4e205230f4e029cf5e16a28a75de0ddc06498726/assets/logo.png" alt="Waspy Logo" class="logo-img">
+            <div class="logo">waspy</div>
+        </a>
+        <div class="nav-right">
+            <ul class="nav-links">
+                <li><a href="../index.html">Home</a></li>
+                <li><a href="../modules.html">Modules</a></li>
+                <li><a href="../changelog.html">Changelog</a></li>
+                <li><a href="waspy.html" class="active">Paper</a></li>
+                <li><a href="https://github.com/anistark/waspy">GitHub</a></li>
+            </ul>
+
+            <button class="theme-toggle" id="themeToggle" title="Toggle theme" aria-label="Toggle theme">
+                <div class="theme-icon">
+                    <svg class="sun-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                        <path d="M12 2.25a.75.75 0 01.75.75v2.25a.75.75 0 01-1.5 0V3a.75.75 0 01.75-.75zM7.5 12a4.5 4.5 0 119 0 4.5 4.5 0 01-9 0zM18.894 6.166a.75.75 0 00-1.06-1.06l-1.591 1.59a.75.75 0 101.06 1.061l1.591-1.59zM21.75 12a.75.75 0 01-.75.75h-2.25a.75.75 0 010-1.5H21a.75.75 0 01.75.75zM17.834 18.894a.75.75 0 001.06-1.06l-1.59-1.591a.75.75 0 10-1.061 1.06l1.59 1.591zM12 18a.75.75 0 01.75.75V21a.75.75 0 01-1.5 0v-2.25A.75.75 0 0112 18zM7.758 17.303a.75.75 0 00-1.061-1.06l-1.591 1.59a.75.75 0 001.06 1.061l1.591-1.59zM6 12a.75.75 0 01-.75.75H3a.75.75 0 010-1.5h2.25A.75.75 0 016 12zM6.697 7.757a.75.75 0 001.06-1.06l-1.59-1.591a.75.75 0 00-1.061 1.06l1.59 1.591z"/>
+                    </svg>
+                    <svg class="moon-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                        <path d="M9.528 1.718a.75.75 0 01.162.819A8.97 8.97 0 009 6a9 9 0 009 9 8.97 8.97 0 003.463-.69.75.75 0 01.981.98 10.503 10.503 0 01-9.694 6.46c-5.799 0-10.5-4.701-10.5-10.5 0-4.368 2.667-8.112 6.46-9.694a.75.75 0 01.818.162z"/>
+                    </svg>
+                </div>
+            </button>
+        </div>
+    </nav>
+</header>
+
+<main class="paper-page">
+
+<section class="page-hero no-print">
+    <h1>Direct Ahead-of-Time Compilation of <span class="accent">Typed Python</span> to Compact <span class="accent-green">WebAssembly</span></h1>
+    <p class="subtitle">The Waspy paper: why shipping compiled Python programs beats shipping Python interpreters on Wasm.</p>
+    <p class="paper-hero-meta"><a href="https://github.com/anistark" target="_blank" rel="noopener">Kumar Anirudha</a> &middot; <a href="https://github.com/farhaanbukhsh" target="_blank" rel="noopener">Farhaan Bukhsh</a></p>
+    <p class="paper-hero-meta">Last updated July 8, 2026</p>
+    <div class="cta-buttons" style="margin-top: 1.4rem;">
+        <a href="waspy.pdf" target="_blank" rel="noopener" class="btn btn-primary">📄 Download PDF</a>
+    </div>
+</section>
+
+<div class="titleblock print-only">
+  <h1>Waspy: Direct Ahead-of-Time Compilation of Typed Python<br>to Compact WebAssembly</h1>
+  <p class="authors"><a href="https://github.com/anistark" target="_blank" rel="noopener">Kumar Anirudha</a> &nbsp;&middot;&nbsp; <a href="https://github.com/farhaanbukhsh" target="_blank" rel="noopener">Farhaan Bukhsh</a></p>
+  <p class="affil">Last updated July 8, 2026</p>
+</div>
+
+<div class="cols">
+
+<div class="abstract">
+<p class="abstitle">Abstract</p>
+WebAssembly (Wasm) has become a universal, sandboxed compilation target that runs in every major browser and in a growing family of server-side runtimes. Python, meanwhile, remains one of the world's most widely used languages, yet it reaches Wasm today almost exclusively by shipping an interpreter: Pyodide, CPython&rsquo;s Emscripten builds, MicroPython&rsquo;s Wasm port, and Nuitka-based tools all bundle a Python runtime into the deployed artifact, producing payloads from hundreds of kilobytes to tens of megabytes and paying interpreter startup and dispatch costs on every run. This paper presents <i>Waspy</i>, an open-source ahead-of-time compiler, written in Rust, that translates a statically typed subset of Python directly into freestanding WebAssembly modules with no embedded interpreter and no mandatory JavaScript glue. Waspy parses CPython-compatible syntax, lowers it to a typed intermediate representation, emits Wasm bytecode directly, and post-optimizes the binary with Binaryen. The supported subset covers functions, control flow, classes with single inheritance and heap-allocated instances, collections, exceptions, lambdas and comprehensions, and a compiled subset of the standard library. On representative programs, Waspy produces optimized modules of 0.2 to 5.5&nbsp;KB with end-to-end compile times under 20&nbsp;ms, three to four orders of magnitude smaller than interpreter-based deployment. We describe the design trade-offs of mapping a dynamic language onto Wasm&rsquo;s static type system and linear memory, the current limitations of the approach, and the roadmap toward garbage collection, growable collections, and generators.</div>
+
+<h2>I.&nbsp;&nbsp;Introduction</h2>
+
+<p>WebAssembly [1] is a portable, verifiable, sandboxed binary instruction format supported natively by all major browsers and, through standalone runtimes such as Wasmtime and Wasmer, increasingly used for serverless functions, plugin systems, and edge computing. Its promise is simple: compile once, run anywhere, with near-native performance and strong isolation.</p>
+
+<p>Python sits awkwardly against this promise. It is consistently ranked among the most popular programming languages, yet it is an interpreted, dynamically typed language whose reference implementation (CPython) is a large C program. The dominant strategy for running Python on Wasm is therefore to compile <i>the interpreter</i> to Wasm and ship it alongside the user&rsquo;s source code. Pyodide [2] compiles CPython and much of the scientific stack with Emscripten; the CPython project itself now ships official Emscripten and WASI build targets [3]; MicroPython provides a smaller Wasm port [4]; and tools such as py2wasm [5] use Nuitka [6] to transpile Python to C before linking a CPython runtime into the output.</p>
+
+<p>All of these inherit the same structural costs. First, <b>payload size</b>: the deployed artifact contains a complete language runtime, from hundreds of kilobytes for MicroPython to several megabytes for CPython-based approaches, regardless of how small the user program is. Second, <b>startup latency</b>: the interpreter must be instantiated and bootstrapped before the first line of user code runs, which is hostile to cold-start-sensitive environments such as edge functions and browser interactions. Third, <b>opacity of the interface</b>: an embedded interpreter exposes an <i>eval</i>-style entry point rather than typed, directly callable Wasm exports, complicating composition with other Wasm modules and host tooling.</p>
+
+<p>This paper explores the opposite point in the design space: <i>compile the Python program itself, not the interpreter</i>. Waspy is an ahead-of-time (AOT) compiler that translates a statically typed subset of Python directly into a self-contained Wasm module. Each Python function becomes an exported Wasm function with a typed signature; there is no interpreter, no bytecode, and no required JavaScript shim. The price is coverage: Waspy compiles a subset of Python, anchored on type annotations and augmented with local type inference, rather than the full dynamic language. We argue that this trade is worthwhile for a large class of workloads, such as numeric kernels, business logic, validation rules, embedded scripting, and teaching, where developers want Python&rsquo;s syntax and ergonomics but Wasm&rsquo;s size, speed, and composability.</p>
+
+<p>The contributions of this paper are:</p>
+<ul class="tight">
+<li>The design and implementation of Waspy, an open-source (MIT-licensed) Python-to-Wasm AOT compiler written in Rust, with a four-stage pipeline: CPython-compatible parsing, lowering to a typed intermediate representation (IR), direct Wasm emission, and Binaryen post-optimization (Section III).</li>
+<li>A pragmatic mapping of Python semantics (objects, collections, strings, exceptions, and a standard-library subset) onto Wasm&rsquo;s four value types and linear memory, without a garbage collector or runtime library (Section IV).</li>
+<li>An evaluation on representative programs showing optimized module sizes of 233&nbsp;bytes to 5.5&nbsp;KB and compile times under 20&nbsp;ms, compared against interpreter-shipping alternatives (Section V).</li>
+<li>An honest account of the semantic gaps that remain (memory reclamation, growable collections, generators, full closures) and a roadmap for closing them (Section VI).</li>
+</ul>
+
+<h2>II.&nbsp;&nbsp;Background and Related Work</h2>
+
+<h3>A. WebAssembly as a compilation target</h3>
+<p>Wasm [1] defines a stack machine with four value types (<code>i32</code>, <code>i64</code>, <code>f32</code>, <code>f64</code>), structured control flow, and a single linear memory per module (in the widely deployed core specification). There is no built-in garbage collector in core Wasm, no exceptions (in the baseline widely available everywhere), and no direct access to the host: everything crosses an explicit import/export boundary. Languages with static types and manual memory management (C, C++, Rust, Zig) map onto this model naturally; dynamic languages do not, which is precisely why the interpreter-shipping strategy became the default for Python, Ruby, and PHP.</p>
+
+<h3>B. Interpreter-in-Wasm approaches</h3>
+<p>Pyodide [2] is the most complete Python-on-Wasm environment: full CPython plus NumPy, Pandas, and SciPy compiled with Emscripten, with rich JavaScript interoperability. Its completeness is also its weight: the core runtime download is measured in megabytes before any scientific packages, and instantiation takes seconds on typical connections. PyScript builds a browser framework on top of it. CPython 3.13+ ships official WebAssembly build targets [3] with similar characteristics. MicroPython&rsquo;s Wasm port [4] shrinks the runtime dramatically (hundreds of kilobytes) by re-implementing a Python subset, but still ships an interpreter and its dispatch overhead. RustPython [7], a Python interpreter in Rust, can also run in the browser via Wasm, again as an interpreter.</p>
+
+<h3>C. AOT and hybrid compilers for Python</h3>
+<p>Nuitka [6] transpiles Python to C, but links against libpython and thus retains the full runtime. py2wasm [5] applies Nuitka with a Wasm-targeting toolchain, reporting roughly 3&times; speedups over interpreted CPython-on-Wasm, but its output still embeds a Python runtime measured in megabytes. Cython [8] and mypyc compile annotated Python to C for use as CPython extension modules; they accelerate Python but do not produce freestanding artifacts. Codon [9] is the closest relative in spirit: an LLVM-based AOT compiler for a statically typed Python dialect achieving C-like performance. Codon, however, targets native code first, is not open source under an OSI license, and does not aim at minimal self-contained Wasm modules. Waspy differs from all of the above in optimizing for exactly that: the smallest possible, dependency-free Wasm module with typed exports, produced by a permissively licensed, embeddable compiler library.</p>
+
+<h3>D. Compiling dynamic languages statically</h3>
+<p>Compiling a dynamic language ahead of time requires either whole-program type inference, gradual typing with annotations, or run-time fallback mechanisms. PyPy [10] exemplifies the run-time route with its meta-tracing JIT, but that approach is unavailable inside a Wasm module, which cannot generate and execute new code at run time. Waspy instead takes the gradual-typing route pioneered in practice by mypy and adopted by Codon and mypyc: function signatures must be annotated (PEP 484 [11]), and local variable types are inferred from initialization and use. This restricts the accepted language but keeps both the compiler and the generated code simple, predictable, and small, which is an explicit design goal.</p>
+
+<h2>III.&nbsp;&nbsp;Design and Architecture</h2>
+
+<p>Waspy is implemented in Rust (~0.11.0 at the time of writing) and distributed as a library crate, so it can be embedded in build tools, web services, and plugin hosts; a companion runner integration (<code>wasmrun</code>) provides a CLI workflow. Fig.&nbsp;1 shows the pipeline.</p>
+
+<div class="figure">
+<div class="pipe">
+  <div class="stage"><b>Python source</b> (one file, many files, or a project tree)</div>
+  <div class="arrow">&darr;</div>
+  <div class="stage"><b>Parse</b><br><span class="note">rustpython-parser &rarr; CPython-compatible AST</span></div>
+  <div class="arrow">&darr;</div>
+  <div class="stage"><b>Lower to typed IR</b><br><span class="note">type checking &amp; inference, decorators, entry-point detection</span></div>
+  <div class="arrow">&darr;</div>
+  <div class="stage"><b>Code generation</b><br><span class="note">direct Wasm emission via wasm-encoder</span></div>
+  <div class="arrow">&darr;</div>
+  <div class="stage"><b>Post-optimization</b><br><span class="note">Binaryen (wasm-opt) passes</span></div>
+  <div class="arrow">&darr;</div>
+  <div class="stage"><b>Freestanding .wasm module</b> (typed exports, no interpreter)</div>
+</div>
+<div class="figcaption"><b>Fig. 1.</b> The Waspy compilation pipeline.</div>
+</div>
+
+<h3>A. Parsing</h3>
+<p>Waspy reuses <code>rustpython-parser</code>, the parser of the RustPython project, and therefore accepts standard CPython grammar. This is a deliberate separation of concerns: Waspy imposes no syntactic dialect. Any accepted program is valid Python that also runs under CPython, which preserves the developer&rsquo;s existing tooling (editors, linters, type checkers, tests) and makes the semantics auditable by differential testing against CPython.</p>
+
+<h3>B. Typed intermediate representation</h3>
+<p>The AST is lowered into a compact typed IR of modules, functions, statements, and expressions. Types enter the IR from three sources: (1) mandatory PEP&nbsp;484 annotations on function parameters and return values, (2) literal and operator typing, and (3) forward local inference, in which a variable&rsquo;s type is fixed by its first assignment and checked at subsequent uses, with automatic coercion between compatible numeric types. The IR stage also resolves decorators through a registry, detects <code>if __name__ == "__main__"</code> entry points and synthesizes a corresponding exported entry function, and merges multiple source files (or a whole project directory, discovered via lightweight import analysis) into a single IR module so that cross-file calls compile to direct Wasm calls.</p>
+
+<h3>C. Code generation</h3>
+<p>Code generation emits Wasm bytecode directly through the <code>wasm-encoder</code> crate; there is no C, LLVM, or text-format intermediary. Each Python function becomes one Wasm function, exported under its original name. Python locals map to Wasm locals; control flow (<code>if</code>/<code>elif</code>/<code>else</code>, <code>while</code>, <code>for</code> over ranges and collections, <code>break</code>/<code>continue</code> including inside nested <code>if</code>/<code>try</code> blocks) maps to Wasm structured <code>block</code>/<code>loop</code>/<code>br</code> instructions, which fit Python&rsquo;s structured control flow with no relooping needed. Short-circuit <code>and</code>/<code>or</code> compile to conditional branches. Because the module is closed at compile time, all calls are direct and the whole program is visible to the optimizer.</p>
+
+<h3>D. Post-optimization</h3>
+<p>The raw module is passed through Binaryen [12], applying its standard optimization pipeline (dead code elimination, inlining, local coalescing, instruction simplification, and size-directed passes). Optimization is on by default and can be disabled for debugging or for downstream toolchains that prefer to optimize themselves. The compiler can additionally emit function metadata and a self-contained HTML test harness for immediate execution in a browser.</p>
+
+<h2>IV.&nbsp;&nbsp;Mapping Python onto Wasm</h2>
+
+<h3>A. Scalar types</h3>
+<p>Table&nbsp;I shows the value mapping. Integers map to <code>i32</code>, floats to IEEE-754 <code>f64</code>, and booleans to <code>i32</code> 0/1. The full arithmetic operator set is supported, including floor division, modulo with Python sign semantics, and exponentiation.</p>
+
+<div class="figure">
+<div class="figcaption" style="margin-bottom:1mm"><b>TABLE I.</b> Python-to-WebAssembly type mapping</div>
+<table>
+<thead><tr><th>Python type</th><th>Wasm representation</th></tr></thead>
+<tbody>
+<tr><td><code>int</code></td><td><code>i32</code> value</td></tr>
+<tr><td><code>float</code></td><td><code>f64</code> value</td></tr>
+<tr><td><code>bool</code></td><td><code>i32</code> (0 / 1)</td></tr>
+<tr><td><code>str</code></td><td>pointer (<code>i32</code>) into linear memory; length-prefixed</td></tr>
+<tr><td><code>list</code>, <code>tuple</code>, <code>range</code></td><td>pointer to fixed-capacity region in linear memory</td></tr>
+<tr><td><code>dict</code></td><td>pointer to key/value region in linear memory</td></tr>
+<tr><td><code>set</code></td><td>pointer to open-addressing hash table in linear memory</td></tr>
+<tr><td>class instance</td><td>pointer to heap-allocated field block (<code>__alloc</code>)</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>B. Strings and collections</h3>
+<p>Strings live in linear memory and support slicing, concatenation, formatting, and more than twenty methods, with compile-time evaluation where operands are constant. Lists, tuples, dicts, sets, and ranges are laid out as regions in linear memory with capacities fixed at compile time from their literals; loops that build collections allocate fresh per-iteration regions to preserve value semantics. Sets use an open-addressing hash table, giving expected-constant membership tests; <code>in</code>/<code>not&nbsp;in</code>, indexing, and the common method surface are supported across collection types, including float-element collections using full-width <code>f64</code> slots.</p>
+
+<h3>C. Objects and classes</h3>
+<p>Class instances are heap-allocated through a compiler-generated bump allocator (<code>__alloc</code>) over linear memory. Multiple live instances per class are supported; instances can be passed to and returned from functions. Waspy supports single inheritance with <code>super()</code> delegation and <code>isinstance</code> checks, resolved statically where possible. Because the class hierarchy is closed at compile time, method calls compile to direct calls rather than dictionary lookups. This is one of the places where the subset restriction converts Python&rsquo;s most expensive dynamic feature into zero-overhead code.</p>
+
+<h3>D. Exceptions</h3>
+<p>Core Wasm (as universally deployed) lacks native exception handling, so Waspy compiles <code>try</code>/<code>except</code>/<code>finally</code>/<code>raise</code> into structured control flow: raising sets an error state and branches to the innermost matching handler, and <code>finally</code> blocks are duplicated along normal and exceptional edges. This keeps the output compatible with every Wasm runtime, at the cost of some code-size duplication in exception-heavy code.</p>
+
+<h3>E. Standard library subset</h3>
+<p>Rather than shipping a runtime library, Waspy implements a subset of the standard library <i>inside the compiler</i>: calls into <code>math</code>, <code>random</code>, <code>json</code>, <code>re</code>, <code>datetime</code>, <code>logging</code>, <code>collections</code>, <code>itertools</code>, <code>functools</code>, <code>sys</code>, and <code>os</code>/<code>os.path</code> are recognized during lowering and compiled to inline Wasm implementations or intrinsic sequences. Only code that is actually used is emitted, so a program that calls <code>math.sqrt</code> pays for square root and nothing else, in contrast to interpreter bundles, where the whole library is present regardless.</p>
+
+<h3>F. Developer experience</h3>
+<p>Compilation errors carry source locations and specific error categories (parse errors, type errors, unsupported features), with warnings for constructs that compile but deserve attention. The library exposes four verbosity levels and options for debug info, metadata extraction, and HTML harness generation. The test suite currently comprises 89 unit and integration tests exercising the pipeline end to end.</p>
+
+<h2>V.&nbsp;&nbsp;Evaluation</h2>
+
+<p>We evaluate the two properties Waspy is designed for: output size and compilation speed. All measurements were taken with Waspy 0.11.0 (optimizations enabled) on an Apple-silicon macOS machine, compiling the example programs distributed with the project. Table&nbsp;II reports optimized module sizes.</p>
+
+<div class="figure">
+<div class="figcaption" style="margin-bottom:1mm"><b>TABLE II.</b> Optimized Wasm module sizes for example programs</div>
+<table>
+<thead><tr><th>Program</th><th>Exercises</th><th class="num">Size (bytes)</th></tr></thead>
+<tbody>
+<tr><td>exceptions</td><td>try/except/finally, raise</td><td class="num">233</td></tr>
+<tr><td>basic_operations</td><td>arithmetic, comparisons</td><td class="num">422</td></tr>
+<tr><td>control_flow</td><td>if/while/for, break/continue</td><td class="num">575</td></tr>
+<tr><td>calculator</td><td>multi-function module</td><td class="num">921</td></tr>
+<tr><td>typed_demo</td><td>type system, coercions</td><td class="num">1,196</td></tr>
+<tr><td>nested_collections</td><td>lists/dicts/sets, nesting</td><td class="num">5,528</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Every module is self-contained and directly instantiable: <code>WebAssembly.instantiate(bytes)</code> in a browser or Node.js, or any standalone runtime, with each Python function available as a typed export. End-to-end compilation (parse through Binaryen) completes in under 20&nbsp;ms for these programs, making Waspy practical inside interactive tooling and build pipelines.</p>
+
+<p>Table&nbsp;III positions these numbers against the interpreter-shipping alternatives. The figures for other systems are approximate published deployment sizes for a minimal &ldquo;hello, add two numbers&rdquo; workload; they should be read as orders of magnitude, not benchmarks, since the systems differ enormously in language coverage.</p>
+
+<div class="figure">
+<div class="figcaption" style="margin-bottom:1mm"><b>TABLE III.</b> Deployment characteristics for a small Python function on Wasm (orders of magnitude; coverage differs greatly)</div>
+<table>
+<thead><tr><th>System</th><th>Artifact contains</th><th class="num">Payload</th><th>Python coverage</th></tr></thead>
+<tbody>
+<tr><td>Pyodide [2]</td><td>CPython + stdlib (+packages)</td><td class="num">&gt; 6 MB</td><td>effectively full</td></tr>
+<tr><td>CPython/Emscripten [3]</td><td>CPython + stdlib</td><td class="num">MBs</td><td>full (per platform tier)</td></tr>
+<tr><td>py2wasm [5]</td><td>transpiled C + CPython runtime</td><td class="num">MBs</td><td>near-full</td></tr>
+<tr><td>MicroPython Wasm [4]</td><td>MicroPython VM</td><td class="num">100s of KB</td><td>large subset</td></tr>
+<tr><td><b>Waspy</b></td><td><b>compiled user code only</b></td><td class="num"><b>0.2 to 6 KB</b></td><td>typed subset</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>The gap of three to four orders of magnitude is structural, not incidental: it is the difference between shipping a program and shipping a language implementation. For workloads inside Waspy&rsquo;s subset, this translates directly into faster cold starts, lower bandwidth, and modules small enough to inline into HTML pages, smart-contract-style environments, or per-request edge deployments.</p>
+
+<h2>VI.&nbsp;&nbsp;Limitations and Roadmap</h2>
+
+<p>Waspy is under active development, and its current limitations are documented rather than hidden:</p>
+<ul class="tight">
+<li><b>No memory reclamation.</b> The bump allocator has no <code>free</code>; instances live until the module is torn down and <code>__del__</code> never runs. Reference counting or integration with the Wasm GC proposal is the highest-priority roadmap item.</li>
+<li><b>Fixed-capacity collections.</b> Collection capacity is fixed at compile time from literals; growth past the initial capacity (e.g., unbounded <code>.append</code>) is unsafe. Runtime reallocation is planned.</li>
+<li><b>Generators and closures.</b> <code>yield</code> does not yet preserve execution state, and closure variable capture analysis is incomplete. Lambdas, basic closures, and list comprehensions do compile.</li>
+<li><b>Imports and I/O.</b> Only the bundled stdlib subset can be imported inside a module; user-written <code>.py</code> module imports are handled at the project-compilation level rather than as a general import system, and file I/O awaits a WASI-backed implementation.</li>
+</ul>
+
+<p>The path to 1.0 also includes completing the object model (classmethod/staticmethod, dataclasses), hashed dictionary lookups (sets already use hashing), and module caching. Two properties of the architecture make us optimistic about closing these gaps incrementally: the typed IR isolates each feature&rsquo;s lowering, and CPython compatibility means every new feature can be validated differentially against the reference implementation.</p>
+
+<h2>VII.&nbsp;&nbsp;Use Cases and Outlook</h2>
+
+<p>The design point Waspy occupies (tiny, typed, freestanding modules from annotated Python) serves several concrete audiences. Web developers can compile hot numeric or logic kernels to Wasm without leaving Python or adopting Rust/C++. Platform engineers get a safe way to accept user-supplied Python logic (rules, pricing, validation) and run it sandboxed at the edge with microsecond instantiation. Educators get a transparent, 20&nbsp;ms-feedback compiler whose entire pipeline (AST, typed IR, Wasm text) is small enough to read, making it a practical vehicle for teaching compiler construction with a familiar source language. Because Waspy is an embeddable MIT-licensed library on crates.io, it can also serve as compilation infrastructure inside larger systems, from notebook environments to plugin runtimes.</p>
+
+<h2>VIII.&nbsp;&nbsp;Conclusion</h2>
+
+<p>Interpreter-in-Wasm systems answer the question &ldquo;how do we run all of Python on WebAssembly?&rdquo; Waspy answers a different one: &ldquo;how much of Python can we run on WebAssembly for (almost) free?&rdquo; The answer is already substantial: typed functions, control flow, classes with inheritance, collections, exceptions, and a compiled stdlib subset, delivered as freestanding modules of a few hundred bytes to a few kilobytes, compiled in milliseconds by a small, embeddable, permissively licensed Rust library. As the supported subset grows toward garbage collection, growable collections, and generators, we believe direct AOT compilation will become the default way to put Python <i>programs</i>, rather than Python <i>interpreters</i>, on the web and the edge.</p>
+
+<h2>Availability</h2>
+<p>Waspy is open source under the MIT license. Source code, examples, and documentation: <a href="https://github.com/anistark/waspy" target="_blank" rel="noopener"><code>https://github.com/anistark/waspy</code></a>; releases are published on <a href="https://crates.io/crates/waspy" target="_blank" rel="noopener">crates.io</a> (<code>cargo add waspy</code>).</p>
+
+<h2>Acknowledgments</h2>
+<p>Waspy is a community open-source project, and this work reflects the efforts of its wider contributor base. We thank all contributors to the Waspy repository, whose individual contributions are recorded at <a href="https://github.com/anistark/waspy/graphs/contributors" target="_blank" rel="noopener"><code>https://github.com/anistark/waspy/graphs/contributors</code></a>, as well as the maintainers of the upstream projects Waspy builds on: rustpython-parser, wasm-encoder, and Binaryen.</p>
+
+<h2>References</h2>
+<ol class="refs">
+<li>A. Haas et al., &ldquo;Bringing the Web up to Speed with WebAssembly,&rdquo; in <i>Proc. 38th ACM SIGPLAN Conf. on Programming Language Design and Implementation (PLDI)</i>, 2017, pp. 185-200.</li>
+<li>The Pyodide development team, &ldquo;Pyodide: Python distribution for the browser and Node.js based on WebAssembly,&rdquo; <a href="https://pyodide.org" target="_blank" rel="noopener">https://pyodide.org</a>, accessed Jul. 2026.</li>
+<li>Python Software Foundation, &ldquo;CPython WebAssembly (Emscripten and WASI) build targets,&rdquo; <a href="https://docs.python.org" target="_blank" rel="noopener">https://docs.python.org</a>, accessed Jul. 2026.</li>
+<li>MicroPython project, &ldquo;MicroPython WebAssembly port,&rdquo; <a href="https://github.com/micropython/micropython/tree/master/ports/webassembly" target="_blank" rel="noopener">https://github.com/micropython/micropython/tree/master/ports/webassembly</a>, accessed Jul. 2026.</li>
+<li>Wasmer, Inc., &ldquo;py2wasm: A Python to WebAssembly compiler,&rdquo; <a href="https://wasmer.io/posts/py2wasm-a-python-to-wasm-compiler" target="_blank" rel="noopener">https://wasmer.io/posts/py2wasm-a-python-to-wasm-compiler</a>, 2024.</li>
+<li>K. Hayen, &ldquo;Nuitka: The Python compiler,&rdquo; <a href="https://nuitka.net" target="_blank" rel="noopener">https://nuitka.net</a>, accessed Jul. 2026.</li>
+<li>RustPython contributors, &ldquo;RustPython: A Python interpreter written in Rust,&rdquo; <a href="https://rustpython.github.io" target="_blank" rel="noopener">https://rustpython.github.io</a>, accessed Jul. 2026.</li>
+<li>S. Behnel, R. Bradshaw, C. Citro, L. Dalcin, D. S. Seljebotn, and K. Smith, &ldquo;Cython: The Best of Both Worlds,&rdquo; <i>Computing in Science &amp; Engineering</i>, vol. 13, no. 2, pp. 31-39, 2011.</li>
+<li>A. Shajii, G. Ramirez, H. Smajlovi&#263;, J. Ray, B. Berger, S. Amarasinghe, and I. Numanagi&#263;, &ldquo;Codon: A Compiler for High-Performance Pythonic Applications and DSLs,&rdquo; in <i>Proc. 32nd ACM SIGPLAN Int. Conf. on Compiler Construction (CC)</i>, 2023, pp. 191-202.</li>
+<li>C. F. Bolz, A. Cuni, M. Fijalkowski, and A. Rigo, &ldquo;Tracing the Meta-Level: PyPy&rsquo;s Tracing JIT Compiler,&rdquo; in <i>Proc. 4th Workshop on the Implementation, Compilation, Optimization of Object-Oriented Languages and Programming Systems (ICOOOLPS)</i>, 2009, pp. 18-25.</li>
+<li>G. van Rossum, J. Lehtosalo, and &Lstrok;. Langa, &ldquo;PEP 484: Type Hints,&rdquo; Python Enhancement Proposals, 2014, <a href="https://peps.python.org/pep-0484/" target="_blank" rel="noopener">https://peps.python.org/pep-0484/</a>.</li>
+<li>A. Zakai and the Binaryen contributors, &ldquo;Binaryen: Optimizer and compiler/toolchain library for WebAssembly,&rdquo; <a href="https://github.com/WebAssembly/binaryen" target="_blank" rel="noopener">https://github.com/WebAssembly/binaryen</a>, accessed Jul. 2026.</li>
+</ol>
+
+</div>
+</main>
+
+<footer class="site-footer no-print">
+    <div class="container">
+        <div class="footer-content">
+            <div class="footer-section footer-brand">
+                <h3>waspy</h3>
+                <p>A Python to WebAssembly compiler written in Rust, designed for performance and simplicity.</p>
+            </div>
+
+            <div class="footer-section">
+                <h3>Resources</h3>
+                <a href="https://github.com/anistark/waspy" class="footer-link">GitHub Repository</a>
+                <a href="https://github.com/anistark/waspy/blob/main/CONTRIBUTING.md" class="footer-link">Contributing Guide</a>
+                <a href="https://github.com/anistark/waspy/issues" class="footer-link">Issue Tracker</a>
+            </div>
+
+            <div class="footer-section">
+                <h3>Pages</h3>
+                <a href="../index.html" class="footer-link">Home</a>
+                <a href="../modules.html" class="footer-link">Modules</a>
+                <a href="../changelog.html" class="footer-link">Changelog</a>
+            </div>
+
+            <div class="footer-section">
+                <h3>Paper</h3>
+                <a href="waspy.pdf" target="_blank" rel="noopener" class="footer-link">Download PDF</a>
+                <span class="footer-link">Last updated July 8, 2026</span>
+            </div>
+        </div>
+
+        <div class="footer-bottom">
+            <p>&copy; 2025 Waspy Project. Built with 💛 for the Python community.</p>
+        </div>
+    </div>
+</footer>
+
+<script src="../main.js"></script>
+</body>
+</html>
