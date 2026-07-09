@@ -1,7 +1,10 @@
 use crate::compiler::context::{ClassInfo, CompilationContext, COLLECTION_HEAP_BASE};
 use crate::compiler::function::{compile_function, resolve_return_type};
-use crate::ir::{IRBody, IRConstant, IRExpr, IRModule, IRStatement, IRType, STRING_LEN_PREFIX};
-use std::collections::HashMap;
+use crate::ir::{
+    method_kind, IRBody, IRConstant, IRExpr, IRFunction, IRModule, IRStatement, IRType, MethodKind,
+    STRING_LEN_PREFIX,
+};
+use std::collections::{HashMap, HashSet};
 use wasm_encoder::{
     BlockType, CodeSection, ConstExpr, DataSection, ExportSection, Function, FunctionSection,
     GlobalSection, GlobalType, Instruction, MemorySection, MemoryType, Module, TypeSection,
@@ -17,6 +20,22 @@ fn ir_type_to_wasm_type(ir_type: &IRType) -> ValType {
         IRType::List(_) | IRType::Dict(_, _) | IRType::Tuple(_) => ValType::I32, // Collections are pointers
         IRType::Optional(_) | IRType::Union(_) => ValType::I32, // References to optionals/unions
         _ => ValType::I32,
+    }
+}
+
+/// Method-kind classification for a method whose decorator stack was already
+/// validated during IR conversion, so failure cannot recur here.
+fn kind_of(class_name: &str, method: &IRFunction) -> MethodKind {
+    method_kind(class_name, &method.name, &method.decorators).unwrap_or(MethodKind::Instance)
+}
+
+/// Registry key for a method's signature (`Class::name`). A property's getter
+/// and setter share a Python name, so the setter is keyed `Class::name::setter`
+/// to keep both signatures addressable.
+fn method_registry_key(class_name: &str, method: &IRFunction) -> String {
+    match kind_of(class_name, method) {
+        MethodKind::PropertySetter => format!("{class_name}::{}::setter", method.name),
+        _ => format!("{class_name}::{}", method.name),
     }
 }
 
@@ -208,7 +227,7 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
         for cls in &ir_module.classes {
             for method in &cls.methods {
                 let rt = resolve_return_type(method, &resolved_returns);
-                resolved_returns.insert(format!("{}::{}", cls.name, method.name), rt);
+                resolved_returns.insert(method_registry_key(&cls.name, method), rt);
             }
         }
     }
@@ -220,7 +239,7 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
     };
     let method_return = |class: &str, method: &crate::ir::IRFunction| -> IRType {
         resolved_returns
-            .get(&format!("{class}::{}", method.name))
+            .get(&method_registry_key(class, method))
             .cloned()
             .unwrap_or_else(|| method.return_type.clone())
     };
@@ -325,6 +344,8 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
             class_id: next_class_id,
             methods: HashMap::new(),
             method_owner: HashMap::new(),
+            method_kinds: HashMap::new(),
+            property_setters: HashMap::new(),
             field_offsets: HashMap::new(),
             field_types: HashMap::new(),
             class_var_values: HashMap::new(),
@@ -351,6 +372,8 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
             class_info.class_var_values = base_info.class_var_values.clone();
             class_info.methods = base_info.methods.clone();
             class_info.method_owner = base_info.method_owner.clone();
+            class_info.method_kinds = base_info.method_kinds.clone();
+            class_info.property_setters = base_info.property_setters.clone();
             current_offset = base_info.instance_size as u64;
         }
         let add_field = |info: &mut ClassInfo, name: &str, ty: IRType, current_offset: &mut u64| {
@@ -383,6 +406,27 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
 
         // Instance fields are discovered from `self.<field> = ...` assignments in
         // method bodies (their types inferred from the method's parameters).
+        // A name managed by a property (own or inherited) never becomes a
+        // field: `self.attr = v` routes through the setter, whose body assigns
+        // the real backing field (conventionally `self._attr`).
+        let property_names: HashSet<String> = cls
+            .methods
+            .iter()
+            .filter(|m| {
+                matches!(
+                    kind_of(&cls.name, m),
+                    MethodKind::PropertyGetter | MethodKind::PropertySetter
+                )
+            })
+            .map(|m| m.name.clone())
+            .chain(
+                class_info
+                    .method_kinds
+                    .iter()
+                    .filter(|(_, k)| **k == MethodKind::PropertyGetter)
+                    .map(|(n, _)| n.clone()),
+            )
+            .collect();
         for method in &cls.methods {
             let params: HashMap<String, IRType> = method
                 .params
@@ -392,15 +436,21 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
             let mut fields = Vec::new();
             collect_self_fields(&method.body, &params, &mut fields);
             for (name, ty) in fields {
+                if property_names.contains(&name) {
+                    continue;
+                }
                 add_field(&mut class_info, &name, ty, &mut current_offset);
             }
         }
         class_info.instance_size = current_offset as u32;
 
-        // Register methods
+        // Register methods. A property setter is registered under its own
+        // `Class::name::setter` key (its getter owns the plain name in the
+        // method table); every other kind lands in `methods`/`method_owner`
+        // with its kind recorded for call-site dispatch.
         for method in &cls.methods {
             let param_types = method.params.iter().map(|p| p.param_type.clone()).collect();
-            let qualified_name = format!("{}::{}", cls.name, method.name);
+            let qualified_name = method_registry_key(&cls.name, method);
 
             ctx.add_function(
                 &qualified_name,
@@ -409,10 +459,20 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
                 method_return(&cls.name, method),
             );
 
-            class_info.methods.insert(method.name.clone(), func_idx);
-            class_info
-                .method_owner
-                .insert(method.name.clone(), cls.name.clone());
+            match kind_of(&cls.name, method) {
+                MethodKind::PropertySetter => {
+                    class_info
+                        .property_setters
+                        .insert(method.name.clone(), (func_idx, cls.name.clone()));
+                }
+                kind => {
+                    class_info.methods.insert(method.name.clone(), func_idx);
+                    class_info
+                        .method_owner
+                        .insert(method.name.clone(), cls.name.clone());
+                    class_info.method_kinds.insert(method.name.clone(), kind);
+                }
+            }
 
             // Export method with qualified name
             exports.export(&qualified_name, wasm_encoder::ExportKind::Func, func_idx);

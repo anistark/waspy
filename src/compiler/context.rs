@@ -1,4 +1,4 @@
-use crate::ir::{IRExpr, IRType};
+use crate::ir::{IRExpr, IRType, MethodKind};
 use std::cell::Cell;
 use std::collections::HashMap;
 
@@ -85,6 +85,15 @@ pub struct ClassInfo {
     /// names the base, so the `Owner::method` qualified lookup (parameter and
     /// return types) resolves even though `Sub::method` was never registered.
     pub method_owner: HashMap<String, String>,
+    /// How each method binds its first argument (`@staticmethod`,
+    /// `@classmethod`, `@property`, or a plain instance method). Call sites and
+    /// attribute reads dispatch on this. Property setters are absent here —
+    /// they live in `property_setters`, keyed by the same name as the getter.
+    pub method_kinds: HashMap<String, MethodKind>,
+    /// Property setters: property name -> (function index, defining class).
+    /// The defining class resolves the `Owner::name::setter` qualified lookup
+    /// for the setter's parameter types.
+    pub property_setters: HashMap<String, (u32, String)>,
     pub field_offsets: HashMap<String, u64>, // field_name -> byte_offset
     pub field_types: HashMap<String, IRType>, // field_name -> value type (f64 vs i32)
     pub class_var_values: HashMap<String, IRExpr>, // class-level var name -> initializer

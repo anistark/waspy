@@ -3,10 +3,87 @@ use crate::compiler::context::{
 };
 use crate::compiler::function::{load_field_instr, lookup_field};
 use crate::ir::{
-    IRBoolOp, IRCompareOp, IRConstant, IRExpr, IROp, IRType, IRUnaryOp, MemoryLayout,
+    IRBoolOp, IRCompareOp, IRConstant, IRExpr, IROp, IRType, IRUnaryOp, MemoryLayout, MethodKind,
     STRING_LEN_PREFIX,
 };
 use wasm_encoder::{BlockType, Function, Instruction, MemArg, ValType};
+
+/// Resolve a bare name used as a call/attribute receiver to a class, when it
+/// statically denotes one: either a class's own name (`Counter.create()`), or
+/// `cls` inside a classmethod, whose parameter is typed as the defining class
+/// during IR conversion. Dispatch through the result is static, consistent
+/// with the rest of the object model (no vtables).
+fn static_class_target(ctx: &CompilationContext, name: &str) -> Option<String> {
+    if ctx.get_class_info(name).is_some() {
+        return Some(name.to_string());
+    }
+    if name == "cls" {
+        if let Some(IRType::Class(class_name)) = ctx.get_local_info("cls").map(|i| &i.var_type) {
+            return Some(class_name.clone());
+        }
+    }
+    None
+}
+
+/// Emit a method call addressed through a class rather than an instance:
+/// `ClassName.method(...)`, or `cls.method(...)` inside a classmethod. A
+/// `@staticmethod` takes only the explicit arguments; a `@classmethod` gets the
+/// class id pushed as its implicit `cls`; a plain method called this way is
+/// Python's unbound form, where the caller passes the instance explicitly.
+fn emit_class_level_method_call(
+    func: &mut Function,
+    ctx: &CompilationContext,
+    memory_layout: &MemoryLayout,
+    class_name: &str,
+    method_name: &str,
+    arguments: &[IRExpr],
+) -> IRType {
+    let Some(class_info) = ctx.get_class_info(class_name) else {
+        func.instruction(&Instruction::I32Const(0));
+        return IRType::Unknown;
+    };
+    let Some(method_idx) = class_info.methods.get(method_name).copied() else {
+        // Unknown method on a known class: evaluate nothing, yield 0.
+        func.instruction(&Instruction::I32Const(0));
+        return IRType::Unknown;
+    };
+    let kind = class_info
+        .method_kinds
+        .get(method_name)
+        .copied()
+        .unwrap_or(MethodKind::Instance);
+    // The id of the class the call is addressed through (not the defining
+    // base), so a classmethod inherited by a subclass sees the subclass's id.
+    let class_id = class_info.class_id;
+    let owner = class_info
+        .method_owner
+        .get(method_name)
+        .cloned()
+        .unwrap_or_else(|| class_name.to_string());
+    let (param_types, ret) = ctx
+        .get_function_info(&format!("{owner}::{method_name}"))
+        .map(|f| (f.param_types.clone(), f.return_type.clone()))
+        .unwrap_or((Vec::new(), IRType::Unknown));
+
+    // Explicit arguments map onto the parameter list after any implicit one.
+    let arg_base = match kind {
+        MethodKind::Class => {
+            func.instruction(&Instruction::I32Const(class_id));
+            1
+        }
+        _ => 0,
+    };
+    for (i, arg) in arguments.iter().enumerate() {
+        let t = emit_expr(arg, func, ctx, memory_layout, param_types.get(i + arg_base));
+        // Narrow a string/bytes argument to its offset word, matching the
+        // calling convention used at instantiation sites.
+        if matches!(t, IRType::String | IRType::Bytes) {
+            func.instruction(&Instruction::Drop);
+        }
+    }
+    func.instruction(&Instruction::Call(method_idx));
+    ret
+}
 
 // Helper to convert f64 to Ieee64
 #[inline]
@@ -1174,20 +1251,22 @@ pub fn emit_expr(
             // returns `self` back), so nested instantiations in the argument
             // list compose without clobbering any scratch local. Fresh heap
             // memory is zero, so unassigned fields read as 0/0.0.
-            if ctx.get_class_info(function_name).is_some() {
+            // `cls(...)` inside a classmethod constructs the defining class,
+            // resolved statically through the `cls` parameter's type.
+            if let Some(class_target) = static_class_target(ctx, function_name) {
                 let (instance_size, class_id) = ctx
-                    .get_class_info(function_name)
+                    .get_class_info(&class_target)
                     .map(|c| (c.instance_size, c.class_id))
                     .unwrap_or((0, 0));
                 let init_idx = ctx
-                    .get_class_info(function_name)
+                    .get_class_info(&class_target)
                     .and_then(|c| c.methods.get("__init__").copied());
                 // The class that textually defines `__init__` — the subclass
                 // itself, or the base it inherits the constructor from.
                 let init_owner = ctx
-                    .get_class_info(function_name)
+                    .get_class_info(&class_target)
                     .and_then(|c| c.method_owner.get("__init__").cloned())
-                    .unwrap_or_else(|| function_name.clone());
+                    .unwrap_or_else(|| class_target.clone());
 
                 if let Some(init_idx) = init_idx {
                     // __init__ parameter types, `self` first.
@@ -1227,7 +1306,7 @@ pub fn emit_expr(
                     func.instruction(&Instruction::I32Const(class_id));
                     func.instruction(&Instruction::Call(ctx.alloc_obj_func_index));
                 }
-                return IRType::Class(function_name.clone());
+                return IRType::Class(class_target);
             }
 
             // `issubclass(Sub, Base)` — both arguments are bare class-name
@@ -2249,12 +2328,15 @@ pub fn emit_expr(
                 };
             }
 
-            // `ClassName.var` reads a class-level variable; inline its value.
-            if let IRExpr::Variable(class_name) = &**object {
-                if let Some(class_info) = ctx.get_class_info(class_name) {
-                    if let Some(value) = class_info.class_var_values.get(attribute) {
-                        let value = value.clone();
-                        return emit_expr(&value, func, ctx, memory_layout, expected_type);
+            // `ClassName.var` (or `cls.var` inside a classmethod) reads a
+            // class-level variable; inline its value.
+            if let IRExpr::Variable(name) = &**object {
+                if let Some(class_name) = static_class_target(ctx, name) {
+                    if let Some(class_info) = ctx.get_class_info(&class_name) {
+                        if let Some(value) = class_info.class_var_values.get(attribute) {
+                            let value = value.clone();
+                            return emit_expr(&value, func, ctx, memory_layout, expected_type);
+                        }
                     }
                 }
             }
@@ -2263,6 +2345,33 @@ pub fn emit_expr(
 
             match &obj_type {
                 IRType::Class(class_name) => {
+                    // A `@property` read compiles to its getter: `obj.attr`
+                    // becomes `Class::attr(self)`, with the instance pointer
+                    // already on the stack as the only argument.
+                    let class_info = ctx.get_class_info(class_name);
+                    let getter =
+                        class_info.and_then(|ci| match ci.method_kinds.get(attribute.as_str()) {
+                            Some(MethodKind::PropertyGetter) => {
+                                ci.methods.get(attribute.as_str()).copied().map(|idx| {
+                                    let owner = ci
+                                        .method_owner
+                                        .get(attribute.as_str())
+                                        .cloned()
+                                        .unwrap_or_else(|| class_name.clone());
+                                    (idx, owner)
+                                })
+                            }
+                            _ => None,
+                        });
+                    if let Some((getter_idx, owner)) = getter {
+                        let ret = ctx
+                            .get_function_info(&format!("{owner}::{attribute}"))
+                            .map(|f| f.return_type.clone())
+                            .unwrap_or(IRType::Unknown);
+                        func.instruction(&Instruction::Call(getter_idx));
+                        return ret;
+                    }
+
                     // Instance field read: load with the field's width and report
                     // its type so float fields participate in f64 arithmetic.
                     if let Some((field_offset, field_ty)) = lookup_field(ctx, class_name, attribute)
@@ -3758,6 +3867,22 @@ pub fn emit_expr(
                 }
             }
 
+            // Class-level method call: `ClassName.method(...)` or, inside a
+            // classmethod, `cls.method(...)`. There is no instance to emit;
+            // dispatch is resolved statically by the method's kind.
+            if let IRExpr::Variable(name) = &**object {
+                if let Some(class_name) = static_class_target(ctx, name) {
+                    return emit_class_level_method_call(
+                        func,
+                        ctx,
+                        memory_layout,
+                        &class_name,
+                        method_name,
+                        arguments,
+                    );
+                }
+            }
+
             let object_type = emit_expr(object, func, ctx, memory_layout, None);
 
             match &object_type {
@@ -4031,16 +4156,35 @@ pub fn emit_expr(
                         .get_class_info(class_name)
                         .and_then(|ci| ci.methods.get(method_name.as_str()).copied());
                     if let Some(method_idx) = method_idx {
-                        let owner = ctx
-                            .get_class_info(class_name)
+                        let class_info = ctx.get_class_info(class_name);
+                        let owner = class_info
                             .and_then(|ci| ci.method_owner.get(method_name.as_str()).cloned())
                             .unwrap_or_else(|| class_name.clone());
+                        let kind = class_info
+                            .and_then(|ci| ci.method_kinds.get(method_name.as_str()).copied())
+                            .unwrap_or(MethodKind::Instance);
                         let (param_types, ret) = ctx
                             .get_function_info(&format!("{owner}::{method_name}"))
                             .map(|f| (f.param_types.clone(), f.return_type.clone()))
                             .unwrap_or((Vec::new(), IRType::Unknown));
+                        // A static or class method ignores the instance: drop
+                        // the pointer, and for a classmethod push the static
+                        // class's id as the implicit `cls` instead.
+                        let arg_base = match kind {
+                            MethodKind::Static => {
+                                func.instruction(&Instruction::Drop);
+                                0
+                            }
+                            MethodKind::Class => {
+                                func.instruction(&Instruction::Drop);
+                                let class_id = class_info.map(|ci| ci.class_id).unwrap_or_default();
+                                func.instruction(&Instruction::I32Const(class_id));
+                                1
+                            }
+                            _ => 1,
+                        };
                         for (i, arg) in arguments.iter().enumerate() {
-                            emit_expr(arg, func, ctx, memory_layout, param_types.get(i + 1));
+                            emit_expr(arg, func, ctx, memory_layout, param_types.get(i + arg_base));
                         }
                         func.instruction(&Instruction::Call(method_idx));
                         ret

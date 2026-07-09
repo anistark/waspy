@@ -361,6 +361,86 @@ fn isinstance_uses_runtime_tag_not_static_type() {
     assert_eq!(call_i32(&src, "runtime_type_check"), 1);
 }
 
+/// A `@staticmethod` has no implicit `self` and is callable both on the class
+/// (`Counter.add(19, 23)`) and on an instance, which is ignored (`c.add(40, 2)`).
+#[test]
+fn staticmethod_on_class_and_instance() {
+    let src = read_example("oop_method_kinds.py");
+    assert_eq!(call_i32(&src, "static_method_on_class"), 42);
+    assert_eq!(call_i32(&src, "static_method_on_instance"), 42);
+}
+
+/// A `@classmethod` factory constructs an instance via `cls(...)`:
+/// Counter.create(41).increment() = 42.
+#[test]
+fn classmethod_factory_constructs_instance() {
+    let src = read_example("oop_method_kinds.py");
+    assert_eq!(call_i32(&src, "classmethod_factory"), 42);
+}
+
+/// A classmethod called through an instance still receives the class, not the
+/// instance: the factory builds a fresh Counter. 5 + 10 = 15.
+#[test]
+fn classmethod_called_on_instance() {
+    let src = read_example("oop_method_kinds.py");
+    assert_eq!(call_i32(&src, "classmethod_on_instance"), 15);
+}
+
+/// `obj.attr` on a `@property` invokes the getter method — both a stored value
+/// (celsius = 25.0) and a computed one (100C -> 212.0F).
+#[test]
+fn property_read_invokes_getter() {
+    let src = read_example("oop_method_kinds.py");
+    assert_eq!(call_f64(&src, "property_getter"), 25.0);
+    assert_eq!(call_f64(&src, "computed_property"), 212.0);
+}
+
+/// `obj.attr = v` on a `@property` invokes the setter, and `obj.attr += d`
+/// chains getter then setter. Both observe 21.5 through the getter.
+#[test]
+fn property_write_invokes_setter() {
+    let src = read_example("oop_method_kinds.py");
+    assert_eq!(call_f64(&src, "property_setter"), 21.5);
+    assert_eq!(call_f64(&src, "property_augmented_assignment"), 21.5);
+}
+
+/// Conflicting method-kind decorators are rejected with a clear compile error
+/// instead of silently mis-dispatching.
+#[test]
+fn conflicting_method_decorators_are_rejected() {
+    let src =
+        "class A:\n    @staticmethod\n    @classmethod\n    def f(cls) -> int:\n        return 1\n";
+    let err = try_compile(src).expect_err("conflicting decorators must not compile");
+    assert!(
+        err.contains("combines decorators"),
+        "unexpected error message: {err}"
+    );
+}
+
+/// A property setter without a matching `@property` getter can never be
+/// reached, so it is rejected at compile time.
+#[test]
+fn setter_without_getter_is_rejected() {
+    let src = "class A:\n    @x.setter\n    def x(self, v: int):\n        self._x = v\n";
+    let err = try_compile(src).expect_err("setter without getter must not compile");
+    assert!(
+        err.contains("no matching '@property' getter"),
+        "unexpected error message: {err}"
+    );
+}
+
+/// Property deleters are not supported and fail loudly rather than compiling a
+/// method that never runs.
+#[test]
+fn property_deleter_is_rejected() {
+    let src = "class A:\n    @property\n    def x(self) -> int:\n        return 1\n\n    @x.deleter\n    def x(self):\n        pass\n";
+    let err = try_compile(src).expect_err("deleter must not compile");
+    assert!(
+        err.contains("deleters are not supported"),
+        "unexpected error message: {err}"
+    );
+}
+
 /// Multiple inheritance is rejected with a compile error rather than silently
 /// compiling a class with a broken field layout.
 #[test]
