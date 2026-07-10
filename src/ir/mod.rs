@@ -1,6 +1,7 @@
 mod converter;
 mod decorators;
 mod entry_points;
+mod finalize;
 mod types;
 
 pub use converter::*;

@@ -441,6 +441,148 @@ fn property_deleter_is_rejected() {
     );
 }
 
+/// The generated dataclass `__init__` assigns each annotated field from its
+/// positional argument: Point(3, 4) -> 3 + 4 = 7.
+#[test]
+fn dataclass_init_assigns_fields() {
+    let src = read_example("oop_dataclasses.py");
+    assert_eq!(call_i32(&src, "construct_with_all_args"), 7);
+}
+
+/// A trailing argument omitted at the construction site takes the field's
+/// default (2*3 + 7 = 13); passing it explicitly overrides (2*3 + 9 = 15).
+#[test]
+fn dataclass_field_defaults_apply_and_override() {
+    let src = read_example("oop_dataclasses.py");
+    assert_eq!(call_i32(&src, "construct_with_default"), 13);
+    assert_eq!(call_i32(&src, "default_can_be_overridden"), 15);
+}
+
+/// `==` between dataclass instances dispatches to the generated `__eq__`,
+/// comparing field values rather than instance pointers; `!=` inverts it.
+#[test]
+fn dataclass_equality_compares_by_value() {
+    let src = read_example("oop_dataclasses.py");
+    assert_eq!(call_i32(&src, "equal_by_value"), 1);
+    assert_eq!(call_i32(&src, "unequal_by_value"), 1);
+}
+
+/// The generated `__repr__` renders the class name and each field's runtime
+/// value ("Point(x=1, y=-23)"), built with the runtime int-to-string helper
+/// and compared byte-for-byte against the expected literal.
+#[test]
+fn dataclass_repr_renders_runtime_values() {
+    let src = read_example("oop_dataclasses.py");
+    assert_eq!(call_i32(&src, "repr_round_trips"), 1);
+}
+
+/// String fields work end to end: `__repr__` quotes them like Python, and the
+/// stored offset word reads back byte-for-byte through `==`.
+#[test]
+fn dataclass_string_fields_round_trip() {
+    let src = read_example("oop_dataclasses.py");
+    assert_eq!(call_i32(&src, "repr_quotes_strings"), 1);
+    assert_eq!(call_i32(&src, "string_field_round_trips"), 3);
+}
+
+/// A field without a default may not follow one with a default, mirroring
+/// Python's dataclass TypeError at compile time.
+#[test]
+fn dataclass_default_ordering_is_enforced() {
+    let src =
+        "from dataclasses import dataclass\n\n@dataclass\nclass P:\n    x: int = 1\n    y: int\n";
+    let err = try_compile(src).expect_err("non-default after default must not compile");
+    assert!(
+        err.contains("non-default argument"),
+        "unexpected error message: {err}"
+    );
+}
+
+/// Mutable defaults would be shared across instances, so they are rejected
+/// like Python rejects them.
+#[test]
+fn dataclass_mutable_default_is_rejected() {
+    let src = "from dataclasses import dataclass\n\n@dataclass\nclass P:\n    items: list = []\n";
+    let err = try_compile(src).expect_err("mutable default must not compile");
+    assert!(
+        err.contains("mutable default"),
+        "unexpected error message: {err}"
+    );
+}
+
+/// `dataclasses.field(...)` configures behavior we don't implement; it fails
+/// loudly rather than compiling wrong semantics.
+#[test]
+fn dataclass_field_call_is_rejected() {
+    let src = "from dataclasses import dataclass, field\n\n@dataclass\nclass P:\n    xs: int = field(default=3)\n";
+    let err = try_compile(src).expect_err("field(...) must not compile");
+    assert!(
+        err.contains("field(...)"),
+        "unexpected error message: {err}"
+    );
+}
+
+/// Constructing with a required argument missing (and no default to fill it)
+/// is a compile error instead of an invalid module.
+#[test]
+fn missing_required_constructor_argument_is_rejected() {
+    let src = "from dataclasses import dataclass\n\n@dataclass\nclass P:\n    x: int\n    y: int\n\ndef make() -> int:\n    p = P(1)\n    return p.x\n";
+    let err = try_compile(src).expect_err("missing required argument must not compile");
+    assert!(
+        err.contains("missing required argument"),
+        "unexpected error message: {err}"
+    );
+}
+
+/// A concrete subclass of an ABC instantiates and implements the abstract
+/// method: Square(6).area() = 36.
+#[test]
+fn abc_concrete_subclass_instantiates() {
+    let src = read_example("oop_abc.py");
+    assert_eq!(call_i32(&src, "concrete_subclass_area"), 36);
+}
+
+/// The ABC's concrete method is inherited by subclasses (4 + 3 = 7), and each
+/// subclass dispatches its own abstract-method implementation (4 + 15 = 19).
+#[test]
+fn abc_concrete_and_abstract_methods_dispatch() {
+    let src = read_example("oop_abc.py");
+    assert_eq!(call_i32(&src, "inherited_concrete_method"), 7);
+    assert_eq!(call_i32(&src, "abstract_method_dispatch"), 19);
+}
+
+/// `isinstance` works against the abstract base: both concrete instances are
+/// Shapes, and a Square is not a Triangle. 1 + 10 = 11.
+#[test]
+fn abc_isinstance_against_abstract_base() {
+    let src = read_example("oop_abc.py");
+    assert_eq!(call_i32(&src, "isinstance_of_abstract_base"), 11);
+}
+
+/// Instantiating a class that inherits abc.ABC with an unimplemented
+/// @abstractmethod is rejected at compile time, mirroring Python's TypeError.
+#[test]
+fn abstract_class_instantiation_is_rejected() {
+    let src = "from abc import ABC, abstractmethod\n\nclass Shape(ABC):\n    @abstractmethod\n    def area(self) -> int:\n        pass\n\ndef make() -> int:\n    s = Shape()\n    return s.area()\n";
+    let err = try_compile(src).expect_err("abstract instantiation must not compile");
+    assert!(
+        err.contains("abstract class 'Shape'") && err.contains("'area'"),
+        "unexpected error message: {err}"
+    );
+}
+
+/// A subclass that fails to implement the abstract method is itself abstract
+/// and cannot be instantiated either.
+#[test]
+fn abstract_subclass_instantiation_is_rejected() {
+    let src = "from abc import ABC, abstractmethod\n\nclass Shape(ABC):\n    @abstractmethod\n    def area(self) -> int:\n        pass\n\nclass Named(Shape):\n    def name(self) -> int:\n        return 1\n\ndef make() -> int:\n    n = Named()\n    return n.name()\n";
+    let err = try_compile(src).expect_err("abstract subclass instantiation must not compile");
+    assert!(
+        err.contains("abstract class 'Named'"),
+        "unexpected error message: {err}"
+    );
+}
+
 /// Multiple inheritance is rejected with a compile error rather than silently
 /// compiling a class with a broken field layout.
 #[test]

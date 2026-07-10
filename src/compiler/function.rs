@@ -786,8 +786,14 @@ pub fn compile_body(
                 if let Some((field_offset, field_ty)) = field {
                     // Stack: object_ptr. Emit the value coerced to the field's
                     // type, then store with the matching width (f64 for float
-                    // fields, i32 otherwise).
-                    emit_expr(value, func, ctx, memory_layout, Some(&field_ty));
+                    // fields, i32 otherwise). A string/bytes value is an
+                    // (offset, length) pair but the field slot holds one word:
+                    // drop the length and store the offset (reads rebuild the
+                    // pair from the blob prefix).
+                    let value_ty = emit_expr(value, func, ctx, memory_layout, Some(&field_ty));
+                    if matches!(value_ty, IRType::String | IRType::Bytes) {
+                        func.instruction(&Instruction::Drop);
+                    }
                     func.instruction(&store_field_instr(&field_ty, field_offset));
                 } else {
                     // Unknown field: drop the address and the value.
