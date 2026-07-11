@@ -200,6 +200,134 @@ fn build_alloc_obj_function(alloc_func_index: u32) -> Function {
     f
 }
 
+/// Build `__i32_to_str(value: i32) -> i32`: render `value` as decimal digits
+/// in a fresh `__alloc` blob laid out like every other string
+/// (`[len:i32][digits][nul]`), returning the offset just past the length
+/// prefix. This is the runtime half of `str(int)` / `str(bool)`; callers
+/// recover the length via `load(offset - 4)`, the standard convention.
+/// Negative values are handled through the unsigned magnitude, so `i32::MIN`
+/// (whose negation wraps) renders correctly.
+fn build_i32_to_str_function(alloc_func_index: u32) -> Function {
+    // Locals (local 0 is the `value` parameter): 1 = unsigned magnitude,
+    // 2 = sign flag, 3 = total length (digits + sign), 4 = blob base,
+    // 5 = write cursor, 6 = digit-count scratch.
+    let mut f = Function::new([(6u32, ValType::I32)]);
+    let byte_arg = |offset: u64| wasm_encoder::MemArg {
+        offset,
+        align: 0,
+        memory_index: 0,
+    };
+
+    // neg = value < 0
+    f.instruction(&Instruction::LocalGet(0));
+    f.instruction(&Instruction::I32Const(0));
+    f.instruction(&Instruction::I32LtS);
+    f.instruction(&Instruction::LocalSet(2));
+
+    // uval = neg ? 0 - value : value (u32 magnitude; wraps correctly for MIN)
+    f.instruction(&Instruction::LocalGet(2));
+    f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+    f.instruction(&Instruction::I32Const(0));
+    f.instruction(&Instruction::LocalGet(0));
+    f.instruction(&Instruction::I32Sub);
+    f.instruction(&Instruction::Else);
+    f.instruction(&Instruction::LocalGet(0));
+    f.instruction(&Instruction::End);
+    f.instruction(&Instruction::LocalSet(1));
+
+    // len = 1; tmp = uval; while tmp >= 10 { tmp /= 10; len += 1 }
+    f.instruction(&Instruction::I32Const(1));
+    f.instruction(&Instruction::LocalSet(3));
+    f.instruction(&Instruction::LocalGet(1));
+    f.instruction(&Instruction::LocalSet(6));
+    f.instruction(&Instruction::Block(BlockType::Empty));
+    f.instruction(&Instruction::Loop(BlockType::Empty));
+    f.instruction(&Instruction::LocalGet(6));
+    f.instruction(&Instruction::I32Const(10));
+    f.instruction(&Instruction::I32LtU);
+    f.instruction(&Instruction::BrIf(1));
+    f.instruction(&Instruction::LocalGet(6));
+    f.instruction(&Instruction::I32Const(10));
+    f.instruction(&Instruction::I32DivU);
+    f.instruction(&Instruction::LocalSet(6));
+    f.instruction(&Instruction::LocalGet(3));
+    f.instruction(&Instruction::I32Const(1));
+    f.instruction(&Instruction::I32Add);
+    f.instruction(&Instruction::LocalSet(3));
+    f.instruction(&Instruction::Br(0));
+    f.instruction(&Instruction::End); // loop
+    f.instruction(&Instruction::End); // block
+
+    // len += neg (room for the '-')
+    f.instruction(&Instruction::LocalGet(3));
+    f.instruction(&Instruction::LocalGet(2));
+    f.instruction(&Instruction::I32Add);
+    f.instruction(&Instruction::LocalSet(3));
+
+    // block = __alloc(prefix + len + 1 for the NUL)
+    f.instruction(&Instruction::I32Const(STRING_LEN_PREFIX as i32 + 1));
+    f.instruction(&Instruction::LocalGet(3));
+    f.instruction(&Instruction::I32Add);
+    f.instruction(&Instruction::Call(alloc_func_index));
+    f.instruction(&Instruction::LocalSet(4));
+
+    // Length prefix at the block start.
+    f.instruction(&Instruction::LocalGet(4));
+    f.instruction(&Instruction::LocalGet(3));
+    f.instruction(&Instruction::I32Store(wasm_encoder::MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
+
+    // pos = block + prefix + len: the NUL goes there, digits fill backwards
+    // from it.
+    f.instruction(&Instruction::LocalGet(4));
+    f.instruction(&Instruction::I32Const(STRING_LEN_PREFIX as i32));
+    f.instruction(&Instruction::I32Add);
+    f.instruction(&Instruction::LocalGet(3));
+    f.instruction(&Instruction::I32Add);
+    f.instruction(&Instruction::LocalSet(5));
+    f.instruction(&Instruction::LocalGet(5));
+    f.instruction(&Instruction::I32Const(0));
+    f.instruction(&Instruction::I32Store8(byte_arg(0)));
+
+    // do { pos -= 1; *pos = '0' + uval % 10; uval /= 10 } while uval != 0
+    f.instruction(&Instruction::Loop(BlockType::Empty));
+    f.instruction(&Instruction::LocalGet(5));
+    f.instruction(&Instruction::I32Const(1));
+    f.instruction(&Instruction::I32Sub);
+    f.instruction(&Instruction::LocalSet(5));
+    f.instruction(&Instruction::LocalGet(5));
+    f.instruction(&Instruction::LocalGet(1));
+    f.instruction(&Instruction::I32Const(10));
+    f.instruction(&Instruction::I32RemU);
+    f.instruction(&Instruction::I32Const('0' as i32));
+    f.instruction(&Instruction::I32Add);
+    f.instruction(&Instruction::I32Store8(byte_arg(0)));
+    f.instruction(&Instruction::LocalGet(1));
+    f.instruction(&Instruction::I32Const(10));
+    f.instruction(&Instruction::I32DivU);
+    f.instruction(&Instruction::LocalTee(1));
+    f.instruction(&Instruction::BrIf(0));
+    f.instruction(&Instruction::End);
+
+    // The sign, if any, lands in the first data byte.
+    f.instruction(&Instruction::LocalGet(2));
+    f.instruction(&Instruction::If(BlockType::Empty));
+    f.instruction(&Instruction::LocalGet(4));
+    f.instruction(&Instruction::I32Const('-' as i32));
+    f.instruction(&Instruction::I32Store8(byte_arg(STRING_LEN_PREFIX as u64)));
+    f.instruction(&Instruction::End);
+
+    // Return the data offset (past the length prefix).
+    f.instruction(&Instruction::LocalGet(4));
+    f.instruction(&Instruction::I32Const(STRING_LEN_PREFIX as i32));
+    f.instruction(&Instruction::I32Add);
+    f.instruction(&Instruction::End);
+    f
+}
+
 /// Compile an IR module into WebAssembly binary format
 pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
     let mut module = Module::new();
@@ -253,12 +381,13 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
         total_function_count += cls.methods.len();
     }
 
-    // The runtime allocator `__alloc` and the instance allocator `__alloc_obj`
-    // are appended after all user functions and methods, so they take the next
-    // two function (and type) indices. Record them so codegen can emit
-    // `call $__alloc` / `call $__alloc_obj`.
+    // The runtime helpers — allocator `__alloc`, instance allocator
+    // `__alloc_obj`, and decimal renderer `__i32_to_str` — are appended after
+    // all user functions and methods, so they take the next three function
+    // (and type) indices. Record them so codegen can emit calls to each.
     ctx.alloc_func_index = total_function_count as u32;
     ctx.alloc_obj_func_index = total_function_count as u32 + 1;
+    ctx.i32_to_str_func_index = total_function_count as u32 + 2;
 
     // Create function types for module functions
     for func in &ir_module.functions {
@@ -289,12 +418,14 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
         }
     }
 
-    // Types for the runtime allocator `__alloc(size: i32) -> i32` and the
-    // instance allocator `__alloc_obj(size: i32, class_id: i32) -> i32`.
+    // Types for the runtime helpers: `__alloc(size: i32) -> i32`,
+    // `__alloc_obj(size: i32, class_id: i32) -> i32`, and
+    // `__i32_to_str(value: i32) -> i32`.
     types.ty().function([ValType::I32], [ValType::I32]);
     types
         .ty()
         .function([ValType::I32, ValType::I32], [ValType::I32]);
+    types.ty().function([ValType::I32], [ValType::I32]);
 
     module.section(&types);
 
@@ -306,6 +437,7 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
     }
     functions.function(total_function_count as u32); // __alloc
     functions.function(total_function_count as u32 + 1); // __alloc_obj
+    functions.function(total_function_count as u32 + 2); // __i32_to_str
     module.section(&functions);
 
     // Export section - export both functions and memory
@@ -556,10 +688,11 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
         }
     }
 
-    // Runtime allocators, last so their indices match `ctx.alloc_func_index`
-    // and `ctx.alloc_obj_func_index`.
+    // Runtime helpers, last so their indices match `ctx.alloc_func_index`,
+    // `ctx.alloc_obj_func_index`, and `ctx.i32_to_str_func_index`.
     codes.function(&build_alloc_function());
     codes.function(&build_alloc_obj_function(ctx.alloc_func_index));
+    codes.function(&build_i32_to_str_function(ctx.alloc_func_index));
 
     // Memory must hold the static data (strings/bytes/object instances) plus
     // every collection region handed out during codegen. The collection heap

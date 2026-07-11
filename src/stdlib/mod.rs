@@ -24,6 +24,11 @@ pub fn is_stdlib_module(name: &str) -> bool {
             | "itertools"
             | "functools"
             | "logging"
+            // Compile-time-only modules: `abc.ABC`/`abstractmethod` and
+            // `dataclasses.dataclass` are resolved during IR conversion and
+            // have no runtime surface.
+            | "abc"
+            | "dataclasses"
     )
 }
 

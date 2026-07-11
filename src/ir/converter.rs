@@ -16,7 +16,7 @@ pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
             Stmt::FunctionDef(fundef) => {
                 // Process function definition
                 let name = fundef.name.to_string();
-                let params = process_function_params(&fundef.args)?;
+                let params = process_function_params(&fundef.args, &mut memory_layout)?;
                 let return_type = if let Some(returns) = &fundef.returns {
                     type_annotation_to_ir_type(returns)?
                 } else {
@@ -115,6 +115,10 @@ pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
     // Carry the populated string/bytes layout to the compiler, which needs the
     // resolved offsets to emit loads and the data section.
     module.memory_layout = memory_layout;
+
+    // Whole-module checks and rewrites (abstract-class instantiation,
+    // call-site parameter defaults) that need every declaration converted.
+    crate::ir::finalize::finalize_module(&mut module)?;
 
     Ok(module)
 }
@@ -298,23 +302,29 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
     if let Stmt::ClassDef(classdef) = stmt {
         let name = classdef.name.to_string();
 
-        // Extract base classes
+        // Extract base classes: bare names (`Shape`) and attribute paths
+        // (`abc.ABC`), which only appear for module-qualified marker bases.
         let bases: Vec<String> = classdef
             .bases
             .iter()
-            .filter_map(|base| {
-                if let Expr::Name(name) = base {
-                    Some(name.id.to_string())
-                } else {
-                    None
-                }
+            .filter_map(|base| match base {
+                Expr::Name(name) => Some(name.id.to_string()),
+                Expr::Attribute(attr) => match &*attr.value {
+                    Expr::Name(module) => Some(format!("{}.{}", module.id, attr.attr)),
+                    _ => None,
+                },
+                _ => None,
             })
             .collect();
 
         // Only single inheritance is supported: reject multiple bases loudly
         // rather than silently compiling a class with a broken field layout.
-        // `object` is every class's implicit root, so it doesn't count.
-        let real_bases: Vec<&String> = bases.iter().filter(|b| b.as_str() != "object").collect();
+        // `object` is every class's implicit root and `ABC` is a marker (it
+        // contributes no fields or methods), so neither counts.
+        let real_bases: Vec<&String> = bases
+            .iter()
+            .filter(|b| !matches!(b.as_str(), "object" | "ABC" | "abc.ABC"))
+            .collect();
         if real_bases.len() > 1 {
             return Err(anyhow!(
                 "class '{name}' declares multiple base classes ({}); only single inheritance is supported",
@@ -325,6 +335,54 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
                     .join(", ")
             ));
         }
+
+        // Class decorators: `@dataclass`, `@dataclasses.dataclass`, and the
+        // bare call form `@dataclass()`. The argument form (`frozen=True`,
+        // `order=True`, ...) changes semantics we don't implement, so it is
+        // rejected loudly instead of being silently ignored.
+        let mut is_dataclass = false;
+        for dec in &classdef.decorator_list {
+            let (dec_name, has_args) = match dec {
+                Expr::Name(n) => (n.id.to_string(), false),
+                Expr::Attribute(attr) => match &*attr.value {
+                    Expr::Name(base) => (format!("{}.{}", base.id, attr.attr), false),
+                    _ => continue,
+                },
+                Expr::Call(call) => {
+                    let callee = match &*call.func {
+                        Expr::Name(n) => n.id.to_string(),
+                        Expr::Attribute(attr) => match &*attr.value {
+                            Expr::Name(base) => format!("{}.{}", base.id, attr.attr),
+                            _ => continue,
+                        },
+                        _ => continue,
+                    };
+                    (callee, !call.args.is_empty() || !call.keywords.is_empty())
+                }
+                _ => continue,
+            };
+            if dec_name == "dataclass" || dec_name == "dataclasses.dataclass" {
+                if has_args {
+                    return Err(crate::core::errors::unsupported_feature(
+                        format!(
+                            "@dataclass arguments (frozen, order, ...) are not supported \
+                             on class '{name}'"
+                        ),
+                        None,
+                    )
+                    .into());
+                }
+                is_dataclass = true;
+            }
+        }
+
+        // Dataclass fields come from the annotated class-level assignments, in
+        // source order, validated against Python's dataclass rules.
+        let dataclass_fields = if is_dataclass {
+            collect_dataclass_fields(&name, &classdef.body, memory_layout)?
+        } else {
+            Vec::new()
+        };
 
         let mut methods = Vec::new();
         let mut class_vars = Vec::new();
@@ -337,7 +395,7 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
                 Stmt::FunctionDef(method_def) => {
                     // Process method (similar to function but with 'self' parameter)
                     let method_name = method_def.name.to_string();
-                    let mut params = process_function_params(&method_def.args)?;
+                    let mut params = process_function_params(&method_def.args, memory_layout)?;
 
                     // Capture both bare-name decorators (`@property`) and the
                     // attribute form used by property setters (`@radius.setter`).
@@ -437,6 +495,13 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
             }
         }
 
+        // A dataclass gets `__init__`, `__eq__`, and `__repr__` generated from
+        // its annotated fields; a method the user wrote in the class body wins
+        // over the generated one, matching CPython's dataclass behavior.
+        if is_dataclass {
+            synthesize_dataclass_methods(&name, &dataclass_fields, &mut methods, memory_layout);
+        }
+
         Ok(IRClass {
             name,
             bases,
@@ -445,6 +510,268 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
         })
     } else {
         Err(anyhow!("Expected ClassDef statement"))
+    }
+}
+
+/// One `name: type [= default]` field of a `@dataclass` body, in source order.
+struct DataclassField {
+    name: String,
+    ty: IRType,
+    default: Option<IRExpr>,
+}
+
+/// Collect the annotated class-level assignments of a `@dataclass` body as its
+/// fields, enforcing Python's dataclass rules at compile time: a field without
+/// a default may not follow one with a default, mutable defaults (list/dict/set
+/// literals) are rejected, and `dataclasses.field(...)` is unsupported.
+/// `ClassVar`-annotated names are class variables, not fields.
+fn collect_dataclass_fields(
+    class_name: &str,
+    body: &[Stmt],
+    memory_layout: &mut MemoryLayout,
+) -> Result<Vec<DataclassField>> {
+    let mut fields: Vec<DataclassField> = Vec::new();
+    let mut first_defaulted: Option<String> = None;
+
+    for stmt in body {
+        let Stmt::AnnAssign(ann) = stmt else {
+            continue;
+        };
+        let Expr::Name(target) = &*ann.target else {
+            continue;
+        };
+        let field_name = target.id.to_string();
+
+        // `x: ClassVar[int] = 0` stays a class variable (already handled by the
+        // class-var path); it never becomes an instance field.
+        let is_class_var = match &*ann.annotation {
+            Expr::Name(n) => n.id.as_str() == "ClassVar",
+            Expr::Subscript(sub) => {
+                matches!(&*sub.value, Expr::Name(n) if n.id.as_str() == "ClassVar")
+            }
+            _ => false,
+        };
+        if is_class_var {
+            continue;
+        }
+
+        let default = match ann.value.as_deref() {
+            Some(value) => {
+                // `field(...)` configures per-field behavior (default_factory,
+                // compare, ...) that we don't implement.
+                if let Expr::Call(call) = value {
+                    let callee = match &*call.func {
+                        Expr::Name(n) => n.id.to_string(),
+                        Expr::Attribute(attr) => match &*attr.value {
+                            Expr::Name(base) => format!("{}.{}", base.id, attr.attr),
+                            _ => String::new(),
+                        },
+                        _ => String::new(),
+                    };
+                    if callee == "field" || callee == "dataclasses.field" {
+                        return Err(crate::core::errors::unsupported_feature(
+                            format!(
+                                "dataclasses.field(...) on field '{field_name}' of dataclass \
+                                 '{class_name}' is not supported"
+                            ),
+                            None,
+                        )
+                        .into());
+                    }
+                }
+                // Python rejects mutable defaults (they'd be shared across
+                // instances); mirror that instead of compiling sharing bugs.
+                if matches!(
+                    value,
+                    Expr::List(_) | Expr::Dict(_) | Expr::Set(_) | Expr::ListComp(_)
+                ) {
+                    return Err(crate::core::errors::type_error(
+                        format!(
+                            "mutable default for field '{field_name}' of dataclass \
+                             '{class_name}' is not allowed"
+                        ),
+                        None,
+                    )
+                    .into());
+                }
+                Some(lower_expr(value, memory_layout)?)
+            }
+            None => None,
+        };
+
+        match (&default, &first_defaulted) {
+            (Some(_), None) => first_defaulted = Some(field_name.clone()),
+            (None, Some(defaulted)) => {
+                return Err(crate::core::errors::type_error(
+                    format!(
+                        "non-default argument '{field_name}' follows default argument \
+                         '{defaulted}' in dataclass '{class_name}'"
+                    ),
+                    None,
+                )
+                .into());
+            }
+            _ => {}
+        }
+
+        fields.push(DataclassField {
+            name: field_name,
+            ty: type_annotation_to_ir_type(&ann.annotation)?,
+            default,
+        });
+    }
+
+    Ok(fields)
+}
+
+/// Append the generated `__init__`, `__eq__`, and `__repr__` of a `@dataclass`
+/// to its method list, skipping any the user defined explicitly.
+///
+/// `__init__` takes one parameter per field (carrying the field's default) and
+/// assigns `self.<field> = <field>`, so the regular field-discovery and
+/// instantiation machinery applies unchanged. `__eq__` compares fields
+/// pairwise (callers dispatch `==`/`!=` on class operands to it). `__repr__`
+/// builds `Name(field=value, ...)` at runtime and is only generated when every
+/// field can be stringified (int/bool via `str()`, str spliced directly) —
+/// float formatting has no runtime support yet.
+fn synthesize_dataclass_methods(
+    class_name: &str,
+    fields: &[DataclassField],
+    methods: &mut Vec<IRFunction>,
+    memory_layout: &mut MemoryLayout,
+) {
+    let has_method = |methods: &[IRFunction], name: &str| methods.iter().any(|m| m.name == name);
+    let self_param = || IRParam {
+        name: "self".to_string(),
+        param_type: IRType::Class(class_name.to_string()),
+        default_value: None,
+    };
+    let self_field = |field: &str| IRExpr::Attribute {
+        object: Box::new(IRExpr::Variable("self".to_string())),
+        attribute: field.to_string(),
+    };
+
+    if !has_method(methods, "__init__") {
+        let mut params = vec![self_param()];
+        let mut statements = Vec::new();
+        for field in fields {
+            params.push(IRParam {
+                name: field.name.clone(),
+                param_type: field.ty.clone(),
+                default_value: field.default.clone(),
+            });
+            statements.push(IRStatement::AttributeAssign {
+                object: IRExpr::Variable("self".to_string()),
+                attribute: field.name.clone(),
+                value: IRExpr::Variable(field.name.clone()),
+            });
+        }
+        methods.push(IRFunction {
+            name: "__init__".to_string(),
+            params,
+            body: IRBody { statements },
+            return_type: IRType::Unknown,
+            decorators: Vec::new(),
+        });
+    }
+
+    if !has_method(methods, "__eq__") {
+        let other_param = IRParam {
+            name: "other".to_string(),
+            param_type: IRType::Class(class_name.to_string()),
+            default_value: None,
+        };
+        let other_field = |field: &str| IRExpr::Attribute {
+            object: Box::new(IRExpr::Variable("other".to_string())),
+            attribute: field.to_string(),
+        };
+        // Fold the per-field comparisons into an `and` chain; a fieldless
+        // dataclass compares equal to any instance of its class.
+        let mut comparison: Option<IRExpr> = None;
+        for field in fields {
+            let field_eq = IRExpr::CompareOp {
+                left: Box::new(self_field(&field.name)),
+                right: Box::new(other_field(&field.name)),
+                op: IRCompareOp::Eq,
+            };
+            comparison = Some(match comparison {
+                Some(chain) => IRExpr::BoolOp {
+                    left: Box::new(chain),
+                    right: Box::new(field_eq),
+                    op: IRBoolOp::And,
+                },
+                None => field_eq,
+            });
+        }
+        let result = comparison.unwrap_or(IRExpr::Const(IRConstant::Bool(true)));
+        methods.push(IRFunction {
+            name: "__eq__".to_string(),
+            params: vec![self_param(), other_param],
+            body: IRBody {
+                statements: vec![IRStatement::Return(Some(result))],
+            },
+            return_type: IRType::Bool,
+            decorators: Vec::new(),
+        });
+    }
+
+    let reprable = fields
+        .iter()
+        .all(|f| matches!(f.ty, IRType::Int | IRType::Bool | IRType::String));
+    if reprable && !has_method(methods, "__repr__") {
+        // Alternate constant labels with runtime field values, merging adjacent
+        // constants so each interned label is a single blob. Every constant is
+        // registered in the module layout here, since these strings never pass
+        // through the normal literal-lowering path.
+        let mut text = format!("{class_name}(");
+        let mut parts: Vec<IRExpr> = Vec::new();
+        let flush =
+            |text: &mut String, parts: &mut Vec<IRExpr>, memory_layout: &mut MemoryLayout| {
+                if !text.is_empty() {
+                    memory_layout.add_string(text);
+                    parts.push(IRExpr::Const(IRConstant::String(std::mem::take(text))));
+                }
+            };
+        for (i, field) in fields.iter().enumerate() {
+            if i > 0 {
+                text.push_str(", ");
+            }
+            text.push_str(&field.name);
+            text.push('=');
+            if field.ty == IRType::String {
+                // repr() quotes string values.
+                text.push('\'');
+                flush(&mut text, &mut parts, memory_layout);
+                parts.push(self_field(&field.name));
+                text.push('\'');
+            } else {
+                flush(&mut text, &mut parts, memory_layout);
+                parts.push(IRExpr::FunctionCall {
+                    function_name: "str".to_string(),
+                    arguments: vec![self_field(&field.name)],
+                });
+            }
+        }
+        text.push(')');
+        flush(&mut text, &mut parts, memory_layout);
+
+        let repr = parts
+            .into_iter()
+            .reduce(|acc, part| IRExpr::BinaryOp {
+                left: Box::new(acc),
+                right: Box::new(part),
+                op: IROp::Add,
+            })
+            .expect("repr always has at least the constant shell");
+        methods.push(IRFunction {
+            name: "__repr__".to_string(),
+            params: vec![self_param()],
+            body: IRBody {
+                statements: vec![IRStatement::Return(Some(repr))],
+            },
+            return_type: IRType::String,
+            decorators: Vec::new(),
+        });
     }
 }
 
@@ -699,8 +1026,14 @@ fn type_annotation_to_ir_type(expr: &Expr) -> Result<IRType> {
     }
 }
 
-/// Process function parameters with possible type annotations
-fn process_function_params(args: &Arguments) -> Result<Vec<IRParam>> {
+/// Process function parameters with possible type annotations. Defaults are
+/// lowered against the module's real memory layout so that (e.g.) a string
+/// default's offset is valid when the default is later inlined at a call site
+/// that omits the argument.
+fn process_function_params(
+    args: &Arguments,
+    memory_layout: &mut MemoryLayout,
+) -> Result<Vec<IRParam>> {
     args.args
         .iter()
         .map(|arg_with_default: &ArgWithDefault| {
@@ -715,8 +1048,7 @@ fn process_function_params(args: &Arguments) -> Result<Vec<IRParam>> {
 
             // Check for default value
             let default_value = if let Some(default) = &arg_with_default.default {
-                let mut memory_layout = MemoryLayout::new();
-                Some(lower_expr(default, &mut memory_layout)?)
+                Some(lower_expr(default, memory_layout)?)
             } else {
                 None
             };
@@ -1078,6 +1410,9 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                         }
                     }
                 }
+            }
+            Stmt::Pass(_) => {
+                // `pass` is a syntactic no-op (e.g. an @abstractmethod body).
             }
             _ => {
                 return Err(anyhow!("Unsupported statement type: {stmt:?}"));
@@ -2019,7 +2354,7 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
             }
         }
         Expr::Lambda(lambda) => {
-            let params = process_function_params(&lambda.args)?;
+            let params = process_function_params(&lambda.args, memory_layout)?;
             let body = Box::new(lower_expr(&lambda.body, memory_layout)?);
 
             // TODO: Analyze body to detect captured variables from outer scope

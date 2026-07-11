@@ -82,6 +82,10 @@ fn emit_class_level_method_call(
         }
     }
     func.instruction(&Instruction::Call(method_idx));
+    // A call result is a single word; rebuild the string/bytes pair.
+    if matches!(ret, IRType::String | IRType::Bytes) {
+        recover_str_pair(func, ctx);
+    }
     ret
 }
 
@@ -154,6 +158,23 @@ fn load_collection_word(func: &mut Function, elem_type: &IRType, scratch: u32) {
             func.instruction(&Instruction::I32Load(slot_arg()));
         }
     }
+}
+
+/// Rebuild the `(offset, length)` pair from a bare string/bytes offset on top
+/// of the stack, loading the length from the blob's prefix
+/// (`load(offset - STRING_LEN_PREFIX)`). Used wherever a single offset word
+/// crosses back into pair-land: a call result (functions return one word), an
+/// instance field read, or a `__i32_to_str` result.
+fn recover_str_pair(func: &mut Function, ctx: &CompilationContext) {
+    func.instruction(&Instruction::LocalTee(ctx.temp_local));
+    func.instruction(&Instruction::LocalGet(ctx.temp_local));
+    func.instruction(&Instruction::I32Const(STRING_LEN_PREFIX as i32));
+    func.instruction(&Instruction::I32Sub);
+    func.instruction(&Instruction::I32Load(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
 }
 
 /// Stash a freshly emitted search needle (its value is on top of the stack, of
@@ -1025,6 +1046,30 @@ pub fn emit_expr(
             let left_type = emit_expr(left, func, ctx, memory_layout, None);
             let right_type = emit_expr(right, func, ctx, memory_layout, Some(&left_type));
 
+            // Equality between class instances dispatches to `__eq__` when the
+            // left operand's class defines or inherits one (dataclasses always
+            // do). The two instance pointers already on the stack are exactly
+            // the (self, other) argument pair. Dispatch is static, consistent
+            // with the object model: the *static* type of the left operand
+            // picks the implementation. Classes without `__eq__` keep pointer
+            // identity, and ordering comparisons stay pointer-based.
+            if matches!(op, IRCompareOp::Eq | IRCompareOp::NotEq)
+                && matches!(right_type, IRType::Class(_))
+            {
+                if let IRType::Class(class_name) = &left_type {
+                    let eq_method = ctx
+                        .get_class_info(class_name)
+                        .and_then(|ci| ci.methods.get("__eq__").copied());
+                    if let Some(eq_idx) = eq_method {
+                        func.instruction(&Instruction::Call(eq_idx));
+                        if matches!(op, IRCompareOp::NotEq) {
+                            func.instruction(&Instruction::I32Eqz);
+                        }
+                        return IRType::Bool;
+                    }
+                }
+            }
+
             // String/bytes comparison: each operand is an (offset, length) pair,
             // so the stack holds (left_off, left_len, right_off, right_len). The
             // numeric paths below assume single-word scalars and would compare
@@ -1409,8 +1454,15 @@ pub fn emit_expr(
 
             // Look up the function index if it exists in our context
             if let Some(func_info) = ctx.get_function_info(function_name.as_str()) {
+                let return_type = func_info.return_type.clone();
                 func.instruction(&Instruction::Call(func_info.index));
-                func_info.return_type.clone()
+                // A function returns a single word; a string/bytes result is
+                // its offset, so rebuild the (offset, length) pair consumers
+                // expect from the blob prefix.
+                if matches!(return_type, IRType::String | IRType::Bytes) {
+                    recover_str_pair(func, ctx);
+                }
+                return_type
             } else {
                 // Built-in functions
                 match function_name.as_str() {
@@ -1533,6 +1585,35 @@ pub fn emit_expr(
                             func.instruction(&Instruction::F64ConvertI32S);
                         }
                         IRType::Float
+                    }
+                    "str" => {
+                        // str(x): strings/bytes pass through as their existing
+                        // (offset, length) pair; ints and bools render their
+                        // decimal digits at runtime via `__i32_to_str` (bools
+                        // as 0/1). Floats have no runtime formatter yet, so
+                        // they yield an empty string rather than invalid WASM.
+                        match arg_types.first() {
+                            Some(IRType::String) | Some(IRType::Bytes) => IRType::String,
+                            Some(IRType::Int) | Some(IRType::Bool) => {
+                                func.instruction(&Instruction::Call(ctx.i32_to_str_func_index));
+                                recover_str_pair(func, ctx);
+                                IRType::String
+                            }
+                            Some(_) => {
+                                // One stack value (i32 word or f64): drop it
+                                // and yield the empty pair.
+                                func.instruction(&Instruction::Drop);
+                                func.instruction(&Instruction::I32Const(0));
+                                func.instruction(&Instruction::I32Const(0));
+                                IRType::String
+                            }
+                            None => {
+                                // str() with no argument: the empty string.
+                                func.instruction(&Instruction::I32Const(0));
+                                func.instruction(&Instruction::I32Const(0));
+                                IRType::String
+                            }
+                        }
                     }
                     "sum" => {
                         if arg_types.is_empty() {
@@ -2369,14 +2450,24 @@ pub fn emit_expr(
                             .map(|f| f.return_type.clone())
                             .unwrap_or(IRType::Unknown);
                         func.instruction(&Instruction::Call(getter_idx));
+                        // A call result is a single word; rebuild the
+                        // string/bytes pair.
+                        if matches!(ret, IRType::String | IRType::Bytes) {
+                            recover_str_pair(func, ctx);
+                        }
                         return ret;
                     }
 
                     // Instance field read: load with the field's width and report
                     // its type so float fields participate in f64 arithmetic.
+                    // A string/bytes field slot holds only the offset word, so
+                    // rebuild the (offset, length) pair from the blob prefix.
                     if let Some((field_offset, field_ty)) = lookup_field(ctx, class_name, attribute)
                     {
                         func.instruction(&load_field_instr(&field_ty, field_offset));
+                        if matches!(field_ty, IRType::String | IRType::Bytes) {
+                            recover_str_pair(func, ctx);
+                        }
                         field_ty
                     } else {
                         func.instruction(&Instruction::Drop);
@@ -2454,6 +2545,11 @@ pub fn emit_expr(
                             }
                         }
                         func.instruction(&Instruction::Call(method_idx));
+                        // A call result is a single word; rebuild the
+                        // string/bytes pair.
+                        if matches!(ret, IRType::String | IRType::Bytes) {
+                            recover_str_pair(func, ctx);
+                        }
                         return ret;
                     }
                     // No base or unknown method: evaluate nothing, yield 0.
@@ -4184,9 +4280,26 @@ pub fn emit_expr(
                             _ => 1,
                         };
                         for (i, arg) in arguments.iter().enumerate() {
-                            emit_expr(arg, func, ctx, memory_layout, param_types.get(i + arg_base));
+                            let t = emit_expr(
+                                arg,
+                                func,
+                                ctx,
+                                memory_layout,
+                                param_types.get(i + arg_base),
+                            );
+                            // Narrow a string/bytes argument to its offset
+                            // word, matching the calling convention used at
+                            // instantiation sites.
+                            if matches!(t, IRType::String | IRType::Bytes) {
+                                func.instruction(&Instruction::Drop);
+                            }
                         }
                         func.instruction(&Instruction::Call(method_idx));
+                        // A call result is a single word; rebuild the
+                        // string/bytes pair.
+                        if matches!(ret, IRType::String | IRType::Bytes) {
+                            recover_str_pair(func, ctx);
+                        }
                         ret
                     } else {
                         // Method or class not found: drop the object and args.

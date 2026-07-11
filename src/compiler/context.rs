@@ -144,6 +144,11 @@ pub struct CompilationContext {
     /// instantiation sequence stack-only, so nested instantiations compose
     /// without touching any scratch local. Set during module assembly.
     pub alloc_obj_func_index: u32,
+    /// WASM function index of `__i32_to_str(value) -> offset`, which renders an
+    /// i32 as its decimal digits in a fresh `__alloc` blob (`[len][digits][nul]`,
+    /// offset past the prefix) — the runtime half of `str(int)`. Set during
+    /// module assembly.
+    pub i32_to_str_func_index: u32,
     /// True while compiling an `__init__` method. Its `return` paths (explicit
     /// bare `return` and the implicit fall-through) yield `self` (local 0)
     /// instead of the usual 0, so `ClassName(...)` receives the instance
@@ -175,6 +180,7 @@ impl CompilationContext {
             collection_alloc_offset: Cell::new(0),
             alloc_func_index: 0,
             alloc_obj_func_index: 0,
+            i32_to_str_func_index: 0,
             return_self: false,
             current_class: None,
         }
