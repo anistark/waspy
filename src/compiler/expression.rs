@@ -576,18 +576,17 @@ pub fn emit_expr(
                             return left_type.clone();
                         }
                     }
-                    IROp::Mod => {
+                    IROp::Mod
+                        if right_type == IRType::String
+                            || right_type == IRType::Int
+                            || right_type == IRType::Float =>
+                    {
                         // String formatting: "format %s" % (value,) or "format %s" % value
                         // TODO: Implement string formatting with placeholders
                         // For now, drop the right value and return the format string
-                        if right_type == IRType::String
-                            || right_type == IRType::Int
-                            || right_type == IRType::Float
-                        {
-                            func.instruction(&Instruction::Drop);
-                            func.instruction(&Instruction::Drop);
-                            return IRType::String;
-                        }
+                        func.instruction(&Instruction::Drop);
+                        func.instruction(&Instruction::Drop);
+                        return IRType::String;
                     }
                     _ => {}
                 }

@@ -1395,9 +1395,11 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                 if let Ok(imports) = process_import_from(stmt, false, &Vec::new()) {
                     for import in imports {
                         // Only handle simple from imports in functions
-                        if !import.is_star_import && import.name.is_some() {
+                        if import.is_star_import {
+                            continue;
+                        }
+                        if let Some(name) = import.name {
                             let module_name = import.module;
-                            let name = import.name.unwrap();
                             let target = import.alias.unwrap_or_else(|| name.clone());
 
                             // Create qualified name

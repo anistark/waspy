@@ -460,8 +460,7 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
     // Python requires a base to be defined before a subclass references it, so
     // a base's ClassInfo is always registered by the time its subclass is
     // processed.
-    let mut next_class_id = 1i32;
-    for cls in &ir_module.classes {
+    for (class_id, cls) in (1i32..).zip(ir_module.classes.iter()) {
         // Single inheritance: resolve the (at most one, enforced during IR
         // conversion) base class. `object` is the implicit root, not a base.
         let base = cls
@@ -473,7 +472,7 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
         let mut class_info = ClassInfo {
             name: cls.name.clone(),
             base: base.clone(),
-            class_id: next_class_id,
+            class_id,
             methods: HashMap::new(),
             method_owner: HashMap::new(),
             method_kinds: HashMap::new(),
@@ -483,7 +482,6 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
             class_var_values: HashMap::new(),
             instance_size: 0,
         };
-        next_class_id += 1;
 
         // Each field is an 8-byte slot (holds an i32 or an f64); the first 4
         // bytes hold the class-id tag stamped by `__alloc_obj`. `add_field`

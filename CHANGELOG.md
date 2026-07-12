@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0](https://github.com/anistark/waspy/releases/tag/v0.12.0) - 2026-07-12
+
 ### Added
 - `@dataclass` ([#18](https://github.com/anistark/waspy/issues/18)): a class decorated with `@dataclass` (or `@dataclasses.dataclass`) gets `__init__`, `__eq__`, and `__repr__` generated from its annotated fields during IR conversion, so the regular field-discovery and instantiation machinery applies unchanged. The constructor takes one parameter per field with field defaults honored — a call site that omits trailing arguments has the defaults spliced in by a new whole-module post-pass (`src/ir/finalize.rs`), which also fills parameter defaults for ordinary function calls (previously an omitted default underflowed the stack into invalid WASM) and rejects a construction missing a required argument. Python's dataclass rules are enforced at compile time: a field without a default may not follow one with a default, mutable defaults (list/dict/set literals) are rejected, and `dataclasses.field(...)` / `@dataclass(...)` with arguments fail loudly as unsupported. A method the user writes in the class body wins over the generated one; `ClassVar`-annotated names stay class variables
 - `==` / `!=` between class instances now dispatches to `__eq__` when the left operand's class defines or inherits one (generated or hand-written) — the two instance pointers already on the stack are exactly the `(self, other)` argument pair, keeping dispatch static like the rest of the object model. Dataclass equality therefore compares field values; classes without `__eq__` keep pointer identity

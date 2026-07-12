@@ -1,22 +1,17 @@
 //! Compiler options and configuration.
 
 /// Verbosity level for compiler output
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum Verbosity {
     /// Minimal output (errors only)
     Quiet = 0,
     /// Normal output
+    #[default]
     Normal = 1,
     /// Verbose output (--verbose)
     Verbose = 2,
     /// Debug output (--debug)
     Debug = 3,
-}
-
-impl Default for Verbosity {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 impl Verbosity {

@@ -45,7 +45,8 @@ Generate & Optimize
 - Performs automatic WebAssembly optimization using Binaryen
 - Detects and handles project structure and dependencies
 - Supports module-level variables and class definitions with heap-allocated instances — multiple live instances per class, usable as function arguments and return values
-- Collections: lists, dicts, sets, tuples, and ranges — literals, indexing, methods, and membership (`in`/`not in`)
+- Object-oriented Python: single inheritance with `super()`, `isinstance`/`issubclass` over the class hierarchy, `@staticmethod`/`@classmethod`/`@property` (with setters), `@dataclass` (generated `__init__`/`__eq__`/`__repr__`), and abstract base classes via `abc.ABC`
+- Collections: lists, dicts, sets, tuples, and ranges — literals, indexing, methods, and membership (`in`/`not in`), with full-precision f64 elements and hash-table sets
 - Exception handling with `try`/`except`/`finally` and `raise`
 - Lambdas, basic closures, and list comprehensions
 - Bundled standard library runtime: `sys`, `os` (incl. `os.path`), `math`, `random`, `json`, `re`, `datetime`, `logging`, `collections`, `itertools`, `functools`
@@ -68,7 +69,7 @@ cargo add waspy
 
 # Or add to your Cargo.toml
 [dependencies]
-waspy = "0.11.0"
+waspy = "0.12.0"
 
 ## Quick Start
 
@@ -280,7 +281,7 @@ Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for details on
 
 The path to 1.0 focuses on the remaining correctness and runtime gaps:
 
-- Object model completion (inheritance, classmethod/staticmethod, dataclasses) on top of the heap-allocated instances
+- Remaining object-model gaps: virtual dispatch through `self` (vtables) and multiple inheritance
 - Growable collections (runtime reallocation past a literal's fixed capacity) and hashed `dict` lookups (sets already use an open-addressing table)
 - Generators that preserve execution state
 - Full closure capture analysis

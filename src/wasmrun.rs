@@ -698,7 +698,7 @@ pub unsafe extern "C" fn waspy_compile_project(
 #[no_mangle]
 pub unsafe extern "C" fn waspy_free_wasm_data(data: *mut u8, len: usize) {
     if !data.is_null() && len > 0 {
-        let _ = Box::from_raw(std::slice::from_raw_parts_mut(data, len));
+        let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(data, len));
     }
 }
 
