@@ -99,10 +99,14 @@ pub enum IRStatement {
         index: IRExpr,
         value: IRExpr,
     },
-    // Tuple unpacking like a, b = (1, 2)
+    // Tuple unpacking like a, b = (1, 2). With `starred` set (extended
+    // unpacking, `a, *b, c = xs`), that target position collects the middle
+    // elements as a fresh list while the others bind positionally from the
+    // front and back.
     TupleUnpack {
         targets: Vec<String>,
         value: IRExpr,
+        starred: Option<usize>,
     },
     // Yield statement for generators: yield value
     Yield {
@@ -208,12 +212,16 @@ pub enum IRExpr {
         object: Box<IRExpr>,
         attribute: String,
     },
-    // New expressions
-    ListComp {
-        // [expr for x in iterable]
-        expr: Box<IRExpr>,
-        var_name: String,
-        iterable: Box<IRExpr>,
+    // List/set/dict comprehension with one or more generators and optional
+    // per-generator filters. `element` is the produced element (the key for a
+    // dict comprehension, whose value goes in `value`). Generator targets are
+    // pre-renamed to unique names by the converter so a comprehension variable
+    // never clobbers a same-named function local (Python 3 scoping).
+    Comprehension {
+        kind: IRComprehensionKind,
+        element: Box<IRExpr>,
+        value: Option<Box<IRExpr>>,
+        generators: Vec<IRGenerator>,
     },
     MethodCall {
         // object.method(args)
@@ -238,6 +246,35 @@ pub enum IRExpr {
         body: Box<IRExpr>,
         captured_vars: Vec<String>, // Variables captured from outer scope
     },
+    // A lifted lambda (closure creation). The finalize pass replaces every
+    // `Lambda` with this after hoisting its body into a real module function
+    // named `lambda_name` (whose trailing `__env` parameter carries the
+    // environment). Evaluates to a pointer to a fresh heap environment:
+    // `[table_slot:i32][captured0:8B][captured1:8B]...` — the table slot at
+    // offset 0 drives `call_indirect` dispatch, and each captured enclosing
+    // local is copied (by value) into a slot at creation time.
+    ClosureMake {
+        lambda_name: String,
+        captured: Vec<String>,
+    },
+}
+
+/// Which collection a comprehension builds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum IRComprehensionKind {
+    List,
+    Set,
+    Dict,
+}
+
+/// One `for target(s) in iterable [if cond]*` clause of a comprehension.
+/// Multiple `targets` mean the iterated element is a tuple unpacked
+/// positionally (`for k, v in items`).
+#[derive(Debug, Clone)]
+pub struct IRGenerator {
+    pub targets: Vec<String>,
+    pub iterable: IRExpr,
+    pub conditions: Vec<IRExpr>,
 }
 
 /// Constant value types supported in the IR
@@ -359,6 +396,10 @@ pub struct MemoryLayout {
     pub set_id_counter: u32,
     pub object_heap_offset: u32, // Where object instances are stored
     pub next_object_id: u32,     // Counter for allocating object instances
+    /// Counter used while lowering to give each comprehension's loop variables
+    /// unique names (`__comp{n}_{orig}`), so they never collide with (or leak
+    /// into) same-named function locals — Python 3 comprehension scoping.
+    pub comp_var_counter: u32,
 }
 
 impl Default for MemoryLayout {
@@ -378,6 +419,7 @@ impl MemoryLayout {
             set_id_counter: 0,
             object_heap_offset: 65536,
             next_object_id: 0,
+            comp_var_counter: 0,
         }
     }
 

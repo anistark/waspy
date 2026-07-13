@@ -1,6 +1,6 @@
 use crate::compiler::context::{
-    strlen_local_name, CompilationContext, LoopContext, COLLECTION_HEADER, COLLECTION_SLOT,
-    DICT_ENTRY, SCRATCH_LOCALS,
+    comp_gen_local_name, comp_local_name, strlen_local_name, CompilationContext, LoopContext,
+    COLLECTION_HEADER, COLLECTION_SLOT, DICT_ENTRY, SCRATCH_LOCALS,
 };
 use crate::compiler::expression::{emit_expr, emit_integer_power_operation};
 use crate::ir::{IRBody, IRConstant, IRExpr, IRFunction, IROp, IRStatement, IRType, MemoryLayout};
@@ -72,6 +72,7 @@ pub fn compile_function(
     // Loop-control bookkeeping starts empty for each function.
     ctx.block_depth = 0;
     ctx.loop_stack.clear();
+    ctx.comp_depth.set(0);
 
     // Compile the function body
     compile_body(&ir_func.body, &mut func, ctx, memory_layout);
@@ -250,6 +251,16 @@ fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRType {
             .get_local_info(name)
             .map(|info| info.var_type.clone())
             .unwrap_or(IRType::Unknown),
+        // A comprehension's element type isn't resolved until codegen, but the
+        // result is always a pointer-shaped collection (an i32 slot), which is
+        // what the local's WASM type needs to know.
+        IRExpr::Comprehension { kind, .. } => match kind {
+            crate::ir::IRComprehensionKind::List => IRType::List(Box::new(IRType::Unknown)),
+            crate::ir::IRComprehensionKind::Set => IRType::Set(Box::new(IRType::Unknown)),
+            crate::ir::IRComprehensionKind::Dict => {
+                IRType::Dict(Box::new(IRType::Unknown), Box::new(IRType::Unknown))
+            }
+        },
         IRExpr::FunctionCall { function_name, .. } if function_name == "float" => IRType::Float,
         IRExpr::FunctionCall { function_name, .. } => ctx
             .get_function_info(function_name)
@@ -343,9 +354,182 @@ fn collect_return_type(body: &IRBody, ctx: &CompilationContext, out: &mut IRType
     }
 }
 
+/// Reserve the helper locals a comprehension needs (result pointer, write
+/// index, capacity, iterator state per generator, and the generator target
+/// variables themselves), then recurse into its subexpressions one nesting
+/// level deeper. Locals are keyed by comprehension nesting depth — codegen
+/// tracks the same depth in `ctx.comp_depth` — so sibling comprehensions share
+/// a depth's locals (their evaluations never overlap) while nested ones get
+/// their own.
+fn scan_expr_locals(expr: &IRExpr, ctx: &mut CompilationContext, depth: u32) {
+    match expr {
+        IRExpr::Comprehension {
+            kind,
+            element,
+            value,
+            generators,
+        } => {
+            ensure_local(ctx, &comp_local_name("res", depth), IRType::Int);
+            ensure_local(ctx, &comp_local_name("widx", depth), IRType::Int);
+            ensure_local(ctx, &comp_local_name("cap", depth), IRType::Int);
+            ensure_local(ctx, &comp_local_name("elem", depth), IRType::Int);
+            if matches!(kind, crate::ir::IRComprehensionKind::Set) {
+                ensure_local(ctx, &comp_local_name("mask", depth), IRType::Int);
+                ensure_local(ctx, &comp_local_name("hidx", depth), IRType::Int);
+                ensure_local(ctx, &comp_local_name("bkt", depth), IRType::Int);
+            }
+            for (g, generator) in generators.iter().enumerate() {
+                ensure_local(ctx, &comp_gen_local_name("ptr", depth, g), IRType::Int);
+                ensure_local(ctx, &comp_gen_local_name("idx", depth, g), IRType::Int);
+                ensure_local(ctx, &comp_gen_local_name("len", depth, g), IRType::Int);
+                // The loop target binds each element, so a float iterable needs
+                // an f64 local (same rule as the `for` statement's target).
+                if let [target] = generator.targets.as_slice() {
+                    let target_ty =
+                        if infer_iterable_elem_type(&generator.iterable, ctx) == IRType::Float {
+                            IRType::Float
+                        } else {
+                            IRType::Unknown
+                        };
+                    ensure_local(ctx, target, target_ty);
+                } else {
+                    for target in &generator.targets {
+                        ensure_local(ctx, target, IRType::Unknown);
+                    }
+                }
+                scan_expr_locals(&generator.iterable, ctx, depth + 1);
+                for condition in &generator.conditions {
+                    scan_expr_locals(condition, ctx, depth + 1);
+                }
+            }
+            scan_expr_locals(element, ctx, depth + 1);
+            if let Some(value) = value {
+                scan_expr_locals(value, ctx, depth + 1);
+            }
+        }
+        // A module-level variable read is inlined as its initializer at
+        // codegen, so any comprehension inside that initializer needs its
+        // locals reserved here too. Locals shadow module vars, and a module
+        // var's initializer cannot reference itself, so one level of lookup
+        // (with the recursion below) suffices.
+        IRExpr::Variable(name) => {
+            if ctx.get_local_index(name).is_none() {
+                if let Some((_, init)) = ctx.get_module_var(name) {
+                    let init = init.clone();
+                    scan_expr_locals(&init, ctx, depth);
+                }
+            }
+        }
+        IRExpr::Const(_) | IRExpr::Param(_) => {}
+        IRExpr::BinaryOp { left, right, .. }
+        | IRExpr::CompareOp { left, right, .. }
+        | IRExpr::BoolOp { left, right, .. } => {
+            scan_expr_locals(left, ctx, depth);
+            scan_expr_locals(right, ctx, depth);
+        }
+        IRExpr::UnaryOp { operand, .. } => scan_expr_locals(operand, ctx, depth),
+        IRExpr::FunctionCall { arguments, .. } => {
+            for arg in arguments {
+                scan_expr_locals(arg, ctx, depth);
+            }
+        }
+        IRExpr::ListLiteral(items) | IRExpr::SetLiteral(items) | IRExpr::TupleLiteral(items) => {
+            for item in items {
+                scan_expr_locals(item, ctx, depth);
+            }
+        }
+        IRExpr::DictLiteral(entries) => {
+            for (key, value) in entries {
+                scan_expr_locals(key, ctx, depth);
+                scan_expr_locals(value, ctx, depth);
+            }
+        }
+        IRExpr::Indexing { container, index } => {
+            scan_expr_locals(container, ctx, depth);
+            scan_expr_locals(index, ctx, depth);
+        }
+        IRExpr::Slicing {
+            container,
+            start,
+            end,
+            step,
+        } => {
+            scan_expr_locals(container, ctx, depth);
+            for bound in [start, end, step].into_iter().flatten() {
+                scan_expr_locals(bound, ctx, depth);
+            }
+        }
+        IRExpr::Attribute { object, .. } => scan_expr_locals(object, ctx, depth),
+        IRExpr::MethodCall {
+            object, arguments, ..
+        } => {
+            scan_expr_locals(object, ctx, depth);
+            for arg in arguments {
+                scan_expr_locals(arg, ctx, depth);
+            }
+        }
+        IRExpr::DynamicImportExpr { module_name } => scan_expr_locals(module_name, ctx, depth),
+        IRExpr::RangeCall { start, stop, step } => {
+            for bound in [start, step].into_iter().flatten() {
+                scan_expr_locals(bound, ctx, depth);
+            }
+            scan_expr_locals(stop, ctx, depth);
+        }
+        IRExpr::Lambda { body, .. } => scan_expr_locals(body, ctx, depth),
+        // Captured names reference existing locals; nothing to reserve.
+        IRExpr::ClosureMake { .. } => {}
+    }
+}
+
+/// Run [`scan_expr_locals`] over every expression embedded in a statement.
+/// Nested statement bodies are *not* visited here — `scan_and_allocate_locals`
+/// already recurses into them and calls this for each inner statement.
+fn scan_stmt_exprs(stmt: &IRStatement, ctx: &mut CompilationContext) {
+    match stmt {
+        IRStatement::Return(Some(expr))
+        | IRStatement::Expression(expr)
+        | IRStatement::Assign { value: expr, .. }
+        | IRStatement::AugAssign { value: expr, .. }
+        | IRStatement::TupleUnpack { value: expr, .. }
+        | IRStatement::If {
+            condition: expr, ..
+        }
+        | IRStatement::While {
+            condition: expr, ..
+        }
+        | IRStatement::For { iterable: expr, .. }
+        | IRStatement::Raise {
+            exception: Some(expr),
+        }
+        | IRStatement::With {
+            context_expr: expr, ..
+        }
+        | IRStatement::DynamicImport {
+            module_name: expr, ..
+        }
+        | IRStatement::Yield { value: Some(expr) } => scan_expr_locals(expr, ctx, 0),
+        IRStatement::AttributeAssign { object, value, .. }
+        | IRStatement::AttributeAugAssign { object, value, .. } => {
+            scan_expr_locals(object, ctx, 0);
+            scan_expr_locals(value, ctx, 0);
+        }
+        IRStatement::IndexAssign {
+            container,
+            index,
+            value,
+        } => {
+            scan_expr_locals(container, ctx, 0);
+            scan_expr_locals(index, ctx, 0);
+            scan_expr_locals(value, ctx, 0);
+        }
+        _ => {}
+    }
+}
+
 /// Scan the function body for variable declarations and allocate local variables
 pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
     for stmt in &body.statements {
+        scan_stmt_exprs(stmt, ctx);
         match stmt {
             IRStatement::Assign {
                 target,
@@ -372,10 +556,19 @@ pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
                     }
                 }
             }
-            IRStatement::TupleUnpack { targets, .. } => {
-                for target in targets {
+            IRStatement::TupleUnpack {
+                targets, starred, ..
+            } => {
+                for (i, target) in targets.iter().enumerate() {
                     if ctx.get_local_index(target).is_none() {
-                        ctx.add_local(target, IRType::Unknown);
+                        // The starred target collects the middle elements as a
+                        // list, so type it as one for later len()/indexing.
+                        let ty = if Some(i) == *starred {
+                            IRType::List(Box::new(IRType::Unknown))
+                        } else {
+                            IRType::Unknown
+                        };
+                        ctx.add_local(target, ty);
                     }
                 }
             }
@@ -533,10 +726,14 @@ pub fn compile_body(
                 // Recover the element/entry types of collections so later
                 // indexing knows how to load each slot. Only pointer-shaped
                 // types are adopted, since they share that same i32 slot and
-                // won't disturb the already-fixed local layout.
+                // won't disturb the already-fixed local layout. A local the
+                // scan could only type as a collection of Unknown (e.g. a
+                // comprehension result, whose element type is resolved during
+                // codegen) is upgraded the same way once the emitted value
+                // reports the concrete element type.
                 if let Some(info) = ctx.locals_map.get_mut(target) {
-                    if matches!(info.var_type, IRType::Unknown)
-                        && matches!(
+                    let adopt = match (&info.var_type, &value_type) {
+                        (IRType::Unknown, _) => matches!(
                             value_type,
                             IRType::List(_)
                                 | IRType::Tuple(_)
@@ -545,8 +742,15 @@ pub fn compile_body(
                                 | IRType::String
                                 | IRType::Bytes
                                 | IRType::Class(_)
-                        )
-                    {
+                        ),
+                        (IRType::List(elem), IRType::List(_))
+                        | (IRType::Set(elem), IRType::Set(_)) => **elem == IRType::Unknown,
+                        (IRType::Dict(key, val), IRType::Dict(_, _)) => {
+                            **key == IRType::Unknown && **val == IRType::Unknown
+                        }
+                        _ => false,
+                    };
+                    if adopt {
                         info.var_type = value_type.clone();
                     }
                 }
@@ -570,11 +774,16 @@ pub fn compile_body(
                     panic!("Variable {target} not found in context");
                 }
             }
-            IRStatement::TupleUnpack { targets, value } => {
-                // Emit code for the value (should be a tuple)
+            IRStatement::TupleUnpack {
+                targets,
+                value,
+                starred,
+            } => {
+                // Emit code for the value (a tuple or list pointer; both share
+                // the [len:i32][slot0][slot1]... layout)
                 let _tuple_type = emit_expr(value, func, ctx, memory_layout, None);
 
-                // Load tuple length
+                // Keep the pointer, then load the element count
                 func.instruction(&Instruction::LocalSet(ctx.temp_local));
                 func.instruction(&Instruction::LocalGet(ctx.temp_local));
                 func.instruction(&Instruction::I32Load(MemArg {
@@ -583,40 +792,139 @@ pub fn compile_body(
                     memory_index: 0,
                 }));
 
-                // Verify that number of targets matches tuple length
-                func.instruction(&Instruction::I32Const(targets.len() as i32));
-                func.instruction(&Instruction::I32Ne);
-                func.instruction(&Instruction::If(BlockType::Empty));
-                // Error case: tuple size mismatch - for now just continue
-                func.instruction(&Instruction::End);
+                // Bind a target variable from the value on the stack.
+                let set_target = |func: &mut Function, ctx: &CompilationContext, target: &str| {
+                    if let Some(local_idx) = ctx.get_local_index(target) {
+                        func.instruction(&Instruction::LocalSet(local_idx));
+                    } else {
+                        panic!("Variable {target} not found in context");
+                    }
+                };
 
-                // Extract each element from the tuple and assign to target
-                // variables. Element i sits at HEADER + i*SLOT. A float target
-                // would need an f64 load here; tuple-unpack targets are not yet
-                // type-inferred, so float members still bind as their i32 low
-                // word (a documented follow-up, mirroring the loop-var case).
-                for (i, target) in targets.iter().enumerate() {
-                    // Load tuple pointer
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                if let Some(star) = starred {
+                    // Extended unpacking `a, *b, c = xs`: the scalars bind
+                    // positionally from the front and back, and the starred
+                    // target collects the middle as a fresh runtime list.
+                    let before = *star;
+                    let after = targets.len() - 1 - before;
+                    let n = ctx.temp_local + 1;
+                    let mid_len = ctx.temp_local + 2;
+                    let mid_ptr = ctx.temp_local + 3;
+                    func.instruction(&Instruction::LocalSet(n));
 
-                    // Add offset to get element (HEADER + i*SLOT)
-                    func.instruction(&Instruction::I32Const(
-                        (COLLECTION_HEADER + (i as u32) * COLLECTION_SLOT) as i32,
-                    ));
+                    // Front targets: element i at HEADER + i*SLOT. (Float
+                    // members still bind as their i32 low word — the existing
+                    // tuple-unpack limitation.)
+                    for (i, target) in targets[..before].iter().enumerate() {
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                        func.instruction(&Instruction::I32Load(MemArg {
+                            offset: (COLLECTION_HEADER + (i as u32) * COLLECTION_SLOT) as u64,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                        set_target(func, ctx, target);
+                    }
+
+                    // mid_len = max(n - before - after, 0); the clamp keeps a
+                    // too-short value (a runtime ValueError in Python) from
+                    // trapping on a negative-size allocation.
+                    func.instruction(&Instruction::LocalGet(n));
+                    func.instruction(&Instruction::I32Const((before + after) as i32));
+                    func.instruction(&Instruction::I32Sub);
+                    func.instruction(&Instruction::LocalTee(mid_len));
+                    func.instruction(&Instruction::I32Const(0));
+                    func.instruction(&Instruction::LocalGet(mid_len));
+                    func.instruction(&Instruction::I32Const(0));
+                    func.instruction(&Instruction::I32GtS);
+                    func.instruction(&Instruction::Select);
+                    func.instruction(&Instruction::LocalSet(mid_len));
+
+                    // mid_ptr = __alloc(HEADER + mid_len*SLOT), header = mid_len
+                    func.instruction(&Instruction::LocalGet(mid_len));
+                    func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+                    func.instruction(&Instruction::I32Mul);
+                    func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
                     func.instruction(&Instruction::I32Add);
-
-                    // Load element value
-                    func.instruction(&Instruction::I32Load(MemArg {
+                    func.instruction(&Instruction::Call(ctx.alloc_func_index));
+                    func.instruction(&Instruction::LocalSet(mid_ptr));
+                    func.instruction(&Instruction::LocalGet(mid_ptr));
+                    func.instruction(&Instruction::LocalGet(mid_len));
+                    func.instruction(&Instruction::I32Store(MemArg {
                         offset: 0,
                         align: 2,
                         memory_index: 0,
                     }));
 
-                    // Store in target variable
-                    if let Some(local_idx) = ctx.get_local_index(target) {
-                        func.instruction(&Instruction::LocalSet(local_idx));
-                    } else {
-                        panic!("Variable {target} not found in context");
+                    // Slots are contiguous, so the middle slice is one
+                    // memory.copy from source slot `before`.
+                    func.instruction(&Instruction::LocalGet(mid_ptr));
+                    func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
+                    func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                    func.instruction(&Instruction::I32Const(
+                        (COLLECTION_HEADER + before as u32 * COLLECTION_SLOT) as i32,
+                    ));
+                    func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::LocalGet(mid_len));
+                    func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+                    func.instruction(&Instruction::I32Mul);
+                    func.instruction(&Instruction::MemoryCopy {
+                        src_mem: 0,
+                        dst_mem: 0,
+                    });
+
+                    func.instruction(&Instruction::LocalGet(mid_ptr));
+                    set_target(func, ctx, &targets[before]);
+
+                    // Back targets: element (n - after + k) for the k-th
+                    // target after the star; the index is runtime because n is.
+                    for (k, target) in targets[before + 1..].iter().enumerate() {
+                        func.instruction(&Instruction::LocalGet(n));
+                        func.instruction(&Instruction::I32Const(k as i32 - after as i32));
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+                        func.instruction(&Instruction::I32Mul);
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::I32Load(MemArg {
+                            offset: COLLECTION_HEADER as u64,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                        set_target(func, ctx, target);
+                    }
+                } else {
+                    // Verify that number of targets matches tuple length
+                    func.instruction(&Instruction::I32Const(targets.len() as i32));
+                    func.instruction(&Instruction::I32Ne);
+                    func.instruction(&Instruction::If(BlockType::Empty));
+                    // Error case: tuple size mismatch - for now just continue
+                    func.instruction(&Instruction::End);
+
+                    // Extract each element from the tuple and assign to target
+                    // variables. Element i sits at HEADER + i*SLOT. A float target
+                    // would need an f64 load here; tuple-unpack targets are not yet
+                    // type-inferred, so float members still bind as their i32 low
+                    // word (a documented follow-up, mirroring the loop-var case).
+                    for (i, target) in targets.iter().enumerate() {
+                        // Load tuple pointer
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local));
+
+                        // Add offset to get element (HEADER + i*SLOT)
+                        func.instruction(&Instruction::I32Const(
+                            (COLLECTION_HEADER + (i as u32) * COLLECTION_SLOT) as i32,
+                        ));
+                        func.instruction(&Instruction::I32Add);
+
+                        // Load element value
+                        func.instruction(&Instruction::I32Load(MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+
+                        // Store in target variable
+                        set_target(func, ctx, target);
                     }
                 }
             }

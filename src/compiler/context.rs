@@ -41,6 +41,22 @@ pub fn strlen_local_name(name: &str) -> String {
     format!("__strlen_{name}")
 }
 
+/// Name of a per-comprehension helper local, indexed by comprehension nesting
+/// depth (`res` result pointer, `widx` write index, `cap` capacity, `elem`
+/// tuple-unpack scratch, and for set comprehensions `mask`/`hidx`/`bkt` hash
+/// probing state). Reserved during the local-allocation scan; sibling
+/// comprehensions at the same depth share them safely because their
+/// evaluations never overlap.
+pub fn comp_local_name(role: &str, depth: u32) -> String {
+    format!("__comp_{role}_{depth}")
+}
+
+/// Name of a per-generator helper local of a comprehension (`ptr`/`idx`/`len`
+/// iterator state), indexed by comprehension depth and generator position.
+pub fn comp_gen_local_name(role: &str, depth: u32, gen: usize) -> String {
+    format!("__comp_{role}_{depth}_{gen}")
+}
+
 /// Local variable
 pub struct LocalInfo {
     pub index: u32,
@@ -129,6 +145,16 @@ pub struct CompilationContext {
     /// `break`/`continue` with an empty stack is a compile error (Python would
     /// raise `SyntaxError`). Reset per function.
     pub loop_stack: Vec<LoopContext>,
+    /// Comprehension nesting depth at the current codegen point. A
+    /// comprehension's helper locals (`__comp_*_{d}` / `__comp_*_{d}_{g}`)
+    /// are indexed by this depth, reserved during the local-allocation scan;
+    /// sibling comprehensions at the same depth safely share them because
+    /// their evaluations never overlap in time. Also consulted (like
+    /// `loop_stack`) to decide whether a collection literal must be copied out
+    /// of its compile-time template region: inside a comprehension loop the
+    /// template is rebuilt per iteration. A `Cell` because expression codegen
+    /// holds `&CompilationContext`. Reset per function.
+    pub comp_depth: Cell<u32>,
     /// Running high-water mark of the collection heap, in bytes past
     /// `COLLECTION_HEAP_BASE`. Each literal reserves a fresh region here, so it
     /// grows monotonically across the whole module. A `Cell` because codegen
@@ -149,6 +175,20 @@ pub struct CompilationContext {
     /// offset past the prefix) — the runtime half of `str(int)`. Set during
     /// module assembly.
     pub i32_to_str_func_index: u32,
+    /// Funcref-table slot of each lifted lambda function, keyed by its
+    /// `__lambda_{n}` name. `ClosureMake` stamps the slot into the closure
+    /// environment's first word; `call_indirect` dispatches through it. Set
+    /// during module assembly.
+    pub lambda_slots: HashMap<String, u32>,
+    /// Type-section index of the closure-call signature with zero user
+    /// parameters (`(env: i32) -> i32`); arity `a`'s signature sits at
+    /// `closure_type_base + a`. `None` when the module has no lambdas (no
+    /// table is emitted). Set during module assembly.
+    pub closure_type_base: Option<u32>,
+    /// Largest user-parameter count across the module's lambdas; a closure
+    /// call site with more arguments than this has no matching signature and
+    /// falls back to yielding 0.
+    pub closure_max_arity: u32,
     /// True while compiling an `__init__` method. Its `return` paths (explicit
     /// bare `return` and the implicit fall-through) yield `self` (local 0)
     /// instead of the usual 0, so `ClassName(...)` receives the instance
@@ -177,10 +217,14 @@ impl CompilationContext {
             for_loop_seq: 0,
             block_depth: 0,
             loop_stack: Vec::new(),
+            comp_depth: Cell::new(0),
             collection_alloc_offset: Cell::new(0),
             alloc_func_index: 0,
             alloc_obj_func_index: 0,
             i32_to_str_func_index: 0,
+            lambda_slots: HashMap::new(),
+            closure_type_base: None,
+            closure_max_arity: 0,
             return_self: false,
             current_class: None,
         }

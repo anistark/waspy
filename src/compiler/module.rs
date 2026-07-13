@@ -6,9 +6,9 @@ use crate::ir::{
 };
 use std::collections::{HashMap, HashSet};
 use wasm_encoder::{
-    BlockType, CodeSection, ConstExpr, DataSection, ExportSection, Function, FunctionSection,
-    GlobalSection, GlobalType, Instruction, MemorySection, MemoryType, Module, TypeSection,
-    ValType,
+    BlockType, CodeSection, ConstExpr, DataSection, ElementSection, Elements, ExportSection,
+    Function, FunctionSection, GlobalSection, GlobalType, Instruction, MemorySection, MemoryType,
+    Module, RefType, TableSection, TableType, TypeSection, ValType,
 };
 
 /// Map IR type to WebAssembly ValType
@@ -427,6 +427,35 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
         .function([ValType::I32, ValType::I32], [ValType::I32]);
     types.ty().function([ValType::I32], [ValType::I32]);
 
+    // Lifted lambdas (closures, #43): each `__lambda_{n}` function gets a slot
+    // in a funcref table so closure values can dispatch via `call_indirect`.
+    // The call signature for a closure of user-arity `a` is `(a i32 args +
+    // env ptr) -> i32`; one such type per arity 0..=max is appended after the
+    // helper types, at `closure_type_base + a`.
+    let lambda_functions: Vec<(u32, &crate::ir::IRFunction)> = ir_module
+        .functions
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.name.starts_with("__lambda_"))
+        .map(|(i, f)| (i as u32, f))
+        .collect();
+    for (slot, (_, f)) in lambda_functions.iter().enumerate() {
+        ctx.lambda_slots.insert(f.name.clone(), slot as u32);
+    }
+    if !lambda_functions.is_empty() {
+        let max_arity = lambda_functions
+            .iter()
+            .map(|(_, f)| f.params.len().saturating_sub(1))
+            .max()
+            .unwrap_or(0);
+        ctx.closure_type_base = Some(total_function_count as u32 + 3);
+        ctx.closure_max_arity = max_arity as u32;
+        for arity in 0..=max_arity {
+            let params = vec![ValType::I32; arity + 1];
+            types.ty().function(params, [ValType::I32]);
+        }
+    }
+
     module.section(&types);
 
     // Build function section (one entry per user function/method, referencing
@@ -451,8 +480,11 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
 
         ctx.add_function(&func.name, func_idx, param_types, module_return(func));
 
-        // Export the function
-        exports.export(&func.name, wasm_encoder::ExportKind::Func, func_idx);
+        // Export the function. Lifted lambdas are internal — they are only
+        // reachable through the funcref table.
+        if !func.name.starts_with("__lambda_") {
+            exports.export(&func.name, wasm_encoder::ExportKind::Func, func_idx);
+        }
         func_idx += 1;
     }
 
@@ -720,12 +752,39 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
         &ConstExpr::i32_const(runtime_heap_base as i32),
     );
 
-    // Section order follows the WASM spec: Memory (5), Global (6), Export (7),
-    // Code (10), Data (11). Code must precede Data or strict validators (and
-    // Binaryen's reader) reject the module, which previously disabled optimization.
+    // The closure dispatch table: slot i holds lifted lambda i. Emitted only
+    // when the module has lambdas.
+    let mut tables = TableSection::new();
+    let mut elements = ElementSection::new();
+    if !lambda_functions.is_empty() {
+        tables.table(TableType {
+            element_type: RefType::FUNCREF,
+            table64: false,
+            minimum: lambda_functions.len() as u64,
+            maximum: Some(lambda_functions.len() as u64),
+            shared: false,
+        });
+        let func_indices: Vec<u32> = lambda_functions.iter().map(|(idx, _)| *idx).collect();
+        elements.active(
+            None,
+            &ConstExpr::i32_const(0),
+            Elements::Functions(func_indices.into()),
+        );
+    }
+
+    // Section order follows the WASM spec: Table (4), Memory (5), Global (6),
+    // Export (7), Element (9), Code (10), Data (11). Code must precede Data or
+    // strict validators (and Binaryen's reader) reject the module, which
+    // previously disabled optimization.
+    if !lambda_functions.is_empty() {
+        module.section(&tables);
+    }
     module.section(&memories);
     module.section(&globals);
     module.section(&exports);
+    if !lambda_functions.is_empty() {
+        module.section(&elements);
+    }
     module.section(&codes);
     module.section(&data);
 

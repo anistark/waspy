@@ -1,10 +1,11 @@
 use crate::compiler::context::{
-    strlen_local_name, CompilationContext, COLLECTION_HEADER, COLLECTION_SLOT, DICT_ENTRY,
+    comp_gen_local_name, comp_local_name, strlen_local_name, CompilationContext, COLLECTION_HEADER,
+    COLLECTION_SLOT, DICT_ENTRY,
 };
 use crate::compiler::function::{load_field_instr, lookup_field};
 use crate::ir::{
-    IRBoolOp, IRCompareOp, IRConstant, IRExpr, IROp, IRType, IRUnaryOp, MemoryLayout, MethodKind,
-    STRING_LEN_PREFIX,
+    IRBoolOp, IRCompareOp, IRComprehensionKind, IRConstant, IRExpr, IRGenerator, IROp, IRType,
+    IRUnaryOp, MemoryLayout, MethodKind, STRING_LEN_PREFIX,
 };
 use wasm_encoder::{BlockType, Function, Instruction, MemArg, ValType};
 
@@ -318,7 +319,10 @@ fn emit_collection_result(
     template_ptr: u32,
     size: u32,
 ) {
-    if ctx.loop_stack.is_empty() {
+    // A comprehension's loops don't go through `loop_stack` (they can't contain
+    // user `break`/`continue`), so a literal built inside one is detected via
+    // the comprehension depth instead.
+    if ctx.loop_stack.is_empty() && ctx.comp_depth.get() == 0 {
         func.instruction(&Instruction::I32Const(template_ptr as i32));
         return;
     }
@@ -343,6 +347,596 @@ fn emit_collection_result(
     });
 
     func.instruction(&Instruction::LocalGet(dst));
+}
+
+// --- Comprehensions (#44) -------------------------------------------------
+//
+// A comprehension builds its result at runtime because the element count isn't
+// known at compile time (it depends on iterable lengths and filters). Codegen
+// runs in (up to) two passes over the generators:
+//
+//   1. capacity: for a single generator, the length of its iterable; for
+//      multiple generators, a counting pre-pass runs the outer loops (without
+//      filters) and sums the innermost iterable's length. Filters only ever
+//      *over*-allocate, which the bump allocator tolerates.
+//   2. fill: the real nested loops bind the target variables, evaluate the
+//      filters, and append each produced element; the final element count is
+//      written to the result header afterwards.
+//
+// The result block comes from `__alloc`, so — unlike literal template regions —
+// a comprehension built inside a loop is automatically a fresh region per
+// iteration. Helper locals are reserved by the scan pass keyed on
+// comprehension nesting depth (see `scan_expr_locals`); with multiple
+// generators the inner iterable expressions are evaluated once per outer
+// iteration in *both* passes, so side effects in them run twice (documented
+// limitation, matching the "no observable side effects in iterables" reality
+// of the current language subset).
+
+/// `MemArg` for an access at `offset` with the collection alignment hint.
+fn mem_off(offset: u64) -> MemArg {
+    MemArg {
+        offset,
+        align: 2,
+        memory_index: 0,
+    }
+}
+
+/// Resolve a comprehension helper local reserved by the scan pass.
+fn comp_local(ctx: &CompilationContext, name: String) -> u32 {
+    ctx.get_local_index(&name)
+        .unwrap_or_else(|| panic!("comprehension helper local {name} not reserved"))
+}
+
+/// Push the run-time element count of the iterable stashed in `ptr`. List-like
+/// iterables (lists, tuples — same `[len][slots]` layout) load the header;
+/// ranges compute their trip count from `[start][stop][step]`, clamped at 0
+/// so an empty range (e.g. `range(5, 0)`) contributes nothing.
+fn emit_comp_iterable_len(func: &mut Function, ctx: &CompilationContext, is_range: bool, ptr: u32) {
+    if !is_range {
+        func.instruction(&Instruction::LocalGet(ptr));
+        func.instruction(&Instruction::I32Load(slot_arg()));
+        return;
+    }
+
+    // step > 0 ? (stop - start + step - 1) / step
+    //          : (start - stop - step - 1) / (-step)
+    func.instruction(&Instruction::LocalGet(ptr));
+    func.instruction(&Instruction::I32Load(mem_off(8)));
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::I32GtS);
+    func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+    func.instruction(&Instruction::LocalGet(ptr));
+    func.instruction(&Instruction::I32Load(mem_off(4)));
+    func.instruction(&Instruction::LocalGet(ptr));
+    func.instruction(&Instruction::I32Load(mem_off(0)));
+    func.instruction(&Instruction::I32Sub);
+    func.instruction(&Instruction::LocalGet(ptr));
+    func.instruction(&Instruction::I32Load(mem_off(8)));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::I32Const(1));
+    func.instruction(&Instruction::I32Sub);
+    func.instruction(&Instruction::LocalGet(ptr));
+    func.instruction(&Instruction::I32Load(mem_off(8)));
+    func.instruction(&Instruction::I32DivS);
+    func.instruction(&Instruction::Else);
+    func.instruction(&Instruction::LocalGet(ptr));
+    func.instruction(&Instruction::I32Load(mem_off(0)));
+    func.instruction(&Instruction::LocalGet(ptr));
+    func.instruction(&Instruction::I32Load(mem_off(4)));
+    func.instruction(&Instruction::I32Sub);
+    func.instruction(&Instruction::LocalGet(ptr));
+    func.instruction(&Instruction::I32Load(mem_off(8)));
+    func.instruction(&Instruction::I32Sub);
+    func.instruction(&Instruction::I32Const(1));
+    func.instruction(&Instruction::I32Sub);
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::LocalGet(ptr));
+    func.instruction(&Instruction::I32Load(mem_off(8)));
+    func.instruction(&Instruction::I32Sub);
+    func.instruction(&Instruction::I32DivS);
+    func.instruction(&Instruction::End);
+
+    // Clamp a negative trip count (empty range) to zero.
+    func.instruction(&Instruction::LocalTee(ctx.temp_local));
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::LocalGet(ctx.temp_local));
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::I32GtS);
+    func.instruction(&Instruction::Select);
+}
+
+/// Emit the nested generator loops of a comprehension, calling `innermost`
+/// once per innermost iteration (with the targets of every generator bound).
+///
+/// Generator 0's iterable must already be evaluated and stashed in its `ptr`
+/// local (its type passed as `gen0_ty`) — the capacity phase does this so the
+/// fill phase doesn't re-evaluate it. Inner generators' iterables can
+/// reference outer targets, so they are (re)evaluated per outer iteration.
+/// `with_conditions: false` skips the filters (used by the counting pre-pass,
+/// where they could only shrink the capacity estimate).
+#[allow(clippy::too_many_arguments)]
+fn emit_comp_loops(
+    func: &mut Function,
+    ctx: &CompilationContext,
+    memory_layout: &MemoryLayout,
+    generators: &[IRGenerator],
+    g: usize,
+    depth: u32,
+    gen0_ty: &IRType,
+    with_conditions: bool,
+    innermost: &mut dyn FnMut(&mut Function),
+) {
+    if g == generators.len() {
+        innermost(func);
+        return;
+    }
+    let generator = &generators[g];
+    let ptr = comp_local(ctx, comp_gen_local_name("ptr", depth, g));
+    let idx = comp_local(ctx, comp_gen_local_name("idx", depth, g));
+    let len = comp_local(ctx, comp_gen_local_name("len", depth, g));
+
+    let ty = if g == 0 {
+        gen0_ty.clone()
+    } else {
+        let t = emit_expr(&generator.iterable, func, ctx, memory_layout, None);
+        narrow_element_to_word(func, &t);
+        func.instruction(&Instruction::LocalSet(ptr));
+        t
+    };
+
+    let n_conds = if with_conditions {
+        generator.conditions.len()
+    } else {
+        0
+    };
+
+    if matches!(ty, IRType::Range) {
+        // Iterate the range by stepping the target itself (mirrors the `for`
+        // statement's range path); `idx`/`len` are unused here.
+        let target = comp_local(ctx, generator.targets[0].clone());
+
+        func.instruction(&Instruction::LocalGet(ptr));
+        func.instruction(&Instruction::I32Load(mem_off(0)));
+        func.instruction(&Instruction::LocalSet(target));
+
+        func.instruction(&Instruction::Block(BlockType::Empty));
+        func.instruction(&Instruction::Loop(BlockType::Empty));
+
+        // Exit test depends on the runtime sign of step.
+        func.instruction(&Instruction::LocalGet(ptr));
+        func.instruction(&Instruction::I32Load(mem_off(8)));
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::I32GtS);
+        func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        func.instruction(&Instruction::LocalGet(target));
+        func.instruction(&Instruction::LocalGet(ptr));
+        func.instruction(&Instruction::I32Load(mem_off(4)));
+        func.instruction(&Instruction::I32GeS);
+        func.instruction(&Instruction::Else);
+        func.instruction(&Instruction::LocalGet(target));
+        func.instruction(&Instruction::LocalGet(ptr));
+        func.instruction(&Instruction::I32Load(mem_off(4)));
+        func.instruction(&Instruction::I32LeS);
+        func.instruction(&Instruction::End);
+        func.instruction(&Instruction::BrIf(1));
+
+        // Filters guard everything inside this iteration.
+        if with_conditions {
+            for condition in &generator.conditions {
+                emit_expr(condition, func, ctx, memory_layout, Some(&IRType::Bool));
+                func.instruction(&Instruction::If(BlockType::Empty));
+            }
+        }
+        emit_comp_loops(
+            func,
+            ctx,
+            memory_layout,
+            generators,
+            g + 1,
+            depth,
+            gen0_ty,
+            with_conditions,
+            innermost,
+        );
+        for _ in 0..n_conds {
+            func.instruction(&Instruction::End);
+        }
+
+        // target += step
+        func.instruction(&Instruction::LocalGet(target));
+        func.instruction(&Instruction::LocalGet(ptr));
+        func.instruction(&Instruction::I32Load(mem_off(8)));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalSet(target));
+
+        func.instruction(&Instruction::Br(0));
+        func.instruction(&Instruction::End);
+        func.instruction(&Instruction::End);
+    } else {
+        // List-like layout: [len:i32][slot0][slot1]... (lists and tuples).
+        func.instruction(&Instruction::LocalGet(ptr));
+        func.instruction(&Instruction::I32Load(slot_arg()));
+        func.instruction(&Instruction::LocalSet(len));
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::LocalSet(idx));
+
+        func.instruction(&Instruction::Block(BlockType::Empty));
+        func.instruction(&Instruction::Loop(BlockType::Empty));
+
+        func.instruction(&Instruction::LocalGet(idx));
+        func.instruction(&Instruction::LocalGet(len));
+        func.instruction(&Instruction::I32GeS);
+        func.instruction(&Instruction::BrIf(1));
+
+        // Bind the target(s) from slot `idx`.
+        if let [target] = generator.targets.as_slice() {
+            let target_idx = comp_local(ctx, target.clone());
+            let target_is_float = matches!(
+                ctx.get_local_info(target).map(|i| &i.var_type),
+                Some(IRType::Float)
+            );
+            func.instruction(&Instruction::LocalGet(ptr));
+            func.instruction(&Instruction::LocalGet(idx));
+            func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+            func.instruction(&Instruction::I32Mul);
+            func.instruction(&Instruction::I32Add);
+            if target_is_float {
+                func.instruction(&Instruction::F64Load(mem_off(COLLECTION_HEADER as u64)));
+            } else {
+                func.instruction(&Instruction::I32Load(mem_off(COLLECTION_HEADER as u64)));
+            }
+            func.instruction(&Instruction::LocalSet(target_idx));
+        } else {
+            // `for k, v in items`: the element is a tuple pointer; unpack its
+            // slots positionally (i32 words — float members keep the existing
+            // tuple-unpack limitation).
+            let elem = comp_local(ctx, comp_local_name("elem", depth));
+            func.instruction(&Instruction::LocalGet(ptr));
+            func.instruction(&Instruction::LocalGet(idx));
+            func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+            func.instruction(&Instruction::I32Mul);
+            func.instruction(&Instruction::I32Add);
+            func.instruction(&Instruction::I32Load(mem_off(COLLECTION_HEADER as u64)));
+            func.instruction(&Instruction::LocalSet(elem));
+            for (j, target) in generator.targets.iter().enumerate() {
+                let target_idx = comp_local(ctx, target.clone());
+                func.instruction(&Instruction::LocalGet(elem));
+                func.instruction(&Instruction::I32Load(mem_off(
+                    (COLLECTION_HEADER + j as u32 * COLLECTION_SLOT) as u64,
+                )));
+                func.instruction(&Instruction::LocalSet(target_idx));
+            }
+        }
+
+        if with_conditions {
+            for condition in &generator.conditions {
+                emit_expr(condition, func, ctx, memory_layout, Some(&IRType::Bool));
+                func.instruction(&Instruction::If(BlockType::Empty));
+            }
+        }
+        emit_comp_loops(
+            func,
+            ctx,
+            memory_layout,
+            generators,
+            g + 1,
+            depth,
+            gen0_ty,
+            with_conditions,
+            innermost,
+        );
+        for _ in 0..n_conds {
+            func.instruction(&Instruction::End);
+        }
+
+        func.instruction(&Instruction::LocalGet(idx));
+        func.instruction(&Instruction::I32Const(1));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalSet(idx));
+
+        func.instruction(&Instruction::Br(0));
+        func.instruction(&Instruction::End);
+        func.instruction(&Instruction::End);
+    }
+}
+
+/// Insert the element on top of the stack into the runtime-built set hash
+/// table at local `res` (dedup on insert). Mirrors the set-literal insertion,
+/// but the table pointer and `cap - 1` mask are runtime locals instead of
+/// compile-time constants. Bumps the member count at `res[0]` only when a new
+/// bucket is occupied.
+fn emit_runtime_set_insert(
+    func: &mut Function,
+    ctx: &CompilationContext,
+    elem_ty: &IRType,
+    res: u32,
+    mask: u32,
+    hidx: u32,
+    bkt: u32,
+) {
+    let needle = ctx.temp_local + 1;
+    stash_search_needle(func, ctx, elem_ty, needle);
+    emit_set_hash(func, ctx, elem_ty, needle);
+    func.instruction(&Instruction::LocalGet(mask));
+    func.instruction(&Instruction::I32And);
+    func.instruction(&Instruction::LocalSet(hidx));
+
+    func.instruction(&Instruction::Block(BlockType::Empty)); // $done
+    func.instruction(&Instruction::Loop(BlockType::Empty)); // $probe
+
+    // bkt = res + SET_HEADER + hidx*SET_BUCKET
+    func.instruction(&Instruction::LocalGet(res));
+    func.instruction(&Instruction::I32Const(SET_HEADER as i32));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::LocalGet(hidx));
+    func.instruction(&Instruction::I32Const(SET_BUCKET as i32));
+    func.instruction(&Instruction::I32Mul);
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::LocalSet(bkt));
+
+    // Empty bucket? -> occupy it, bump count, exit.
+    func.instruction(&Instruction::LocalGet(bkt));
+    func.instruction(&Instruction::I32Load(slot_arg()));
+    func.instruction(&Instruction::I32Eqz);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    func.instruction(&Instruction::LocalGet(bkt));
+    func.instruction(&Instruction::I32Const(1));
+    func.instruction(&Instruction::I32Store(slot_arg()));
+    func.instruction(&Instruction::LocalGet(bkt));
+    func.instruction(&Instruction::I32Const(SET_BUCKET_VALUE as i32));
+    func.instruction(&Instruction::I32Add);
+    store_stashed_needle(func, ctx, elem_ty, needle);
+    func.instruction(&Instruction::LocalGet(res));
+    func.instruction(&Instruction::LocalGet(res));
+    func.instruction(&Instruction::I32Load(slot_arg()));
+    func.instruction(&Instruction::I32Const(1));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::I32Store(slot_arg()));
+    func.instruction(&Instruction::Br(2)); // $done
+    func.instruction(&Instruction::End);
+
+    // Occupied by the same value? -> duplicate, exit.
+    func.instruction(&Instruction::LocalGet(bkt));
+    func.instruction(&Instruction::I32Const(SET_BUCKET_VALUE as i32));
+    func.instruction(&Instruction::I32Add);
+    emit_slot_eq_needle(func, ctx, elem_ty, needle);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    func.instruction(&Instruction::Br(2)); // $done
+    func.instruction(&Instruction::End);
+
+    // Collision: advance and re-probe.
+    func.instruction(&Instruction::LocalGet(hidx));
+    func.instruction(&Instruction::I32Const(1));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::LocalGet(mask));
+    func.instruction(&Instruction::I32And);
+    func.instruction(&Instruction::LocalSet(hidx));
+    func.instruction(&Instruction::Br(0)); // $probe
+
+    func.instruction(&Instruction::End); // loop
+    func.instruction(&Instruction::End); // block
+}
+
+/// Emit a list/set/dict comprehension. See the module comment above for the
+/// two-pass (capacity, fill) strategy. Leaves the result pointer on the stack.
+fn emit_comprehension(
+    kind: IRComprehensionKind,
+    element: &IRExpr,
+    value: Option<&IRExpr>,
+    generators: &[IRGenerator],
+    func: &mut Function,
+    ctx: &CompilationContext,
+    memory_layout: &MemoryLayout,
+) -> IRType {
+    let depth = ctx.comp_depth.get();
+    // Everything emitted from here on (iterables, filters, elements) sits one
+    // comprehension level deeper: nested comprehensions use the next depth's
+    // helper locals, and literals know they're (re)built per iteration.
+    ctx.comp_depth.set(depth + 1);
+
+    let res = comp_local(ctx, comp_local_name("res", depth));
+    let widx = comp_local(ctx, comp_local_name("widx", depth));
+    let cap = comp_local(ctx, comp_local_name("cap", depth));
+    let ptr0 = comp_local(ctx, comp_gen_local_name("ptr", depth, 0));
+
+    // --- Capacity phase -----------------------------------------------------
+    // Evaluate the first iterable once and stash it; the fill phase reuses it.
+    let gen0_ty = emit_expr(&generators[0].iterable, func, ctx, memory_layout, None);
+    narrow_element_to_word(func, &gen0_ty);
+    func.instruction(&Instruction::LocalSet(ptr0));
+
+    if generators.len() == 1 {
+        emit_comp_iterable_len(func, ctx, matches!(gen0_ty, IRType::Range), ptr0);
+        func.instruction(&Instruction::LocalSet(cap));
+    } else {
+        // Counting pre-pass: run the outer loops (no filters) and sum the
+        // innermost iterable's length.
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::LocalSet(cap));
+        let last = generators.len() - 1;
+        let ptr_last = comp_local(ctx, comp_gen_local_name("ptr", depth, last));
+        let last_iterable = &generators[last].iterable;
+        emit_comp_loops(
+            func,
+            ctx,
+            memory_layout,
+            &generators[..last],
+            0,
+            depth,
+            &gen0_ty,
+            false,
+            &mut |func| {
+                let t = emit_expr(last_iterable, func, ctx, memory_layout, None);
+                narrow_element_to_word(func, &t);
+                func.instruction(&Instruction::LocalSet(ptr_last));
+                emit_comp_iterable_len(func, ctx, matches!(t, IRType::Range), ptr_last);
+                func.instruction(&Instruction::LocalGet(cap));
+                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::LocalSet(cap));
+            },
+        );
+    }
+
+    // --- Allocation ----------------------------------------------------------
+    // `__alloc` blocks are always fresh (monotonic bump over zeroed memory),
+    // so no zero-fill is needed — in particular the set table starts empty.
+    match kind {
+        IRComprehensionKind::List | IRComprehensionKind::Dict => {
+            let entry = if matches!(kind, IRComprehensionKind::Dict) {
+                DICT_ENTRY
+            } else {
+                COLLECTION_SLOT
+            };
+            func.instruction(&Instruction::LocalGet(cap));
+            func.instruction(&Instruction::I32Const(entry as i32));
+            func.instruction(&Instruction::I32Mul);
+            func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
+            func.instruction(&Instruction::I32Add);
+            func.instruction(&Instruction::Call(ctx.alloc_func_index));
+            func.instruction(&Instruction::LocalSet(res));
+        }
+        IRComprehensionKind::Set => {
+            let mask = comp_local(ctx, comp_local_name("mask", depth));
+            let hidx = comp_local(ctx, comp_local_name("hidx", depth));
+
+            // cap2 = 1 << (32 - clz(2*cap + 1)): the smallest power of two
+            // strictly greater than 2*cap (load factor < 0.5, never zero), so
+            // probing always terminates. `hidx` temporarily holds cap2.
+            func.instruction(&Instruction::I32Const(1));
+            func.instruction(&Instruction::I32Const(32));
+            func.instruction(&Instruction::LocalGet(cap));
+            func.instruction(&Instruction::I32Const(1));
+            func.instruction(&Instruction::I32Shl);
+            func.instruction(&Instruction::I32Const(1));
+            func.instruction(&Instruction::I32Or);
+            func.instruction(&Instruction::I32Clz);
+            func.instruction(&Instruction::I32Sub);
+            func.instruction(&Instruction::I32Shl);
+            func.instruction(&Instruction::LocalSet(hidx));
+
+            // res = __alloc(SET_HEADER + cap2*SET_BUCKET); store cap2 at res+4.
+            func.instruction(&Instruction::LocalGet(hidx));
+            func.instruction(&Instruction::I32Const(SET_BUCKET as i32));
+            func.instruction(&Instruction::I32Mul);
+            func.instruction(&Instruction::I32Const(SET_HEADER as i32));
+            func.instruction(&Instruction::I32Add);
+            func.instruction(&Instruction::Call(ctx.alloc_func_index));
+            func.instruction(&Instruction::LocalSet(res));
+            func.instruction(&Instruction::LocalGet(res));
+            func.instruction(&Instruction::LocalGet(hidx));
+            func.instruction(&Instruction::I32Store(mem_off(4)));
+            func.instruction(&Instruction::LocalGet(hidx));
+            func.instruction(&Instruction::I32Const(1));
+            func.instruction(&Instruction::I32Sub);
+            func.instruction(&Instruction::LocalSet(mask));
+        }
+    }
+
+    // --- Fill phase ------------------------------------------------------------
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::LocalSet(widx));
+
+    let mut elem_ty = IRType::Unknown;
+    let mut val_ty = IRType::Unknown;
+    {
+        let elem_ty = &mut elem_ty;
+        let val_ty = &mut val_ty;
+        emit_comp_loops(
+            func,
+            ctx,
+            memory_layout,
+            generators,
+            0,
+            depth,
+            &gen0_ty,
+            true,
+            &mut |func| match kind {
+                IRComprehensionKind::List => {
+                    // slot address = res + HEADER + widx*SLOT
+                    func.instruction(&Instruction::LocalGet(res));
+                    func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
+                    func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::LocalGet(widx));
+                    func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+                    func.instruction(&Instruction::I32Mul);
+                    func.instruction(&Instruction::I32Add);
+                    let t = emit_expr(element, func, ctx, memory_layout, None);
+                    narrow_element_to_word(func, &t);
+                    store_collection_word(func, &t);
+                    *elem_ty = t;
+
+                    func.instruction(&Instruction::LocalGet(widx));
+                    func.instruction(&Instruction::I32Const(1));
+                    func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::LocalSet(widx));
+                }
+                IRComprehensionKind::Dict => {
+                    // key slot at res + HEADER + widx*ENTRY, value slot right after
+                    func.instruction(&Instruction::LocalGet(res));
+                    func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
+                    func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::LocalGet(widx));
+                    func.instruction(&Instruction::I32Const(DICT_ENTRY as i32));
+                    func.instruction(&Instruction::I32Mul);
+                    func.instruction(&Instruction::I32Add);
+                    let kt = emit_expr(element, func, ctx, memory_layout, None);
+                    narrow_element_to_word(func, &kt);
+                    store_collection_word(func, &kt);
+                    *elem_ty = kt;
+
+                    func.instruction(&Instruction::LocalGet(res));
+                    func.instruction(&Instruction::I32Const(
+                        (COLLECTION_HEADER + COLLECTION_SLOT) as i32,
+                    ));
+                    func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::LocalGet(widx));
+                    func.instruction(&Instruction::I32Const(DICT_ENTRY as i32));
+                    func.instruction(&Instruction::I32Mul);
+                    func.instruction(&Instruction::I32Add);
+                    let vt = emit_expr(
+                        value.expect("dict comprehension has a value"),
+                        func,
+                        ctx,
+                        memory_layout,
+                        None,
+                    );
+                    narrow_element_to_word(func, &vt);
+                    store_collection_word(func, &vt);
+                    *val_ty = vt;
+
+                    func.instruction(&Instruction::LocalGet(widx));
+                    func.instruction(&Instruction::I32Const(1));
+                    func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::LocalSet(widx));
+                }
+                IRComprehensionKind::Set => {
+                    let mask = comp_local(ctx, comp_local_name("mask", depth));
+                    let hidx = comp_local(ctx, comp_local_name("hidx", depth));
+                    let bkt = comp_local(ctx, comp_local_name("bkt", depth));
+                    let t = emit_expr(element, func, ctx, memory_layout, None);
+                    emit_runtime_set_insert(func, ctx, &t, res, mask, hidx, bkt);
+                    *elem_ty = t;
+                }
+            },
+        );
+    }
+
+    // --- Finalize -------------------------------------------------------------
+    // Lists and dicts record how many elements the filters let through; the
+    // set's count was maintained by the dedup insert.
+    if !matches!(kind, IRComprehensionKind::Set) {
+        func.instruction(&Instruction::LocalGet(res));
+        func.instruction(&Instruction::LocalGet(widx));
+        func.instruction(&Instruction::I32Store(slot_arg()));
+    }
+    func.instruction(&Instruction::LocalGet(res));
+
+    ctx.comp_depth.set(depth);
+    match kind {
+        IRComprehensionKind::List => IRType::List(Box::new(elem_ty)),
+        IRComprehensionKind::Set => IRType::Set(Box::new(elem_ty)),
+        IRComprehensionKind::Dict => IRType::Dict(Box::new(elem_ty), Box::new(val_ty)),
+    }
 }
 
 /// Emit WebAssembly instructions for an IR expression
@@ -1433,6 +2027,55 @@ pub fn emit_expr(
                 return IRType::Bool;
             }
 
+            // Calling a closure-valued name (#43): the callee is a local (or a
+            // module variable) holding a closure environment pointer, not a
+            // statically known function. Dispatch through the funcref table:
+            // push the arguments, the environment pointer (the lambda's
+            // trailing `__env` parameter), and the table slot stored in the
+            // environment's first word, then `call_indirect` with the
+            // signature for this arity. A known `def` of the same name wins
+            // (checked first), preserving the existing static-call behavior.
+            if ctx.get_function_info(function_name.as_str()).is_none() {
+                let is_closure_callee = ctx.get_local_index(function_name).is_some()
+                    || ctx.get_module_var(function_name).is_some();
+                if is_closure_callee {
+                    if let Some(type_base) = ctx.closure_type_base {
+                        if arguments.len() as u32 <= ctx.closure_max_arity {
+                            for arg in arguments {
+                                let t = emit_expr(arg, func, ctx, memory_layout, None);
+                                // Closure parameters are single i32 words.
+                                match t {
+                                    IRType::String | IRType::Bytes => {
+                                        func.instruction(&Instruction::Drop);
+                                    }
+                                    IRType::Float => {
+                                        func.instruction(&Instruction::I32TruncF64S);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            // Environment pointer: last argument, then reused
+                            // to load the table slot from its first word.
+                            emit_expr(
+                                &IRExpr::Variable(function_name.clone()),
+                                func,
+                                ctx,
+                                memory_layout,
+                                None,
+                            );
+                            func.instruction(&Instruction::LocalTee(ctx.temp_local));
+                            func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                            func.instruction(&Instruction::I32Load(slot_arg()));
+                            func.instruction(&Instruction::CallIndirect {
+                                type_index: type_base + arguments.len() as u32,
+                                table_index: 0,
+                            });
+                            return IRType::Unknown;
+                        }
+                    }
+                }
+            }
+
             // Push arguments onto the stack in order. For a call to a known user
             // function, a string/bytes argument must be narrowed to its single
             // offset word: each parameter is one i32 slot, so the callee recovers
@@ -2481,20 +3124,20 @@ pub fn emit_expr(
                 }
             }
         }
-        IRExpr::ListComp {
-            expr: _,
-            var_name: _,
-            iterable,
-        } => {
-            // [expr for var_name in iterable]
-            // Emit code for the iterable evaluation
-            emit_expr(iterable, func, ctx, memory_layout, None);
-            // Drop the iterable result for now
-            func.instruction(&Instruction::Drop);
-            // Return an empty list pointer as placeholder
-            func.instruction(&Instruction::I32Const(0));
-            IRType::List(Box::new(IRType::Unknown))
-        }
+        IRExpr::Comprehension {
+            kind,
+            element,
+            value,
+            generators,
+        } => emit_comprehension(
+            *kind,
+            element,
+            value.as_deref(),
+            generators,
+            func,
+            ctx,
+            memory_layout,
+        ),
         IRExpr::MethodCall {
             object,
             method_name,
@@ -4389,12 +5032,58 @@ pub fn emit_expr(
             body: _,
             captured_vars: _,
         } => {
-            // Lambdas with closures: capture variables and return a callable
+            // Unreachable in the normal pipeline: the finalize pass lifts every
+            // lambda into `ClosureMake`. Kept as a harmless placeholder for IR
+            // built without finalization.
             let param_types = params.iter().map(|p| p.param_type.clone()).collect();
             func.instruction(&Instruction::I32Const(1)); // Lambda function reference
 
             IRType::Callable {
                 params: param_types,
+                return_type: Box::new(IRType::Unknown),
+            }
+        }
+        IRExpr::ClosureMake {
+            lambda_name,
+            captured,
+        } => {
+            // Closure creation (#43): allocate the environment
+            // `[table_slot:i32][cap0:8B][cap1:8B]...` and copy each captured
+            // enclosing local into it by value. The layout matches a list's
+            // `[word][slot0]...`, so the lifted lambda rebinds captures with
+            // plain `__env[k]` indexing. Captured floats would need an f64
+            // store and a typed rebind; they read as 0 for now (documented
+            // limitation), as does a name that never resolved to a local.
+            let slot = ctx.lambda_slots.get(lambda_name).copied().unwrap_or(0);
+
+            func.instruction(&Instruction::I32Const(
+                (COLLECTION_HEADER + captured.len() as u32 * COLLECTION_SLOT) as i32,
+            ));
+            func.instruction(&Instruction::Call(ctx.alloc_func_index));
+            func.instruction(&Instruction::LocalSet(ctx.temp_local));
+
+            func.instruction(&Instruction::LocalGet(ctx.temp_local));
+            func.instruction(&Instruction::I32Const(slot as i32));
+            func.instruction(&Instruction::I32Store(slot_arg()));
+
+            for (k, name) in captured.iter().enumerate() {
+                func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                match ctx.get_local_info(name) {
+                    Some(info) if !matches!(info.var_type, IRType::Float) => {
+                        func.instruction(&Instruction::LocalGet(info.index));
+                    }
+                    _ => {
+                        func.instruction(&Instruction::I32Const(0));
+                    }
+                }
+                func.instruction(&Instruction::I32Store(mem_off(
+                    (COLLECTION_HEADER + k as u32 * COLLECTION_SLOT) as u64,
+                )));
+            }
+
+            func.instruction(&Instruction::LocalGet(ctx.temp_local));
+            IRType::Callable {
+                params: Vec::new(),
                 return_type: Box::new(IRType::Unknown),
             }
         }

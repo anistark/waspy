@@ -594,3 +594,110 @@ fn multiple_inheritance_is_rejected() {
         "unexpected error message: {err}"
     );
 }
+
+/// List comprehensions: mapping, filtering, range sources (ascending and
+/// descending), and Python-3 scoping (the loop variable must not leak into or
+/// clobber a same-named function local).
+#[test]
+fn list_comprehensions() {
+    let src = read_example("comprehensions.py");
+    assert_eq!(call_i32(&src, "list_comp_basic"), 20);
+    assert_eq!(call_i32(&src, "list_comp_filter"), 312);
+    assert_eq!(call_i32(&src, "list_comp_range"), 165);
+    assert_eq!(call_i32(&src, "list_comp_descending_range"), 551);
+    assert_eq!(call_i32(&src, "comp_scope_does_not_leak"), 102);
+}
+
+/// Float elements round-trip through a comprehension as f64 slots.
+#[test]
+fn float_list_comprehension() {
+    let src = read_example("comprehensions.py");
+    assert_eq!(call_i32(&src, "float_comp"), 9);
+}
+
+/// Dict comprehensions: mapping, filtering, and `{k: v for k, v in items}`
+/// tuple unpacking of the iterated element.
+#[test]
+fn dict_comprehensions() {
+    let src = read_example("comprehensions.py");
+    assert_eq!(call_i32(&src, "dict_comp"), 94);
+    assert_eq!(call_i32(&src, "dict_comp_filter"), 315);
+    assert_eq!(call_i32(&src, "dict_comp_unpacks_pairs"), 50);
+}
+
+/// Set comprehensions dedup at construction and support membership tests on
+/// the runtime-built hash table.
+#[test]
+fn set_comprehensions() {
+    let src = read_example("comprehensions.py");
+    assert_eq!(call_i32(&src, "set_comp_dedups"), 3);
+    assert_eq!(call_i32(&src, "set_comp_filter_membership"), 301);
+}
+
+/// Multiple generators flatten nested structures; filters compose with later
+/// generators; a comprehension can itself be the element of another.
+#[test]
+fn nested_and_multi_generator_comprehensions() {
+    let src = read_example("comprehensions.py");
+    assert_eq!(call_i32(&src, "multi_generator_flatten"), 607);
+    assert_eq!(call_i32(&src, "multi_generator_with_filter"), 431);
+    assert_eq!(call_i32(&src, "comp_inside_comp"), 9);
+}
+
+/// A comprehension result iterates in a `for` statement, and one built inside
+/// a loop gets a fresh region each iteration (no aliasing between iterations).
+#[test]
+fn comprehensions_compose_with_loops() {
+    let src = read_example("comprehensions.py");
+    assert_eq!(call_i32(&src, "comp_as_loop_iterable"), 14);
+    assert_eq!(call_i32(&src, "comp_rebuilt_per_iteration"), 63);
+}
+
+/// Extended (starred) unpacking: the starred target collects the middle slice
+/// as a real list (len/indexing/iteration work), scalars bind from the front
+/// and back, and an exact-fit unpack leaves the starred list empty.
+#[test]
+fn extended_unpacking() {
+    let src = read_example("extended_unpacking.py");
+    assert_eq!(call_i32(&src, "star_in_middle"), 124);
+    assert_eq!(call_i32(&src, "star_collects_values"), 23);
+    assert_eq!(call_i32(&src, "star_at_front"), 257);
+    assert_eq!(call_i32(&src, "star_at_back"), 936);
+    assert_eq!(call_i32(&src, "star_binds_empty"), 102);
+    assert_eq!(call_i32(&src, "star_from_tuple"), 100);
+    assert_eq!(call_i32(&src, "star_list_iterates"), 114);
+}
+
+/// Closures capture enclosing variables (#43): a returned lambda observes the
+/// value captured at creation, same-scope captures work, and two closures from
+/// the same factory hold independent environments.
+#[test]
+fn closures_capture_variables() {
+    let src = read_example("closures.py");
+    assert_eq!(call_i32(&src, "returned_closure_reads_capture"), 8);
+    assert_eq!(call_i32(&src, "closure_captures_local"), 123);
+    assert_eq!(call_i32(&src, "closures_capture_independently"), 308);
+}
+
+/// Lambda plumbing: no-capture lambdas, multiple parameters, zero parameters,
+/// module-level lambdas, and calling a module function from a lambda body.
+#[test]
+fn lambdas_call_through_dispatch_table() {
+    let src = read_example("closures.py");
+    assert_eq!(call_i32(&src, "lambda_without_capture"), 42);
+    assert_eq!(call_i32(&src, "lambda_with_two_params"), 42);
+    assert_eq!(call_i32(&src, "zero_argument_closure"), 99);
+    assert_eq!(call_i32(&src, "module_level_lambda"), 36);
+    assert_eq!(call_i32(&src, "lambda_calls_module_function"), 10);
+}
+
+/// Closures are first-class: passed as arguments and called through untyped
+/// parameters, returned from nested lambdas, and stored in (and read back out
+/// of) a comprehension-built list.
+#[test]
+fn closures_are_first_class_values() {
+    let src = read_example("closures.py");
+    assert_eq!(call_i32(&src, "closure_passed_as_argument"), 15);
+    assert_eq!(call_i32(&src, "nested_lambda_captures_param"), 7);
+    assert_eq!(call_i32(&src, "closures_built_in_comprehension"), 22);
+}
