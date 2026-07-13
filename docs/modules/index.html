@@ -309,7 +309,7 @@
                     { name: "Dict index assignment with update or append (dict[key] = value)", status: "done" },
                     { name: "Generator State Management - execution context suspension/resumption", status: "progress" },
                     { name: "Dynamic Module Loading - runtime module loading and execution", status: "progress" },
-                    { name: "Closure Variable Capture Analysis - detecting and capturing closure variables", status: "progress" },
+                    { name: "Closure Variable Capture Analysis - detecting and capturing closure variables", status: "done", version: "0.17.0" },
                     { name: "String Transformation in WASM - full character-by-char transformations", status: "progress" }
                 ]
             },
@@ -356,13 +356,14 @@
             comprehensions: {
                 title: "COMPREHENSIONS",
                 status: "done",
-                version: "0.8.0",
+                version: "0.17.0",
                 features: [
-                    { name: "List comprehensions ([x for x in list])", status: "done", version: "0.8.0" },
-                    { name: "List comprehension filters ([x for x in list if condition])", status: "done", version: "0.8.0" },
-                    { name: "Dict comprehensions ({k: v for k, v in items})", status: "todo" },
-                    { name: "Set comprehensions ({x for x in list})", status: "todo" },
-                    { name: "Generator expressions (x for x in list)", status: "todo" }
+                    { name: "List comprehensions ([x for x in list])", status: "done", version: "0.17.0" },
+                    { name: "List comprehension filters ([x for x in list if condition])", status: "done", version: "0.17.0" },
+                    { name: "Dict comprehensions ({k: v for k, v in items})", status: "done", version: "0.17.0" },
+                    { name: "Set comprehensions ({x for x in list}) with dedup at construction", status: "done", version: "0.17.0" },
+                    { name: "Multiple generators & nesting ([x for row in m for x in row])", status: "done", version: "0.17.0" },
+                    { name: "Generator expressions (x for x in list) — materialized eagerly as lists", status: "done", version: "0.17.0" }
                 ]
             },
             functional: {
@@ -370,9 +371,10 @@
                 status: "done",
                 version: "0.8.0",
                 features: [
-                    { name: "Lambda functions (lambda x: x + 1)", status: "done", version: "0.8.0" },
-                    { name: "Closures with variable capture", status: "done", version: "0.8.0" },
-                    { name: "Higher-order functions (passing functions as arguments)", status: "done", version: "0.8.0" },
+                    { name: "Lambda functions (lambda x: x + 1) compiled to real functions", status: "done", version: "0.17.0" },
+                    { name: "Closures with variable capture (by value at creation)", status: "done", version: "0.17.0" },
+                    { name: "First-class closures — returned, passed as arguments, stored in collections, nested", status: "done", version: "0.17.0" },
+                    { name: "Higher-order functions (passing functions as arguments)", status: "done", version: "0.17.0" },
                     { name: "Callable type tracking for function objects", status: "done", version: "0.8.0" }
                 ]
             },
@@ -426,6 +428,7 @@
                     { name: "Tuple indexing with type tracking", status: "done", version: "0.8.0" },
                     { name: "Heterogeneous tuples with mixed types", status: "done", version: "0.8.0" },
                     { name: "Tuple unpacking & assignment (a, b = (1, 2))", status: "done", version: "0.8.0" },
+                    { name: "Extended (starred) unpacking (a, *b, c = xs)", status: "done", version: "0.17.0" },
                     { name: "Tuple methods (.index, .count)", status: "done", version: "0.8.0" },
                     { name: "Named tuples - namedtuple() factory", status: "done", version: "0.8.0" },
                     { name: "String formatting (.format() & % & f-strings)", status: "done" }

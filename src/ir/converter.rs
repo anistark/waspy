@@ -1093,21 +1093,46 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                         });
                     }
                     Expr::Tuple(tuple_expr) => {
-                        // Handle tuple unpacking like "a, b = (1, 2)"
-                        let targets: Result<Vec<String>, _> = tuple_expr
-                            .elts
-                            .iter()
-                            .map(|elt| match elt {
-                                Expr::Name(name) => Ok(name.id.to_string()),
-                                _ => Err(anyhow!(
-                                    "Only simple variable names supported in tuple unpacking"
-                                )),
-                            })
-                            .collect();
-                        let targets = targets?;
+                        // Tuple unpacking like "a, b = (1, 2)", including one
+                        // starred target ("a, *b, c = xs") which collects the
+                        // middle elements.
+                        let mut targets = Vec::with_capacity(tuple_expr.elts.len());
+                        let mut starred = None;
+                        for (i, elt) in tuple_expr.elts.iter().enumerate() {
+                            match elt {
+                                Expr::Name(name) => targets.push(name.id.to_string()),
+                                Expr::Starred(star) => {
+                                    if starred.is_some() {
+                                        return Err(anyhow!(
+                                            "multiple starred expressions in assignment"
+                                        ));
+                                    }
+                                    match &*star.value {
+                                        Expr::Name(name) => {
+                                            starred = Some(i);
+                                            targets.push(name.id.to_string());
+                                        }
+                                        _ => {
+                                            return Err(anyhow!(
+                                                "Only simple variable names supported in tuple unpacking"
+                                            ))
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    return Err(anyhow!(
+                                        "Only simple variable names supported in tuple unpacking"
+                                    ))
+                                }
+                            }
+                        }
                         let value = lower_expr(&assign.value, memory_layout)?;
 
-                        ir_statements.push(IRStatement::TupleUnpack { targets, value });
+                        ir_statements.push(IRStatement::TupleUnpack {
+                            targets,
+                            value,
+                            starred,
+                        });
                     }
                     Expr::Attribute(attr) => {
                         // Handle attribute assignment like "self.width = width"
@@ -1469,6 +1494,210 @@ fn check_for_dynamic_import_expr(
     }
 
     Ok(None)
+}
+
+/// Lower a list/set/dict comprehension (or generator expression) into
+/// `IRExpr::Comprehension`.
+///
+/// Generator targets are renamed to unique `__comp{n}_{orig}` names and every
+/// reference to them (in later iterables, conditions, and the element/value
+/// expressions) is rewritten to the unique name. Python 3 gives comprehensions
+/// their own scope, so without the rename a comprehension variable would
+/// clobber a same-named function local. Scoping is respected during the
+/// rewrite: a generator's iterable only sees targets of *earlier* generators,
+/// while its conditions and the element see its own targets too. A nested
+/// comprehension renames its own targets first (it is lowered recursively
+/// before the outer rewrite runs), so an inner target shadowing an outer one
+/// is left alone.
+fn lower_comprehension(
+    kind: IRComprehensionKind,
+    element: &Expr,
+    value: Option<&Expr>,
+    generators: &[rustpython_parser::ast::Comprehension],
+    memory_layout: &mut MemoryLayout,
+) -> Result<IRExpr> {
+    if generators.is_empty() {
+        return Err(anyhow!("comprehension without generators"));
+    }
+
+    let mut rename: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut ir_generators = Vec::with_capacity(generators.len());
+
+    for generator in generators {
+        if generator.is_async {
+            return Err(anyhow!("async comprehensions are not supported"));
+        }
+
+        // The iterable sees only the targets of earlier generators.
+        let mut iterable = lower_expr(&generator.iter, memory_layout)?;
+        rename_vars(&mut iterable, &rename);
+
+        let raw_targets: Vec<String> = match &generator.target {
+            Expr::Name(name) => vec![name.id.to_string()],
+            Expr::Tuple(tuple) => tuple
+                .elts
+                .iter()
+                .map(|elt| match elt {
+                    Expr::Name(name) => Ok(name.id.to_string()),
+                    _ => Err(anyhow!(
+                        "Only simple variable targets supported in comprehensions"
+                    )),
+                })
+                .collect::<Result<_>>()?,
+            _ => {
+                return Err(anyhow!(
+                    "Only simple variable targets supported in comprehensions"
+                ))
+            }
+        };
+
+        let comp_id = memory_layout.comp_var_counter;
+        memory_layout.comp_var_counter += 1;
+        let targets: Vec<String> = raw_targets
+            .iter()
+            .map(|t| format!("__comp{comp_id}_{t}"))
+            .collect();
+        for (orig, renamed) in raw_targets.iter().zip(&targets) {
+            rename.insert(orig.clone(), renamed.clone());
+        }
+
+        let mut conditions = Vec::with_capacity(generator.ifs.len());
+        for condition in &generator.ifs {
+            let mut cond = lower_expr(condition, memory_layout)?;
+            rename_vars(&mut cond, &rename);
+            conditions.push(cond);
+        }
+
+        ir_generators.push(IRGenerator {
+            targets,
+            iterable,
+            conditions,
+        });
+    }
+
+    let mut element_ir = lower_expr(element, memory_layout)?;
+    rename_vars(&mut element_ir, &rename);
+    let value_ir = value
+        .map(|v| -> Result<Box<IRExpr>> {
+            let mut val = lower_expr(v, memory_layout)?;
+            rename_vars(&mut val, &rename);
+            Ok(Box::new(val))
+        })
+        .transpose()?;
+
+    Ok(IRExpr::Comprehension {
+        kind,
+        element: Box::new(element_ir),
+        value: value_ir,
+        generators: ir_generators,
+    })
+}
+
+/// Rewrite every free `Variable`/`Param` reference in `expr` per `map`.
+/// Names bound inside the expression shadow the rewrite: lambda parameters
+/// filter the map for the lambda body, and nested comprehension targets are
+/// already unique (renamed when they were lowered) so they never match.
+fn rename_vars(expr: &mut IRExpr, map: &std::collections::HashMap<String, String>) {
+    if map.is_empty() {
+        return;
+    }
+    match expr {
+        IRExpr::Variable(name) | IRExpr::Param(name) => {
+            if let Some(renamed) = map.get(name) {
+                *name = renamed.clone();
+            }
+        }
+        IRExpr::Const(_) => {}
+        IRExpr::BinaryOp { left, right, .. }
+        | IRExpr::CompareOp { left, right, .. }
+        | IRExpr::BoolOp { left, right, .. } => {
+            rename_vars(left, map);
+            rename_vars(right, map);
+        }
+        IRExpr::UnaryOp { operand, .. } => rename_vars(operand, map),
+        IRExpr::FunctionCall { arguments, .. } => {
+            for arg in arguments {
+                rename_vars(arg, map);
+            }
+        }
+        IRExpr::ListLiteral(items) | IRExpr::SetLiteral(items) | IRExpr::TupleLiteral(items) => {
+            for item in items {
+                rename_vars(item, map);
+            }
+        }
+        IRExpr::DictLiteral(entries) => {
+            for (key, value) in entries {
+                rename_vars(key, map);
+                rename_vars(value, map);
+            }
+        }
+        IRExpr::Indexing { container, index } => {
+            rename_vars(container, map);
+            rename_vars(index, map);
+        }
+        IRExpr::Slicing {
+            container,
+            start,
+            end,
+            step,
+        } => {
+            rename_vars(container, map);
+            for bound in [start, end, step].into_iter().flatten() {
+                rename_vars(bound, map);
+            }
+        }
+        IRExpr::Attribute { object, .. } => rename_vars(object, map),
+        IRExpr::MethodCall {
+            object, arguments, ..
+        } => {
+            rename_vars(object, map);
+            for arg in arguments {
+                rename_vars(arg, map);
+            }
+        }
+        IRExpr::DynamicImportExpr { module_name } => rename_vars(module_name, map),
+        IRExpr::RangeCall { start, stop, step } => {
+            for bound in [start, step].into_iter().flatten() {
+                rename_vars(bound, map);
+            }
+            rename_vars(stop, map);
+        }
+        IRExpr::Lambda { params, body, .. } => {
+            // Lambda parameters shadow outer names inside the body.
+            let filtered: std::collections::HashMap<String, String> = map
+                .iter()
+                .filter(|(name, _)| !params.iter().any(|p| &p.name == *name))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            rename_vars(body, &filtered);
+        }
+        // Only produced by the finalize pass, which runs after every rename;
+        // covered for completeness (captured names are variable references).
+        IRExpr::ClosureMake { captured, .. } => {
+            for name in captured {
+                if let Some(renamed) = map.get(name) {
+                    *name = renamed.clone();
+                }
+            }
+        }
+        IRExpr::Comprehension {
+            element,
+            value,
+            generators,
+            ..
+        } => {
+            rename_vars(element, map);
+            if let Some(value) = value {
+                rename_vars(value, map);
+            }
+            for generator in generators {
+                rename_vars(&mut generator.iterable, map);
+                for condition in &mut generator.conditions {
+                    rename_vars(condition, map);
+                }
+            }
+        }
+    }
 }
 
 /// Lower a Python expression into an IR expression
@@ -2216,35 +2445,37 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
             object: Box::new(lower_expr(&attr.value, memory_layout)?),
             attribute: attr.attr.to_string(),
         }),
-        Expr::ListComp(comp) => {
-            // List comprehension support: [expr for var in iterable if condition]
-            if comp.generators.len() != 1 {
-                return Err(anyhow!(
-                    "Only single generator list comprehensions supported"
-                ));
-            }
-
-            let generator = &comp.generators[0];
-
-            // Get target name (only simple variable targets for now)
-            let var_name = match &generator.target {
-                Expr::Name(name) => name.id.to_string(),
-                _ => {
-                    return Err(anyhow!(
-                        "Only simple variable targets supported in list comprehensions"
-                    ))
-                }
-            };
-
-            // TODO: Handle filter conditions if present (for now, ignore them)
-            // Filters would require runtime conditional evaluation
-
-            Ok(IRExpr::ListComp {
-                expr: Box::new(lower_expr(&comp.elt, memory_layout)?),
-                var_name,
-                iterable: Box::new(lower_expr(&generator.iter, memory_layout)?),
-            })
-        }
+        Expr::ListComp(comp) => lower_comprehension(
+            IRComprehensionKind::List,
+            &comp.elt,
+            None,
+            &comp.generators,
+            memory_layout,
+        ),
+        Expr::SetComp(comp) => lower_comprehension(
+            IRComprehensionKind::Set,
+            &comp.elt,
+            None,
+            &comp.generators,
+            memory_layout,
+        ),
+        Expr::DictComp(comp) => lower_comprehension(
+            IRComprehensionKind::Dict,
+            &comp.key,
+            Some(&comp.value),
+            &comp.generators,
+            memory_layout,
+        ),
+        // A generator expression is materialized eagerly as a list: every
+        // iterable here is finite and the consumers (sum(), for, in) only ever
+        // drain it fully, so eager evaluation is observationally equivalent.
+        Expr::GeneratorExp(comp) => lower_comprehension(
+            IRComprehensionKind::List,
+            &comp.elt,
+            None,
+            &comp.generators,
+            memory_layout,
+        ),
         Expr::JoinedStr(joined_str) => {
             // F-string support: f"string {expr} more"
             // JoinedStr contains a list of values: some are Constant strings, some are FormattedValues (expressions)
