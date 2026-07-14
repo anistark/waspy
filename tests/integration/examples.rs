@@ -701,3 +701,129 @@ fn closures_are_first_class_values() {
     assert_eq!(call_i32(&src, "nested_lambda_captures_param"), 7);
     assert_eq!(call_i32(&src, "closures_built_in_comprehension"), 22);
 }
+
+/// Generators (v0.18.0, #6/#45): a generator suspends at `yield` and resumes
+/// with its state intact, whether the yield sits in a `while` loop, a
+/// `for`-over-range loop, or behind conditionals; `return` ends iteration
+/// early. Each is consumed by a `for` loop.
+#[test]
+fn generators_suspend_and_resume() {
+    let src = read_example("generators.py");
+    // while-loop generator: 0+1+2+3+4.
+    assert_eq!(call_i32(&src, "sum_count_up"), 10);
+    // for-over-range generator: 0+1+4+9.
+    assert_eq!(call_i32(&src, "sum_squares"), 14);
+    // conditional yields with an early return: 0+2+4.
+    assert_eq!(call_i32(&src, "sum_first_evens"), 6);
+}
+
+/// `yield from` delegates to an inner iterable (a range and another
+/// generator), and a generator can drive another generator in its own `for`.
+#[test]
+fn yield_from_delegates() {
+    let src = read_example("generators.py");
+    assert_eq!(call_i32(&src, "sum_chained"), 6);
+    assert_eq!(call_i32(&src, "sum_doubled"), 12);
+}
+
+/// Manual iteration: `next()` pulls values one at a time; `send()` resumes a
+/// `x = yield` expression with the sent value; `close()` exhausts the
+/// generator so a later loop body never runs.
+#[test]
+fn generator_next_send_close() {
+    let src = read_example("generators.py");
+    assert_eq!(call_i32(&src, "manual_next"), 12);
+    assert_eq!(call_i32(&src, "send_accumulates"), 12);
+    assert_eq!(call_i32(&src, "closed_generator_stops"), 0);
+}
+
+/// The custom iterator protocol (#40): a user class with `__iter__`/`__next__`
+/// iterates in a `for` loop and `raise StopIteration` ends it; `break` leaves
+/// a generator drive loop early.
+#[test]
+fn custom_iterator_protocol() {
+    let src = read_example("generators.py");
+    assert_eq!(call_i32(&src, "countdown_sum"), 10);
+    assert_eq!(call_i32(&src, "generator_break_early"), 6);
+}
+
+/// Each generator call builds its own state instance (two live generators
+/// advance independently), and float yields flow through as f64 values.
+#[test]
+fn generator_instances_and_float_yields() {
+    let src = read_example("generators.py");
+    assert_eq!(call_i32(&src, "two_generators_independent"), 10);
+    assert_eq!(call_f64(&src, "sum_halves"), 1.5);
+}
+
+/// Tuple targets in `for` statements: `for a, b in pairs` unpacks each
+/// element, star targets collect the middle slice, and both work over tuple
+/// literals in lists.
+#[test]
+fn for_loop_tuple_targets() {
+    let src = read_example("loop_unpacking.py");
+    assert_eq!(call_i32(&src, "pairs_sum"), 102);
+    assert_eq!(call_i32(&src, "star_target"), 652);
+}
+
+/// `enumerate(xs[, start])` threads a counter alongside the driven iterable —
+/// lists, explicit start values, and ranges.
+#[test]
+fn enumerate_in_for_loops() {
+    let src = read_example("loop_unpacking.py");
+    assert_eq!(call_i32(&src, "enum_sum"), 360);
+    assert_eq!(call_i32(&src, "enum_start"), 161);
+    assert_eq!(call_i32(&src, "enum_range"), 36);
+}
+
+/// `zip(...)` binds one target per sequence and stops at the shortest, for
+/// two and three sequences.
+#[test]
+fn zip_in_for_loops() {
+    let src = read_example("loop_unpacking.py");
+    assert_eq!(call_i32(&src, "zip_sum"), 66);
+    assert_eq!(call_i32(&src, "zip3_sum"), 333);
+}
+
+/// `dict.items()` / `.keys()` / `.values()` iterate the entry slots
+/// positionally.
+#[test]
+fn dict_iteration_in_for_loops() {
+    let src = read_example("loop_unpacking.py");
+    assert_eq!(call_i32(&src, "items_sum"), 660);
+    assert_eq!(call_i32(&src, "keys_values_sum"), 915);
+}
+
+/// The desugared loops compose with generators: `enumerate` and `items()`
+/// loops suspend at `yield` with their counters and dict pointer preserved in
+/// the generator state.
+#[test]
+fn enumerate_and_items_inside_generators() {
+    let src = read_example("loop_unpacking.py");
+    assert_eq!(call_i32(&src, "enum_in_generator"), 33);
+    assert_eq!(call_i32(&src, "items_in_generator"), 41);
+}
+
+/// Suspension across a `try`/`with` frame cannot be resumed by the state
+/// machine, so it is rejected at compile time rather than miscompiled.
+#[test]
+fn yield_inside_try_is_rejected() {
+    let src = "def gen():\n    try:\n        yield 1\n    except ValueError:\n        pass\n";
+    let err = try_compile(src).expect_err("yield inside try must not compile");
+    assert!(
+        err.contains("yield/return inside try/with"),
+        "unexpected error message: {err}"
+    );
+}
+
+/// Generator methods (yield inside a class method) are not supported and fail
+/// loudly instead of compiling a placeholder that silently does nothing.
+#[test]
+fn generator_methods_are_rejected() {
+    let src = "class A:\n    def items(self):\n        yield 1\n";
+    let err = try_compile(src).expect_err("generator method must not compile");
+    assert!(
+        err.contains("generator methods are not supported"),
+        "unexpected error message: {err}"
+    );
+}

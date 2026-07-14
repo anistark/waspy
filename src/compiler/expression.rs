@@ -1876,6 +1876,45 @@ pub fn emit_expr(
             function_name,
             arguments,
         } => {
+            // Iterator-protocol intrinsic (see `ir::generators`): leave the
+            // current StopIteration flag (global 1) on the stack and clear it.
+            if function_name == crate::ir::STOP_CHECK_FN {
+                func.instruction(&Instruction::GlobalGet(1));
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::GlobalSet(1));
+                return IRType::Bool;
+            }
+
+            // Positional dict-entry access backing `for k, v in d.items()`
+            // (see `ir::converter`): entry i's key sits at
+            // HEADER + i*DICT_ENTRY, its value one slot later. Loaded as the
+            // i32 slot word (f64 values keep only their low word — the
+            // existing tuple-unpack limitation).
+            if function_name == crate::ir::DICT_KEY_AT_FN
+                || function_name == crate::ir::DICT_VAL_AT_FN
+            {
+                if let [dict, index] = arguments.as_slice() {
+                    emit_expr(dict, func, ctx, memory_layout, None);
+                    emit_expr(index, func, ctx, memory_layout, Some(&IRType::Int));
+                    func.instruction(&Instruction::I32Const(DICT_ENTRY as i32));
+                    func.instruction(&Instruction::I32Mul);
+                    func.instruction(&Instruction::I32Add);
+                    let slot = if function_name == crate::ir::DICT_VAL_AT_FN {
+                        COLLECTION_SLOT
+                    } else {
+                        0
+                    };
+                    func.instruction(&Instruction::I32Load(MemArg {
+                        offset: (COLLECTION_HEADER + slot) as u64,
+                        align: 2,
+                        memory_index: 0,
+                    }));
+                } else {
+                    func.instruction(&Instruction::I32Const(0));
+                }
+                return IRType::Int;
+            }
+
             // Class instantiation: `ClassName(args)`. Handled before the generic
             // argument emission so the instance pointer (`self`) is the first
             // argument to `__init__` and the user arguments are coerced to their
@@ -2121,22 +2160,25 @@ pub fn emit_expr(
                                 func.instruction(&Instruction::LocalGet(ctx.temp_local));
                                 IRType::Int
                             }
-                            // Lists, dicts, sets and tuples are all pointers that
-                            // store their element/entry count in the first 4 bytes.
-                            IRType::List(_)
-                            | IRType::Dict(_, _)
-                            | IRType::Set(_)
-                            | IRType::Tuple(_) => {
+                            IRType::Float => {
+                                // len() of a scalar is invalid Python; consume
+                                // the value and answer 0.
+                                func.instruction(&Instruction::Drop);
+                                func.instruction(&Instruction::I32Const(0));
+                                IRType::Int
+                            }
+                            // Lists, dicts, sets and tuples are all pointers
+                            // that store their element/entry count in the
+                            // first 4 bytes. An Unknown value (e.g. a
+                            // collection read back out of an instance field)
+                            // is a single i32 word, so treating it as such a
+                            // pointer is the correct default.
+                            _ => {
                                 func.instruction(&Instruction::I32Load(MemArg {
                                     offset: 0,
                                     align: 2,
                                     memory_index: 0,
                                 }));
-                                IRType::Int
-                            }
-                            _ => {
-                                // Unknown type, return 0
-                                func.instruction(&Instruction::I32Const(0));
                                 IRType::Int
                             }
                         }

@@ -198,6 +198,11 @@ pub struct CompilationContext {
     /// Name of the class whose method is currently being compiled, if any.
     /// `super().method(...)` resolves the base class through this.
     pub current_class: Option<String>,
+    /// Resolved return type of the function currently being compiled.
+    /// `raise StopIteration` returns the matching default value (f64 0.0 vs
+    /// i32 0) after setting the stop flag. Set per function in
+    /// `compile_function`.
+    pub current_return_type: IRType,
 }
 
 impl CompilationContext {
@@ -227,6 +232,7 @@ impl CompilationContext {
             closure_max_arity: 0,
             return_self: false,
             current_class: None,
+            current_return_type: IRType::Unknown,
         }
     }
 

@@ -66,6 +66,16 @@ fn infer_field_value_type(value: &IRExpr, params: &HashMap<String, IRType>) -> I
             }
         }
         IRExpr::UnaryOp { operand, .. } => infer_field_value_type(operand, params),
+        // Collection-valued fields (e.g. a dict literal stored by a lifted
+        // generator local) keep their kind so consumers like len() and
+        // indexing know the slot holds a collection pointer.
+        IRExpr::ListLiteral(_) => IRType::List(Box::new(IRType::Unknown)),
+        IRExpr::SetLiteral(_) => IRType::Set(Box::new(IRType::Unknown)),
+        IRExpr::TupleLiteral(_) => IRType::Tuple(Vec::new()),
+        IRExpr::DictLiteral(_) => {
+            IRType::Dict(Box::new(IRType::Unknown), Box::new(IRType::Unknown))
+        }
+        IRExpr::RangeCall { .. } => IRType::Range,
         _ => IRType::Unknown,
     }
 }
@@ -750,6 +760,19 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
             shared: false,
         },
         &ConstExpr::i32_const(runtime_heap_base as i32),
+    );
+
+    // Global 1: the StopIteration flag. Set by `raise StopIteration` (which
+    // also returns from the raising function) and read-and-cleared by the
+    // `__waspy_stop_check` intrinsic, so iterator exhaustion crosses the
+    // `__next__` call boundary.
+    globals.global(
+        GlobalType {
+            val_type: ValType::I32,
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::i32_const(0),
     );
 
     // The closure dispatch table: slot i holds lifted lambda i. Emitted only
