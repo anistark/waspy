@@ -49,6 +49,7 @@ Generate & Optimize
 - Collections: lists, dicts, sets, tuples, and ranges — literals, indexing, methods, and membership (`in`/`not in`), with full-precision f64 elements and hash-table sets
 - Exception handling with `try`/`except`/`finally` and `raise`
 - Comprehensions: list, set, and dict comprehensions with filters, multiple generators, nesting, and `{k: v for k, v in pairs}` unpacking
+- Generators with real state preservation: `yield` suspends and resumes, `yield from` delegates, and `next()`/`send()`/`close()` work; user classes implementing `__iter__`/`__next__` iterate in `for` loops with `StopIteration` ending the loop
 - Closures with full variable capture: lambdas compile to real functions dispatched through a `call_indirect` table, capture enclosing variables (by value), and work as first-class values — returned, passed as arguments, and stored in collections
 - Extended unpacking: `a, *b, c = xs` binds the starred target to the middle slice as a real list
 - Bundled standard library runtime: `sys`, `os` (incl. `os.path`), `math`, `random`, `json`, `re`, `datetime`, `logging`, `collections`, `itertools`, `functools`
@@ -57,7 +58,7 @@ Generate & Optimize
 
 - Object instances are never reclaimed — the bump allocator has no `free`, so every instance lives until the module is torn down and `__del__` is not invoked
 - Collections have a fixed compile-time capacity — growing one past its initial size (e.g. `.append` beyond a literal's length) overflows into the next region; runtime growth/reallocation is not yet implemented
-- Generators do not preserve execution state — `yield` compiles as a placeholder
+- Generators cover the common shapes; `yield` inside `try`/`with` and generator methods (`yield` in a class method) are rejected at compile time, and `close()` skips `GeneratorExit`/`finally` semantics
 - Closures capture by value at creation time — a captured variable mutated after the closure is created keeps its old value inside the closure (Python's late-binding cells are a follow-up); float captures are not yet supported
 - Only stdlib modules import; user-written `.py` modules and file I/O are not supported
 - `with` over a custom context manager does not yet compile ([#5](https://github.com/anistark/waspy/issues/5))
@@ -285,7 +286,6 @@ The path to 1.0 focuses on the remaining correctness and runtime gaps:
 
 - Remaining object-model gaps: virtual dispatch through `self` (vtables) and multiple inheritance
 - Growable collections (runtime reallocation past a literal's fixed capacity) and hashed `dict` lookups (sets already use an open-addressing table)
-- Generators that preserve execution state
 - User-written `.py` module imports, module caching, and file I/O
 - Garbage collection / reference counting for the bump-allocated heap
 

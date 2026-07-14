@@ -1876,6 +1876,15 @@ pub fn emit_expr(
             function_name,
             arguments,
         } => {
+            // Iterator-protocol intrinsic (see `ir::generators`): leave the
+            // current StopIteration flag (global 1) on the stack and clear it.
+            if function_name == crate::ir::STOP_CHECK_FN {
+                func.instruction(&Instruction::GlobalGet(1));
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::GlobalSet(1));
+                return IRType::Bool;
+            }
+
             // Class instantiation: `ClassName(args)`. Handled before the generic
             // argument emission so the instance pointer (`self`) is the first
             // argument to `__init__` and the user arguments are coerced to their

@@ -752,6 +752,19 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
         &ConstExpr::i32_const(runtime_heap_base as i32),
     );
 
+    // Global 1: the StopIteration flag. Set by `raise StopIteration` (which
+    // also returns from the raising function) and read-and-cleared by the
+    // `__waspy_stop_check` intrinsic, so iterator exhaustion crosses the
+    // `__next__` call boundary.
+    globals.global(
+        GlobalType {
+            val_type: ValType::I32,
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::i32_const(0),
+    );
+
     // The closure dispatch table: slot i holds lifted lambda i. Emitted only
     // when the module has lambdas.
     let mut tables = TableSection::new();

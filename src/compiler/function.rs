@@ -27,6 +27,7 @@ pub fn compile_function(
     // `super().method(...)` resolves the base class of the class whose method
     // body is being compiled.
     ctx.current_class = owning_class.map(str::to_string);
+    ctx.current_return_type = return_type.clone();
 
     for param in &ir_func.params {
         ctx.add_local(&param.name, param.param_type.clone());
@@ -110,6 +111,7 @@ fn exception_type_code(name: &str) -> i32 {
         "IndexError" => 5,
         "AttributeError" => 6,
         "RuntimeError" => 7,
+        "StopIteration" => 8,
         _ => 99,
     }
 }
@@ -957,6 +959,30 @@ pub fn compile_body(
             }
 
             IRStatement::Raise { exception } => {
+                // `raise StopIteration` signals iterator exhaustion across the
+                // call boundary: set the module-wide stop flag (global 1) and
+                // return this function's default value. The caller's drive
+                // loop reads the flag through the `__waspy_stop_check`
+                // intrinsic and breaks.
+                let raised_name = match exception {
+                    Some(IRExpr::FunctionCall { function_name, .. }) => {
+                        Some(function_name.as_str())
+                    }
+                    Some(IRExpr::Variable(name)) | Some(IRExpr::Param(name)) => Some(name.as_str()),
+                    _ => None,
+                };
+                if raised_name == Some("StopIteration") {
+                    func.instruction(&Instruction::I32Const(1));
+                    func.instruction(&Instruction::GlobalSet(1));
+                    if matches!(ctx.current_return_type, IRType::Float) {
+                        func.instruction(&Instruction::F64Const(0.0_f64.into()));
+                    } else {
+                        func.instruction(&Instruction::I32Const(0));
+                    }
+                    func.instruction(&Instruction::Return);
+                    continue;
+                }
+
                 // Mark exception as raised by setting exception flag
                 // Try to get existing exception flag variable if in a try block
                 let exception_flag_idx = ctx

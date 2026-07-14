@@ -273,7 +273,11 @@
                     { name: "Per-instance field storage with calculated memory offsets", status: "done", version: "0.7.0" },
                     { name: "Heap-allocated instances — a distinct pointer per instantiation", status: "done", version: "0.13.0" },
                     { name: "Multiple live instances of one class with independent state", status: "done", version: "0.13.0" },
-                    { name: "Instances as first-class values (arguments, factory returns)", status: "done", version: "0.13.0" }
+                    { name: "Instances as first-class values (arguments, factory returns)", status: "done", version: "0.13.0" },
+                    { name: "Single inheritance with super().__init__ / super().method()", status: "done", version: "0.14.0" },
+                    { name: "isinstance / issubclass over the class hierarchy", status: "done", version: "0.14.0" },
+                    { name: "@dataclass with generated __init__ / __eq__ / __repr__", status: "done", version: "0.16.0" },
+                    { name: "Abstract base classes (abc.ABC + @abstractmethod)", status: "done", version: "0.16.0" }
                 ]
             },
             advancedFlow: {
@@ -307,7 +311,7 @@
                 features: [
                     { name: "Set storage with de-duplication & membership (in / not in)", status: "done" },
                     { name: "Dict index assignment with update or append (dict[key] = value)", status: "done" },
-                    { name: "Generator State Management - execution context suspension/resumption", status: "progress" },
+                    { name: "Generator State Management - execution context suspension/resumption", status: "done", version: "0.18.0" },
                     { name: "Dynamic Module Loading - runtime module loading and execution", status: "progress" },
                     { name: "Closure Variable Capture Analysis - detecting and capturing closure variables", status: "done", version: "0.17.0" },
                     { name: "String Transformation in WASM - full character-by-char transformations", status: "progress" }
@@ -381,11 +385,13 @@
             generators: {
                 title: "GENERATORS & ITERATORS",
                 status: "done",
-                version: "0.8.0",
+                version: "0.18.0",
                 features: [
-                    { name: "yield statement & generator functions", status: "done", version: "0.8.0" },
+                    { name: "Generator functions - yield suspends and resumes with state preserved", status: "done", version: "0.18.0" },
+                    { name: "yield from delegation (ranges, lists, other generators)", status: "done", version: "0.18.0" },
+                    { name: "next(), send() with x = yield resume values, and close()", status: "done", version: "0.18.0" },
+                    { name: "Iterator protocol (__iter__, __next__) on user classes with StopIteration", status: "done", version: "0.18.0" },
                     { name: "Generator type tracking (Generator[T])", status: "done", version: "0.8.0" },
-                    { name: "Iterator protocol (__iter__, __next__)", status: "todo" },
                     { name: "range() function implementation - all variants", status: "done", version: "0.8.0" },
                     { name: "for loop iteration over ranges with step support", status: "done", version: "0.8.0" }
                 ]
@@ -436,12 +442,12 @@
             },
             advancedOOP: {
                 title: "ADVANCED OOP",
-                status: "todo",
+                status: "progress",
                 features: [
+                    { name: "Property decorators (@property, @<name>.setter)", status: "done", version: "0.15.0" },
+                    { name: "Static & class methods (@staticmethod, @classmethod with cls factories)", status: "done", version: "0.15.0" },
                     { name: "Multiple inheritance & method resolution", status: "todo" },
-                    { name: "Metaclasses & class creation", status: "todo" },
-                    { name: "Property decorators (@property, @setter)", status: "todo" },
-                    { name: "Static methods (@staticmethod, @classmethod)", status: "todo" }
+                    { name: "Metaclasses & class creation", status: "todo" }
                 ]
             },
             memory: {

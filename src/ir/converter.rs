@@ -116,8 +116,10 @@ pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
     // resolved offsets to emit loads and the data section.
     module.memory_layout = memory_layout;
 
-    // Whole-module checks and rewrites (abstract-class instantiation,
-    // call-site parameter defaults) that need every declaration converted.
+    // Generator lowering first (it synthesizes classes and constructor
+    // bodies the finalize pass must still see), then whole-module checks and
+    // rewrites (abstract-class instantiation, call-site parameter defaults).
+    crate::ir::generators::transform_generators(&mut module)?;
     crate::ir::finalize::finalize_module(&mut module)?;
 
     Ok(module)
@@ -1085,6 +1087,24 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                 match &assign.targets[0] {
                     Expr::Name(name) => {
                         let target = name.id.to_string();
+                        // `x = yield v` suspends, then binds the value passed
+                        // by `send()` (0 for a plain `__next__`), read back
+                        // through the generator's sent-value slot.
+                        if let Expr::Yield(yield_expr) = &*assign.value {
+                            let value = match &yield_expr.value {
+                                Some(v) => Some(lower_expr(v, memory_layout)?),
+                                None => None,
+                            };
+                            ir_statements.push(IRStatement::Yield { value });
+                            ir_statements.push(IRStatement::Assign {
+                                target,
+                                value: IRExpr::Variable(
+                                    crate::ir::generators::GEN_SENT_FIELD.to_string(),
+                                ),
+                                var_type: None,
+                            });
+                            continue;
+                        }
                         let value = lower_expr(&assign.value, memory_layout)?;
                         ir_statements.push(IRStatement::Assign {
                             target,
@@ -1288,6 +1308,23 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                         None
                     };
                     ir_statements.push(IRStatement::Yield { value });
+                } else if let Expr::YieldFrom(yield_from) = &*expr_stmt.value {
+                    // `yield from X` delegates to the inner iterable: lower it
+                    // as `for <tmp> in X: yield <tmp>` and let the generator
+                    // pass drive X through the iterator protocol.
+                    let iterable = lower_expr(&yield_from.value, memory_layout)?;
+                    let target = format!("__yf_{}", memory_layout.comp_var_counter);
+                    memory_layout.comp_var_counter += 1;
+                    ir_statements.push(IRStatement::For {
+                        target: target.clone(),
+                        iterable,
+                        body: Box::new(IRBody {
+                            statements: vec![IRStatement::Yield {
+                                value: Some(IRExpr::Variable(target)),
+                            }],
+                        }),
+                        else_body: None,
+                    });
                 } else if let Some(dynamic_import) =
                     check_for_dynamic_import_expr(&expr_stmt.value, memory_layout)?
                 {
@@ -2014,6 +2051,17 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                                 return Err(anyhow!("range() takes 1 to 3 positional arguments"));
                             }
                         }
+                    }
+
+                    // next(it) advances an iterator: lower to the protocol
+                    // method so the generator pass can dispatch it statically.
+                    if function_name == "next" && call.args.len() == 1 {
+                        let object = lower_expr(&call.args[0], memory_layout)?;
+                        return Ok(IRExpr::MethodCall {
+                            object: Box::new(object),
+                            method_name: "__next__".to_string(),
+                            arguments: Vec::new(),
+                        });
                     }
 
                     // namedtuple() function - returns a class factory
