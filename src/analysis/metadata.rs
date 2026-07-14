@@ -139,5 +139,6 @@ fn type_to_string(ir_type: &ir::IRType) -> String {
         ir::IRType::Date => "datetime.date".to_string(),
         ir::IRType::Time => "datetime.time".to_string(),
         ir::IRType::Timedelta => "datetime.timedelta".to_string(),
+        ir::IRType::File => "file".to_string(),
     }
 }

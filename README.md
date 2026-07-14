@@ -53,6 +53,8 @@ Generate & Optimize
 - Tuple targets in `for` loops (`for a, b in pairs`, star targets included) and the iterator-shaped builtins: `enumerate(xs[, start])`, `zip(...)`, and `dict.items()`/`.keys()`/`.values()`
 - Closures with full variable capture: lambdas compile to real functions dispatched through a `call_indirect` table, capture enclosing variables (by value), and work as first-class values — returned, passed as arguments, and stored in collections
 - Extended unpacking: `a, *b, c = xs` binds the starred target to the middle slice as a real list
+- User-written module imports: `import mod`, `import mod as m`, and `from mod import f [as g]` resolve sibling `.py` files (and `pkg/mod.py` packages) and statically link them into the single output WASM module, with each module compiled exactly once however many import paths reach it
+- File I/O through a documented host interface: `open()`, `read([n])`, `write(s)`, `close()`, and `with open(...) as f:` compile to four imported `waspy_host` functions the embedder provides (browser, Node, or any WASM runtime); modules that never call `open()` import nothing
 - Bundled standard library runtime: `sys`, `os` (incl. `os.path`), `math`, `random`, `json`, `re`, `datetime`, `logging`, `collections`, `itertools`, `functools`
 
 ## Limitations
@@ -61,8 +63,9 @@ Generate & Optimize
 - Collections have a fixed compile-time capacity — growing one past its initial size (e.g. `.append` beyond a literal's length) overflows into the next region; runtime growth/reallocation is not yet implemented
 - Generators cover the common shapes; `yield` inside `try`/`with` and generator methods (`yield` in a class method) are rejected at compile time, and `close()` skips `GeneratorExit`/`finally` semantics
 - Closures capture by value at creation time — a captured variable mutated after the closure is created keeps its old value inside the closure (Python's late-binding cells are a follow-up); float captures are not yet supported
-- Only stdlib modules import; user-written `.py` modules and file I/O are not supported
-- `with` over a custom context manager does not yet compile ([#5](https://github.com/anistark/waspy/issues/5))
+- Imported user modules share one flat namespace in the output module — two modules defining the same function name collide (first definition wins, with a warning)
+- `f.read()` without a size reads up to 64 KiB per call; `open()` modes must be string literals
+- `with` over a custom context manager does not yet compile ([#5](https://github.com/anistark/waspy/issues/5)); `with open(...)` works
 - No garbage collection or reference counting — the bump allocator never frees
 
 ## Installation
@@ -287,7 +290,6 @@ The path to 1.0 focuses on the remaining correctness and runtime gaps:
 
 - Remaining object-model gaps: virtual dispatch through `self` (vtables) and multiple inheritance
 - Growable collections (runtime reallocation past a literal's fixed capacity) and hashed `dict` lookups (sets already use an open-addressing table)
-- User-written `.py` module imports, module caching, and file I/O
 - Garbage collection / reference counting for the bump-allocated heap
 
 ![waspy](./assets/waspy.png)

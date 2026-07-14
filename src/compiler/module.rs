@@ -1,3 +1,4 @@
+use crate::compiler::context::FileIoImports;
 use crate::compiler::context::{ClassInfo, CompilationContext, COLLECTION_HEAP_BASE};
 use crate::compiler::function::{compile_function, resolve_return_type};
 use crate::ir::{
@@ -6,9 +7,10 @@ use crate::ir::{
 };
 use std::collections::{HashMap, HashSet};
 use wasm_encoder::{
-    BlockType, CodeSection, ConstExpr, DataSection, ElementSection, Elements, ExportSection,
-    Function, FunctionSection, GlobalSection, GlobalType, Instruction, MemorySection, MemoryType,
-    Module, RefType, TableSection, TableType, TypeSection, ValType,
+    BlockType, CodeSection, ConstExpr, DataSection, ElementSection, Elements, EntityType,
+    ExportSection, Function, FunctionSection, GlobalSection, GlobalType, ImportSection,
+    Instruction, MemorySection, MemoryType, Module, RefType, TableSection, TableType, TypeSection,
+    ValType,
 };
 
 /// Map IR type to WebAssembly ValType
@@ -338,6 +340,137 @@ fn build_i32_to_str_function(alloc_func_index: u32) -> Function {
     f
 }
 
+/// Does this expression (or any sub-expression) call `open()`?
+fn expr_uses_open(expr: &IRExpr) -> bool {
+    match expr {
+        IRExpr::FunctionCall {
+            function_name,
+            arguments,
+        } => function_name == "open" || arguments.iter().any(expr_uses_open),
+        IRExpr::MethodCall {
+            object, arguments, ..
+        } => expr_uses_open(object) || arguments.iter().any(expr_uses_open),
+        IRExpr::BinaryOp { left, right, .. }
+        | IRExpr::CompareOp { left, right, .. }
+        | IRExpr::BoolOp { left, right, .. } => expr_uses_open(left) || expr_uses_open(right),
+        IRExpr::UnaryOp { operand, .. } => expr_uses_open(operand),
+        IRExpr::ListLiteral(items) | IRExpr::SetLiteral(items) | IRExpr::TupleLiteral(items) => {
+            items.iter().any(expr_uses_open)
+        }
+        IRExpr::DictLiteral(entries) => entries
+            .iter()
+            .any(|(k, v)| expr_uses_open(k) || expr_uses_open(v)),
+        IRExpr::Indexing { container, index } => expr_uses_open(container) || expr_uses_open(index),
+        IRExpr::Slicing {
+            container,
+            start,
+            end,
+            step,
+        } => {
+            expr_uses_open(container)
+                || [start, end, step]
+                    .into_iter()
+                    .flatten()
+                    .any(|e| expr_uses_open(e))
+        }
+        IRExpr::Attribute { object, .. } => expr_uses_open(object),
+        IRExpr::Comprehension {
+            element,
+            value,
+            generators,
+            ..
+        } => {
+            expr_uses_open(element)
+                || value.as_deref().is_some_and(expr_uses_open)
+                || generators
+                    .iter()
+                    .any(|g| expr_uses_open(&g.iterable) || g.conditions.iter().any(expr_uses_open))
+        }
+        IRExpr::RangeCall { start, stop, step } => {
+            expr_uses_open(stop)
+                || [start, step]
+                    .into_iter()
+                    .flatten()
+                    .any(|e| expr_uses_open(e))
+        }
+        IRExpr::Lambda { body, .. } => expr_uses_open(body),
+        IRExpr::DynamicImportExpr { module_name } => expr_uses_open(module_name),
+        IRExpr::Const(_) | IRExpr::Param(_) | IRExpr::Variable(_) | IRExpr::ClosureMake { .. } => {
+            false
+        }
+    }
+}
+
+/// Does this body (recursively) call `open()` anywhere?
+fn body_uses_open(body: &IRBody) -> bool {
+    body.statements.iter().any(|stmt| match stmt {
+        IRStatement::Return(expr) => expr.as_ref().is_some_and(expr_uses_open),
+        IRStatement::Assign { value, .. } | IRStatement::AugAssign { value, .. } => {
+            expr_uses_open(value)
+        }
+        IRStatement::Expression(expr) => expr_uses_open(expr),
+        IRStatement::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            expr_uses_open(condition)
+                || body_uses_open(then_body)
+                || else_body.as_deref().is_some_and(body_uses_open)
+        }
+        IRStatement::While { condition, body } => expr_uses_open(condition) || body_uses_open(body),
+        IRStatement::For {
+            iterable,
+            body,
+            else_body,
+            ..
+        } => {
+            expr_uses_open(iterable)
+                || body_uses_open(body)
+                || else_body.as_deref().is_some_and(body_uses_open)
+        }
+        IRStatement::With {
+            context_expr, body, ..
+        } => expr_uses_open(context_expr) || body_uses_open(body),
+        IRStatement::TryExcept {
+            try_body,
+            except_handlers,
+            finally_body,
+        } => {
+            body_uses_open(try_body)
+                || except_handlers.iter().any(|h| body_uses_open(&h.body))
+                || finally_body.as_deref().is_some_and(body_uses_open)
+        }
+        IRStatement::AttributeAssign { object, value, .. }
+        | IRStatement::AttributeAugAssign { object, value, .. } => {
+            expr_uses_open(object) || expr_uses_open(value)
+        }
+        IRStatement::IndexAssign {
+            container,
+            index,
+            value,
+        } => expr_uses_open(container) || expr_uses_open(index) || expr_uses_open(value),
+        IRStatement::TupleUnpack { value, .. } => expr_uses_open(value),
+        IRStatement::Raise { exception } => exception.as_ref().is_some_and(expr_uses_open),
+        IRStatement::Yield { value } => value.as_ref().is_some_and(expr_uses_open),
+        IRStatement::DynamicImport { module_name, .. } => expr_uses_open(module_name),
+        IRStatement::ImportModule { .. } | IRStatement::Break | IRStatement::Continue => false,
+    })
+}
+
+/// Does the module use file I/O anywhere (an `open()` call in any function,
+/// method, or module-variable initializer)? Only then is the `waspy_host`
+/// import section emitted, so programs without file I/O keep instantiating
+/// with no imports at all.
+fn module_uses_file_io(ir_module: &IRModule) -> bool {
+    ir_module.functions.iter().any(|f| body_uses_open(&f.body))
+        || ir_module
+            .classes
+            .iter()
+            .any(|c| c.methods.iter().any(|m| body_uses_open(&m.body)))
+        || ir_module.variables.iter().any(|v| expr_uses_open(&v.value))
+}
+
 /// Compile an IR module into WebAssembly binary format
 pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
     let mut module = Module::new();
@@ -349,6 +482,42 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
     // Register module-level variables so functions can inline their values.
     for var in &ir_module.variables {
         ctx.add_module_var(&var.name, var.var_type.clone(), var.value.clone());
+    }
+
+    // Imported user-written modules are statically linked into this single
+    // module by the multi-file merge, so record their bindings for call-site
+    // resolution: `import mod [as m]` binds a module-namespace name (making
+    // `mod.f(...)` resolve to the merged `f`), and `from mod import f as g`
+    // aliases `g` to the merged `f`.
+    for imp in &ir_module.imports {
+        if crate::stdlib::is_stdlib_module(&imp.module) || imp.is_dynamic {
+            continue;
+        }
+        if imp.is_from_import {
+            if let (Some(name), Some(alias)) = (&imp.name, &imp.alias) {
+                if name != "*" {
+                    ctx.import_aliases.insert(alias.clone(), name.clone());
+                }
+            }
+        } else {
+            let binding = imp.alias.clone().unwrap_or_else(|| imp.module.clone());
+            ctx.user_modules.insert(binding, imp.module.clone());
+        }
+    }
+
+    // File I/O (#25): when the program calls `open()` anywhere, the module
+    // imports the four `waspy_host` functions. Imported functions occupy the
+    // lowest indices of the function index space, so every defined function's
+    // index shifts up by the import count.
+    let uses_file_io = module_uses_file_io(ir_module);
+    let import_count: u32 = if uses_file_io { 4 } else { 0 };
+    if uses_file_io {
+        ctx.file_io = Some(FileIoImports {
+            open: 0,
+            read: 1,
+            write: 2,
+            close: 3,
+        });
     }
 
     // Resolve each function's (and method's) return type up front, inferring
@@ -394,10 +563,11 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
     // The runtime helpers — allocator `__alloc`, instance allocator
     // `__alloc_obj`, and decimal renderer `__i32_to_str` — are appended after
     // all user functions and methods, so they take the next three function
-    // (and type) indices. Record them so codegen can emit calls to each.
-    ctx.alloc_func_index = total_function_count as u32;
-    ctx.alloc_obj_func_index = total_function_count as u32 + 1;
-    ctx.i32_to_str_func_index = total_function_count as u32 + 2;
+    // indices (offset by any host imports, which occupy the lowest indices).
+    // Record them so codegen can emit calls to each.
+    ctx.alloc_func_index = import_count + total_function_count as u32;
+    ctx.alloc_obj_func_index = import_count + total_function_count as u32 + 1;
+    ctx.i32_to_str_func_index = import_count + total_function_count as u32 + 2;
 
     // Create function types for module functions
     for func in &ir_module.functions {
@@ -466,7 +636,36 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
         }
     }
 
+    // Types for the `waspy_host` file-I/O imports, appended after every other
+    // type so the existing "defined function i has type i" mapping is
+    // untouched. `open`/`read`/`write` share the 3-arg shape; `close` takes
+    // one argument.
+    let mut host_imports = ImportSection::new();
+    if uses_file_io {
+        let closure_type_count = ctx
+            .closure_type_base
+            .map(|_| ctx.closure_max_arity + 1)
+            .unwrap_or(0);
+        let host3_type = total_function_count as u32 + 3 + closure_type_count;
+        let host1_type = host3_type + 1;
+        types
+            .ty()
+            .function([ValType::I32, ValType::I32, ValType::I32], [ValType::I32]);
+        types.ty().function([ValType::I32], [ValType::I32]);
+
+        // Import order fixes the function indices recorded in `ctx.file_io`:
+        // open=0, read=1, write=2, close=3.
+        host_imports.import("waspy_host", "open", EntityType::Function(host3_type));
+        host_imports.import("waspy_host", "read", EntityType::Function(host3_type));
+        host_imports.import("waspy_host", "write", EntityType::Function(host3_type));
+        host_imports.import("waspy_host", "close", EntityType::Function(host1_type));
+    }
+
     module.section(&types);
+    // The import section must sit between the type and function sections.
+    if uses_file_io {
+        module.section(&host_imports);
+    }
 
     // Build function section (one entry per user function/method, referencing
     // the matching type, plus trailing entries for `__alloc` / `__alloc_obj`).
@@ -482,8 +681,9 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
     // Export section - export both functions and memory
     let mut exports = ExportSection::new();
 
-    // Register module functions
-    let mut func_idx = 0u32;
+    // Register module functions. Defined functions start after any host
+    // imports in the function index space.
+    let mut func_idx = import_count;
     for func in &ir_module.functions {
         // Register function in context
         let param_types = func.params.iter().map(|p| p.param_type.clone()).collect();
@@ -787,7 +987,10 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
             maximum: Some(lambda_functions.len() as u64),
             shared: false,
         });
-        let func_indices: Vec<u32> = lambda_functions.iter().map(|(idx, _)| *idx).collect();
+        let func_indices: Vec<u32> = lambda_functions
+            .iter()
+            .map(|(idx, _)| *idx + import_count)
+            .collect();
         elements.active(
             None,
             &ConstExpr::i32_const(0),

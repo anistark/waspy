@@ -116,12 +116,39 @@ pub struct ClassInfo {
     pub instance_size: u32,                  // size of instance in bytes
 }
 
+/// WASM function indices of the `waspy_host` file-I/O imports. Present only
+/// when the module actually uses file operations — an import section is
+/// emitted solely in that case, so modules without file I/O keep instantiating
+/// with an empty import object.
+#[derive(Clone, Copy)]
+pub struct FileIoImports {
+    /// `waspy_host.open(path_ptr, path_len, flags) -> fd` (-1 on failure).
+    pub open: u32,
+    /// `waspy_host.read(fd, buf_ptr, len) -> bytes_read` (0 = EOF, <0 error).
+    pub read: u32,
+    /// `waspy_host.write(fd, buf_ptr, len) -> bytes_written` (<0 error).
+    pub write: u32,
+    /// `waspy_host.close(fd) -> status` (0 = ok).
+    pub close: u32,
+}
+
 /// Compiled Local variables and function types
 pub struct CompilationContext {
     pub locals_map: HashMap<String, LocalInfo>,
     pub local_count: u32,
     pub function_map: HashMap<String, FunctionInfo>,
     pub class_map: HashMap<String, ClassInfo>,
+    /// Imported user-written modules: binding name in this namespace (the
+    /// module name, or its `import mod as m` alias) -> real module name. A
+    /// user module's functions/classes/constants are statically linked into
+    /// this single WASM module, so `mod.f(...)` resolves to the merged `f`.
+    pub user_modules: HashMap<String, String>,
+    /// `from mod import name as alias` bindings for user modules:
+    /// alias -> real (merged) function or class name.
+    pub import_aliases: HashMap<String, String>,
+    /// File-I/O host import indices; `Some` only when the module uses file
+    /// operations (an `open()` call somewhere in its IR).
+    pub file_io: Option<FileIoImports>,
     /// Module-level variables, by name -> (declared type, initializer). Read
     /// references to these are inlined by emitting the initializer expression.
     pub module_vars: HashMap<String, (Option<IRType>, IRExpr)>,
@@ -215,6 +242,9 @@ impl CompilationContext {
             local_count: 0,
             function_map: HashMap::new(),
             class_map: HashMap::new(),
+            user_modules: HashMap::new(),
+            import_aliases: HashMap::new(),
+            file_io: None,
             module_vars: HashMap::new(),
             temp_local: 0,
             temp_local_f64: 0,
@@ -234,6 +264,19 @@ impl CompilationContext {
             current_class: None,
             current_return_type: IRType::Unknown,
         }
+    }
+
+    /// Resolve a called or instantiated name through the module's
+    /// `from mod import x as y` aliases. A real definition (function or
+    /// class) of the name itself always wins over an alias.
+    pub fn resolve_import_alias<'a>(&'a self, name: &'a str) -> &'a str {
+        if self.function_map.contains_key(name) || self.class_map.contains_key(name) {
+            return name;
+        }
+        self.import_aliases
+            .get(name)
+            .map(|s| s.as_str())
+            .unwrap_or(name)
     }
 
     /// True if `sub` is `base` or reaches `base` by walking single-inheritance

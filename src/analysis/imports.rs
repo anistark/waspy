@@ -1,7 +1,9 @@
 //! Module for analyzing Python imports.
 
-use std::collections::VecDeque;
-use std::path::Path;
+use anyhow::{Context, Result};
+use std::collections::{HashSet, VecDeque};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 /// Extract import statements from Python code
 pub fn extract_imports(content: &str) -> Vec<ImportInfo> {
@@ -206,6 +208,90 @@ pub enum ImportType {
     From,
     RelativeSingle,
     RelativeMultiple(usize),
+}
+
+/// Resolve a module name to a `.py` file relative to `base_dir`.
+///
+/// `foo` resolves to `<base_dir>/foo.py` or `<base_dir>/foo/__init__.py`;
+/// a dotted name like `pkg.mod` resolves to `<base_dir>/pkg/mod.py` (or the
+/// package's `__init__.py`). Returns `None` when no such file exists — the
+/// import is then either a stdlib module or genuinely unresolvable.
+pub fn resolve_module_file(base_dir: &Path, module_name: &str) -> Option<PathBuf> {
+    let relative: PathBuf = module_name.split('.').collect();
+
+    let direct = base_dir.join(&relative).with_extension("py");
+    if direct.is_file() {
+        return Some(direct);
+    }
+
+    let package_init = base_dir.join(&relative).join("__init__.py");
+    if package_init.is_file() {
+        return Some(package_init);
+    }
+
+    None
+}
+
+/// Resolve every user-written module reachable from an entry file.
+///
+/// Walks the entry source's imports (and, transitively, the imports of each
+/// resolved module), skipping stdlib modules, and reads each local `.py` file
+/// found next to the entry file. Each module is visited **once** no matter how
+/// many import paths reach it (module caching, #41): a module re-imported by
+/// several files appears a single time in the result, so it is compiled and
+/// its module-level state merged only once.
+///
+/// Returns `(module_name, file_path, source)` triples in discovery (BFS)
+/// order, excluding the entry file itself. An import that is neither stdlib
+/// nor resolvable locally is skipped with a warning, matching the compiler's
+/// existing permissiveness toward unsupported imports.
+pub fn resolve_user_modules(
+    entry_path: &Path,
+    entry_source: &str,
+) -> Result<Vec<(String, PathBuf, String)>> {
+    let base_dir = entry_path.parent().unwrap_or_else(|| Path::new("."));
+    let entry_module = entry_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let mut resolved = Vec::new();
+    let mut visited: HashSet<String> = HashSet::new();
+    visited.insert(entry_module);
+
+    let mut queue: VecDeque<String> = VecDeque::new();
+    for import in extract_imports(entry_source) {
+        queue.push_back(import.module_name);
+    }
+
+    while let Some(module_name) = queue.pop_front() {
+        // Relative imports (`from . import x`) carry leading dots; resolve
+        // them against the same base directory.
+        let clean_name = module_name.trim_start_matches('.');
+        if clean_name.is_empty() || crate::stdlib::is_stdlib_module(clean_name) {
+            continue;
+        }
+        if !visited.insert(clean_name.to_string()) {
+            continue; // Already resolved: compiled once, reused (#41).
+        }
+
+        let Some(file_path) = resolve_module_file(base_dir, clean_name) else {
+            crate::log_warn!("Unresolved import '{clean_name}': no local module file found");
+            continue;
+        };
+
+        let source = fs::read_to_string(&file_path)
+            .with_context(|| format!("Failed to read module file: {}", file_path.display()))?;
+
+        // Follow this module's own imports before recording it.
+        for import in extract_imports(&source) {
+            queue.push_back(import.module_name);
+        }
+
+        resolved.push((clean_name.to_string(), file_path, source));
+    }
+
+    Ok(resolved)
 }
 
 /// Convert file path to Python module path

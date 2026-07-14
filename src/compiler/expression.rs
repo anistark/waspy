@@ -1876,6 +1876,13 @@ pub fn emit_expr(
             function_name,
             arguments,
         } => {
+            // `from mod import f as g` on a user-written module (#41): calls
+            // to `g` resolve to the merged `f` — the imported module's
+            // definitions are statically linked into this single WASM module.
+            // A real definition named `g` always wins over the alias.
+            let resolved_alias = ctx.resolve_import_alias(function_name).to_string();
+            let function_name = &resolved_alias;
+
             // Iterator-protocol intrinsic (see `ir::generators`): leave the
             // current StopIteration flag (global 1) on the stack and clear it.
             if function_name == crate::ir::STOP_CHECK_FN {
@@ -2182,6 +2189,52 @@ pub fn emit_expr(
                                 IRType::Int
                             }
                         }
+                    }
+                    "open" => {
+                        // open(path[, mode]) -> file (#25). The path's
+                        // (offset, length) pair feeds `waspy_host.open`
+                        // directly; the mode must be a string literal and is
+                        // folded to host flag bits at compile time (a fresh
+                        // "r"/"w" literal need not be interned in memory).
+                        if let Some(io) = ctx.file_io {
+                            // The generic argument emission above already
+                            // pushed every argument; discard everything after
+                            // the path pair (the mode, if present).
+                            for t in arg_types.iter().skip(1) {
+                                match t {
+                                    IRType::String | IRType::Bytes => {
+                                        func.instruction(&Instruction::Drop);
+                                        func.instruction(&Instruction::Drop);
+                                    }
+                                    _ => {
+                                        func.instruction(&Instruction::Drop);
+                                    }
+                                }
+                            }
+                            let flags = arguments
+                                .get(1)
+                                .map(file_mode_flags)
+                                .unwrap_or(FILE_FLAG_READ);
+                            func.instruction(&Instruction::I32Const(flags));
+                            func.instruction(&Instruction::Call(io.open));
+                        } else {
+                            // Unreachable in practice: the module scan emits
+                            // the host imports whenever `open` appears. Keep
+                            // the stack balanced regardless.
+                            for t in &arg_types {
+                                match t {
+                                    IRType::String | IRType::Bytes => {
+                                        func.instruction(&Instruction::Drop);
+                                        func.instruction(&Instruction::Drop);
+                                    }
+                                    _ => {
+                                        func.instruction(&Instruction::Drop);
+                                    }
+                                }
+                            }
+                            func.instruction(&Instruction::I32Const(-1));
+                        }
+                        IRType::File
                     }
                     "print" => {
                         // Pop the arguments off the stack
@@ -3040,6 +3093,29 @@ pub fn emit_expr(
             }
         }
         IRExpr::Attribute { object, attribute } => {
+            // A constant read through an imported user module's namespace
+            // (#41): `mod.CONST` (or `m.CONST` via an alias). Module-level
+            // variables from every merged file share one namespace, so inline
+            // the merged variable's initializer, exactly like a plain
+            // module-variable read. A local of the same name shadows the
+            // module binding.
+            if let IRExpr::Variable(name) = &**object {
+                if ctx.get_local_info(name).is_none() && ctx.user_modules.contains_key(name) {
+                    if ctx.get_module_var(attribute).is_some() {
+                        return emit_expr(
+                            &IRExpr::Variable(attribute.clone()),
+                            func,
+                            ctx,
+                            memory_layout,
+                            expected_type,
+                        );
+                    }
+                    // Unknown attribute on a user module: yield 0.
+                    func.instruction(&Instruction::I32Const(0));
+                    return IRType::Unknown;
+                }
+            }
+
             // Resolve a stdlib attribute, whether on a module (`os.sep`) or a
             // submodule (`os.path.sep`, where `object` is itself `os.path`).
             let stdlib_value = match &**object {
@@ -3239,6 +3315,27 @@ pub fn emit_expr(
                     // No base or unknown method: evaluate nothing, yield 0.
                     func.instruction(&Instruction::I32Const(0));
                     return IRType::Unknown;
+                }
+            }
+
+            // A call through an imported user module's namespace (#41):
+            // `mod.f(...)`, or `m.f(...)` with `import mod as m`. The
+            // module's functions and classes are statically linked into this
+            // single WASM module by the multi-file merge, so compile it as a
+            // plain call (or class instantiation) of the merged name. A local
+            // variable of the same name shadows the module binding.
+            if let IRExpr::Variable(name) = &**object {
+                if ctx.get_local_info(name).is_none() && ctx.user_modules.contains_key(name) {
+                    return emit_expr(
+                        &IRExpr::FunctionCall {
+                            function_name: method_name.clone(),
+                            arguments: arguments.clone(),
+                        },
+                        func,
+                        ctx,
+                        memory_layout,
+                        expected_type,
+                    );
                 }
             }
 
@@ -4913,6 +5010,9 @@ pub fn emit_expr(
                         }
                     }
                 }
+                IRType::File => {
+                    emit_file_method_call(func, ctx, memory_layout, method_name, arguments)
+                }
                 IRType::List(_element_type) => emit_list_method_call(
                     func,
                     ctx,
@@ -5276,6 +5376,258 @@ pub fn emit_float_modulo_operation(func: &mut Function) {
 }
 
 /// Emit WebAssembly instructions for list method calls
+/// Host file-open flag bits — the `flags` argument of `waspy_host.open`,
+/// folded at compile time from the Python mode string ("r", "w", "a", "rb",
+/// "w+", ...). Part of the documented host interface (#25).
+pub const FILE_FLAG_READ: i32 = 1;
+pub const FILE_FLAG_WRITE: i32 = 2;
+pub const FILE_FLAG_APPEND: i32 = 4;
+pub const FILE_FLAG_BINARY: i32 = 8;
+pub const FILE_FLAG_UPDATE: i32 = 16;
+
+/// Default byte cap for a size-less `f.read()`: one WASM page.
+const FILE_READ_DEFAULT_CAP: i32 = 65536;
+
+/// Fold a compile-time `open()` mode string into host flag bits. A
+/// non-literal (or unrecognized) mode falls back to read-only.
+fn file_mode_flags(mode: &IRExpr) -> i32 {
+    let IRExpr::Const(IRConstant::String(mode)) = mode else {
+        return FILE_FLAG_READ;
+    };
+    let mut flags = 0;
+    for ch in mode.chars() {
+        flags |= match ch {
+            'r' => FILE_FLAG_READ,
+            'w' => FILE_FLAG_WRITE,
+            'a' => FILE_FLAG_APPEND,
+            'b' => FILE_FLAG_BINARY,
+            '+' => FILE_FLAG_UPDATE,
+            _ => 0,
+        };
+    }
+    if flags & (FILE_FLAG_READ | FILE_FLAG_WRITE | FILE_FLAG_APPEND) == 0 {
+        flags |= FILE_FLAG_READ;
+    }
+    flags
+}
+
+/// Emit a method call on a file object (#25). The file descriptor (the file
+/// value's single i32 word) is already on the stack. Supported: `read([n])`,
+/// `write(s)`, `close()`, `flush()`. Each lowers to the `waspy_host` imports;
+/// scratch locals are used only across straight-line sequences with no nested
+/// `emit_expr`, per the scratch-local discipline.
+fn emit_file_method_call(
+    func: &mut Function,
+    ctx: &CompilationContext,
+    memory_layout: &MemoryLayout,
+    method_name: &str,
+    arguments: &[IRExpr],
+) -> IRType {
+    let mem = |offset: u64| MemArg {
+        offset,
+        align: 2,
+        memory_index: 0,
+    };
+
+    let Some(io) = ctx.file_io else {
+        // A File-typed value in a module whose IR never calls `open()` (so no
+        // host imports were emitted). Keep the stack balanced and yield the
+        // method's usual result shape.
+        func.instruction(&Instruction::Drop); // fd
+        for arg in arguments {
+            let t = emit_expr(arg, func, ctx, memory_layout, None);
+            func.instruction(&Instruction::Drop);
+            if matches!(t, IRType::String | IRType::Bytes) {
+                func.instruction(&Instruction::Drop);
+            }
+        }
+        return match method_name {
+            "read" => {
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32Const(0));
+                IRType::String
+            }
+            "write" => {
+                func.instruction(&Instruction::I32Const(0));
+                IRType::Int
+            }
+            "close" | "flush" => IRType::None,
+            _ => {
+                func.instruction(&Instruction::I32Const(0));
+                IRType::Unknown
+            }
+        };
+    };
+
+    match method_name {
+        "read" => {
+            // read([n]) -> str: allocate a fresh [len][bytes][nul] blob and
+            // fill it with `waspy_host.read` calls until the cap is reached
+            // or the host reports EOF (n <= 0). Python's size-less read()
+            // means "read everything"; here it reads up to one page — the
+            // documented v0.19 cap. Scratch: t+0 fd, t+1 cap, t+2 blob base,
+            // t+3 total read, t+4 last chunk size.
+            let (t0, t1, t2, t3, t4) = (
+                ctx.temp_local,
+                ctx.temp_local + 1,
+                ctx.temp_local + 2,
+                ctx.temp_local + 3,
+                ctx.temp_local + 4,
+            );
+            // Cap: explicit size argument, or the default page. Emitted while
+            // the fd is still on the stack (before any scratch store), so a
+            // nested expression can't clobber our locals.
+            if let Some(size_arg) = arguments.first() {
+                let t = emit_expr(size_arg, func, ctx, memory_layout, Some(&IRType::Int));
+                if t == IRType::Float {
+                    func.instruction(&Instruction::I32TruncF64S);
+                }
+            } else {
+                func.instruction(&Instruction::I32Const(FILE_READ_DEFAULT_CAP));
+            }
+            func.instruction(&Instruction::LocalSet(t1)); // cap
+            func.instruction(&Instruction::LocalSet(t0)); // fd
+
+            // Python's read(-1) (and any negative size) means "read all":
+            // widen to the default cap.
+            func.instruction(&Instruction::LocalGet(t1));
+            func.instruction(&Instruction::I32Const(0));
+            func.instruction(&Instruction::I32LtS);
+            func.instruction(&Instruction::If(BlockType::Empty));
+            func.instruction(&Instruction::I32Const(FILE_READ_DEFAULT_CAP));
+            func.instruction(&Instruction::LocalSet(t1));
+            func.instruction(&Instruction::End);
+
+            // base = __alloc(prefix + cap + 1 for the NUL)
+            func.instruction(&Instruction::LocalGet(t1));
+            func.instruction(&Instruction::I32Const(STRING_LEN_PREFIX as i32 + 1));
+            func.instruction(&Instruction::I32Add);
+            func.instruction(&Instruction::Call(ctx.alloc_func_index));
+            func.instruction(&Instruction::LocalSet(t2));
+
+            // total = 0
+            func.instruction(&Instruction::I32Const(0));
+            func.instruction(&Instruction::LocalSet(t3));
+
+            // while total < cap: n = read(fd, base + prefix + total,
+            // cap - total); if n <= 0 break; total += n
+            func.instruction(&Instruction::Block(BlockType::Empty));
+            func.instruction(&Instruction::Loop(BlockType::Empty));
+            func.instruction(&Instruction::LocalGet(t3));
+            func.instruction(&Instruction::LocalGet(t1));
+            func.instruction(&Instruction::I32GeS);
+            func.instruction(&Instruction::BrIf(1));
+            func.instruction(&Instruction::LocalGet(t0));
+            func.instruction(&Instruction::LocalGet(t2));
+            func.instruction(&Instruction::I32Const(STRING_LEN_PREFIX as i32));
+            func.instruction(&Instruction::I32Add);
+            func.instruction(&Instruction::LocalGet(t3));
+            func.instruction(&Instruction::I32Add);
+            func.instruction(&Instruction::LocalGet(t1));
+            func.instruction(&Instruction::LocalGet(t3));
+            func.instruction(&Instruction::I32Sub);
+            func.instruction(&Instruction::Call(io.read));
+            func.instruction(&Instruction::LocalTee(t4));
+            func.instruction(&Instruction::I32Const(0));
+            func.instruction(&Instruction::I32LeS);
+            func.instruction(&Instruction::BrIf(1));
+            func.instruction(&Instruction::LocalGet(t3));
+            func.instruction(&Instruction::LocalGet(t4));
+            func.instruction(&Instruction::I32Add);
+            func.instruction(&Instruction::LocalSet(t3));
+            func.instruction(&Instruction::Br(0));
+            func.instruction(&Instruction::End); // loop
+            func.instruction(&Instruction::End); // block
+
+            // Stamp the length prefix so collection read-back and len() work
+            // like every other runtime-built string.
+            func.instruction(&Instruction::LocalGet(t2));
+            func.instruction(&Instruction::LocalGet(t3));
+            func.instruction(&Instruction::I32Store(mem(0)));
+
+            // Result pair: (base + prefix, total)
+            func.instruction(&Instruction::LocalGet(t2));
+            func.instruction(&Instruction::I32Const(STRING_LEN_PREFIX as i32));
+            func.instruction(&Instruction::I32Add);
+            func.instruction(&Instruction::LocalGet(t3));
+            IRType::String
+        }
+        "write" => {
+            // write(s) -> int (bytes written). Scratch: t+0 fd, t+1 offset,
+            // t+2 length — stored only after every nested emit is done.
+            let (t0, t1, t2) = (ctx.temp_local, ctx.temp_local + 1, ctx.temp_local + 2);
+            match arguments.first() {
+                Some(arg) => {
+                    let t = emit_expr(arg, func, ctx, memory_layout, None);
+                    match t {
+                        IRType::String | IRType::Bytes => {
+                            // Stack: fd, offset, length.
+                            func.instruction(&Instruction::LocalSet(t2));
+                            func.instruction(&Instruction::LocalSet(t1));
+                            func.instruction(&Instruction::LocalSet(t0));
+                            func.instruction(&Instruction::LocalGet(t0));
+                            func.instruction(&Instruction::LocalGet(t1));
+                            func.instruction(&Instruction::LocalGet(t2));
+                            func.instruction(&Instruction::Call(io.write));
+                        }
+                        IRType::Float => {
+                            // Not writable; consume and report 0 bytes.
+                            func.instruction(&Instruction::Drop);
+                            func.instruction(&Instruction::Drop); // fd
+                            func.instruction(&Instruction::I32Const(0));
+                        }
+                        _ => {
+                            // A single-word value (e.g. a string read back out
+                            // of a collection slot) is a blob offset; recover
+                            // its length from the prefix, the standard
+                            // convention.
+                            func.instruction(&Instruction::LocalSet(t1));
+                            func.instruction(&Instruction::LocalSet(t0));
+                            func.instruction(&Instruction::LocalGet(t0));
+                            func.instruction(&Instruction::LocalGet(t1));
+                            func.instruction(&Instruction::LocalGet(t1));
+                            func.instruction(&Instruction::I32Const(STRING_LEN_PREFIX as i32));
+                            func.instruction(&Instruction::I32Sub);
+                            func.instruction(&Instruction::I32Load(mem(0)));
+                            func.instruction(&Instruction::Call(io.write));
+                        }
+                    }
+                }
+                None => {
+                    func.instruction(&Instruction::Drop); // fd
+                    func.instruction(&Instruction::I32Const(0));
+                }
+            }
+            IRType::Int
+        }
+        "close" => {
+            // close() -> None. The host result is dropped; None pushes
+            // nothing (the Expression-statement convention).
+            func.instruction(&Instruction::Call(io.close));
+            func.instruction(&Instruction::Drop);
+            IRType::None
+        }
+        "flush" => {
+            // The host interface is unbuffered; flush is a no-op.
+            func.instruction(&Instruction::Drop); // fd
+            IRType::None
+        }
+        _ => {
+            // Unknown file method: consume everything, yield 0.
+            func.instruction(&Instruction::Drop); // fd
+            for arg in arguments {
+                let t = emit_expr(arg, func, ctx, memory_layout, None);
+                func.instruction(&Instruction::Drop);
+                if matches!(t, IRType::String | IRType::Bytes) {
+                    func.instruction(&Instruction::Drop);
+                }
+            }
+            func.instruction(&Instruction::I32Const(0));
+            IRType::Unknown
+        }
+    }
+}
+
 pub fn emit_list_method_call(
     func: &mut Function,
     ctx: &CompilationContext,

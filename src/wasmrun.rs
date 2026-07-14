@@ -166,10 +166,7 @@ impl WasmBuilder for WaspyBuilder {
     }
 
     fn build(&self, config: &BuildConfig) -> CompilationResult<BuildResult> {
-        use crate::{
-            compile_python_project_with_options, compile_python_to_wasm_with_options,
-            CompilerOptions,
-        };
+        use crate::{compile_python_project_with_options, CompilerOptions};
 
         let start_time = std::time::Instant::now();
 
@@ -189,15 +186,9 @@ impl WasmBuilder for WaspyBuilder {
         let input_path = std::path::Path::new(&config.input);
 
         let wasm_bytes = if input_path.is_file() {
-            // Single Python file
-            let source = std::fs::read_to_string(&config.input).map_err(|e| {
-                CompilationError::BuildFailed {
-                    language: "python".to_string(),
-                    reason: format!("Failed to read file: {e}"),
-                }
-            })?;
-
-            compile_python_to_wasm_with_options(&source, &compiler_options)
+            // Single Python entry file: compile by path so imports of sibling
+            // user-written .py modules resolve and link in (#41).
+            crate::compile_python_file_with_options(input_path, &compiler_options)
         } else {
             // Python project directory
             compile_python_project_with_options(&config.input, &compiler_options)

@@ -408,7 +408,22 @@
                     { name: "Star imports detection (from X import *)", status: "done", version: "0.8.0" },
                     { name: "Conditional imports in try/except blocks", status: "done", version: "0.8.0" },
                     { name: "Dynamic imports (__import__, importlib)", status: "done", version: "0.8.0" },
-                    { name: "Module execution and loading", status: "done", version: "0.8.0" }
+                    { name: "Module execution and loading", status: "done", version: "0.8.0" },
+                    { name: "User-defined module files - import mod / from mod import f resolved from sibling .py files and statically linked", status: "done", version: "0.19.0" },
+                    { name: "Namespace access on user modules (mod.f(), mod.CONST, mod.ClassName()) and aliases (import mod as m, from mod import f as g)", status: "done", version: "0.19.0" },
+                    { name: "Module caching - a module imported through several paths compiles once", status: "done", version: "0.19.0" }
+                ]
+            },
+            fileIo: {
+                title: "FILE I/O",
+                status: "done",
+                version: "0.19.0",
+                features: [
+                    { name: "open(path, mode) via the documented waspy_host import interface (r, w, a, b, + modes folded to flags)", status: "done", version: "0.19.0" },
+                    { name: "read() / read(n) returning strings (64 KiB default cap per call)", status: "done", version: "0.19.0" },
+                    { name: "write(s) returning bytes written; close() and flush()", status: "done", version: "0.19.0" },
+                    { name: "with open(...) as f: context-manager form (desugared to open/body/close)", status: "done", version: "0.19.0" },
+                    { name: "Import section emitted only when open() is used - other modules keep zero imports", status: "done", version: "0.19.0" }
                 ]
             },
             errorHandling: {

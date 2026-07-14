@@ -320,6 +320,10 @@ pub enum IRType {
         return_type: Box<IRType>,
     },
     Generator(Box<IRType>), // Generator yields values of this type
+    // A file object returned by `open()`. At runtime the value is the host
+    // file descriptor (a single i32); read/write/close lower to calls into
+    // the `waspy_host` import namespace.
+    File,
     // Datetime types for proper arithmetic support
     Datetime,  // (year, month, day, hour, minute, second, microsecond)
     Date,      // (year, month, day)

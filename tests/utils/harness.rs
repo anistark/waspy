@@ -3,8 +3,10 @@
 //! These drive the public API exactly as a downstream user would: compile a
 //! Python source string (or a bundled `examples/*.py` file) to WASM, validate
 //! it, instantiate it with `wasmi`, and call exported functions. Compiled
-//! waspy modules have no host imports, so an empty `Linker` is sufficient and
-//! instantiation also exercises the start and data sections.
+//! waspy modules have no host imports — except programs using file I/O, which
+//! import the four `waspy_host` functions — so the broad-sweep linker defines
+//! no-op stubs for those (unused definitions are ignored) and instantiation
+//! also exercises the start and data sections.
 //!
 //! The panicking helpers (`compile`, `instantiate`, `call_i32`, …) mirror the
 //! in-crate test helpers in `src/lib.rs` and are for assertions with a known
@@ -61,15 +63,29 @@ pub fn try_compile(source: &str) -> Result<Vec<u8>, String> {
     compile_python_to_wasm_with_options(source, &options).map_err(|e| format!("{e:#}"))
 }
 
-/// Validate the bytes as a WASM module and instantiate them under an empty
-/// linker, returning the error as a string on failure. Validation checks
-/// structure, types, and stack balance; instantiation then runs the start
-/// function and materializes the data section.
+/// Validate the bytes as a WASM module and instantiate them, returning the
+/// error as a string on failure. Validation checks structure, types, and
+/// stack balance; instantiation then runs the start function and materializes
+/// the data section. The linker carries no-op stubs for the `waspy_host` file
+/// I/O imports (open -> -1, read -> 0, write -> its length, close -> 0) so
+/// examples using `open()` instantiate too; modules without file I/O import
+/// nothing and ignore the stubs.
 pub fn try_instantiate(wasm: &[u8]) -> Result<(), String> {
     let engine = Engine::default();
     let module = wasmi::Module::new(&engine, wasm).map_err(|e| format!("validate: {e}"))?;
     let mut store = Store::new(&engine, ());
-    Linker::<()>::new(&engine)
+    let mut linker = Linker::<()>::new(&engine);
+    linker
+        .func_wrap("waspy_host", "open", |_: i32, _: i32, _: i32| -> i32 { -1 })
+        .and_then(|l| l.func_wrap("waspy_host", "read", |_: i32, _: i32, _: i32| -> i32 { 0 }))
+        .and_then(|l| {
+            l.func_wrap("waspy_host", "write", |_: i32, _: i32, len: i32| -> i32 {
+                len
+            })
+        })
+        .and_then(|l| l.func_wrap("waspy_host", "close", |_: i32| -> i32 { 0 }))
+        .map_err(|e| format!("linker: {e}"))?;
+    linker
         .instantiate(&mut store, &module)
         .map_err(|e| format!("instantiate: {e}"))?
         .start(&mut store)
