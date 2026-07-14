@@ -50,6 +50,7 @@ Generate & Optimize
 - Exception handling with `try`/`except`/`finally` and `raise`
 - Comprehensions: list, set, and dict comprehensions with filters, multiple generators, nesting, and `{k: v for k, v in pairs}` unpacking
 - Generators with real state preservation: `yield` suspends and resumes, `yield from` delegates, and `next()`/`send()`/`close()` work; user classes implementing `__iter__`/`__next__` iterate in `for` loops with `StopIteration` ending the loop
+- Tuple targets in `for` loops (`for a, b in pairs`, star targets included) and the iterator-shaped builtins: `enumerate(xs[, start])`, `zip(...)`, and `dict.items()`/`.keys()`/`.values()`
 - Closures with full variable capture: lambdas compile to real functions dispatched through a `call_indirect` table, capture enclosing variables (by value), and work as first-class values — returned, passed as arguments, and stored in collections
 - Extended unpacking: `a, *b, c = xs` binds the starred target to the middle slice as a real list
 - Bundled standard library runtime: `sys`, `os` (incl. `os.path`), `math`, `random`, `json`, `re`, `datetime`, `logging`, `collections`, `itertools`, `functools`

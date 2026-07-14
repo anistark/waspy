@@ -4,6 +4,13 @@ use anyhow::{anyhow, Context, Result};
 use rustpython_parser::ast::{ArgWithDefault, Arguments, ExceptHandler, Expr, Stmt, Suite};
 use std::collections::HashSet;
 
+/// Codegen intrinsics backing `for k, v in d.items()` (and `.keys()` /
+/// `.values()`): load dict entry `i`'s key or value word from the
+/// `[count][k0][v0][k1][v1]...` layout. Recognized by name in expression
+/// codegen.
+pub const DICT_KEY_AT_FN: &str = "__dict_key_at";
+pub const DICT_VAL_AT_FN: &str = "__dict_val_at";
+
 /// Lower a Python AST (Suite) into our IR.
 pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
     let mut module = IRModule::new();
@@ -1336,33 +1343,7 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                 }
             }
             Stmt::For(for_stmt) => {
-                // Handle for loops (only simple variable target for now)
-                let target = match &*for_stmt.target {
-                    Expr::Name(name) => name.id.to_string(),
-                    _ => {
-                        return Err(anyhow!(
-                            "Only simple variable targets supported in for loops"
-                        ))
-                    }
-                };
-
-                let iterable = lower_expr(&for_stmt.iter, memory_layout)?;
-                let body = Box::new(lower_function_body(&for_stmt.body, memory_layout)?);
-                let else_body = if !for_stmt.orelse.is_empty() {
-                    Some(Box::new(lower_function_body(
-                        &for_stmt.orelse,
-                        memory_layout,
-                    )?))
-                } else {
-                    None
-                };
-
-                ir_statements.push(IRStatement::For {
-                    target,
-                    iterable,
-                    body,
-                    else_body,
-                });
+                ir_statements.extend(lower_for_statement(for_stmt, memory_layout)?);
             }
             Stmt::Try(try_stmt) => {
                 // Handle try-except-finally statements
@@ -1487,6 +1468,272 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
     Ok(IRBody {
         statements: ir_statements,
     })
+}
+
+/// Parse a `for` statement's target into its names plus the position of an
+/// optional starred name, mirroring the tuple-assignment target rules.
+fn lower_for_targets(target: &Expr) -> Result<(Vec<String>, Option<usize>)> {
+    match target {
+        Expr::Name(name) => Ok((vec![name.id.to_string()], None)),
+        Expr::Tuple(tuple) => {
+            let mut targets = Vec::with_capacity(tuple.elts.len());
+            let mut starred = None;
+            for (i, elt) in tuple.elts.iter().enumerate() {
+                match elt {
+                    Expr::Name(name) => targets.push(name.id.to_string()),
+                    Expr::Starred(star) => {
+                        if starred.is_some() {
+                            return Err(anyhow!("multiple starred targets in for loop"));
+                        }
+                        match &*star.value {
+                            Expr::Name(name) => {
+                                starred = Some(i);
+                                targets.push(name.id.to_string());
+                            }
+                            _ => {
+                                return Err(anyhow!(
+                                    "Only simple variable names supported in for loop targets"
+                                ))
+                            }
+                        }
+                    }
+                    _ => {
+                        return Err(anyhow!(
+                            "Only simple variable names supported in for loop targets"
+                        ))
+                    }
+                }
+            }
+            Ok((targets, starred))
+        }
+        _ => Err(anyhow!(
+            "Only simple variable targets supported in for loops"
+        )),
+    }
+}
+
+/// Lower a `for` statement, desugaring tuple targets and the iterator-shaped
+/// builtins into constructs the compiler already handles:
+///
+/// - `for a, b in pairs:` binds a hidden loop variable and unpacks it per
+///   iteration through `TupleUnpack` (a star target is allowed).
+/// - `for i, x in enumerate(xs[, start]):` drives `xs` and threads an explicit
+///   counter alongside.
+/// - `for a, b, ... in zip(s0, s1, ...):` drives `s0` and indexes the other
+///   sequences with a shared counter, stopping at the shortest.
+/// - `for k, v in d.items():` (and `.keys()` / `.values()` with one target)
+///   walks the dict's entry slots positionally via the `__dict_key_at` /
+///   `__dict_val_at` codegen intrinsics.
+///
+/// A `for`-`else` clause is dropped, matching the existing `for` codegen.
+fn lower_for_statement(
+    for_stmt: &rustpython_parser::ast::StmtFor,
+    memory_layout: &mut MemoryLayout,
+) -> Result<Vec<IRStatement>> {
+    let (targets, starred) = lower_for_targets(&for_stmt.target)?;
+    let body = lower_function_body(&for_stmt.body, memory_layout)?;
+    let else_body = if !for_stmt.orelse.is_empty() {
+        Some(Box::new(lower_function_body(
+            &for_stmt.orelse,
+            memory_layout,
+        )?))
+    } else {
+        None
+    };
+    let uniq = memory_layout.comp_var_counter;
+    memory_layout.comp_var_counter += 1;
+
+    let int_const = |v: i32| IRExpr::Const(IRConstant::Int(v));
+    let variable = |name: &str| IRExpr::Variable(name.to_string());
+    let assign = |name: &str, value: IRExpr| IRStatement::Assign {
+        target: name.to_string(),
+        value,
+        var_type: None,
+    };
+    let increment = |name: &str| IRStatement::AugAssign {
+        target: name.to_string(),
+        value: int_const(1),
+        op: IROp::Add,
+    };
+    let break_if = |condition: IRExpr| IRStatement::If {
+        condition,
+        then_body: Box::new(IRBody {
+            statements: vec![IRStatement::Break],
+        }),
+        else_body: None,
+    };
+    let len_of = |name: &str| IRExpr::FunctionCall {
+        function_name: "len".to_string(),
+        arguments: vec![variable(name)],
+    };
+
+    if let Expr::Call(call) = &*for_stmt.iter {
+        // for i, x in enumerate(xs[, start])
+        if matches!(&*call.func, Expr::Name(n) if n.id.as_str() == "enumerate") {
+            if targets.len() != 2 || starred.is_some() {
+                return Err(anyhow!(
+                    "enumerate() in a for loop needs exactly two plain targets"
+                ));
+            }
+            if call.args.is_empty() || call.args.len() > 2 {
+                return Err(anyhow!("enumerate() takes 1 or 2 arguments"));
+            }
+            let counter = format!("__enum_{uniq}");
+            let start = match call.args.get(1) {
+                Some(expr) => lower_expr(expr, memory_layout)?,
+                None => int_const(0),
+            };
+            let mut inner = vec![increment(&counter), assign(&targets[0], variable(&counter))];
+            inner.extend(body.statements);
+            return Ok(vec![
+                assign(
+                    &counter,
+                    IRExpr::BinaryOp {
+                        left: Box::new(start),
+                        right: Box::new(int_const(1)),
+                        op: IROp::Sub,
+                    },
+                ),
+                IRStatement::For {
+                    target: targets[1].clone(),
+                    iterable: lower_expr(&call.args[0], memory_layout)?,
+                    body: Box::new(IRBody { statements: inner }),
+                    else_body,
+                },
+            ]);
+        }
+
+        // for a, b, ... in zip(s0, s1, ...) — one target per sequence; the
+        // first sequence drives the loop, the rest are indexed by a shared
+        // counter and the shortest one ends the iteration.
+        if matches!(&*call.func, Expr::Name(n) if n.id.as_str() == "zip") {
+            if call.args.len() < 2 {
+                return Err(anyhow!("zip() in a for loop needs at least two arguments"));
+            }
+            if targets.len() != call.args.len() || starred.is_some() {
+                return Err(anyhow!(
+                    "zip() in a for loop needs one plain target per argument"
+                ));
+            }
+            let counter = format!("__zipi_{uniq}");
+            let mut stmts = Vec::new();
+            let mut seq_names = Vec::new();
+            for (k, arg) in call.args.iter().enumerate().skip(1) {
+                let seq = format!("__zip_{uniq}_{k}");
+                stmts.push(assign(&seq, lower_expr(arg, memory_layout)?));
+                seq_names.push(seq);
+            }
+            stmts.push(assign(&counter, int_const(-1)));
+
+            let mut inner = vec![increment(&counter)];
+            // counter >= len(s1) or counter >= len(s2) or ... -> break
+            let exhausted = seq_names
+                .iter()
+                .map(|seq| IRExpr::CompareOp {
+                    left: Box::new(variable(&counter)),
+                    right: Box::new(len_of(seq)),
+                    op: IRCompareOp::GtE,
+                })
+                .reduce(|left, right| IRExpr::BoolOp {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    op: IRBoolOp::Or,
+                })
+                .expect("zip always has trailing sequences");
+            inner.push(break_if(exhausted));
+            for (target, seq) in targets[1..].iter().zip(&seq_names) {
+                inner.push(assign(
+                    target,
+                    IRExpr::Indexing {
+                        container: Box::new(variable(seq)),
+                        index: Box::new(variable(&counter)),
+                    },
+                ));
+            }
+            inner.extend(body.statements);
+            stmts.push(IRStatement::For {
+                target: targets[0].clone(),
+                iterable: lower_expr(&call.args[0], memory_layout)?,
+                body: Box::new(IRBody { statements: inner }),
+                else_body,
+            });
+            return Ok(stmts);
+        }
+
+        // for k, v in d.items() / for k in d.keys() / for v in d.values():
+        // walk the entry slots positionally.
+        if let Expr::Attribute(attr) = &*call.func {
+            let method = attr.attr.as_str();
+            if matches!(method, "items" | "keys" | "values") && call.args.is_empty() {
+                let expected = if method == "items" { 2 } else { 1 };
+                if targets.len() != expected || starred.is_some() {
+                    return Err(anyhow!(
+                        "dict.{method}() in a for loop needs exactly {expected} plain target(s)"
+                    ));
+                }
+                let dict = format!("__dict_{uniq}");
+                let counter = format!("__di_{uniq}");
+                let entry_at = |intrinsic: &str| IRExpr::FunctionCall {
+                    function_name: intrinsic.to_string(),
+                    arguments: vec![variable(&dict), variable(&counter)],
+                };
+                let mut inner = vec![
+                    increment(&counter),
+                    break_if(IRExpr::CompareOp {
+                        left: Box::new(variable(&counter)),
+                        right: Box::new(len_of(&dict)),
+                        op: IRCompareOp::GtE,
+                    }),
+                ];
+                match method {
+                    "items" => {
+                        inner.push(assign(&targets[0], entry_at(DICT_KEY_AT_FN)));
+                        inner.push(assign(&targets[1], entry_at(DICT_VAL_AT_FN)));
+                    }
+                    "keys" => inner.push(assign(&targets[0], entry_at(DICT_KEY_AT_FN))),
+                    _ => inner.push(assign(&targets[0], entry_at(DICT_VAL_AT_FN))),
+                }
+                inner.extend(body.statements);
+                return Ok(vec![
+                    assign(&dict, lower_expr(&attr.value, memory_layout)?),
+                    assign(&counter, int_const(-1)),
+                    IRStatement::While {
+                        condition: IRExpr::Const(IRConstant::Bool(true)),
+                        body: Box::new(IRBody { statements: inner }),
+                    },
+                ]);
+            }
+        }
+    }
+
+    let iterable = lower_expr(&for_stmt.iter, memory_layout)?;
+
+    // for a, b in pairs: bind the element to a hidden loop variable and
+    // unpack it into the targets each iteration.
+    if targets.len() > 1 || starred.is_some() {
+        let element = format!("__ft_{uniq}");
+        let mut inner = vec![IRStatement::TupleUnpack {
+            targets,
+            value: variable(&element),
+            starred,
+        }];
+        inner.extend(body.statements);
+        return Ok(vec![IRStatement::For {
+            target: element,
+            iterable,
+            body: Box::new(IRBody { statements: inner }),
+            else_body,
+        }]);
+    }
+
+    Ok(vec![IRStatement::For {
+        target: targets.into_iter().next().expect("one target"),
+        iterable,
+        body: Box::new(IRBody {
+            statements: body.statements,
+        }),
+        else_body,
+    }])
 }
 
 /// Check for dynamic imports in expressions

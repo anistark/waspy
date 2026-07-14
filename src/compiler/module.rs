@@ -66,6 +66,16 @@ fn infer_field_value_type(value: &IRExpr, params: &HashMap<String, IRType>) -> I
             }
         }
         IRExpr::UnaryOp { operand, .. } => infer_field_value_type(operand, params),
+        // Collection-valued fields (e.g. a dict literal stored by a lifted
+        // generator local) keep their kind so consumers like len() and
+        // indexing know the slot holds a collection pointer.
+        IRExpr::ListLiteral(_) => IRType::List(Box::new(IRType::Unknown)),
+        IRExpr::SetLiteral(_) => IRType::Set(Box::new(IRType::Unknown)),
+        IRExpr::TupleLiteral(_) => IRType::Tuple(Vec::new()),
+        IRExpr::DictLiteral(_) => {
+            IRType::Dict(Box::new(IRType::Unknown), Box::new(IRType::Unknown))
+        }
+        IRExpr::RangeCall { .. } => IRType::Range,
         _ => IRType::Unknown,
     }
 }

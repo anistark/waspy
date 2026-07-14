@@ -756,6 +756,54 @@ fn generator_instances_and_float_yields() {
     assert_eq!(call_f64(&src, "sum_halves"), 1.5);
 }
 
+/// Tuple targets in `for` statements: `for a, b in pairs` unpacks each
+/// element, star targets collect the middle slice, and both work over tuple
+/// literals in lists.
+#[test]
+fn for_loop_tuple_targets() {
+    let src = read_example("loop_unpacking.py");
+    assert_eq!(call_i32(&src, "pairs_sum"), 102);
+    assert_eq!(call_i32(&src, "star_target"), 652);
+}
+
+/// `enumerate(xs[, start])` threads a counter alongside the driven iterable —
+/// lists, explicit start values, and ranges.
+#[test]
+fn enumerate_in_for_loops() {
+    let src = read_example("loop_unpacking.py");
+    assert_eq!(call_i32(&src, "enum_sum"), 360);
+    assert_eq!(call_i32(&src, "enum_start"), 161);
+    assert_eq!(call_i32(&src, "enum_range"), 36);
+}
+
+/// `zip(...)` binds one target per sequence and stops at the shortest, for
+/// two and three sequences.
+#[test]
+fn zip_in_for_loops() {
+    let src = read_example("loop_unpacking.py");
+    assert_eq!(call_i32(&src, "zip_sum"), 66);
+    assert_eq!(call_i32(&src, "zip3_sum"), 333);
+}
+
+/// `dict.items()` / `.keys()` / `.values()` iterate the entry slots
+/// positionally.
+#[test]
+fn dict_iteration_in_for_loops() {
+    let src = read_example("loop_unpacking.py");
+    assert_eq!(call_i32(&src, "items_sum"), 660);
+    assert_eq!(call_i32(&src, "keys_values_sum"), 915);
+}
+
+/// The desugared loops compose with generators: `enumerate` and `items()`
+/// loops suspend at `yield` with their counters and dict pointer preserved in
+/// the generator state.
+#[test]
+fn enumerate_and_items_inside_generators() {
+    let src = read_example("loop_unpacking.py");
+    assert_eq!(call_i32(&src, "enum_in_generator"), 33);
+    assert_eq!(call_i32(&src, "items_in_generator"), 41);
+}
+
 /// Suspension across a `try`/`with` frame cannot be resumed by the state
 /// machine, so it is rejected at compile time rather than miscompiled.
 #[test]
