@@ -233,6 +233,11 @@ The public surface lives in `src/lib.rs`:
 compile_python_to_wasm(source: &str) -> Result<Vec<u8>>
 compile_python_to_wasm_with_options(source: &str, opts: &CompilerOptions) -> Result<Vec<u8>>
 
+// Entry-file compilation with user-module resolution (imports of sibling
+// .py files are resolved from disk, transitively, each compiled once)
+compile_python_file<P: AsRef<Path>>(path: P, optimize: bool) -> Result<Vec<u8>>
+compile_python_file_with_options<P>(path, opts: &CompilerOptions) -> Result<Vec<u8>>
+
 // Multi-file compilation (merged into one module)
 compile_multiple_python_files(sources: &[(&str, &str)], optimize: bool) -> Result<Vec<u8>>
 compile_multiple_python_files_with_options(sources, opts) -> Result<Vec<u8>>
@@ -386,7 +391,8 @@ test: description          # Adding/fixing tests
 - **Optimization is opt-in and must not affect correctness.** If a binary is only valid after `optimize_wasm()`, the codegen has a bug.
 - **`SCRATCH_LOCALS` is a hard budget.** Codegen that overruns the reserved temporary locals will alias real variables and silently corrupt output. Raise the constant in `src/compiler/context.rs` if you need more.
 - **Multi-file compilation de-duplicates by function name.** Duplicate function names across files are dropped with a warning (first one wins). Memory layouts are merged via `merge_from()` — don't assume single-file offset assumptions hold.
-- **stdlib support is an allowlist.** Only modules in `is_stdlib_module()` are recognized; everything else is treated as user code or an unsupported import.
+- **stdlib support is an allowlist.** Only modules in `is_stdlib_module()` are recognized; everything else is treated as a user-written module: multi-file compilation links it into the single output module (namespace calls, aliases, and constants resolve statically), and `compile_python_file` resolves it from disk next to the entry file.
+- **A program that calls `open()` imports host functions.** File I/O emits a WASM import section (module `waspy_host`: `open`/`read`/`write`/`close`) that the embedder must provide; every other program keeps zero imports and must stay that way — the import section is emitted only when the IR walk finds an `open()` call.
 - **MSRV vs CI mismatch.** `Cargo.toml` declares MSRV 1.70 but CI builds and lints with Rust 1.88. Don't rely on >1.70 features without bumping the declared `rust-version`.
 - **clippy must pass with zero warnings** — CI enforces `-D warnings` on `--all-targets --all-features`.
 - **`examples/output/`, `examples/*.wasm`, `examples/*.html`, and `plan/` are gitignored.** Don't try to commit generated artifacts or the local planning directory.

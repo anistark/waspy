@@ -264,6 +264,13 @@ fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRType {
             }
         },
         IRExpr::FunctionCall { function_name, .. } if function_name == "float" => IRType::Float,
+        // `open()` yields a file handle; its local must be typed so file
+        // method calls dispatch to the host I/O lowering.
+        IRExpr::FunctionCall { function_name, .. }
+            if function_name == "open" && ctx.get_function_info("open").is_none() =>
+        {
+            IRType::File
+        }
         IRExpr::FunctionCall { function_name, .. } => ctx
             .get_function_info(function_name)
             .map(|f| f.return_type.clone())

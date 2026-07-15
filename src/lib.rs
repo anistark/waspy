@@ -165,15 +165,71 @@ pub fn compile_multiple_python_files_with_options(
     sources: &[(&str, &str)],
     options: &CompilerOptions,
 ) -> Result<Vec<u8>> {
+    compile_merged_sources(sources, options, None, true)
+}
+
+/// Merge several Python sources into one IR module and compile it — the
+/// shared implementation behind every multi-file entry point.
+///
+/// Each file is parsed and lowered once; a filename appearing twice is
+/// skipped (a module imported through several paths is compiled and its
+/// module-level state merged exactly once, #41). Functions are de-duplicated
+/// by name (first definition wins, with a warning), and string/bytes layouts
+/// are merged. With `skip_special` set, files matching
+/// [`utils::is_special_python_file`] are ignored — the behavior of the
+/// directory-scanning entry points; import-resolved module files bypass it so
+/// a genuine local module named e.g. `config.py` still links.
+fn compile_merged_sources(
+    sources: &[(&str, &str)],
+    options: &CompilerOptions,
+    config: Option<&ProjectConfig>,
+    skip_special: bool,
+) -> Result<Vec<u8>> {
     // Parse and convert each Python source to IR
     let mut combined_module = ir::IRModule::new();
     let mut function_names = std::collections::HashSet::new();
+    let mut seen_files = std::collections::HashSet::new();
     let mut has_entry_point = false;
     let mut entry_point_info: Option<EntryPointInfo> = None;
 
+    // Set project metadata if available
+    if let Some(config) = config {
+        if !config.name.is_empty() {
+            combined_module
+                .metadata
+                .insert("project_name".to_string(), config.name.clone());
+            combined_module
+                .metadata
+                .insert("project_version".to_string(), config.version.clone());
+
+            if let Some(description) = &config.description {
+                combined_module
+                    .metadata
+                    .insert("project_description".to_string(), description.clone());
+            }
+
+            if let Some(author) = &config.author {
+                combined_module
+                    .metadata
+                    .insert("project_author".to_string(), author.clone());
+            }
+        }
+    }
+
     for (filename, source) in sources {
+        // A module reached through several import paths is merged once (#41).
+        if !seen_files.insert(filename.to_string()) {
+            log_verbose!("Skipping already-merged file: {filename}");
+            continue;
+        }
+
         // Skip incompatible files
-        if utils::is_special_python_file(filename) {
+        if core::config::is_config_file(filename) {
+            log_verbose!("Skipping configuration file: {filename}");
+            continue;
+        }
+
+        if skip_special && utils::is_special_python_file(filename) {
             log_verbose!("Skipping special file: {filename}");
             continue;
         }
@@ -207,9 +263,13 @@ pub fn compile_multiple_python_files_with_options(
             }
         };
 
-        // Skip if no functions
-        if ir_module.functions.is_empty() {
-            log_verbose!("Skipping file with no functions: {filename}");
+        // Skip files that contribute nothing (a constants-only module still
+        // carries variables worth merging).
+        if ir_module.functions.is_empty()
+            && ir_module.classes.is_empty()
+            && ir_module.variables.is_empty()
+        {
+            log_verbose!("Skipping file with no compilable definitions: {filename}");
             continue;
         }
 
@@ -243,6 +303,11 @@ pub fn compile_multiple_python_files_with_options(
         combined_module
             .memory_layout
             .merge_from(&ir_module.memory_layout);
+
+        // Add module-level metadata
+        for (key, value) in ir_module.metadata {
+            combined_module.metadata.insert(key, value);
+        }
     }
 
     if combined_module.functions.is_empty() {
@@ -303,141 +368,91 @@ pub fn compile_multiple_python_files_with_config(
     optimize: bool,
     config: &ProjectConfig,
 ) -> Result<Vec<u8>> {
-    // Parse and convert each Python source to IR
-    let mut combined_module = ir::IRModule::new();
-    let mut function_names = std::collections::HashSet::new();
-    let mut has_entry_point = false;
-    let mut entry_point_info: Option<EntryPointInfo> = None;
+    let options = CompilerOptions {
+        optimize,
+        ..CompilerOptions::default()
+    };
+    compile_merged_sources(sources, &options, Some(config), true)
+}
 
-    // Set project metadata if available
-    if !config.name.is_empty() {
-        combined_module
-            .metadata
-            .insert("project_name".to_string(), config.name.clone());
-        combined_module
-            .metadata
-            .insert("project_version".to_string(), config.version.clone());
+/// Compile a Python entry file together with the user-written modules it
+/// imports (#41), using default options.
+///
+/// Imports are resolved relative to the entry file's directory: `import mod`
+/// finds `mod.py` (or `mod/__init__.py`), `import pkg.mod` finds
+/// `pkg/mod.py`, transitively through each resolved module's own imports.
+/// Every resolved module is compiled and linked into the single output WASM
+/// module exactly once, however many import paths reach it.
+///
+/// # Arguments
+///
+/// * `path` - Path to the entry `.py` file
+/// * `optimize` - Whether to optimize the output
+///
+/// # Returns
+///
+/// WebAssembly binary as a byte vector
+///
+/// # Errors
+///
+/// Returns an error if the entry file or a resolved module cannot be read, or
+/// if parsing, IR conversion, or WebAssembly generation fails
+pub fn compile_python_file<P: AsRef<Path>>(path: P, optimize: bool) -> Result<Vec<u8>> {
+    let options = CompilerOptions {
+        optimize,
+        ..CompilerOptions::default()
+    };
+    compile_python_file_with_options(path, &options)
+}
 
-        if let Some(description) = &config.description {
-            combined_module
-                .metadata
-                .insert("project_description".to_string(), description.clone());
-        }
+/// Compile a Python entry file together with the user-written modules it
+/// imports (#41), with the specified options. See [`compile_python_file`].
+///
+/// # Arguments
+///
+/// * `path` - Path to the entry `.py` file
+/// * `options` - Compiler options
+///
+/// # Returns
+///
+/// WebAssembly binary as a byte vector
+///
+/// # Errors
+///
+/// Returns an error if the entry file or a resolved module cannot be read, or
+/// if parsing, IR conversion, or WebAssembly generation fails
+pub fn compile_python_file_with_options<P: AsRef<Path>>(
+    path: P,
+    options: &CompilerOptions,
+) -> Result<Vec<u8>> {
+    utils::logging::init(options.verbosity);
 
-        if let Some(author) = &config.author {
-            combined_module
-                .metadata
-                .insert("project_author".to_string(), author.clone());
-        }
-    }
+    let path = path.as_ref();
+    let entry_source = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read Python file: {}", path.display()))?;
 
-    for (filename, source) in sources {
-        // Skip incompatible files
-        if core::config::is_config_file(filename) {
-            log_verbose!("Skipping configuration file: {filename}");
-            continue;
-        }
-
-        // Skip incompatible files
-        if utils::is_special_python_file(filename) {
-            log_verbose!("Skipping special file: {filename}");
-            continue;
-        }
-
-        // Check for entry points
-        if !has_entry_point {
-            if let Ok(Some(info)) = ir::detect_entry_points(source, Some(Path::new(filename))) {
-                has_entry_point = true;
-                entry_point_info = Some(info);
-                log_debug!("Detected entry point in file: {filename}");
-            }
-        }
-
-        log_debug!("Processing file: {filename}");
-
-        // Parse Python to AST
-        let ast = match core::parser::parse_python(source) {
-            Ok(ast) => ast,
-            Err(e) => {
-                log_warn!("Failed to parse {filename}: {e}");
-                continue;
-            }
-        };
-
-        // Lower AST to IR
-        let ir_module = match ir::lower_ast_to_ir(&ast) {
-            Ok(module) => module,
-            Err(e) => {
-                log_warn!("Failed to convert {filename} to IR: {e}");
-                continue;
-            }
-        };
-
-        // Skip if no functions
-        if ir_module.functions.is_empty() {
-            log_verbose!("Skipping file with no functions: {filename}");
-            continue;
-        }
-
+    // Resolve every user-written module reachable from the entry file; each
+    // appears once (module caching), in discovery order after the entry file
+    // so the entry file wins name collisions and entry-point detection.
+    let modules = analysis::imports::resolve_user_modules(path, &entry_source)?;
+    let mut sources: Vec<(String, String)> = vec![(path.display().to_string(), entry_source)];
+    for (module_name, file_path, source) in modules {
         log_debug!(
-            "Found {} functions in {filename}",
-            ir_module.functions.len()
+            "Resolved user module '{module_name}' -> {}",
+            file_path.display()
         );
-
-        // Check for duplicate function names and add functions
-        for func in ir_module.functions {
-            if !function_names.insert(func.name.clone()) {
-                log_warn!(
-                    "Duplicate function '{}' found in file: {}",
-                    func.name,
-                    filename
-                );
-                // Skip the duplicate but continue processing
-            } else {
-                log_debug!("Adding function: {}", func.name);
-                // Add the function
-                combined_module.functions.push(func);
-            }
-        }
-
-        // Add module-level variables and imports
-        combined_module.variables.extend(ir_module.variables);
-        combined_module.imports.extend(ir_module.imports);
-        combined_module.classes.extend(ir_module.classes);
-
-        // Merge this file's string/bytes layout into the combined module.
-        combined_module
-            .memory_layout
-            .merge_from(&ir_module.memory_layout);
-
-        // Add module-level metadata
-        for (key, value) in ir_module.metadata {
-            combined_module.metadata.insert(key, value);
-        }
+        sources.push((file_path.display().to_string(), source));
     }
 
-    if combined_module.functions.is_empty() {
-        return Err(anyhow!(
-            "No valid functions found in any of the provided files"
-        ));
-    }
+    let source_refs: Vec<(&str, &str)> = sources
+        .iter()
+        .map(|(f, s)| (f.as_str(), s.as_str()))
+        .collect();
 
-    // Add entry point if one was detected
-    if has_entry_point {
-        if let Some(info) = entry_point_info {
-            ir::add_entry_point_to_module(&mut combined_module, &info)?;
-        }
-    }
-
-    // Generate WASM binary from the combined module
-    let raw_wasm = compiler::compile_ir_module(&combined_module);
-
-    // Optimize the WASM binary
-    if optimize {
-        optimize::optimize_wasm(&raw_wasm).context("Failed to optimize WebAssembly binary")
-    } else {
-        Ok(raw_wasm)
-    }
+    // Resolved module files bypass the special-file skip: the import already
+    // vouches for them (a local module legitimately named `config.py` or a
+    // package `__init__.py` must still link).
+    compile_merged_sources(&source_refs, options, None, false)
 }
 
 /// Compile a Python project directory to WebAssembly.
@@ -684,6 +699,7 @@ pub fn type_to_string(ir_type: &IRType) -> String {
         IRType::Unknown => "unknown".to_string(),
         IRType::Callable { .. } => "Callable".to_string(),
         IRType::Generator(yield_type) => format!("Generator[{}]", type_to_string(yield_type)),
+        IRType::File => "file".to_string(),
         IRType::Datetime => "datetime.datetime".to_string(),
         IRType::Date => "datetime.date".to_string(),
         IRType::Time => "datetime.time".to_string(),
@@ -1099,6 +1115,14 @@ mod collection_tests {
     }
 
     #[test]
+    fn conditional_import_in_try_except_works() {
+        // Conditional imports (#4): an import inside try/except parses, the
+        // module resolves, and its members are usable afterwards.
+        let src = "try:\n    import math\nexcept ImportError:\n    import math\n\ndef f() -> int:\n    pi = math.pi\n    if pi > 3.0:\n        return 1\n    return 0\n";
+        assert_eq!(call_i32(src, "f"), 1);
+    }
+
+    #[test]
     fn string_slice_into_collection_has_length() {
         // A slice's offset points into the source blob, not past a fresh length
         // prefix, so collection read-back (load(offset - 4)) read the source's
@@ -1114,5 +1138,432 @@ mod collection_tests {
         let content =
             "def f() -> int:\n    b = b\"hello world\"\n    part = b[6:11]\n    return part[0]\n";
         assert_eq!(call_i32(content, "f"), 119); // 'w'
+    }
+}
+
+#[cfg(test)]
+mod user_module_tests {
+    use super::*;
+
+    use wasmi::{Engine, Linker, Module, Store};
+
+    /// Compile several (filename, source) pairs into one module (unoptimized)
+    /// and instantiate it, mirroring `collection_tests::instantiate`.
+    fn instantiate_multi(sources: &[(&str, &str)]) -> (wasmi::Instance, Store<()>) {
+        let options = CompilerOptions {
+            optimize: false,
+            ..CompilerOptions::default()
+        };
+        let wasm =
+            compile_multiple_python_files_with_options(sources, &options).expect("compilation");
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm[..]).expect("valid wasm module");
+        let mut store = Store::new(&engine, ());
+        let instance = Linker::<()>::new(&engine)
+            .instantiate(&mut store, &module)
+            .expect("instantiation")
+            .start(&mut store)
+            .expect("start");
+        (instance, store)
+    }
+
+    fn call_multi_i32(sources: &[(&str, &str)], func: &str) -> i32 {
+        let (instance, mut store) = instantiate_multi(sources);
+        instance
+            .get_typed_func::<(), i32>(&store, func)
+            .expect("exported i32 fn")
+            .call(&mut store, ())
+            .expect("call")
+    }
+
+    const MATHMOD: &str =
+        "FACTOR = 7\n\ndef add(a: int, b: int) -> int:\n    return a + b\n\ndef mul(a: int, b: int) -> int:\n    return a * b\n";
+
+    #[test]
+    fn from_import_calls_module_function() {
+        // `from mod import f`: the merged function resolves by name (#41).
+        let main = "from mathmod import add\n\ndef f() -> int:\n    return add(2, 3)\n";
+        assert_eq!(
+            call_multi_i32(&[("main.py", main), ("mathmod.py", MATHMOD)], "f"),
+            5
+        );
+    }
+
+    #[test]
+    fn module_namespace_call() {
+        // `import mod` + `mod.f(...)`: the namespace call resolves to the
+        // statically linked function (#41).
+        let main =
+            "import mathmod\n\ndef f() -> int:\n    return mathmod.add(20, mathmod.mul(2, 11))\n";
+        assert_eq!(
+            call_multi_i32(&[("main.py", main), ("mathmod.py", MATHMOD)], "f"),
+            42
+        );
+    }
+
+    #[test]
+    fn module_alias_namespace_call() {
+        // `import mod as m` + `m.f(...)`.
+        let main = "import mathmod as m\n\ndef f() -> int:\n    return m.add(2, 3)\n";
+        assert_eq!(
+            call_multi_i32(&[("main.py", main), ("mathmod.py", MATHMOD)], "f"),
+            5
+        );
+    }
+
+    #[test]
+    fn from_import_alias_call() {
+        // `from mod import f as g`: calls to `g` resolve to the merged `f`.
+        let main = "from mathmod import add as plus\n\ndef f() -> int:\n    return plus(4, 5)\n";
+        assert_eq!(
+            call_multi_i32(&[("main.py", main), ("mathmod.py", MATHMOD)], "f"),
+            9
+        );
+    }
+
+    #[test]
+    fn module_constant_read() {
+        // `mod.CONST` inlines the merged module-level variable's value.
+        let main = "import mathmod\n\ndef f() -> int:\n    return mathmod.FACTOR * 2\n";
+        assert_eq!(
+            call_multi_i32(&[("main.py", main), ("mathmod.py", MATHMOD)], "f"),
+            14
+        );
+    }
+
+    #[test]
+    fn class_instantiation_through_module_namespace() {
+        // `mod.ClassName(...)` instantiates the merged class; methods work.
+        let shapes = "class Counter:\n    def __init__(self, start: int):\n        self.value = start\n    def bump(self) -> int:\n        self.value = self.value + 1\n        return self.value\n";
+        let main = "import shapes\n\ndef f() -> int:\n    c = shapes.Counter(5)\n    c.bump()\n    return c.bump()\n";
+        assert_eq!(
+            call_multi_i32(&[("main.py", main), ("shapes.py", shapes)], "f"),
+            7
+        );
+    }
+
+    #[test]
+    fn module_local_shadows_module_binding() {
+        // A local named like an imported module shadows the namespace: the
+        // method call goes to the object, not the module.
+        let main = "import mathmod\n\ndef f() -> int:\n    mathmod = [1, 2, 3]\n    mathmod.append(4)\n    return len(mathmod)\n";
+        assert_eq!(
+            call_multi_i32(&[("main.py", main), ("mathmod.py", MATHMOD)], "f"),
+            4
+        );
+    }
+
+    /// Write a small on-disk project (entry + modules) into a fresh temp dir
+    /// and return the entry path. Files are (relative path, contents).
+    fn write_project(tag: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("waspy_user_modules_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for (name, contents) in files {
+            let path = dir.join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("mkdir");
+            }
+            std::fs::write(path, contents).expect("write");
+        }
+        dir.join(files[0].0)
+    }
+
+    fn call_file_i32(entry: &std::path::Path, func: &str) -> i32 {
+        let options = CompilerOptions {
+            optimize: false,
+            ..CompilerOptions::default()
+        };
+        let wasm = compile_python_file_with_options(entry, &options).expect("compilation");
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm[..]).expect("valid wasm module");
+        let mut store = Store::new(&engine, ());
+        let instance = Linker::<()>::new(&engine)
+            .instantiate(&mut store, &module)
+            .expect("instantiation")
+            .start(&mut store)
+            .expect("start");
+        instance
+            .get_typed_func::<(), i32>(&store, func)
+            .expect("exported i32 fn")
+            .call(&mut store, ())
+            .expect("call")
+    }
+
+    #[test]
+    fn entry_file_resolves_imports_from_disk() {
+        // compile_python_file: the entry's imports load sibling .py files,
+        // transitively, and a diamond dependency (`shared` imported by both
+        // `util` and `helper`) links once (#41 module caching).
+        let entry = write_project(
+            "diamond",
+            &[
+                (
+                    "app.py",
+                    "from util import double\nimport helper\n\ndef f() -> int:\n    return double(10) + helper.triple(2)\n",
+                ),
+                (
+                    "util.py",
+                    "from shared import base\n\ndef double(x: int) -> int:\n    return x * 2 + base()\n",
+                ),
+                (
+                    "helper.py",
+                    "from shared import base\n\ndef triple(x: int) -> int:\n    return x * 3 + base()\n",
+                ),
+                ("shared.py", "def base() -> int:\n    return 0\n"),
+            ],
+        );
+        assert_eq!(call_file_i32(&entry, "f"), 26);
+    }
+
+    #[test]
+    fn dotted_import_resolves_package_path() {
+        // `import pkg.mod` resolves to `pkg/mod.py`; its functions link into
+        // the flat namespace (callable via `from pkg.mod import f`).
+        let entry = write_project(
+            "package",
+            &[
+                (
+                    "app.py",
+                    "from pkg.geometry import area\n\ndef f() -> int:\n    return area(6, 7)\n",
+                ),
+                (
+                    "pkg/geometry.py",
+                    "def area(w: int, h: int) -> int:\n    return w * h\n",
+                ),
+            ],
+        );
+        assert_eq!(call_file_i32(&entry, "f"), 42);
+    }
+
+    #[test]
+    fn resolver_visits_each_module_once() {
+        // The resolver's cache: a module reachable through several import
+        // paths appears exactly once in the resolved set (#41).
+        let entry = write_project(
+            "cache",
+            &[
+                (
+                    "app.py",
+                    "import a\nimport b\n\ndef f() -> int:\n    return 0\n",
+                ),
+                ("a.py", "import c\n\ndef fa() -> int:\n    return 1\n"),
+                ("b.py", "import c\n\ndef fb() -> int:\n    return 2\n"),
+                ("c.py", "def fc() -> int:\n    return 3\n"),
+            ],
+        );
+        let source = std::fs::read_to_string(&entry).unwrap();
+        let modules = analysis::imports::resolve_user_modules(&entry, &source).unwrap();
+        let mut names: Vec<&str> = modules.iter().map(|(n, _, _)| n.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["a", "b", "c"]);
+    }
+}
+
+#[cfg(test)]
+mod file_io_tests {
+    use super::*;
+
+    use std::collections::HashMap;
+    use wasmi::{Caller, Engine, Extern, Linker, Module, Store};
+
+    /// In-memory filesystem backing the `waspy_host` imports in tests. This is
+    /// a reference implementation of the documented host interface (#25).
+    #[derive(Default)]
+    struct HostFs {
+        files: HashMap<String, Vec<u8>>,
+        /// fd -> (file name, read cursor, readable, writable). fds index this
+        /// vec; a closed fd is None.
+        handles: Vec<Option<(String, usize, bool, bool)>>,
+    }
+
+    const FLAG_READ: i32 = 1;
+    const FLAG_WRITE: i32 = 2;
+    const FLAG_APPEND: i32 = 4;
+    const FLAG_UPDATE: i32 = 16;
+
+    fn memory_of(caller: &mut Caller<'_, HostFs>) -> wasmi::Memory {
+        caller
+            .get_export("memory")
+            .and_then(Extern::into_memory)
+            .expect("exported memory")
+    }
+
+    fn linker_with_host_fs(engine: &Engine) -> Linker<HostFs> {
+        let mut linker = Linker::<HostFs>::new(engine);
+        linker
+            .func_wrap(
+                "waspy_host",
+                "open",
+                |mut caller: Caller<'_, HostFs>, path_ptr: i32, path_len: i32, flags: i32| -> i32 {
+                    let memory = memory_of(&mut caller);
+                    let (data, fs) = memory.data_and_store_mut(&mut caller);
+                    let start = path_ptr as usize;
+                    let name = String::from_utf8_lossy(&data[start..start + path_len as usize])
+                        .to_string();
+
+                    let readable = flags & (FLAG_READ | FLAG_UPDATE) != 0;
+                    let writable = flags & (FLAG_WRITE | FLAG_APPEND | FLAG_UPDATE) != 0;
+                    if flags & FLAG_WRITE != 0 {
+                        fs.files.insert(name.clone(), Vec::new()); // truncate/create
+                    } else if flags & FLAG_APPEND != 0 {
+                        fs.files.entry(name.clone()).or_default();
+                    } else if !fs.files.contains_key(&name) {
+                        return -1; // read of a missing file
+                    }
+                    fs.handles.push(Some((name, 0, readable, writable)));
+                    (fs.handles.len() - 1) as i32
+                },
+            )
+            .unwrap();
+        linker
+            .func_wrap(
+                "waspy_host",
+                "read",
+                |mut caller: Caller<'_, HostFs>, fd: i32, buf: i32, len: i32| -> i32 {
+                    let memory = memory_of(&mut caller);
+                    let (data, fs) = memory.data_and_store_mut(&mut caller);
+                    let Some(Some((name, pos, readable, _))) = fs.handles.get_mut(fd as usize)
+                    else {
+                        return -1;
+                    };
+                    if !*readable {
+                        return -1;
+                    }
+                    let contents = fs
+                        .files
+                        .get(name.as_str())
+                        .map(|c| c.as_slice())
+                        .unwrap_or(&[]);
+                    let n = (contents.len().saturating_sub(*pos)).min(len as usize);
+                    let start = buf as usize;
+                    data[start..start + n].copy_from_slice(&contents[*pos..*pos + n]);
+                    *pos += n;
+                    n as i32
+                },
+            )
+            .unwrap();
+        linker
+            .func_wrap(
+                "waspy_host",
+                "write",
+                |mut caller: Caller<'_, HostFs>, fd: i32, buf: i32, len: i32| -> i32 {
+                    let memory = memory_of(&mut caller);
+                    let (data, fs) = memory.data_and_store_mut(&mut caller);
+                    let Some(Some((name, _, _, writable))) = fs.handles.get(fd as usize) else {
+                        return -1;
+                    };
+                    if !*writable {
+                        return -1;
+                    }
+                    let start = buf as usize;
+                    let bytes = &data[start..start + len as usize];
+                    fs.files
+                        .get_mut(name.as_str())
+                        .unwrap()
+                        .extend_from_slice(bytes);
+                    len
+                },
+            )
+            .unwrap();
+        linker
+            .func_wrap(
+                "waspy_host",
+                "close",
+                |mut caller: Caller<'_, HostFs>, fd: i32| -> i32 {
+                    if let Some(handle) = caller.data_mut().handles.get_mut(fd as usize) {
+                        *handle = None;
+                        0
+                    } else {
+                        -1
+                    }
+                },
+            )
+            .unwrap();
+        linker
+    }
+
+    /// Compile (unoptimized), instantiate with the in-memory host filesystem,
+    /// and return the instance + store for calls and post-run inspection.
+    fn instantiate_with_fs(source: &str) -> (wasmi::Instance, Store<HostFs>) {
+        let options = CompilerOptions {
+            optimize: false,
+            ..CompilerOptions::default()
+        };
+        let wasm = compile_python_to_wasm_with_options(source, &options).expect("compilation");
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm[..]).expect("valid wasm module");
+        let mut store = Store::new(&engine, HostFs::default());
+        let instance = linker_with_host_fs(&engine)
+            .instantiate(&mut store, &module)
+            .expect("instantiation")
+            .start(&mut store)
+            .expect("start");
+        (instance, store)
+    }
+
+    fn call_fs_i32(source: &str, func: &str) -> (i32, Store<HostFs>) {
+        let (instance, mut store) = instantiate_with_fs(source);
+        let result = instance
+            .get_typed_func::<(), i32>(&store, func)
+            .expect("exported i32 fn")
+            .call(&mut store, ())
+            .expect("call");
+        (result, store)
+    }
+
+    #[test]
+    fn write_then_read_round_trips() {
+        // A full round trip through the host interface: write() reports the
+        // byte count, read() returns a string with the file's contents, and
+        // the host sees the exact bytes (#25).
+        let src = "def f() -> int:\n    f = open(\"data.txt\", \"w\")\n    n = f.write(\"hello world\")\n    f.close()\n    g = open(\"data.txt\", \"r\")\n    s = g.read()\n    g.close()\n    return n + len(s)\n";
+        let (result, store) = call_fs_i32(src, "f");
+        assert_eq!(result, 22); // 11 written + 11 read back
+        assert_eq!(
+            store.data().files.get("data.txt").map(|c| c.as_slice()),
+            Some("hello world".as_bytes())
+        );
+    }
+
+    #[test]
+    fn with_open_closes_the_file() {
+        // `with open(...) as f:` desugars to open/body/close (#25); the write
+        // lands and both handles are closed by the end.
+        let src = "def f() -> int:\n    with open(\"out.txt\", \"w\") as f:\n        f.write(\"abc\")\n    with open(\"out.txt\") as g:\n        s = g.read()\n    return len(s)\n";
+        let (result, store) = call_fs_i32(src, "f");
+        assert_eq!(result, 3);
+        assert!(store.data().handles.iter().all(|h| h.is_none()));
+    }
+
+    #[test]
+    fn read_with_size_caps_the_result() {
+        let src = "def f() -> int:\n    f = open(\"cap.txt\", \"w\")\n    f.write(\"abcdefgh\")\n    f.close()\n    g = open(\"cap.txt\")\n    s = g.read(3)\n    g.close()\n    return len(s)\n";
+        let (result, _store) = call_fs_i32(src, "f");
+        assert_eq!(result, 3);
+    }
+
+    #[test]
+    fn open_missing_file_returns_invalid_fd() {
+        // Reading a file that was never created: the host reports fd -1 and
+        // read() on it yields an empty string rather than trapping.
+        let src = "def f() -> int:\n    g = open(\"missing.txt\", \"r\")\n    s = g.read()\n    g.close()\n    return len(s)\n";
+        let (result, _store) = call_fs_i32(src, "f");
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn module_without_file_io_has_no_imports() {
+        // Programs that never call open() must keep instantiating with an
+        // empty import object (no `waspy_host` requirement).
+        let options = CompilerOptions {
+            optimize: false,
+            ..CompilerOptions::default()
+        };
+        let wasm = compile_python_to_wasm_with_options("def f() -> int:\n    return 1\n", &options)
+            .expect("compilation");
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm[..]).expect("valid wasm module");
+        assert_eq!(module.imports().len(), 0);
     }
 }

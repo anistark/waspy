@@ -8,7 +8,7 @@ use std::env;
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
-use waspy::{compile_python_to_wasm_with_options, parser, CompilerOptions, Verbosity};
+use waspy::{compile_python_file_with_options, parser, CompilerOptions, Verbosity};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
@@ -62,8 +62,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if options.generate_html { "yes" } else { "no" }
     );
 
+    // Compile by path so imports of sibling user-written modules resolve
+    // (each imported .py file is linked into the single output module).
     let start = Instant::now();
-    let wasm = compile_python_to_wasm_with_options(&source, &options)?;
+    let wasm = compile_python_file_with_options(python_file, &options)?;
     let duration = start.elapsed();
 
     println!("\n✅ Compilation completed in {duration:.2?}");

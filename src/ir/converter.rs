@@ -1413,13 +1413,45 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                     None
                 };
 
-                let body = Box::new(lower_function_body(&with_stmt.body, memory_layout)?);
+                // `with open(...) as f:` (#25) desugars to
+                // `f = open(...); <body>; f.close()`. A file handle is a bare
+                // host fd with no `__enter__`/`__exit__`, and this sidesteps
+                // the generic With lowering, which does not support custom
+                // context managers (#5).
+                let is_open_call = matches!(
+                    &context_expr,
+                    IRExpr::FunctionCall { function_name, .. } if function_name == "open"
+                );
+                if is_open_call {
+                    let target = optional_vars.unwrap_or_else(|| {
+                        // A `with open(...)` without `as` still needs a handle
+                        // to close; synthesize a unique local for it.
+                        static WITH_FILE_SEQ: std::sync::atomic::AtomicUsize =
+                            std::sync::atomic::AtomicUsize::new(0);
+                        let n = WITH_FILE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        format!("__with_file_{n}")
+                    });
+                    ir_statements.push(IRStatement::Assign {
+                        target: target.clone(),
+                        value: context_expr,
+                        var_type: Some(IRType::File),
+                    });
+                    let body = lower_function_body(&with_stmt.body, memory_layout)?;
+                    ir_statements.extend(body.statements);
+                    ir_statements.push(IRStatement::Expression(IRExpr::MethodCall {
+                        object: Box::new(IRExpr::Variable(target)),
+                        method_name: "close".to_string(),
+                        arguments: Vec::new(),
+                    }));
+                } else {
+                    let body = Box::new(lower_function_body(&with_stmt.body, memory_layout)?);
 
-                ir_statements.push(IRStatement::With {
-                    context_expr,
-                    optional_vars,
-                    body,
-                });
+                    ir_statements.push(IRStatement::With {
+                        context_expr,
+                        optional_vars,
+                        body,
+                    });
+                }
             }
             Stmt::Import(_) => {
                 // Handle inline imports within functions
