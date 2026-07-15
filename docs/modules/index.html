@@ -159,7 +159,7 @@
                     { name: "for loops with list/string iteration", status: "done", version: "0.7.0" },
                     { name: "break and continue in loops", status: "done", version: "0.11.0" },
                     { name: "try/except/finally exception handling", status: "done", version: "0.7.0" },
-                    { name: "with statements and context managers", status: "done", version: "0.7.0" },
+                    { name: "with statements (with open(...) as f; custom context managers pending #5)", status: "progress", version: "0.19.0" },
                     { name: "Comparison operations (==, !=, <, <=, >, >=)", status: "done", version: "0.1.0" },
                     { name: "Boolean logic (and, or, not) with short-circuit", status: "done", version: "0.1.0" }
                 ]
@@ -225,8 +225,10 @@
                 version: "0.1.0",
                 features: [
                     { name: "WebAssembly optimization (Binaryen)", status: "done", version: "0.1.0" },
-                    { name: "Compiler options & configuration", status: "done", version: "0.1.0" },
-                    { name: "Error handling with detailed messages", status: "done", version: "0.1.0" },
+                    { name: "Compiler options & configuration (reviewed API: optimize + verbosity)", status: "done", version: "0.20.0" },
+                    { name: "Error handling with located messages (line/column, function, hints)", status: "done", version: "0.20.0" },
+                    { name: "Early validation - unsupported syntax rejected before codegen", status: "done", version: "0.20.0" },
+                    { name: "Integration test suite - every example compiled, run, and asserted in CI", status: "done", version: "0.20.0" },
                     { name: "Memory layout optimization", status: "done", version: "0.1.0" }
                 ]
             },
@@ -288,7 +290,7 @@
                     { name: "for loops with list/string iteration", status: "done", version: "0.7.0" },
                     { name: "break and continue (with correct nesting in if/try/loops)", status: "done", version: "0.11.0" },
                     { name: "try/except/finally with exception handling", status: "done", version: "0.7.0" },
-                    { name: "with statements and context managers", status: "done", version: "0.7.0" },
+                    { name: "with statements (with open(...) as f; custom context managers pending #5)", status: "progress", version: "0.19.0" },
                     { name: "Exception type matching and handlers", status: "done", version: "0.7.0" }
                 ]
             },
@@ -300,8 +302,8 @@
                     { name: "Type conversions (int(), float(), str(), bool())", status: "done", version: "0.4.0" },
                     { name: "len() - strings, lists, and dicts", status: "done", version: "0.7.0" },
                     { name: "print() - argument handling implemented", status: "done", version: "0.7.0" },
-                    { name: "min() & max() - multiple arguments", status: "done", version: "0.7.0" },
-                    { name: "sum() - iterable with start value", status: "done", version: "0.7.0" }
+                    { name: "min() & max() - multiple arguments (single-iterable form rejected with a hint)", status: "done", version: "0.7.0" },
+                    { name: "sum() over lists/tuples with optional start value - real element loop", status: "done", version: "0.20.0" }
                 ]
             },
             runtimeFeatures: {

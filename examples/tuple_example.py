@@ -1,3 +1,15 @@
+def tuple_sum() -> int:
+    """Index each element of a literal tuple: 1 + 2 + 3 = 6."""
+    t = (1, 2, 3)
+    return t[0] + t[1] + t[2]
+
+
+def single_element() -> int:
+    """A one-element tuple still needs its trailing comma."""
+    single = (99,)
+    return single[0]
+
+
 def main():
     t = (1, 2, 3)
     print(t[0])

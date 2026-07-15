@@ -1,7 +1,51 @@
 //! Waspy: A Python to WebAssembly compiler written in Rust.
 //!
-//! Waspy translates Python functions into WebAssembly, allowing Python code
-//! to run in browsers and other WebAssembly environments.
+//! Waspy translates a typed subset of Python into a standalone WebAssembly
+//! module, allowing Python code to run in browsers and other WebAssembly
+//! environments. There is no interpreter or runtime dependency: each
+//! supported construct compiles to inline WASM, and the produced module's
+//! exported functions are the compiled Python functions.
+//!
+//! # Quick start
+//!
+//! ```
+//! use waspy::compile_python_to_wasm;
+//!
+//! let source = "def add(a: int, b: int) -> int:\n    return a + b\n";
+//! let wasm: Vec<u8> = compile_python_to_wasm(source)?;
+//! assert_eq!(&wasm[0..4], b"\0asm");
+//! # anyhow::Ok(())
+//! ```
+//!
+//! # Public API
+//!
+//! The stable surface of this crate is the set of items exported from the
+//! crate root:
+//!
+//! - **Single source**: [`compile_python_to_wasm`],
+//!   [`compile_python_to_wasm_with_options`]
+//! - **Entry file with user-module imports resolved from disk**:
+//!   [`compile_python_file`], [`compile_python_file_with_options`]
+//! - **Several sources merged into one module**:
+//!   [`compile_multiple_python_files`],
+//!   [`compile_multiple_python_files_with_options`],
+//!   [`compile_multiple_python_files_with_config`]
+//! - **Project directory**: [`compile_python_project`],
+//!   [`compile_python_project_with_options`]
+//! - **Metadata without codegen**: [`get_python_file_metadata`],
+//!   [`get_python_project_metadata`], [`FunctionSignature`]
+//! - **Configuration**: [`CompilerOptions`], [`Verbosity`]
+//! - **Helpers**: [`type_to_string`]
+//!
+//! All compile entry points return `anyhow::Result<Vec<u8>>`; the byte vector
+//! is a complete, validated WebAssembly binary. Structured compiler errors
+//! (with source locations where available) travel in the error chain as
+//! [`core::errors::ChakraError`] values.
+//!
+//! The pipeline modules ([`core`], [`ir`], [`compiler`], [`optimize`],
+//! [`stdlib`], [`analysis`], [`utils`]) are exposed for advanced embedding
+//! and inspection, but their contents are implementation detail and may
+//! change between minor versions; depend on the crate-root exports.
 
 pub mod analysis;
 pub mod compiler;
@@ -651,7 +695,7 @@ pub fn get_python_project_metadata<P: AsRef<Path>>(
                 }
             }
             Err(e) => {
-                println!("Warning: Failed to extract metadata from {path}: {e}");
+                log_warn!("Failed to extract metadata from {path}: {e}");
             }
         }
     }
@@ -708,7 +752,6 @@ pub fn type_to_string(ir_type: &IRType) -> String {
 }
 
 pub use crate::analysis::metadata::FunctionSignature;
-pub use crate::core::parser;
 
 #[cfg(test)]
 mod collection_tests {

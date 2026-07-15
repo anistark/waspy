@@ -63,8 +63,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Set compiler options
     let options = CompilerOptions {
         optimize: true,
-        debug_info: true,
-        generate_html: true,
         ..CompilerOptions::default()
     };
 
@@ -115,8 +113,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn print_usage(program_name: &str) {
+    eprintln!("Waspy multi-file compiler driver — merge several Python files into");
+    eprintln!("one WebAssembly module, so functions can call across file boundaries.");
+    eprintln!();
     eprintln!("Usage: {program_name} <output_file> <python_file1> [python_file2] ...");
-    eprintln!("Example: {program_name} examples/output/combined.wasm examples/basic_operations.py examples/calculator.py");
+    eprintln!();
+    eprintln!("Functions are de-duplicated by name across files (the first definition");
+    eprintln!("wins, with a warning), and an HTML test page is written next to the");
+    eprintln!("output module.");
+    eprintln!();
+    eprintln!("Example:");
+    eprintln!("  {program_name} examples/output/combined.wasm \\");
+    eprintln!("      examples/basic_operations.py examples/calculator.py");
+    eprintln!();
+    eprintln!("Tip: `just compile-multi <out> <file1> <file2>` wraps this driver.");
 }
 
 fn generate_html_test_file(wasm_filename: &str) -> String {

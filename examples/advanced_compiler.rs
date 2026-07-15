@@ -8,7 +8,8 @@ use std::env;
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
-use waspy::{compile_python_file_with_options, parser, CompilerOptions, Verbosity};
+use waspy::core::parser;
+use waspy::{compile_python_file_with_options, CompilerOptions, Verbosity};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
@@ -22,7 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let python_file = &args[1];
 
     // Parse options
-    let options = parse_options(&args);
+    let (options, driver) = parse_options(&args);
 
     // Create output directory
     fs::create_dir_all("examples/output")?;
@@ -35,7 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let source = fs::read_to_string(python_file)?;
 
     // Extract and display function signatures if requested
-    if options.include_metadata {
+    if driver.show_metadata {
         display_function_metadata(&source)?;
     }
 
@@ -49,17 +50,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "disabled"
         }
     );
-    println!(
-        "- Debug info: {}",
-        if options.debug_info {
-            "included"
-        } else {
-            "excluded"
-        }
-    );
+    println!("- Verbosity: {:?}", options.verbosity);
     println!(
         "- HTML test harness: {}",
-        if options.generate_html { "yes" } else { "no" }
+        if driver.generate_html { "yes" } else { "no" }
     );
 
     // Compile by path so imports of sibling user-written modules resolve
@@ -78,10 +72,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Write the WebAssembly to a file
     fs::write(&output_file, &wasm)?;
     println!("WebAssembly written to {}", output_file.display());
-    println!("Output size: {} bytes", wasm.len());
+
+    // Report source vs output sizes so the compilation cost is visible at a
+    // glance (issue: report file sizes after compilation).
+    let source_size = source.len();
+    let wasm_size = wasm.len();
+    println!("\nFile sizes:");
+    println!("  Python source: {}", format_size(source_size));
+    println!("  WASM output:   {}", format_size(wasm_size));
+    println!(
+        "  Ratio:         {:.2}x {}",
+        if source_size > 0 {
+            wasm_size as f64 / source_size as f64
+        } else {
+            0.0
+        },
+        if wasm_size <= source_size {
+            "(smaller than source)"
+        } else {
+            "(of source size)"
+        }
+    );
 
     // Generate HTML test harness if requested
-    if options.generate_html {
+    if driver.generate_html {
         let html_file = output_file.with_extension("html");
         let html =
             generate_html_test_file(stem, output_file.file_name().unwrap().to_str().unwrap());
@@ -93,39 +107,71 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn print_usage(program_name: &str) {
-    eprintln!("Usage: {program_name} <python_file> [options]");
-    eprintln!("Options:");
-    eprintln!("  --no-optimize     Disable WebAssembly optimization");
-    eprintln!("  --debug-info      Include debug information");
-    eprintln!("  --metadata        Show function signatures and metadata");
-    eprintln!("  --html            Generate an HTML test harness");
-    eprintln!("  --verbose         Enable verbose logging (including AST output)");
-    eprintln!("  --debug           Enable debug logging (most detailed)");
-    eprintln!("  --entry-point=NAME Set a specific entry point function");
-    eprintln!("\nExample:");
-    eprintln!("  {program_name} examples/typed_demo.py --metadata --html --verbose");
+/// Driver-side switches that shape this example's output but are not
+/// compiler options (the library neither prints metadata nor writes HTML).
+#[derive(Default)]
+struct DriverFlags {
+    show_metadata: bool,
+    generate_html: bool,
 }
 
-fn parse_options(args: &[String]) -> CompilerOptions {
+/// Render a byte count human-readably (e.g. "1.4 KiB (1433 bytes)").
+fn format_size(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{bytes} bytes")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KiB ({bytes} bytes)", bytes as f64 / 1024.0)
+    } else {
+        format!(
+            "{:.2} MiB ({bytes} bytes)",
+            bytes as f64 / (1024.0 * 1024.0)
+        )
+    }
+}
+
+fn print_usage(program_name: &str) {
+    eprintln!("Waspy advanced compiler driver — compile a Python file to WebAssembly.");
+    eprintln!();
+    eprintln!("Usage: {program_name} <python_file> [options]");
+    eprintln!();
+    eprintln!("The entry file's imports of sibling user-written .py modules are");
+    eprintln!("resolved from disk and linked into the single output module, which");
+    eprintln!("is written to examples/output/<name>.wasm.");
+    eprintln!();
+    eprintln!("Options:");
+    eprintln!("  --no-optimize   Skip the Binaryen optimization pass (faster builds,");
+    eprintln!("                  larger output; the module is valid either way)");
+    eprintln!("  --metadata      Print the file's function signatures and AST summary");
+    eprintln!("                  before compiling");
+    eprintln!("  --html          Also write an HTML page next to the .wasm that loads");
+    eprintln!("                  it and calls exported functions from the browser");
+    eprintln!("  --verbose       Verbose compiler logging (per-stage progress)");
+    eprintln!("  --debug         Debug logging (most detailed, includes IR dumps)");
+    eprintln!();
+    eprintln!("Examples:");
+    eprintln!("  {program_name} examples/typed_demo.py");
+    eprintln!("  {program_name} examples/typed_demo.py --metadata --html");
+    eprintln!("  {program_name} examples/user_modules_app/main.py --verbose");
+    eprintln!();
+    eprintln!("Tip: `just compile <file>` and `just optimize <file>` wrap this driver.");
+}
+
+fn parse_options(args: &[String]) -> (CompilerOptions, DriverFlags) {
     let mut options = CompilerOptions::default();
+    let mut driver = DriverFlags::default();
     let mut verbose = false;
     let mut debug = false;
 
     for arg in args.iter().skip(1) {
         match arg.as_str() {
             "--no-optimize" => options.optimize = false,
-            "--debug-info" => options.debug_info = true,
-            "--metadata" => options.include_metadata = true,
-            "--html" => options.generate_html = true,
+            "--metadata" => driver.show_metadata = true,
+            "--html" => driver.generate_html = true,
             "--verbose" => verbose = true,
             "--debug" => debug = true,
-            _ => {
-                // Check for --entry-point=NAME format
-                if arg.starts_with("--entry-point=") {
-                    if let Some(name) = arg.strip_prefix("--entry-point=") {
-                        options.entry_point = Some(name.to_string());
-                    }
+            other => {
+                if other.starts_with("--") {
+                    eprintln!("Warning: unknown option `{other}` ignored (see --help)");
                 }
             }
         }
@@ -134,7 +180,7 @@ fn parse_options(args: &[String]) -> CompilerOptions {
     // Set verbosity level based on flags
     options.verbosity = Verbosity::from_flags(verbose, debug);
 
-    options
+    (options, driver)
 }
 
 fn display_function_metadata(source: &str) -> Result<(), Box<dyn std::error::Error>> {

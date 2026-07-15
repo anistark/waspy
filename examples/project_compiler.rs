@@ -18,6 +18,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (Path::new(&args[1]), Path::new(&args[2]))
     } else {
         // Default to example project
+        eprintln!("Waspy project compiler driver — compile a Python project directory");
+        eprintln!("(every compilable .py file, config-aware) into one WebAssembly module.");
+        eprintln!();
+        eprintln!("Usage: {} <project_dir> <output_file>", args[0]);
+        eprintln!("Tip: `just compile-project <dir> [output]` wraps this driver.");
+        eprintln!();
+        eprintln!("No arguments given — using the bundled example project.");
+        eprintln!();
         (
             Path::new("examples/calculator_project"),
             Path::new("examples/output/calculator_project.wasm"),
@@ -29,14 +37,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Project directory: {}", project_path.display());
     println!("Output file: {}", output_path.display());
 
-    // Set compiler options
+    // Set compiler options; the HTML harness is this driver's own feature.
     let options = CompilerOptions {
         optimize: true,
-        debug_info: true,
-        generate_html: true,
-        include_metadata: true,
         ..CompilerOptions::default()
     };
+    let generate_html = true;
 
     // Start timing
     let start_time = Instant::now();
@@ -72,7 +78,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Output file: {}", output_path.display());
 
     // Generate HTML test file if requested
-    if options.generate_html {
+    if generate_html {
         let html_file = output_path.with_extension("html");
         let wasm_name = output_path.file_name().unwrap().to_str().unwrap();
         let html = generate_html_test_file(wasm_name);

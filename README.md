@@ -9,11 +9,9 @@ A Python to WebAssembly compiler written in Rust.
 
 ## Overview
 
-Waspy translates Python functions into WebAssembly. The implementation supports basic arithmetic operations, control flow, and multiple functions with enhanced type support.
+Waspy compiles a typed subset of Python ahead of time into a standalone WebAssembly module — no interpreter or VM in the output. This README's [Supported Python subset](#supported-python-subset) and [Limitations](#limitations) sections are the authoritative statement of what compiles and runs today.
 
 ### Compilation Pipeline
-
-## Overview
 
 ```sh
 [Python Source Code]
@@ -27,7 +25,7 @@ Generate & Optimize
 [WebAssembly Binary]
 ```
 
-## Current Features
+## Supported Python subset
 
 - Compiles Python functions to WebAssembly
 - Supports multiple functions in a single WebAssembly module
@@ -40,8 +38,9 @@ Generate & Optimize
 - Complete string operations support (slicing, concatenation, 20+ methods, formatting)
 - Supports arithmetic operations (`+`, `-`, `*`, `/`, `%`, `//`, `**`)
 - Processes comparison operators (`==`, `!=`, `<`, `<=`, `>`, `>=`)
-- Handles boolean operators (`and`, `or`)
-- Provides improved error handling with detailed error messages
+- Handles boolean operators (`and`, `or`) and bitwise operators (`&`, `|`, `^`, `<<`, `>>`)
+- Built-in functions: `int()`, `float()`, `str()`, `bool()`, `len()`, `print()`, `min()`/`max()` (multiple arguments), `sum()` over lists/tuples (with optional start value)
+- Rejects unsupported Python syntax up front with located errors and hints, instead of failing deep in code generation
 - Performs automatic WebAssembly optimization using Binaryen
 - Detects and handles project structure and dependencies
 - Supports module-level variables and class definitions with heap-allocated instances — multiple live instances per class, usable as function arguments and return values
@@ -68,15 +67,30 @@ Generate & Optimize
 - `with` over a custom context manager does not yet compile ([#5](https://github.com/anistark/waspy/issues/5)); `with open(...)` works
 - No garbage collection or reference counting — the bump allocator never frees
 
+### Explicitly unsupported (rejected at compile time)
+
+The compiler validates syntax up front and rejects these with a located error and a hint, rather than miscompiling them:
+
+- `async def` / `await` / `async for` / `async with` (planned after 1.0)
+- `match` statements, `global`, `nonlocal`, `del`, `assert`, `type` aliases, `except*`
+- `from module import *`
+- `*args`, `**kwargs`, and keyword-only parameters
+- Metaclasses and other class keywords, multiple inheritance
+- Loop `else:` clauses (`for`/`while ... else`)
+- `min()`/`max()` over a single iterable argument (pass the values separately)
+
 ## Installation
 
 ```sh
 cargo add waspy
 ```
 
-# Or add to your Cargo.toml
+Or add it to your `Cargo.toml`:
+
+```toml
 [dependencies]
 waspy = "0.12.0"
+```
 
 ## Quick Start
 
@@ -118,11 +132,8 @@ With Compiler Options:
 use waspy::{compile_python_to_wasm_with_options, CompilerOptions, Verbosity};
 
 let options = CompilerOptions {
-    optimize: true,
-    debug_info: true,
-    generate_html: true,
+    optimize: true,                 // Binaryen pass over the output (default: true)
     verbosity: Verbosity::Verbose,  // or Verbosity::Debug
-    ..CompilerOptions::default()
 };
 
 let wasm = compile_python_to_wasm_with_options(python_code, &options)?;
@@ -165,9 +176,21 @@ let wasm = compile_multiple_python_files(&sources, true)?;
 For unoptimized WebAssembly (useful for debugging or further processing):
 
 ```rust
-use waspy::compile_python_to_wasm_with_options;
+use waspy::{compile_python_to_wasm_with_options, CompilerOptions};
 
-let wasm = compile_python_to_wasm_with_options(python_code, false)?;
+let options = CompilerOptions {
+    optimize: false,
+    ..CompilerOptions::default()
+};
+let wasm = compile_python_to_wasm_with_options(python_code, &options)?;
+```
+
+Compiling an entry file with its own module imports resolved from disk (`import mod` finds the sibling `mod.py`, transitively):
+
+```rust
+use waspy::compile_python_file;
+
+let wasm = compile_python_file("app/main.py", true)?;
 ```
 
 Compiling Projects:
@@ -255,9 +278,14 @@ Waspy handles variables through WebAssembly locals:
 
 Enhanced error reporting system:
 
-- Detailed error messages with source location information
-- Specific error types for different issues (parsing, type errors, etc.)
-- Warnings for potential problems that don't prevent compilation
+- Python syntax errors report their line and column
+- Known-unsupported constructs are rejected before code generation with the construct named, its location, the enclosing function, and a workaround hint
+- Specific error types for different issues (parsing, type errors, unsupported features, name errors)
+- Warnings for potential problems that don't prevent compilation (e.g. cross-module function name collisions)
+
+### Testing
+
+Every bundled example compiles, instantiates, and has its runtime results asserted by the integration suite (`tests/integration/`), alongside operator-level unit tests (`tests/unit/`). Run everything with `just test`, the full CI-equivalent gate with `just ci`, or compile every example through the real drivers with `just verify-examples`.
 
 ## Examples
 
@@ -278,6 +306,15 @@ cargo run --example project_compiler examples/calculator_project examples/output
 
 # Type system demonstration
 cargo run --example typed_demo
+```
+
+Or through the justfile:
+
+```sh
+just compile examples/typed_demo.py     # compile one file (reports sizes)
+just verify-examples                    # compile every bundled example
+just benchmark                          # time compilation (release build)
+just examples                           # run the full driver suite
 ```
 
 ## Contributing

@@ -293,7 +293,7 @@ WebAssembly.instantiate(wasmBuffer).then(result => {
                         <div class="hex-cell reveal" data-accent="teal" style="--d: 1;">
                             <div class="hex-card">
                                 <h3>Typed Code Generation</h3>
-                                <p>Type annotations map to WASM value types (i32, i64, f32, f64), checked at compile time.</p>
+                                <p>Type annotations map to WASM value types (i32 for ints/bools, f64 for floats), checked at compile time.</p>
                                 <span class="feature-tag">annotations</span>
                             </div>
                         </div>
@@ -307,7 +307,7 @@ WebAssembly.instantiate(wasmBuffer).then(result => {
                         <div class="hex-cell reveal" data-accent="green" style="--d: 3;">
                             <div class="hex-card">
                                 <h3>Small Rust API</h3>
-                                <p>compile_python_to_wasm() for one source string; compile_python_project() for a directory.</p>
+                                <p>compile_python_to_wasm() for one source, compile_python_file() for an entry file and its imports, compile_python_project() for a directory.</p>
                                 <span class="feature-tag">rust crate</span>
                             </div>
                         </div>

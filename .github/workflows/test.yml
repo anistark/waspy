@@ -31,3 +31,10 @@ jobs:
 
       - name: Run tests
         run: cargo test --all-features
+
+      # Explicit required gate for the example/feature harness: every
+      # examples/*.py must compile, instantiate, and pass its asserted-result
+      # tests (tests/integration/, tests/unit/). Also covered by the full run
+      # above; kept as its own step so a harness failure is visible by name.
+      - name: Integration and unit harness (required gate)
+        run: cargo test --all-features --test integration_examples --test integration_coverage --test unit_basics

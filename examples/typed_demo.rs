@@ -57,9 +57,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Compile with options
     let options = CompilerOptions {
         optimize: true,
-        debug_info: true,
-        generate_html: true,
-        include_metadata: true,
         ..CompilerOptions::default()
     };
 

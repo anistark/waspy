@@ -1,29 +1,53 @@
 use std::fmt;
 use thiserror::Error;
 
-/// Custom error types for Waspy
+/// Render an optional line/column pair as a display suffix (" at line L,
+/// column C"), or nothing when the location is unknown.
+fn line_col_suffix(line: &Option<usize>, column: &Option<usize>) -> String {
+    match (line, column) {
+        (Some(line), Some(column)) => format!(" at line {line}, column {column}"),
+        (Some(line), None) => format!(" at line {line}"),
+        _ => String::new(),
+    }
+}
+
+/// Render an optional [`ErrorLocation`] as a display suffix (" in file f at
+/// line L, ..."), or nothing when the location is unknown.
+fn location_suffix(location: &Option<ErrorLocation>) -> String {
+    match location {
+        Some(location) => format!(" ({location})"),
+        None => String::new(),
+    }
+}
+
+/// Custom error types for Waspy.
+///
+/// Every located variant renders its position information in the display
+/// output, so downstream users see "Unsupported feature: ... (at line 3)"
+/// without having to destructure the error. (The `Chakra` name is legacy —
+/// the project's original name — kept because the type is public API.)
 #[derive(Error, Debug)]
 pub enum ChakraError {
-    #[error("Python parsing error: {message}")]
+    #[error("Python parsing error: {message}{}", line_col_suffix(.line, .column))]
     ParseError {
         message: String,
         line: Option<usize>,
         column: Option<usize>,
     },
 
-    #[error("Type error: {message}")]
+    #[error("Type error: {message}{}", location_suffix(.location))]
     TypeError {
         message: String,
         location: Option<ErrorLocation>,
     },
 
-    #[error("Unsupported feature: {message}")]
+    #[error("Unsupported feature: {message}{}", location_suffix(.location))]
     UnsupportedFeature {
         message: String,
         location: Option<ErrorLocation>,
     },
 
-    #[error("Name error: {message}")]
+    #[error("Name error: {message}{}", location_suffix(.location))]
     NameError {
         message: String,
         location: Option<ErrorLocation>,
