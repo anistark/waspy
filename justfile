@@ -97,6 +97,55 @@ clean:
     cargo clean
     rm -rf examples/output || true
 
+# Deep clean: build artifacts plus every generated example output (.wasm/.html)
+clean-all: clean
+    #!/usr/bin/env bash
+    set -euo pipefail
+    find examples -name "*.wasm" -delete
+    find examples -name "*.html" -delete
+    echo "Removed generated example artifacts."
+
+# Compile every bundled example through the real driver (multi-file examples
+# via their entry file), failing on the first broken one
+verify-examples:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p examples/output
+    cargo build --quiet --example advanced_compiler
+    for f in examples/*.py; do
+      case "$(basename "$f")" in
+        calculator.py) continue;;  # multi-file only: needs basic_operations.py (covered below)
+      esac
+      echo "== $f"
+      cargo run --quiet --example advanced_compiler "$f" >/dev/null
+    done
+    echo "== examples/user_modules_app/main.py"
+    cargo run --quiet --example advanced_compiler examples/user_modules_app/main.py >/dev/null
+    echo "== examples/basic_operations.py + examples/calculator.py (multi-file)"
+    cargo run --quiet --example multi_file_compiler examples/output/verify_combined.wasm \
+        examples/basic_operations.py examples/calculator.py >/dev/null
+    echo "== examples/calculator_project (project directory)"
+    cargo run --quiet --example project_compiler examples/calculator_project \
+        examples/output/verify_project.wasm >/dev/null
+    echo ""
+    echo "All examples compiled successfully."
+
+# Time compilation of representative examples (release build, wall clock)
+benchmark:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p examples/output
+    echo "Building release examples..."
+    cargo build --quiet --release --example advanced_compiler
+    for f in examples/basic_operations.py examples/typed_demo.py \
+             examples/comprehensions.py examples/generators.py \
+             examples/stdlib_all_modules.py; do
+      echo ""
+      echo "== $f"
+      /usr/bin/time ./target/release/examples/advanced_compiler "$f" 2>&1 \
+        | grep -E "Compilation completed|real|user|sys| KiB| MiB| bytes" || true
+    done
+
 # Serve the docs website locally (set host to 0.0.0.0 or a tailscale IP to share over the network)
 docs port="8000" host="0.0.0.0":
     python3 -m http.server {{port}} --bind {{host}} --directory docs

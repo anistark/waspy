@@ -1145,44 +1145,46 @@ pub fn compile_body(
             }
 
             IRStatement::AugAssign { target, value, op } => {
-                // Get the local index
+                // `x OP= v` -> x = (x OP v), at the local's own width: an f64
+                // local uses f64 arithmetic with the operand coerced to float,
+                // an i32 local uses i32 arithmetic.
                 if let Some(local_idx) = ctx.get_local_index(target) {
-                    // Load the current value
+                    let local_ty = ctx
+                        .get_local_info(target)
+                        .map(|info| info.var_type.clone())
+                        .unwrap_or(IRType::Int);
+                    let is_float = matches!(local_ty, IRType::Float);
+
+                    // Load the current value.
                     func.instruction(&Instruction::LocalGet(local_idx));
 
-                    // Emit code for the value to add/multiply/etc.
-                    emit_expr(value, func, ctx, memory_layout, None);
+                    // Emit the operand, coerced to the local's type.
+                    emit_expr(value, func, ctx, memory_layout, Some(&local_ty));
 
-                    // Apply the operation (add, multiply, etc.)
-                    match op {
-                        IROp::Add => {
-                            func.instruction(&Instruction::I32Add);
-                        }
-                        IROp::Sub => {
-                            func.instruction(&Instruction::I32Sub);
-                        }
-                        IROp::Mul => {
-                            func.instruction(&Instruction::I32Mul);
-                        }
-                        IROp::Div => {
-                            func.instruction(&Instruction::I32DivS);
-                        }
-                        IROp::Mod => {
+                    // Apply the operation.
+                    match (op, is_float) {
+                        (IROp::Mod, false) => {
                             func.instruction(&Instruction::I32RemS);
                         }
-                        IROp::FloorDiv => {
-                            func.instruction(&Instruction::I32DivS);
-                        }
-                        IROp::Pow => {
+                        (IROp::Pow, false) => {
                             emit_integer_power_operation(func);
                         }
-                        // Handle other operations with placeholder implementations
-                        _ => {
-                            // Default for unimplemented operations
-                            func.instruction(&Instruction::Drop);
-                            func.instruction(&Instruction::Drop);
-                            func.instruction(&Instruction::I32Const(0));
+                        (IROp::LShift, false) => {
+                            func.instruction(&Instruction::I32Shl);
                         }
+                        (IROp::RShift, false) => {
+                            func.instruction(&Instruction::I32ShrS);
+                        }
+                        (IROp::BitAnd, false) => {
+                            func.instruction(&Instruction::I32And);
+                        }
+                        (IROp::BitOr, false) => {
+                            func.instruction(&Instruction::I32Or);
+                        }
+                        (IROp::BitXor, false) => {
+                            func.instruction(&Instruction::I32Xor);
+                        }
+                        _ => emit_arith_op(func, op, is_float),
                     }
 
                     // Store the result back

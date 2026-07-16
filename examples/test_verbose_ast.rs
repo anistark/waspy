@@ -21,10 +21,7 @@ def multiply(x: int, y: int) -> int:
     // Compile with verbose mode to see AST output
     let options = CompilerOptions {
         optimize: false,
-        debug_info: true,
-        generate_html: false,
         verbosity: Verbosity::Verbose,
-        ..CompilerOptions::default()
     };
 
     println!("Compiling with verbose mode enabled...\n");

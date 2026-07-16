@@ -2356,21 +2356,116 @@ pub fn emit_expr(
                         if arg_types.is_empty() {
                             return IRType::Unknown;
                         }
-                        if arg_types.len() == 1 {
-                            // sum(iterable) or sum(iterable, start)
-                            match &arg_types[0] {
-                                IRType::List(_elem_type) => {
-                                    // For now, return a dummy value; proper implementation requires iteration
-                                    func.instruction(&Instruction::I32Const(0));
+                        // sum(iterable[, start]) over a list/tuple pointer:
+                        // loop the [len][slot0][slot1]... layout, accumulating
+                        // into a scratch local. Float elements accumulate at
+                        // f64 width; everything else uses the slot's low i32
+                        // word (bools sum as 0/1, like Python).
+                        let elem_type = match &arg_types[0] {
+                            IRType::List(elem) => (**elem).clone(),
+                            // A tuple sums at f64 width only when every member
+                            // is a float; sets use a hash-table layout this
+                            // linear walk can't read, so they fall through.
+                            IRType::Tuple(types) => {
+                                if !types.is_empty()
+                                    && types.iter().all(|t| matches!(t, IRType::Float))
+                                {
+                                    IRType::Float
+                                } else {
                                     IRType::Int
                                 }
-                                _ => IRType::Unknown,
                             }
+                            _ => {
+                                // Not a list-layout iterable: keep the old
+                                // behavior (the argument value stands in for
+                                // the result) rather than emit a bogus loop.
+                                if arg_types.len() == 2 {
+                                    func.instruction(&Instruction::Drop);
+                                    return arg_types[1].clone();
+                                }
+                                return IRType::Unknown;
+                            }
+                        };
+                        let is_float = matches!(elem_type, IRType::Float);
+                        let ptr = ctx.temp_local;
+                        let len = ctx.temp_local + 1;
+                        let idx = ctx.temp_local + 2;
+                        let acc_i32 = ctx.temp_local + 3;
+                        let acc_f64 = ctx.temp_local_f64;
+
+                        // Seed the accumulator with `start` (top of stack when
+                        // present) or zero, then pop the iterable pointer.
+                        if arg_types.len() == 2 {
+                            if is_float {
+                                if !matches!(arg_types[1], IRType::Float) {
+                                    func.instruction(&Instruction::F64ConvertI32S);
+                                }
+                                func.instruction(&Instruction::LocalSet(acc_f64));
+                            } else {
+                                func.instruction(&Instruction::LocalSet(acc_i32));
+                            }
+                        } else if is_float {
+                            func.instruction(&Instruction::F64Const(0.0.into()));
+                            func.instruction(&Instruction::LocalSet(acc_f64));
                         } else {
-                            // sum(iterable, start)
-                            // Pop the iterable, keep the start value as result
-                            func.instruction(&Instruction::Drop);
-                            arg_types[1].clone()
+                            func.instruction(&Instruction::I32Const(0));
+                            func.instruction(&Instruction::LocalSet(acc_i32));
+                        }
+                        func.instruction(&Instruction::LocalSet(ptr));
+
+                        // len = *ptr; idx = 0.
+                        func.instruction(&Instruction::LocalGet(ptr));
+                        func.instruction(&Instruction::I32Load(slot_arg()));
+                        func.instruction(&Instruction::LocalSet(len));
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::LocalSet(idx));
+
+                        // while idx < len: acc += slot[idx]; idx += 1.
+                        func.instruction(&Instruction::Block(BlockType::Empty));
+                        func.instruction(&Instruction::Loop(BlockType::Empty));
+                        func.instruction(&Instruction::LocalGet(idx));
+                        func.instruction(&Instruction::LocalGet(len));
+                        func.instruction(&Instruction::I32GeS);
+                        func.instruction(&Instruction::BrIf(1));
+
+                        if is_float {
+                            func.instruction(&Instruction::LocalGet(acc_f64));
+                        } else {
+                            func.instruction(&Instruction::LocalGet(acc_i32));
+                        }
+                        func.instruction(&Instruction::LocalGet(ptr));
+                        func.instruction(&Instruction::LocalGet(idx));
+                        func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+                        func.instruction(&Instruction::I32Mul);
+                        func.instruction(&Instruction::I32Add);
+                        if is_float {
+                            func.instruction(&Instruction::F64Load(mem_off(
+                                COLLECTION_HEADER as u64,
+                            )));
+                            func.instruction(&Instruction::F64Add);
+                            func.instruction(&Instruction::LocalSet(acc_f64));
+                        } else {
+                            func.instruction(&Instruction::I32Load(mem_off(
+                                COLLECTION_HEADER as u64,
+                            )));
+                            func.instruction(&Instruction::I32Add);
+                            func.instruction(&Instruction::LocalSet(acc_i32));
+                        }
+
+                        func.instruction(&Instruction::LocalGet(idx));
+                        func.instruction(&Instruction::I32Const(1));
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::LocalSet(idx));
+                        func.instruction(&Instruction::Br(0));
+                        func.instruction(&Instruction::End);
+                        func.instruction(&Instruction::End);
+
+                        if is_float {
+                            func.instruction(&Instruction::LocalGet(acc_f64));
+                            IRType::Float
+                        } else {
+                            func.instruction(&Instruction::LocalGet(acc_i32));
+                            IRType::Int
                         }
                     }
                     "namedtuple" => {

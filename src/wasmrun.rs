@@ -176,10 +176,7 @@ impl WasmBuilder for WaspyBuilder {
                 config.optimization,
                 OptimizationLevel::Release | OptimizationLevel::Size
             ),
-            debug_info: config.verbose,
-            generate_html: config.target_type == "html",
-            include_metadata: true,
-            ..CompilerOptions::default()
+            verbosity: crate::Verbosity::from_flags(config.verbose, false),
         };
 
         // Determine if input is file or directory
@@ -223,7 +220,7 @@ impl WasmBuilder for WaspyBuilder {
         })?;
 
         // Generate HTML file if html target
-        if config.target_type == "html" && compiler_options.generate_html {
+        if config.target_type == "html" {
             let html_file = output_path.with_extension("html");
             let wasm_name = output_path.file_name().unwrap().to_str().unwrap();
             let html_content = generate_html_test_file(wasm_name);
@@ -574,9 +571,6 @@ pub unsafe extern "C" fn waspy_compile_python(
     // Set up compiler options
     let options = crate::CompilerOptions {
         optimize: optimize != 0,
-        debug_info: optimize == 0,
-        generate_html: false,
-        include_metadata: true,
         ..crate::CompilerOptions::default()
     };
 
@@ -648,9 +642,6 @@ pub unsafe extern "C" fn waspy_compile_project(
     // Set up compiler options
     let options = crate::CompilerOptions {
         optimize: optimize != 0,
-        debug_info: optimize == 0,
-        generate_html: false,
-        include_metadata: true,
         ..crate::CompilerOptions::default()
     };
 

@@ -1492,7 +1492,17 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                 // `pass` is a syntactic no-op (e.g. an @abstractmethod body).
             }
             _ => {
-                return Err(anyhow!("Unsupported statement type: {stmt:?}"));
+                // The parser's validation pass rejects known-unsupported
+                // syntax with a located message before lowering starts; this
+                // is the safety net for anything that slips through.
+                return Err(crate::core::errors::unsupported_feature(
+                    format!(
+                        "'{}' statements are not supported",
+                        statement_kind_name(stmt)
+                    ),
+                    None,
+                )
+                .into());
             }
         }
     }
@@ -1504,6 +1514,38 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
 
 /// Parse a `for` statement's target into its names plus the position of an
 /// optional starred name, mirroring the tuple-assignment target rules.
+/// Human-readable name of a statement kind, for error messages (the AST
+/// node's debug representation is unreadably large).
+fn statement_kind_name(stmt: &Stmt) -> &'static str {
+    match stmt {
+        Stmt::FunctionDef(_) => "def",
+        Stmt::AsyncFunctionDef(_) => "async def",
+        Stmt::ClassDef(_) => "class",
+        Stmt::Return(_) => "return",
+        Stmt::Delete(_) => "del",
+        Stmt::Assign(_) | Stmt::AugAssign(_) | Stmt::AnnAssign(_) => "assignment",
+        Stmt::TypeAlias(_) => "type alias",
+        Stmt::For(_) => "for",
+        Stmt::AsyncFor(_) => "async for",
+        Stmt::While(_) => "while",
+        Stmt::If(_) => "if",
+        Stmt::With(_) => "with",
+        Stmt::AsyncWith(_) => "async with",
+        Stmt::Match(_) => "match",
+        Stmt::Raise(_) => "raise",
+        Stmt::Try(_) => "try",
+        Stmt::TryStar(_) => "try/except*",
+        Stmt::Assert(_) => "assert",
+        Stmt::Import(_) | Stmt::ImportFrom(_) => "import",
+        Stmt::Global(_) => "global",
+        Stmt::Nonlocal(_) => "nonlocal",
+        Stmt::Expr(_) => "expression",
+        Stmt::Pass(_) => "pass",
+        Stmt::Break(_) => "break",
+        Stmt::Continue(_) => "continue",
+    }
+}
+
 fn lower_for_targets(target: &Expr) -> Result<(Vec<String>, Option<usize>)> {
     match target {
         Expr::Name(name) => Ok((vec![name.id.to_string()], None)),

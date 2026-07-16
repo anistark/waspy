@@ -3,10 +3,10 @@ name = "waspy"
 version = "0.12.0"
 edition = "2021"
 rust-version = "1.70.0"
-description = "A Python interpreter written in Rust, designed for WebAssembly."
+description = "A Python to WebAssembly compiler written in Rust."
 license = "MIT"
 repository = "https://github.com/anistark/waspy"
-keywords = ["python", "interpreter", "webassembly", "wasm", "compiler"]
+keywords = ["python", "compiler", "webassembly", "wasm", "codegen"]
 categories = ["compilers", "wasm", "web-programming", "development-tools"]
 readme = "README.md"
 documentation = "https://docs.rs/waspy"
@@ -82,6 +82,18 @@ path = "examples/verbose_debug_demo.rs"
 [[test]]
 name = "integration_examples"
 path = "tests/integration/examples.rs"
+
+[[test]]
+name = "integration_coverage"
+path = "tests/integration/coverage.rs"
+
+[[test]]
+name = "unit_basics"
+path = "tests/unit/basics.rs"
+
+[[test]]
+name = "unit_errors"
+path = "tests/unit/errors.rs"
 
 # Plugin metadata following wasmrust pattern
 [package.metadata.wasm_plugin]

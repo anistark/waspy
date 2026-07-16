@@ -13,6 +13,19 @@ def test_min_max():
     b = max(5, 3, 8, 1, 9)
     return a
 
+def test_sum():
+    lst = [1, 2, 3, 4, 5]
+    return sum(lst)
+
+def test_conversions():
+    # int() truncates, float() widens, bool() tests truthiness.
+    a = int(3.7)
+    b = int(float(2))
+    c = 0
+    if bool(5):
+        c = 1
+    return a + b + c
+
 def test_print():
     print("Hello")
     print(42)
@@ -22,4 +35,6 @@ def main():
     test_len()
     test_len_list()
     test_min_max()
+    test_sum()
+    test_conversions()
     test_print()
