@@ -151,7 +151,7 @@
             },
             controlFlow: {
                 title: "CONTROL FLOW",
-                status: "done",
+                status: "progress",
                 version: "0.1.0",
                 features: [
                     { name: "if/elif/else statements", status: "done", version: "0.1.0" },
@@ -159,7 +159,7 @@
                     { name: "for loops with list/string iteration", status: "done", version: "0.7.0" },
                     { name: "break and continue in loops", status: "done", version: "0.11.0" },
                     { name: "try/except/finally exception handling", status: "done", version: "0.7.0" },
-                    { name: "with statements (with open(...) as f; custom context managers pending #5)", status: "progress", version: "0.19.0" },
+                    { name: "with statements (with open(...) as f; custom context managers pending)", status: "progress", version: "upcoming", issue: 5 },
                     { name: "Comparison operations (==, !=, <, <=, >, >=)", status: "done", version: "0.1.0" },
                     { name: "Boolean logic (and, or, not) with short-circuit", status: "done", version: "0.1.0" }
                 ]
@@ -225,10 +225,10 @@
                 version: "0.1.0",
                 features: [
                     { name: "WebAssembly optimization (Binaryen)", status: "done", version: "0.1.0" },
-                    { name: "Compiler options & configuration (reviewed API: optimize + verbosity)", status: "done", version: "0.20.0" },
-                    { name: "Error handling with located messages (line/column, function, hints)", status: "done", version: "0.20.0" },
-                    { name: "Early validation - unsupported syntax rejected before codegen", status: "done", version: "0.20.0" },
-                    { name: "Integration test suite - every example compiled, run, and asserted in CI", status: "done", version: "0.20.0" },
+                    { name: "Compiler options & configuration (reviewed API: optimize + verbosity)", status: "done", version: "upcoming" },
+                    { name: "Error handling with located messages (line/column, function, hints)", status: "done", version: "upcoming" },
+                    { name: "Early validation - unsupported syntax rejected before codegen", status: "done", version: "upcoming" },
+                    { name: "Integration test suite - every example compiled, run, and asserted in CI", status: "done", version: "upcoming" },
                     { name: "Memory layout optimization", status: "done", version: "0.1.0" }
                 ]
             },
@@ -273,25 +273,13 @@
                     { name: "Instance attribute access getter (obj.attr)", status: "done", version: "0.7.0" },
                     { name: "Instance attribute assignment setter (obj.attr = value)", status: "done", version: "0.7.0" },
                     { name: "Per-instance field storage with calculated memory offsets", status: "done", version: "0.7.0" },
-                    { name: "Heap-allocated instances — a distinct pointer per instantiation", status: "done", version: "0.13.0" },
-                    { name: "Multiple live instances of one class with independent state", status: "done", version: "0.13.0" },
-                    { name: "Instances as first-class values (arguments, factory returns)", status: "done", version: "0.13.0" },
-                    { name: "Single inheritance with super().__init__ / super().method()", status: "done", version: "0.14.0" },
-                    { name: "isinstance / issubclass over the class hierarchy", status: "done", version: "0.14.0" },
-                    { name: "@dataclass with generated __init__ / __eq__ / __repr__", status: "done", version: "0.16.0" },
-                    { name: "Abstract base classes (abc.ABC + @abstractmethod)", status: "done", version: "0.16.0" }
-                ]
-            },
-            advancedFlow: {
-                title: "ADVANCED CONTROL FLOW",
-                status: "done",
-                version: "0.7.0",
-                features: [
-                    { name: "for loops with list/string iteration", status: "done", version: "0.7.0" },
-                    { name: "break and continue (with correct nesting in if/try/loops)", status: "done", version: "0.11.0" },
-                    { name: "try/except/finally with exception handling", status: "done", version: "0.7.0" },
-                    { name: "with statements (with open(...) as f; custom context managers pending #5)", status: "progress", version: "0.19.0" },
-                    { name: "Exception type matching and handlers", status: "done", version: "0.7.0" }
+                    { name: "Heap-allocated instances: a distinct pointer per instantiation", status: "done", version: "0.12.0" },
+                    { name: "Multiple live instances of one class with independent state", status: "done", version: "0.12.0" },
+                    { name: "Instances as first-class values (arguments, factory returns)", status: "done", version: "0.12.0" },
+                    { name: "Single inheritance with super().__init__ / super().method()", status: "done", version: "0.12.0" },
+                    { name: "isinstance / issubclass over the class hierarchy", status: "done", version: "0.12.0" },
+                    { name: "@dataclass with generated __init__ / __eq__ / __repr__", status: "done", version: "0.12.0" },
+                    { name: "Abstract base classes (abc.ABC + @abstractmethod)", status: "done", version: "0.12.0" }
                 ]
             },
             builtins: {
@@ -303,7 +291,7 @@
                     { name: "len() - strings, lists, and dicts", status: "done", version: "0.7.0" },
                     { name: "print() - argument handling implemented", status: "done", version: "0.7.0" },
                     { name: "min() & max() - multiple arguments (single-iterable form rejected with a hint)", status: "done", version: "0.7.0" },
-                    { name: "sum() over lists/tuples with optional start value - real element loop", status: "done", version: "0.20.0" }
+                    { name: "sum() over lists/tuples with optional start value - real element loop", status: "done", version: "upcoming" }
                 ]
             },
             runtimeFeatures: {
@@ -313,9 +301,9 @@
                 features: [
                     { name: "Set storage with de-duplication & membership (in / not in)", status: "done" },
                     { name: "Dict index assignment with update or append (dict[key] = value)", status: "done" },
-                    { name: "Generator State Management - execution context suspension/resumption", status: "done", version: "0.18.0" },
-                    { name: "Dynamic Module Loading - runtime module loading and execution", status: "progress" },
-                    { name: "Closure Variable Capture Analysis - detecting and capturing closure variables", status: "done", version: "0.17.0" },
+                    { name: "Generator State Management - execution context suspension/resumption", status: "done", version: "upcoming" },
+                    { name: "Dynamic Module Loading - runtime module loading and execution", status: "todo" },
+                    { name: "Closure Variable Capture Analysis - detecting and capturing closure variables", status: "done", version: "upcoming" },
                     { name: "String Transformation in WASM - full character-by-char transformations", status: "progress" }
                 ]
             },
@@ -326,7 +314,7 @@
                     { name: "JavaScript bridge & value conversion", status: "todo" },
                     { name: "DOM manipulation APIs", status: "todo" },
                     { name: "Event handling system", status: "todo" },
-                    { name: "HTTP requests (fetch API)", status: "todo" }
+                    { name: "HTTP requests (fetch API)", status: "todo", issue: 35 }
                 ]
             },
             async: {
@@ -334,7 +322,7 @@
                 status: "todo",
                 features: [
                     { name: "Promise object representation", status: "todo" },
-                    { name: "async/await syntax support", status: "todo" },
+                    { name: "async/await syntax support", status: "todo", issue: 7 },
                     { name: "Asynchronous function execution", status: "todo" },
                     { name: "Concurrent task management", status: "todo" }
                 ]
@@ -362,14 +350,14 @@
             comprehensions: {
                 title: "COMPREHENSIONS",
                 status: "done",
-                version: "0.17.0",
+                version: "upcoming",
                 features: [
-                    { name: "List comprehensions ([x for x in list])", status: "done", version: "0.17.0" },
-                    { name: "List comprehension filters ([x for x in list if condition])", status: "done", version: "0.17.0" },
-                    { name: "Dict comprehensions ({k: v for k, v in items})", status: "done", version: "0.17.0" },
-                    { name: "Set comprehensions ({x for x in list}) with dedup at construction", status: "done", version: "0.17.0" },
-                    { name: "Multiple generators & nesting ([x for row in m for x in row])", status: "done", version: "0.17.0" },
-                    { name: "Generator expressions (x for x in list) — materialized eagerly as lists", status: "done", version: "0.17.0" }
+                    { name: "List comprehensions ([x for x in list])", status: "done", version: "upcoming" },
+                    { name: "List comprehension filters ([x for x in list if condition])", status: "done", version: "upcoming" },
+                    { name: "Dict comprehensions ({k: v for k, v in items})", status: "done", version: "upcoming" },
+                    { name: "Set comprehensions ({x for x in list}) with dedup at construction", status: "done", version: "upcoming" },
+                    { name: "Multiple generators & nesting ([x for row in m for x in row])", status: "done", version: "upcoming" },
+                    { name: "Generator expressions (x for x in list), materialized eagerly as lists", status: "done", version: "upcoming" }
                 ]
             },
             functional: {
@@ -377,27 +365,27 @@
                 status: "done",
                 version: "0.8.0",
                 features: [
-                    { name: "Lambda functions (lambda x: x + 1) compiled to real functions", status: "done", version: "0.17.0" },
-                    { name: "Closures with variable capture (by value at creation)", status: "done", version: "0.17.0" },
-                    { name: "First-class closures — returned, passed as arguments, stored in collections, nested", status: "done", version: "0.17.0" },
-                    { name: "Higher-order functions (passing functions as arguments)", status: "done", version: "0.17.0" },
+                    { name: "Lambda functions (lambda x: x + 1) compiled to real functions", status: "done", version: "upcoming" },
+                    { name: "Closures with variable capture (by value at creation)", status: "done", version: "upcoming" },
+                    { name: "First-class closures: returned, passed as arguments, stored in collections, nested", status: "done", version: "upcoming" },
+                    { name: "Higher-order functions (passing functions as arguments)", status: "done", version: "upcoming" },
                     { name: "Callable type tracking for function objects", status: "done", version: "0.8.0" }
                 ]
             },
             generators: {
                 title: "GENERATORS & ITERATORS",
                 status: "done",
-                version: "0.18.0",
+                version: "upcoming",
                 features: [
-                    { name: "Generator functions - yield suspends and resumes with state preserved", status: "done", version: "0.18.0" },
-                    { name: "yield from delegation (ranges, lists, other generators)", status: "done", version: "0.18.0" },
-                    { name: "next(), send() with x = yield resume values, and close()", status: "done", version: "0.18.0" },
-                    { name: "Iterator protocol (__iter__, __next__) on user classes with StopIteration", status: "done", version: "0.18.0" },
+                    { name: "Generator functions - yield suspends and resumes with state preserved", status: "done", version: "upcoming" },
+                    { name: "yield from delegation (ranges, lists, other generators)", status: "done", version: "upcoming" },
+                    { name: "next(), send() with x = yield resume values, and close()", status: "done", version: "upcoming" },
+                    { name: "Iterator protocol (__iter__, __next__) on user classes with StopIteration", status: "done", version: "upcoming" },
                     { name: "Generator type tracking (Generator[T])", status: "done", version: "0.8.0" },
                     { name: "range() function implementation - all variants", status: "done", version: "0.8.0" },
                     { name: "for loop iteration over ranges with step support", status: "done", version: "0.8.0" },
-                    { name: "Tuple targets in for loops (for a, b in pairs, star targets)", status: "done", version: "0.18.0" },
-                    { name: "enumerate(), zip(), and dict.items()/.keys()/.values() in for loops", status: "done", version: "0.18.0" }
+                    { name: "Tuple targets in for loops (for a, b in pairs, star targets)", status: "done", version: "upcoming" },
+                    { name: "enumerate(), zip(), and dict.items()/.keys()/.values() in for loops", status: "done", version: "upcoming" }
                 ]
             },
             imports: {
@@ -411,21 +399,21 @@
                     { name: "Conditional imports in try/except blocks", status: "done", version: "0.8.0" },
                     { name: "Dynamic imports (__import__, importlib)", status: "done", version: "0.8.0" },
                     { name: "Module execution and loading", status: "done", version: "0.8.0" },
-                    { name: "User-defined module files - import mod / from mod import f resolved from sibling .py files and statically linked", status: "done", version: "0.19.0" },
-                    { name: "Namespace access on user modules (mod.f(), mod.CONST, mod.ClassName()) and aliases (import mod as m, from mod import f as g)", status: "done", version: "0.19.0" },
-                    { name: "Module caching - a module imported through several paths compiles once", status: "done", version: "0.19.0" }
+                    { name: "User-defined module files - import mod / from mod import f resolved from sibling .py files and statically linked", status: "done", version: "upcoming" },
+                    { name: "Namespace access on user modules (mod.f(), mod.CONST, mod.ClassName()) and aliases (import mod as m, from mod import f as g)", status: "done", version: "upcoming" },
+                    { name: "Module caching - a module imported through several paths compiles once", status: "done", version: "upcoming" }
                 ]
             },
             fileIo: {
                 title: "FILE I/O",
                 status: "done",
-                version: "0.19.0",
+                version: "upcoming",
                 features: [
-                    { name: "open(path, mode) via the documented waspy_host import interface (r, w, a, b, + modes folded to flags)", status: "done", version: "0.19.0" },
-                    { name: "read() / read(n) returning strings (64 KiB default cap per call)", status: "done", version: "0.19.0" },
-                    { name: "write(s) returning bytes written; close() and flush()", status: "done", version: "0.19.0" },
-                    { name: "with open(...) as f: context-manager form (desugared to open/body/close)", status: "done", version: "0.19.0" },
-                    { name: "Import section emitted only when open() is used - other modules keep zero imports", status: "done", version: "0.19.0" }
+                    { name: "open(path, mode) via the documented waspy_host import interface (r, w, a, b, + modes folded to flags)", status: "done", version: "upcoming" },
+                    { name: "read() / read(n) returning strings (64 KiB default cap per call)", status: "done", version: "upcoming" },
+                    { name: "write(s) returning bytes written; close() and flush()", status: "done", version: "upcoming" },
+                    { name: "with open(...) as f: context-manager form (desugared to open/body/close)", status: "done", version: "upcoming" },
+                    { name: "Import section emitted only when open() is used - other modules keep zero imports", status: "done", version: "upcoming" }
                 ]
             },
             errorHandling: {
@@ -441,7 +429,7 @@
             },
             advancedTypes: {
                 title: "ADVANCED DATA TYPES",
-                status: "done",
+                status: "progress",
                 version: "0.8.0",
                 features: [
                     { name: "Bytes type & binary data handling", status: "done", version: "0.7.0" },
@@ -453,7 +441,7 @@
                     { name: "Tuple indexing with type tracking", status: "done", version: "0.8.0" },
                     { name: "Heterogeneous tuples with mixed types", status: "done", version: "0.8.0" },
                     { name: "Tuple unpacking & assignment (a, b = (1, 2))", status: "done", version: "0.8.0" },
-                    { name: "Extended (starred) unpacking (a, *b, c = xs)", status: "done", version: "0.17.0" },
+                    { name: "Extended (starred) unpacking (a, *b, c = xs)", status: "done", version: "upcoming" },
                     { name: "Tuple methods (.index, .count)", status: "done", version: "0.8.0" },
                     { name: "Named tuples - namedtuple() factory", status: "done", version: "0.8.0" },
                     { name: "String formatting (.format() & % & f-strings)", status: "done" }
@@ -463,10 +451,10 @@
                 title: "ADVANCED OOP",
                 status: "progress",
                 features: [
-                    { name: "Property decorators (@property, @<name>.setter)", status: "done", version: "0.15.0" },
-                    { name: "Static & class methods (@staticmethod, @classmethod with cls factories)", status: "done", version: "0.15.0" },
+                    { name: "Property decorators (@property, @<name>.setter)", status: "done", version: "0.12.0" },
+                    { name: "Static & class methods (@staticmethod, @classmethod with cls factories)", status: "done", version: "0.12.0" },
                     { name: "Multiple inheritance & method resolution", status: "todo" },
-                    { name: "Metaclasses & class creation", status: "todo" }
+                    { name: "Metaclasses & class creation", status: "todo", issue: 8 }
                 ]
             },
             memory: {
@@ -682,32 +670,42 @@
             return Math.round(((completed + partial) / total) * 100);
         }
 
+        function createIssueLink(issue) {
+            return `
+                <a class="feature-issue" href="https://github.com/anistark/waspy/issues/${issue}" target="_blank" rel="noopener" title="Open issue #${issue} on GitHub" aria-label="Open issue #${issue} on GitHub">
+                    <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                        <path d="M8 9.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z"/>
+                        <path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Z"/>
+                    </svg>
+                </a>
+            `;
+        }
+
         function createModuleCard(moduleKey, module) {
             const progress = calculateModuleProgress(module);
 
             return `
                 <div class="module-card ${module.status}" data-module="${moduleKey}">
-                    <div class="card-header">
+                    <div class="card-header" role="button" tabindex="0" aria-expanded="false" title="${module.features.length} items. Click to expand">
                         <span class="card-title">${module.title}</span>
                         <span class="card-status">${getStatusLabel(module.status)}</span>
+                        <span class="card-chevron" aria-hidden="true">▾</span>
                     </div>
-                    <ul class="feature-list">
-                        ${module.features.map(feature => `
-                            <li class="feature-item">
-                                <span class="feature-status">${getStatusIcon(feature.status)}</span>
-                                <span class="feature-text">${feature.name}</span>
-                                ${feature.version && feature.version !== 'todo' ? `<span class="feature-version" title="Version introduced">${feature.version}</span>` : ''}
-                            </li>
-                        `).join('')}
-                    </ul>
-                    ${module.status !== 'done' ? `
-                        <div class="progress-indicator">
-                            <div class="progress-bar">
-                                <div class="progress-fill" style="width: 0%" data-width="${progress}%"></div>
-                            </div>
-                            <div class="progress-text">${progress}% Complete</div>
-                        </div>
-                    ` : ''}
+                    <div class="progress-bar" title="${progress}% complete" aria-label="${progress}% complete">
+                        <div class="progress-fill" style="width: 0%" data-width="${progress}%"></div>
+                    </div>
+                    <div class="card-body">
+                        <ul class="feature-list">
+                            ${module.features.map(feature => `
+                                <li class="feature-item">
+                                    <span class="feature-status">${getStatusIcon(feature.status)}</span>
+                                    <span class="feature-text">${feature.name}</span>
+                                    ${feature.issue ? createIssueLink(feature.issue) : ''}
+                                    ${feature.version && feature.version !== 'todo' ? `<span class="feature-version${feature.version === 'upcoming' ? ' upcoming' : ''}" title="${feature.version === 'upcoming' ? 'Merged, ships in the next release' : 'Version introduced'}">${feature.version}</span>` : ''}
+                                </li>
+                            `).join('')}
+                        </ul>
+                    </div>
                 </div>
             `;
         }
@@ -737,6 +735,21 @@
                         todoColumn.innerHTML += card;
                         break;
                 }
+            });
+
+            document.querySelectorAll('.module-card .card-header').forEach(header => {
+                const toggle = () => {
+                    const card = header.closest('.module-card');
+                    const expanded = card.classList.toggle('expanded');
+                    header.setAttribute('aria-expanded', expanded);
+                };
+                header.addEventListener('click', toggle);
+                header.addEventListener('keydown', event => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        toggle();
+                    }
+                });
             });
 
             setTimeout(() => {
