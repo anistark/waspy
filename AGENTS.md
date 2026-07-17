@@ -83,7 +83,8 @@ Do not consider a change complete until these pass cleanly.
 
 - **Update `CHANGELOG.md`** for any user-facing change (new feature, fix, breaking change).
 - **Update `README.md`** when supported features, limitations, or the public API change — the README's "Current Features" / "Limitations" lists are user-facing.
-- **Update `docs/` on every major change or feature update.** The `docs/` directory is the user-facing static HTML site (`index.html` landing page, `modules.html`, `changelog.html`, plus `assets/`). Whenever you add or change a feature, supported type, stdlib module, or any user-visible behaviour, reflect it in the relevant `docs/` page — keep `modules.html` in sync with what the compiler actually supports and `changelog.html` in sync with `CHANGELOG.md`. Don't let the published docs drift behind the code.
+- **Update `docs/` on every major change or feature update.** The `docs/` directory is the user-facing static HTML site (`index.html` landing page, `modules/index.html` development board, `changelog/index.html`, plus `assets/`). Whenever you add or change a feature, supported type, stdlib module, or any user-visible behaviour, reflect it in the relevant `docs/` page — keep the modules board in sync with what the compiler actually supports (the changelog page renders `CHANGELOG.md` from `main` automatically). Don't let the published docs drift behind the code.
+- **Version tags on the modules board name published releases only.** On `docs/modules/index.html`, a feature's `version` field is the release that shipped it. Work that is merged but not yet released is tagged `"upcoming"`, never a future or internal/planned version number. When a release ships, replace the `upcoming` tags of the features it contains with the actual release version.
 - **Prefer `just` commands** over raw `cargo` commands. The justfile handles sequencing, examples, and release steps correctly.
 - **Prompt the user if `AGENTS.md` needs updating.** If your changes alter the pipeline, module layout, public API, supported types/stdlib modules, or conventions, tell the user: *"This change may require an update to AGENTS.md — would you like me to update it?"*
 
@@ -308,6 +309,7 @@ test: description          # Adding/fixing tests
 - `just prepare-release` runs format → lint → build → test → `cargo publish --dry-run`.
 - `just publish` publishes to crates.io and then `just github-release` tags and creates the GitHub release.
 - Keep `CHANGELOG.md` updated with every meaningful change.
+- **On release, retag the docs modules board.** Replace every `"upcoming"` version tag in `docs/modules/index.html` for features shipping in the release with the new version number (see the housekeeping rule above; the board never names an unreleased version).
 
 ---
 

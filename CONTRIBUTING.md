@@ -273,6 +273,7 @@ Waspy follows Rust's standard coding conventions:
 3. **Documentation**
    - Add documentation comments to public APIs
    - Follow the [rustdoc conventions](https://doc.rust-lang.org/rustdoc/what-is-rustdoc.html)
+   - If your change adds or completes a user-facing feature, update the development board (`docs/modules/index.html`). Tag the feature's version as `upcoming`; version tags on the board only ever name published releases, and maintainers swap `upcoming` for the real version number at release time
 
 4. **Commit Messages**
    - Write clear, concise commit messages
@@ -291,7 +292,10 @@ Releases are handled by the maintainers. The process is:
 1. **Version Bump**
    - Update version in `Cargo.toml`
 
-2. **Publish**
+2. **Docs Sync**
+   - In `docs/modules/index.html`, replace the `upcoming` version tags of features shipping in this release with the new version number. Features merged but not part of the release stay labeled `upcoming`; the board never shows a version that hasn't been published
+
+3. **Publish**
    - Run `just publish` to publish to crates.io and create a GitHub release
 
 ## Testing Generated WebAssembly

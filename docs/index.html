@@ -33,7 +33,6 @@
                 <ul class="nav-links">
                     <li><a href="#how-it-works">How It Works</a></li>
                     <li><a href="#features">Features</a></li>
-                    <li><a href="#install">Install</a></li>
                     <li><a href="modules/">Modules</a></li>
                     <li><a href="changelog/">Changelog</a></li>
                     <li><a href="paper/">Paper</a></li>
@@ -73,68 +72,17 @@
                     Built in Rust for performance and reliability.
                 </p>
 
-                <div class="cta-buttons hero-seq">
-                    <a href="#install" class="btn btn-primary">
-                        🚀 Get Started
-                    </a>
-                    <a href="https://github.com/anistark/waspy" class="btn btn-secondary">
-                        📖 View Docs
-                    </a>
-                </div>
-
-                <div class="code-demo hero-seq">
-                    <div class="code-titlebar">
+                <div class="hero-terminal hero-seq">
+                    <div class="hero-terminal-titlebar">
                         <div class="window-dots"><span></span><span></span><span></span></div>
-                        <div class="code-tabs">
-                            <button class="code-tab active" data-tab="python">Python</button>
-                            <button class="code-tab" data-tab="rust">Rust</button>
-                            <button class="code-tab" data-tab="js">JavaScript</button>
-                        </div>
+                        <span class="hero-terminal-title">~/your-rust-project</span>
                     </div>
-
-                    <div class="code-content">
-                        <div class="code-panel active" id="python">
-                            <pre><code class="language-python"># fibonacci.py
-def fibonacci(n: int) -> int:
-    if n <= 1:
-        return n
-    a, b = 0, 1
-    for i in range(2, n + 1):
-        a, b = b, a + b
-    return b
-
-def factorial(n: int) -> int:
-    result = 1
-    for i in range(1, n + 1):
-        result *= i
-    return result</code></pre>
-                        </div>
-
-                        <div class="code-panel" id="rust">
-                            <pre><code class="language-rust">use waspy::compile_python_to_wasm;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let python_code = std::fs::read_to_string("fibonacci.py")?;
-    let wasm = compile_python_to_wasm(&python_code)?;
-    std::fs::write("fibonacci.wasm", &wasm)?;
-    println!("✅ Compiled to WebAssembly!");
-    Ok(())
-}</code></pre>
-                        </div>
-
-                        <div class="code-panel" id="js">
-                            <pre><code class="language-javascript">// Run the compiled WebAssembly
-WebAssembly.instantiate(wasmBuffer).then(result => {
-    const { fibonacci, factorial } = result.instance.exports;
-
-    console.log(fibonacci(10)); // 55
-    console.log(factorial(5));  // 120
-
-    // Blazing fast execution! 🔥
-});</code></pre>
-                        </div>
+                    <div class="hero-terminal-body">
+                        <code><span class="prompt">$</span> cargo add waspy</code>
+                        <button class="copy-btn" data-copy="cargo add waspy">Copy</button>
                     </div>
                 </div>
+                <p class="hero-terminal-note hero-seq">Waspy is a Rust library. Add it to your project and compile Python to WebAssembly.</p>
             </div>
         </section>
 
@@ -171,8 +119,117 @@ WebAssembly.instantiate(wasmBuffer).then(result => {
                         <p>Binaryen</p>
                     </div>
                 </div>
+            </div>
 
-                <div class="comparison glass reveal">
+            <div class="container container--wide">
+                <div class="section-header reveal">
+                    <h2 style="font-size: 1.75rem;">The Same Pipeline, In Code</h2>
+                    <p class="section-subtitle">Write Python, compile it from Rust, run it from JavaScript or TypeScript.</p>
+                </div>
+
+                <div class="example-flow">
+                    <div class="example-step reveal" style="--d: 0;">
+                        <div class="example-window">
+                            <div class="example-titlebar">
+                                <div class="window-dots"><span></span><span></span><span></span></div>
+                                <span class="example-filename">fibonacci.py</span>
+                            </div>
+                            <pre><code class="language-python">def fibonacci(n: int) -&gt; int:
+    if n &lt;= 1:
+        return n
+    a, b = 0, 1
+    for i in range(2, n + 1):
+        a, b = b, a + b
+    return b
+
+def factorial(n: int) -&gt; int:
+    result = 1
+    for i in range(1, n + 1):
+        result *= i
+    return result</code></pre>
+                        </div>
+                        <div class="example-caption">
+                            <span class="example-badge">1 · Write Python</span>
+                            Ordinary, type-annotated Python is the compiler's input. Annotations pick the WASM value types:
+                            <span class="cmd">int</span>/<span class="cmd">bool</span> become <span class="cmd">i32</span>, <span class="cmd">float</span> becomes <span class="cmd">f64</span>.
+                        </div>
+                    </div>
+
+                    <span class="example-arrow reveal" style="--d: 1;">→</span>
+
+                    <div class="example-step reveal" style="--d: 2;">
+                        <div class="example-window">
+                            <div class="example-titlebar">
+                                <div class="window-dots"><span></span><span></span><span></span></div>
+                                <span class="example-filename">main.rs</span>
+                            </div>
+                            <pre><code class="language-rust">// in your Rust project,
+// after `cargo add waspy`
+use waspy::compile_python_file;
+
+fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
+    // parse → typed IR → codegen → Binaryen
+    let wasm =
+        compile_python_file("fibonacci.py", true)?;
+
+    // a standalone module,
+    // no Python interpreter inside
+    std::fs::write("fibonacci.wasm", &amp;wasm)?;
+    Ok(())
+}</code></pre>
+                        </div>
+                        <div class="example-caption">
+                            <span class="example-badge">2 · Compile from Rust</span>
+                            <span class="cmd">cargo run</span> turns fibonacci.py into <span class="cmd">fibonacci.wasm</span>.
+                            Every top-level Python function becomes a WASM export; imports of sibling .py files link in automatically.
+                        </div>
+                    </div>
+
+                    <span class="example-arrow reveal" style="--d: 3;">→</span>
+
+                    <div class="example-step reveal" style="--d: 4;">
+                        <div class="example-window">
+                            <div class="example-titlebar">
+                                <div class="window-dots"><span></span><span></span><span></span></div>
+                                <span class="example-filename">run.mjs</span>
+                            </div>
+                            <pre><code class="language-javascript">// Node 18+
+// (TypeScript works the same)
+import { readFile } from "node:fs/promises";
+
+const wasm = await readFile("./fibonacci.wasm");
+const { instance } =
+    await WebAssembly.instantiate(wasm);
+
+console.log(instance.exports.fibonacci(10));
+// 55
+console.log(instance.exports.factorial(5));
+// 120</code></pre>
+                        </div>
+                        <div class="example-caption">
+                            <span class="example-badge">3 · Run from JS/TS</span>
+                            <span class="cmd">node run.mjs</span> prints <span class="cmd">55</span> and <span class="cmd">120</span>: your Python, running as WebAssembly.
+                            In a browser, swap <span class="cmd">readFile</span> for <span class="cmd">fetch</span> + <span class="cmd">WebAssembly.instantiateStreaming</span>.
+                        </div>
+                    </div>
+                </div>
+
+                <div class="example-alt reveal">
+                    <div class="example-alt-card">
+                        <span class="example-badge">From a source string</span>
+                        <code>let wasm = waspy::compile_python_to_wasm(&amp;source)?;</code>
+                        <p>Compile Python you already hold in memory, no files involved.</p>
+                    </div>
+                    <div class="example-alt-card">
+                        <span class="example-badge">From a project directory</span>
+                        <code>let wasm = waspy::compile_python_project("./my_project", true)?;</code>
+                        <p>Compile a project directory into one module, with __main__.py entry detection and pyproject.toml config.</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="container">
+                <div class="comparison reveal">
                     <div class="section-header">
                         <h2 style="font-size: 1.75rem;">Waspy vs Other Python Implementations</h2>
                         <p class="section-subtitle">See how Waspy compares across performance, safety, and portability.</p>
@@ -286,7 +343,7 @@ WebAssembly.instantiate(wasmBuffer).then(result => {
                         <div class="hex-cell reveal" data-accent="amber" style="--d: 0;">
                             <div class="hex-card">
                                 <h3>Ahead-of-Time Compilation</h3>
-                                <p>Python compiles to a WASM binary before it runs — no interpreter or VM in the output.</p>
+                                <p>Python compiles to a WASM binary before it runs, with no interpreter or VM in the output.</p>
                                 <span class="feature-tag">no runtime VM</span>
                             </div>
                         </div>
@@ -339,7 +396,7 @@ WebAssembly.instantiate(wasmBuffer).then(result => {
                         <div class="hex-cell reveal" data-accent="red" style="--d: 2;">
                             <div class="hex-card">
                                 <h3>Import Analysis</h3>
-                                <p>User-written .py modules resolve from disk and link statically — each compiled once, with namespace calls and aliases.</p>
+                                <p>User-written .py modules resolve from disk and link statically, each compiled once, with namespace calls and aliases.</p>
                                 <span class="feature-tag">user modules</span>
                             </div>
                         </div>
@@ -414,7 +471,7 @@ WebAssembly.instantiate(wasmBuffer).then(result => {
                         <text x="455" y="510" fill="#ec6a3f" font-size="11" font-family="JetBrains Mono, monospace" opacity="0.85">Combine All IRModules</text>
                         <text x="455" y="755" fill="#a89478" font-size="11" font-family="Instrument Sans, sans-serif" opacity="0.85">Same as Single File from here</text>
 
-                        <g class="flow-node" data-step="1" data-info="The entry point — your Python project directory containing source files and configuration.">
+                        <g class="flow-node" data-step="1" data-info="The entry point: your Python project directory containing source files and configuration.">
                             <rect x="285" y="20" width="330" height="55" rx="27" ry="27" fill="transparent" stroke="#f2a83b" stroke-width="2" filter="url(#glow-amber)"/>
                             <text x="450" y="54" fill="#ffd28a" font-size="18" font-weight="600" font-family="Instrument Sans, sans-serif" text-anchor="middle">📁 Project Directory</text>
                         </g>
@@ -485,53 +542,6 @@ WebAssembly.instantiate(wasmBuffer).then(result => {
             </div>
         </section>
 
-        <section class="section" id="install">
-            <div class="container">
-                <div class="section-header reveal">
-                    <span class="kicker">Install</span>
-                    <h2>Get Started in Minutes</h2>
-                    <p class="section-subtitle">Four steps from zero to compiled WebAssembly.</p>
-                </div>
-
-                <div class="install-steps">
-                    <div class="install-step reveal" data-step="1" style="--d: 0;">
-                        <h3>Install Waspy</h3>
-                        <p>Add Waspy to your Rust project:</p>
-                        <div class="install-command">
-                            <code>cargo add waspy</code>
-                            <button class="copy-btn" data-copy="cargo add waspy">Copy</button>
-                        </div>
-                    </div>
-
-                    <div class="install-step reveal" data-step="2" style="--d: 1;">
-                        <h3>Compile Python to WASM</h3>
-                        <p>Use the simple API to compile your Python functions:</p>
-                        <div class="install-command">
-                            <code>let wasm = waspy::compile_python_to_wasm(python_code)?;</code>
-                            <button class="copy-btn" data-copy="let wasm = waspy::compile_python_to_wasm(python_code)?;">Copy</button>
-                        </div>
-                    </div>
-
-                    <div class="install-step reveal" data-step="3" style="--d: 2;">
-                        <h3>Advanced Features</h3>
-                        <p>Compile entire projects with options:</p>
-                        <div class="install-command">
-                            <code>let wasm = waspy::compile_python_project("./my_project", true)?;</code>
-                            <button class="copy-btn" data-copy='let wasm = waspy::compile_python_project("./my_project", true)?;'>Copy</button>
-                        </div>
-                    </div>
-
-                    <div class="install-step reveal" data-step="4" style="--d: 3;">
-                        <h3>Run Anywhere</h3>
-                        <p>Execute your compiled WebAssembly in any environment:</p>
-                        <div class="install-command">
-                            <code>WebAssembly.instantiate(wasm).then(instance => { /* magic */ });</code>
-                            <button class="copy-btn" data-copy="WebAssembly.instantiate(wasm).then(instance => { /* magic */ });">Copy</button>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </section>
     </main>
 
     <footer class="site-footer">
@@ -602,15 +612,6 @@ WebAssembly.instantiate(wasmBuffer).then(result => {
     <script src="main.js"></script>
 
     <script>
-        document.querySelectorAll('.code-tab').forEach(tab => {
-            tab.addEventListener('click', () => {
-                document.querySelectorAll('.code-tab').forEach(t => t.classList.remove('active'));
-                document.querySelectorAll('.code-panel').forEach(p => p.classList.remove('active'));
-                tab.classList.add('active');
-                document.getElementById(tab.dataset.tab).classList.add('active');
-            });
-        });
-
         (function () {
             const tooltip = document.getElementById('flowTooltip');
             const svg = document.getElementById('flowchartSvg');
@@ -631,7 +632,7 @@ WebAssembly.instantiate(wasmBuffer).then(result => {
             function showTooltip(node, e) {
                 const step = node.getAttribute('data-step');
                 const info = node.getAttribute('data-info');
-                tooltip.innerHTML = '<div class="step-label">Step ' + step + ' — ' + (stepNames[step] || '') + '</div>' + info;
+                tooltip.innerHTML = '<div class="step-label">Step ' + step + ': ' + (stepNames[step] || '') + '</div>' + info;
                 tooltip.style.display = 'block';
                 positionTooltip(e);
             }

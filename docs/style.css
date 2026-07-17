@@ -585,6 +585,91 @@ body::after {
     to { opacity: 1; transform: translateY(0); }
 }
 
+/* Install terminal in the hero */
+.hero-terminal {
+    max-width: 520px;
+    margin: 2.4rem auto 0;
+    background: var(--bg-glass-strong);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    border: 1px solid color-mix(in srgb, var(--amber) 38%, var(--glass-border));
+    border-radius: var(--radius);
+    box-shadow:
+        inset 0 1px 0 var(--glass-highlight),
+        var(--shadow-deep),
+        0 0 48px color-mix(in srgb, var(--amber) 16%, transparent);
+    overflow: hidden;
+    text-align: left;
+}
+
+.hero-terminal-titlebar {
+    display: flex;
+    align-items: center;
+    gap: 0.8rem;
+    padding: 0.65rem 1.1rem;
+    border-bottom: 1px solid var(--glass-border);
+}
+
+.hero-terminal-titlebar .window-dots {
+    padding-bottom: 0;
+}
+
+.hero-terminal-title {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--text-2);
+}
+
+.hero-terminal-body {
+    position: relative;
+    padding: 1.15rem 5.5rem 1.15rem 1.25rem;
+}
+
+.hero-terminal-body code {
+    font-size: 1.02rem;
+    font-weight: 500;
+    color: var(--text-0);
+}
+
+.hero-terminal-body .prompt {
+    color: var(--green);
+    margin-right: 0.4rem;
+    user-select: none;
+}
+
+.hero-terminal-body .copy-btn {
+    top: 50%;
+    transform: translateY(-50%);
+    right: 0.85rem;
+}
+
+.hero-terminal-note {
+    margin-top: 1.1rem;
+    color: var(--text-2);
+    font-size: 0.9rem;
+}
+
+/* Explanation under each code panel */
+.code-caption {
+    margin-top: 1.1rem;
+    padding-top: 0.9rem;
+    border-top: 1px dashed var(--glass-border);
+    color: var(--text-1);
+    font-size: 0.84rem;
+    line-height: 1.65;
+}
+
+.code-caption strong {
+    color: var(--text-0);
+}
+
+.code-caption .cmd,
+.example-caption .cmd {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    color: var(--honey);
+}
+
 pre {
     margin: 0;
     background: transparent !important;
@@ -600,6 +685,7 @@ code {
 
 /* Prism token warmth on light theme (tomorrow theme is tuned for dark) */
 [data-theme="light"] .code-demo code[class*="language-"],
+[data-theme="light"] .example-window code[class*="language-"],
 [data-theme="light"] .markdown-content pre code {
     color: #433017;
     text-shadow: none;
@@ -737,10 +823,155 @@ code {
     opacity: 0.7;
 }
 
+/* Example walkthrough — the pipeline, shown as code */
+.example-flow {
+    display: flex;
+    align-items: stretch;
+    justify-content: center;
+    gap: 1rem;
+    margin: 2.5rem 0 1.25rem;
+}
+
+.example-step {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.example-arrow {
+    font-size: 1.5rem;
+    color: var(--amber);
+    flex-shrink: 0;
+    align-self: center;
+    opacity: 0.7;
+}
+
+.example-window {
+    flex: 1;
+    background: var(--bg-glass-strong);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius);
+    box-shadow: inset 0 1px 0 var(--glass-highlight), var(--shadow-soft);
+    overflow: hidden;
+    text-align: left;
+}
+
+.example-titlebar {
+    display: flex;
+    align-items: center;
+    gap: 0.8rem;
+    padding: 0.75rem 1.1rem 0;
+}
+
+.example-titlebar .window-dots {
+    padding-bottom: 0;
+}
+
+.example-filename {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    color: var(--text-2);
+}
+
+.example-window pre {
+    padding: 0.9rem 1.2rem 1.2rem;
+}
+
+.example-window code {
+    font-size: 0.75rem;
+    line-height: 1.7;
+}
+
+.example-caption {
+    margin-top: 0.9rem;
+    padding: 0 0.35rem;
+    color: var(--text-1);
+    font-size: 0.84rem;
+    line-height: 1.6;
+    text-align: left;
+}
+
+.example-badge {
+    display: block;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--amber);
+    margin-bottom: 0.3rem;
+}
+
+/* Alternate compile entry points, below the walkthrough */
+.example-alt {
+    display: flex;
+    justify-content: center;
+    gap: 1rem;
+    margin: 0 0 3.5rem;
+}
+
+.example-alt-card {
+    flex: 1;
+    max-width: 560px;
+    min-width: 0;
+    background: var(--bg-glass);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius);
+    padding: 1.1rem 1.25rem;
+    text-align: left;
+}
+
+.example-alt-card > code {
+    display: block;
+    font-size: 0.78rem;
+    color: var(--text-0);
+    white-space: nowrap;
+    overflow-x: auto;
+    margin-bottom: 0.5rem;
+}
+
+.example-alt-card p {
+    color: var(--text-1);
+    font-size: 0.84rem;
+    line-height: 1.6;
+    margin: 0;
+}
+
+@media (max-width: 1200px) {
+    .example-flow {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 0.75rem;
+    }
+
+    .example-arrow {
+        transform: rotate(90deg);
+    }
+
+    .example-step {
+        max-width: 640px;
+        width: 100%;
+        margin: 0 auto;
+    }
+
+    .example-alt {
+        flex-direction: column;
+        align-items: center;
+    }
+
+    .example-alt-card {
+        width: 100%;
+        max-width: 640px;
+    }
+}
+
 /* Comparison table */
 .comparison {
-    padding: 2.5rem;
-    margin: 2rem 0;
+    padding: 0;
+    margin: 3rem 0 2rem;
 }
 
 .comparison-table {
@@ -1529,9 +1760,15 @@ a.footer-link:hover {
     align-items: center;
     justify-content: space-between;
     gap: 0.75rem;
-    margin-bottom: 1rem;
-    padding-bottom: 1rem;
-    border-bottom: 1px solid var(--glass-border);
+    margin-bottom: 0.85rem;
+    cursor: pointer;
+    user-select: none;
+}
+
+.card-header:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--status-accent) 60%, transparent);
+    outline-offset: 4px;
+    border-radius: var(--radius-sm);
 }
 
 .card-title {
@@ -1539,6 +1776,20 @@ a.footer-link:hover {
     font-size: 1rem;
     font-weight: 700;
     letter-spacing: 0.02em;
+    margin-right: auto;
+}
+
+.card-chevron {
+    color: var(--text-2);
+    font-size: 0.8rem;
+    line-height: 1;
+    transform: rotate(-90deg);
+    transition: transform 0.3s ease, color 0.3s ease;
+}
+
+.module-card.expanded .card-chevron {
+    transform: rotate(0deg);
+    color: var(--status-accent);
 }
 
 .card-status {
@@ -1555,8 +1806,24 @@ a.footer-link:hover {
     white-space: nowrap;
 }
 
+.card-body {
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows 0.4s cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+.module-card.expanded .card-body {
+    grid-template-rows: 1fr;
+}
+
+.card-body > .feature-list {
+    overflow: hidden;
+    min-height: 0;
+}
+
 .feature-list {
     list-style: none;
+    padding-top: 0.35rem;
 }
 
 .feature-item {
@@ -1597,18 +1864,18 @@ a.footer-link:hover {
     align-self: center;
 }
 
-.progress-indicator {
-    margin-top: 1rem;
-    padding-top: 1rem;
-    border-top: 1px solid var(--glass-border);
+.feature-version.upcoming {
+    background: color-mix(in srgb, var(--amber) 14%, transparent);
+    color: var(--amber);
+    border-color: color-mix(in srgb, var(--amber) 30%, transparent);
 }
 
+/* Divider under the card title, doubling as a subtle progress indicator */
 .progress-bar {
-    background: color-mix(in srgb, var(--status-accent) 12%, transparent);
+    background: color-mix(in srgb, var(--glass-border) 70%, transparent);
     border-radius: 10px;
-    height: 8px;
+    height: 3px;
     overflow: hidden;
-    margin-bottom: 0.5rem;
 }
 
 .progress-fill {
@@ -1618,12 +1885,25 @@ a.footer-link:hover {
     transition: width 1s cubic-bezier(0.22, 0.61, 0.36, 1);
 }
 
-.progress-text {
-    font-family: var(--font-mono);
-    font-size: 0.72rem;
+.feature-issue {
+    display: inline-flex;
+    align-items: center;
+    align-self: center;
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
     color: var(--text-2);
-    text-align: center;
-    font-weight: 600;
+    transition: color 0.2s ease, transform 0.2s ease;
+}
+
+.feature-issue:hover {
+    color: var(--status-accent);
+    transform: scale(1.15);
+}
+
+.feature-issue svg {
+    width: 100%;
+    height: 100%;
 }
 
 /* Floating page controls (modules) */
@@ -1683,6 +1963,14 @@ a.footer-link:hover {
 
 .snapshot-mode .column-todo .column-content {
     grid-template-columns: repeat(2, 1fr);
+}
+
+.snapshot-mode .card-body {
+    grid-template-rows: 1fr;
+}
+
+.snapshot-mode .card-chevron {
+    display: none;
 }
 
 /* ==========================================================================
@@ -1942,7 +2230,7 @@ a.footer-link:hover {
     }
 
     .comparison {
-        padding: 1.25rem;
+        padding: 0;
     }
 
     .footer-content {
