@@ -37,6 +37,11 @@
 //! - **Configuration**: [`CompilerOptions`], [`Verbosity`]
 //! - **Helpers**: [`type_to_string`]
 //!
+//! Comments in the compiled sources are preserved in a `python.comments`
+//! WebAssembly custom section and can be read back with
+//! [`core::comments::comments_from_wasm`]. Custom sections carry no code, so
+//! this never changes how a module runs.
+//!
 //! All compile entry points return `anyhow::Result<Vec<u8>>`; the byte vector
 //! is a complete, validated WebAssembly binary. Structured compiler errors
 //! (with source locations where available) travel in the error chain as
@@ -82,6 +87,28 @@ use std::path::Path;
 /// # Errors
 ///
 /// Returns an error if parsing, IR conversion, or WebAssembly generation fails
+///
+/// # Examples
+///
+/// ```
+/// use waspy::compile_python_to_wasm;
+///
+/// let wasm = compile_python_to_wasm("def double(n: int) -> int:\n    return n * 2\n")?;
+///
+/// // A complete WebAssembly binary; `double` is one of its exports.
+/// assert_eq!(&wasm[0..4], b"\0asm");
+/// # anyhow::Ok(())
+/// ```
+///
+/// Unsupported constructs are rejected with a located error rather than
+/// producing a half-compiled module:
+///
+/// ```
+/// use waspy::compile_python_to_wasm;
+///
+/// let result = compile_python_to_wasm("async def fetch() -> int:\n    return 1\n");
+/// assert!(result.is_err());
+/// ```
 pub fn compile_python_to_wasm(source: &str) -> Result<Vec<u8>> {
     compile_python_to_wasm_with_options(source, &CompilerOptions::default())
 }
@@ -100,6 +127,28 @@ pub fn compile_python_to_wasm(source: &str) -> Result<Vec<u8>> {
 /// # Errors
 ///
 /// Returns an error if parsing, IR conversion, or WebAssembly generation fails
+///
+/// # Examples
+///
+/// Skip the Binaryen pass and keep the compiler quiet, which is what you want
+/// when you are about to inspect or post-process the output yourself:
+///
+/// ```
+/// use waspy::{compile_python_to_wasm, compile_python_to_wasm_with_options, CompilerOptions, Verbosity};
+///
+/// let source = "def square(n: int) -> int:\n    return n * n\n";
+/// let options = CompilerOptions {
+///     optimize: false,
+///     verbosity: Verbosity::Quiet,
+/// };
+///
+/// let unoptimized = compile_python_to_wasm_with_options(source, &options)?;
+/// let optimized = compile_python_to_wasm(source)?;
+///
+/// // Both are valid and behave identically; optimization only shrinks.
+/// assert!(optimized.len() < unoptimized.len());
+/// # anyhow::Ok(())
+/// ```
 pub fn compile_python_to_wasm_with_options(
     source: &str,
     options: &CompilerOptions,
@@ -117,6 +166,7 @@ pub fn compile_python_to_wasm_with_options(
     // Lower AST to IR
     log_verbose!("Converting AST to intermediate representation...");
     let mut ir_module = ir::lower_ast_to_ir(&ast).context("Failed to convert Python AST to IR")?;
+    ir_module.comments = core::comments::extract_comments("<module>", source);
     log_debug!(
         "Generated IR module with {} functions",
         ir_module.functions.len()
@@ -182,6 +232,27 @@ pub fn compile_python_to_wasm_with_options(
 /// # Errors
 ///
 /// Returns an error if parsing, IR conversion, or WebAssembly generation fails
+///
+/// # Examples
+///
+/// Every function from every source ends up in one module, so a function in
+/// one file can call a function defined in another:
+///
+/// ```
+/// use waspy::compile_multiple_python_files;
+///
+/// let sources = [
+///     ("math_ops.py", "def add(a: int, b: int) -> int:\n    return a + b\n"),
+///     ("main.py", "def sum_three(a: int, b: int, c: int) -> int:\n    return add(add(a, b), c)\n"),
+/// ];
+///
+/// let wasm = compile_multiple_python_files(&sources, true)?;
+/// assert_eq!(&wasm[0..4], b"\0asm");
+/// # anyhow::Ok(())
+/// ```
+///
+/// Use [`compile_python_file`] instead when the files are on disk and related
+/// by `import` statements: it resolves the import graph for you.
 pub fn compile_multiple_python_files(sources: &[(&str, &str)], optimize: bool) -> Result<Vec<u8>> {
     let options = CompilerOptions {
         optimize,
@@ -205,6 +276,28 @@ pub fn compile_multiple_python_files(sources: &[(&str, &str)], optimize: bool) -
 /// # Errors
 ///
 /// Returns an error if parsing, IR conversion, or WebAssembly generation fails
+///
+/// # Examples
+///
+/// A file that fails to parse is reported as a warning and skipped, so the
+/// rest of the sources still compile. Only an empty result is an error:
+///
+/// ```
+/// use waspy::{compile_multiple_python_files_with_options, CompilerOptions, Verbosity};
+///
+/// let sources = [
+///     ("good.py", "def one() -> int:\n    return 1\n"),
+///     ("broken.py", "def two( ->\n"),
+/// ];
+/// let options = CompilerOptions {
+///     verbosity: Verbosity::Quiet,
+///     ..CompilerOptions::default()
+/// };
+///
+/// let wasm = compile_multiple_python_files_with_options(&sources, &options)?;
+/// assert_eq!(&wasm[0..4], b"\0asm");
+/// # anyhow::Ok(())
+/// ```
 pub fn compile_multiple_python_files_with_options(
     sources: &[(&str, &str)],
     options: &CompilerOptions,
@@ -348,6 +441,11 @@ fn compile_merged_sources(
             .memory_layout
             .merge_from(&ir_module.memory_layout);
 
+        // Recovered per file so the custom section names each comment's origin.
+        combined_module
+            .comments
+            .extend(core::comments::extract_comments(filename, source));
+
         // Add module-level metadata
         for (key, value) in ir_module.metadata {
             combined_module.metadata.insert(key, value);
@@ -407,6 +505,29 @@ fn compile_merged_sources(
 /// # Errors
 ///
 /// Returns an error if parsing, IR conversion, or WebAssembly generation fails
+///
+/// # Examples
+///
+/// The config's name, version, description, and author are recorded as module
+/// metadata. [`compile_python_project`] fills this in from the project's
+/// `pyproject.toml`; call this directly when your build system already knows
+/// the project details:
+///
+/// ```
+/// use waspy::compile_multiple_python_files_with_config;
+/// use waspy::core::config::ProjectConfig;
+///
+/// let config = ProjectConfig {
+///     name: "geometry".to_string(),
+///     version: "1.2.0".to_string(),
+///     ..ProjectConfig::default()
+/// };
+/// let sources = [("area.py", "def area(w: int, h: int) -> int:\n    return w * h\n")];
+///
+/// let wasm = compile_multiple_python_files_with_config(&sources, true, &config)?;
+/// assert_eq!(&wasm[0..4], b"\0asm");
+/// # anyhow::Ok(())
+/// ```
 pub fn compile_multiple_python_files_with_config(
     sources: &[(&str, &str)],
     optimize: bool,
@@ -441,6 +562,29 @@ pub fn compile_multiple_python_files_with_config(
 ///
 /// Returns an error if the entry file or a resolved module cannot be read, or
 /// if parsing, IR conversion, or WebAssembly generation fails
+///
+/// # Examples
+///
+/// `main.py` imports `helpers.py`; compiling the entry file alone pulls the
+/// imported module in:
+///
+/// ```
+/// use std::fs;
+/// use waspy::compile_python_file;
+///
+/// let dir = std::env::temp_dir().join("waspy-doc-compile-file");
+/// fs::create_dir_all(&dir)?;
+/// fs::write(dir.join("helpers.py"), "def triple(n: int) -> int:\n    return n * 3\n")?;
+/// fs::write(
+///     dir.join("main.py"),
+///     "import helpers\n\ndef run(n: int) -> int:\n    return helpers.triple(n)\n",
+/// )?;
+///
+/// let wasm = compile_python_file(dir.join("main.py"), true)?;
+/// assert_eq!(&wasm[0..4], b"\0asm");
+/// # fs::remove_dir_all(&dir)?;
+/// # anyhow::Ok(())
+/// ```
 pub fn compile_python_file<P: AsRef<Path>>(path: P, optimize: bool) -> Result<Vec<u8>> {
     let options = CompilerOptions {
         optimize,
@@ -465,6 +609,29 @@ pub fn compile_python_file<P: AsRef<Path>>(path: P, optimize: bool) -> Result<Ve
 ///
 /// Returns an error if the entry file or a resolved module cannot be read, or
 /// if parsing, IR conversion, or WebAssembly generation fails
+///
+/// # Examples
+///
+/// ```
+/// use std::fs;
+/// use waspy::{compile_python_file_with_options, CompilerOptions, Verbosity};
+///
+/// let dir = std::env::temp_dir().join("waspy-doc-compile-file-options");
+/// fs::create_dir_all(&dir)?;
+/// let entry = dir.join("app.py");
+/// fs::write(&entry, "def half(n: int) -> int:\n    return n // 2\n")?;
+///
+/// // Verbose builds log each pipeline stage through the `log` crate.
+/// let options = CompilerOptions {
+///     optimize: true,
+///     verbosity: Verbosity::Verbose,
+/// };
+///
+/// let wasm = compile_python_file_with_options(&entry, &options)?;
+/// assert_eq!(&wasm[0..4], b"\0asm");
+/// # fs::remove_dir_all(&dir)?;
+/// # anyhow::Ok(())
+/// ```
 pub fn compile_python_file_with_options<P: AsRef<Path>>(
     path: P,
     options: &CompilerOptions,
@@ -513,6 +680,26 @@ pub fn compile_python_file_with_options<P: AsRef<Path>>(
 /// # Errors
 ///
 /// Returns an error if parsing, IR conversion, or WebAssembly generation fails
+///
+/// # Examples
+///
+/// Every compilable `.py` file under the directory is compiled and linked
+/// into a single module, no import statements or entry file required:
+///
+/// ```
+/// use std::fs;
+/// use waspy::compile_python_project;
+///
+/// let dir = std::env::temp_dir().join("waspy-doc-project");
+/// fs::create_dir_all(&dir)?;
+/// fs::write(dir.join("area.py"), "def area(w: int, h: int) -> int:\n    return w * h\n")?;
+/// fs::write(dir.join("volume.py"), "def volume(w: int, h: int, d: int) -> int:\n    return w * h * d\n")?;
+///
+/// let wasm = compile_python_project(&dir, true)?;
+/// assert_eq!(&wasm[0..4], b"\0asm");
+/// # fs::remove_dir_all(&dir)?;
+/// # anyhow::Ok(())
+/// ```
 pub fn compile_python_project<P: AsRef<Path>>(project_dir: P, optimize: bool) -> Result<Vec<u8>> {
     let options = CompilerOptions {
         optimize,
@@ -536,6 +723,34 @@ pub fn compile_python_project<P: AsRef<Path>>(project_dir: P, optimize: bool) ->
 /// # Errors
 ///
 /// Returns an error if parsing, IR conversion, or WebAssembly generation fails
+///
+/// # Examples
+///
+/// A `pyproject.toml` next to the sources supplies the project metadata
+/// carried into the module:
+///
+/// ```
+/// use std::fs;
+/// use waspy::{compile_python_project_with_options, CompilerOptions, Verbosity};
+///
+/// let dir = std::env::temp_dir().join("waspy-doc-project-options");
+/// fs::create_dir_all(&dir)?;
+/// fs::write(
+///     dir.join("pyproject.toml"),
+///     "[project]\nname = \"shapes\"\nversion = \"0.3.0\"\n",
+/// )?;
+/// fs::write(dir.join("area.py"), "def area(w: int, h: int) -> int:\n    return w * h\n")?;
+///
+/// let options = CompilerOptions {
+///     optimize: false,
+///     verbosity: Verbosity::Quiet,
+/// };
+///
+/// let wasm = compile_python_project_with_options(&dir, &options)?;
+/// assert_eq!(&wasm[0..4], b"\0asm");
+/// # fs::remove_dir_all(&dir)?;
+/// # anyhow::Ok(())
+/// ```
 pub fn compile_python_project_with_options<P: AsRef<Path>>(
     project_dir: P,
     options: &CompilerOptions,
@@ -637,6 +852,31 @@ pub fn compile_python_project_with_options<P: AsRef<Path>>(
 /// # Errors
 ///
 /// Returns an error if parsing or IR conversion fails
+///
+/// # Examples
+///
+/// Signatures come back in source order, with parameter and return types
+/// rendered as Python type names. This runs the front end only, so it is the
+/// cheap way to answer "what would this module export?":
+///
+/// ```
+/// use waspy::get_python_file_metadata;
+///
+/// let source = "\
+/// def greet(name: str) -> str:
+///     return \"hi \" + name
+///
+/// def area(w: float, h: float) -> float:
+///     return w * h
+/// ";
+///
+/// let signatures = get_python_file_metadata(source)?;
+/// assert_eq!(signatures.len(), 2);
+/// assert_eq!(signatures[0].name, "greet");
+/// assert_eq!(signatures[0].parameters, vec!["name: str"]);
+/// assert_eq!(signatures[1].return_type, "float");
+/// # anyhow::Ok(())
+/// ```
 pub fn get_python_file_metadata(
     source: &str,
 ) -> Result<Vec<analysis::metadata::FunctionSignature>> {
@@ -679,6 +919,28 @@ pub fn get_python_file_metadata(
 /// # Errors
 ///
 /// Returns an error if parsing or IR conversion fails
+///
+/// # Examples
+///
+/// Files with no compilable functions are left out of the result, and a file
+/// that fails to parse is skipped with a warning instead of failing the whole
+/// scan:
+///
+/// ```
+/// use std::fs;
+/// use waspy::get_python_project_metadata;
+///
+/// let dir = std::env::temp_dir().join("waspy-doc-project-metadata");
+/// fs::create_dir_all(&dir)?;
+/// fs::write(dir.join("area.py"), "def area(w: int, h: int) -> int:\n    return w * h\n")?;
+/// fs::write(dir.join("constants.py"), "PI = 3.14\n")?;
+///
+/// let metadata = get_python_project_metadata(&dir)?;
+/// assert_eq!(metadata.len(), 1);
+/// assert_eq!(metadata[0].1[0].name, "area");
+/// # fs::remove_dir_all(&dir)?;
+/// # anyhow::Ok(())
+/// ```
 pub fn get_python_project_metadata<P: AsRef<Path>>(
     project_dir: P,
 ) -> Result<Vec<(String, Vec<analysis::metadata::FunctionSignature>)>> {
@@ -703,7 +965,24 @@ pub fn get_python_project_metadata<P: AsRef<Path>>(
     Ok(all_metadata)
 }
 
-/// Convert IR type to string
+/// Render an IR type as the Python type name it came from.
+///
+/// This is the formatting used by [`get_python_file_metadata`]; it is public
+/// so tools that walk the IR directly can print types the same way.
+///
+/// # Examples
+///
+/// ```
+/// use waspy::type_to_string;
+/// use waspy::ir::IRType;
+///
+/// assert_eq!(type_to_string(&IRType::Int), "int");
+/// assert_eq!(type_to_string(&IRType::List(Box::new(IRType::String))), "List[str]");
+/// assert_eq!(
+///     type_to_string(&IRType::Dict(Box::new(IRType::String), Box::new(IRType::Int))),
+///     "Dict[str, int]",
+/// );
+/// ```
 pub fn type_to_string(ir_type: &IRType) -> String {
     match ir_type {
         IRType::Int => "int".to_string(),
