@@ -283,6 +283,10 @@ Enhanced error reporting system:
 - Specific error types for different issues (parsing, type errors, unsupported features, name errors)
 - Warnings for potential problems that don't prevent compilation (e.g. cross-module function name collisions)
 
+### Comment Preservation
+
+Comments from the Python sources are preserved in the generated binary as a `python.comments` custom section: UTF-8 text, one `file:line:text` entry per line. Custom sections carry no code, so this changes nothing about how the module runs, and the section survives optimization. Read it back with `waspy::core::comments::comments_from_wasm`, or with any tool that dumps WebAssembly custom sections.
+
 ### Testing
 
 Every bundled example compiles, instantiates, and has its runtime results asserted by the integration suite (`tests/integration/`), alongside operator-level unit tests (`tests/unit/`). Run everything with `just test`, the full CI-equivalent gate with `just ci`, or compile every example through the real drivers with `just verify-examples`.

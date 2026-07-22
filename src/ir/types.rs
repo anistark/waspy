@@ -7,6 +7,7 @@ pub struct IRModule {
     pub classes: Vec<IRClass>,      // Module-level classes
     pub metadata: std::collections::HashMap<String, String>, // Module metadata
     pub memory_layout: MemoryLayout, // String/bytes offsets and object heap layout
+    pub comments: Vec<crate::core::comments::SourceComment>, // Comments recovered from the sources
 }
 
 /// IR representation of a function
@@ -516,6 +517,7 @@ impl IRModule {
             classes: Vec::new(),
             metadata: std::collections::HashMap::new(),
             memory_layout: MemoryLayout::new(),
+            comments: Vec::new(),
         }
     }
 }

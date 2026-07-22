@@ -7,11 +7,15 @@ use crate::ir::{
 };
 use std::collections::{HashMap, HashSet};
 use wasm_encoder::{
-    BlockType, CodeSection, ConstExpr, DataSection, ElementSection, Elements, EntityType,
-    ExportSection, Function, FunctionSection, GlobalSection, GlobalType, ImportSection,
+    BlockType, CodeSection, ConstExpr, CustomSection, DataSection, ElementSection, Elements,
+    EntityType, ExportSection, Function, FunctionSection, GlobalSection, GlobalType, ImportSection,
     Instruction, MemorySection, MemoryType, Module, RefType, TableSection, TableType, TypeSection,
     ValType,
 };
+
+/// Name of the custom section carrying the Python comments of the compiled
+/// sources.
+pub const COMMENTS_SECTION_NAME: &str = "python.comments";
 
 /// Map IR type to WebAssembly ValType
 fn ir_type_to_wasm_type(ir_type: &IRType) -> ValType {
@@ -1013,6 +1017,15 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
     }
     module.section(&codes);
     module.section(&data);
+
+    // Custom sections carry no code, so this leaves execution untouched.
+    if !ir_module.comments.is_empty() {
+        let payload = crate::core::comments::encode_comment_section(&ir_module.comments);
+        module.section(&CustomSection {
+            name: COMMENTS_SECTION_NAME.into(),
+            data: payload.as_bytes().into(),
+        });
+    }
 
     module.finish()
 }
