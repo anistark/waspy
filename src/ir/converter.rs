@@ -123,10 +123,12 @@ pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
     // resolved offsets to emit loads and the data section.
     module.memory_layout = memory_layout;
 
-    // Generator lowering first (it synthesizes classes and constructor
-    // bodies the finalize pass must still see), then whole-module checks and
-    // rewrites (abstract-class instantiation, call-site parameter defaults).
+    // Generator lowering first (it synthesizes classes and constructor bodies
+    // the later passes must still see, and rejects `yield` inside `with`),
+    // then the context-manager protocol, then whole-module checks and rewrites
+    // (abstract-class instantiation, call-site parameter defaults).
     crate::ir::generators::transform_generators(&mut module)?;
+    crate::ir::context_managers::desugar_with_statements(&mut module)?;
     crate::ir::finalize::finalize_module(&mut module)?;
 
     Ok(module)

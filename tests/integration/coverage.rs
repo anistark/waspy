@@ -432,3 +432,35 @@ fn file_io_example_round_trips() {
         Some("hello from waspy\nsecond line".as_bytes())
     );
 }
+
+// ---------------------------------------------------------------------------
+// examples/context_managers.py
+// ---------------------------------------------------------------------------
+
+/// `with` runs both halves of the protocol, binds the `as` name to what
+/// `__enter__` returned, and re-entering accumulates: four passes through the
+/// loop leave the manager entered and exited four times.
+#[test]
+fn context_managers_run_the_protocol() {
+    let src = read_example("context_managers.py");
+    assert_eq!(call_i32(&src, "enter_and_exit"), 11);
+    assert_eq!(call_i32(&src, "binds_enter_result"), 42);
+    assert_eq!(call_i32(&src, "repeated_in_a_loop"), 44);
+}
+
+/// `__exit__` runs before an early `return` leaves the body, while the
+/// returned expression still sees the state from inside the block.
+#[test]
+fn context_managers_exit_before_returning() {
+    let src = read_example("context_managers.py");
+    assert_eq!(call_i32(&src, "exit_runs_before_return"), 1);
+    assert_eq!(call_i32(&src, "exit_ran_afterwards"), 1);
+}
+
+/// Nested blocks and an inherited protocol both resolve.
+#[test]
+fn context_managers_nest_and_inherit() {
+    let src = read_example("context_managers.py");
+    assert_eq!(call_i32(&src, "nested_blocks"), 1111);
+    assert_eq!(call_i32(&src, "inherited_protocol"), 1011);
+}

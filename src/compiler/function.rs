@@ -1,6 +1,6 @@
 use crate::compiler::context::{
     comp_gen_local_name, comp_local_name, strlen_local_name, CompilationContext, LoopContext,
-    COLLECTION_HEADER, COLLECTION_SLOT, DICT_ENTRY, SCRATCH_LOCALS,
+    COLLECTION_CAP, COLLECTION_HEADER, COLLECTION_SLOT, DICT_ENTRY, SCRATCH_LOCALS,
 };
 use crate::compiler::expression::{emit_expr, emit_integer_power_operation};
 use crate::ir::{IRBody, IRConstant, IRExpr, IRFunction, IROp, IRStatement, IRType, MemoryLayout};
@@ -263,6 +263,12 @@ fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRType {
                 IRType::Dict(Box::new(IRType::Unknown), Box::new(IRType::Unknown))
             }
         },
+        // A collection literal's element type decides how its elements are
+        // loaded back out (`for x in xs` over a float list must bind an f64
+        // loop variable), so keep the element type instead of collapsing the
+        // literal to a bare pointer.
+        IRExpr::ListLiteral(elems) => IRType::List(Box::new(literal_elem_type(elems, ctx))),
+        IRExpr::SetLiteral(elems) => IRType::Set(Box::new(literal_elem_type(elems, ctx))),
         IRExpr::FunctionCall { function_name, .. } if function_name == "float" => IRType::Float,
         // `open()` yields a file handle; its local must be typed so file
         // method calls dispatch to the host I/O lowering.
@@ -271,30 +277,128 @@ fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRType {
         {
             IRType::File
         }
+        // `c = C()` types the local as an instance, which is what lets a later
+        // `c.method()` resolve the class it belongs to.
+        IRExpr::FunctionCall { function_name, .. }
+            if ctx.get_class_info(function_name).is_some() =>
+        {
+            IRType::Class(function_name.clone())
+        }
         IRExpr::FunctionCall { function_name, .. } => ctx
             .get_function_info(function_name)
             .map(|f| f.return_type.clone())
             .filter(|t| *t == IRType::Float)
             .unwrap_or(IRType::Unknown),
+        // An unannotated local assigned from a method call takes the method's
+        // declared return type. Without this an f64-returning method stored
+        // into an i32 local produced a module Binaryen rejected outright.
+        IRExpr::MethodCall {
+            object,
+            method_name,
+            ..
+        } => method_return_type(object, method_name, ctx).unwrap_or(IRType::Unknown),
         _ => IRType::Unknown,
     }
 }
 
+/// Declared return type of `object.method()`, when the receiver's class is
+/// known. Inherited methods are registered under the class that defines them,
+/// so the lookup goes through `method_owner` the same way codegen's dispatch
+/// does.
+fn method_return_type(
+    object: &IRExpr,
+    method_name: &str,
+    ctx: &CompilationContext,
+) -> Option<IRType> {
+    let class_name = match object {
+        IRExpr::Variable(name) => match ctx.get_local_info(name)?.var_type.clone() {
+            IRType::Class(class_name) => class_name,
+            _ => return None,
+        },
+        IRExpr::Attribute { object, attribute } => {
+            let IRExpr::Variable(obj_name) = object.as_ref() else {
+                return None;
+            };
+            let IRType::Class(owner) = ctx.get_local_info(obj_name)?.var_type.clone() else {
+                return None;
+            };
+            match lookup_field(ctx, &owner, attribute)?.1 {
+                IRType::Class(class_name) => class_name,
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    let class_info = ctx.get_class_info(&class_name)?;
+    let owner = class_info
+        .method_owner
+        .get(method_name)
+        .cloned()
+        .unwrap_or(class_name);
+    Some(
+        ctx.get_function_info(&format!("{owner}::{method_name}"))?
+            .return_type
+            .clone(),
+    )
+}
+
+/// Fill an element-less collection annotation from the assigned value's
+/// inferred type. A bare `xs: list = [1.5, 2.5]` annotates as `List(Unknown)`,
+/// which would lose the float element type that `List[float]` carries and bind
+/// `for x in xs` as an i32. Anything the annotation states concretely wins.
+fn refine_annotation(annotated: IRType, inferred: &IRType) -> IRType {
+    match (&annotated, inferred) {
+        (IRType::List(elem), IRType::List(_)) | (IRType::Set(elem), IRType::Set(_))
+            if **elem == IRType::Unknown =>
+        {
+            inferred.clone()
+        }
+        _ => annotated,
+    }
+}
+
+/// Element type of a collection literal: the type shared by every element, or
+/// `Unknown` for an empty or mixed literal. A mixed literal has no single WASM
+/// slot width, so it keeps the i32 default rather than mis-typing some elements.
+fn literal_elem_type(elems: &[IRExpr], ctx: &CompilationContext) -> IRType {
+    let mut types = elems.iter().map(|e| infer_value_type(e, ctx));
+    let Some(first) = types.next() else {
+        return IRType::Unknown;
+    };
+    if types.all(|t| t == first) {
+        first
+    } else {
+        IRType::Unknown
+    }
+}
+
 /// Best-effort element type of a `for`-loop iterable, used to decide whether the
-/// loop variable must be an f64 local. Only literal iterables (and already-typed
-/// collection locals) are resolved; anything else is `Unknown`, which keeps the
-/// historical i32 binding. List/set vars are still `Unknown` during the scan, so
-/// `for x in <float-list-variable>` is not yet recognised.
+/// loop variable must be an f64 local. Literal iterables and collection locals
+/// whose element type the assignment scan resolved (including
+/// `for x in <float-list-variable>`) are recognised; anything else is `Unknown`,
+/// which keeps the i32 binding.
 fn infer_iterable_elem_type(iterable: &IRExpr, ctx: &CompilationContext) -> IRType {
     match iterable {
-        IRExpr::ListLiteral(elems) | IRExpr::SetLiteral(elems) => elems
-            .first()
-            .map(|e| infer_value_type(e, ctx))
-            .unwrap_or(IRType::Unknown),
+        IRExpr::ListLiteral(elems) | IRExpr::SetLiteral(elems) => literal_elem_type(elems, ctx),
         IRExpr::Variable(name) => match ctx.get_local_info(name).map(|i| i.var_type.clone()) {
             Some(IRType::List(t)) | Some(IRType::Set(t)) => *t,
             _ => IRType::Unknown,
         },
+        // `for x in self.items`: the field's declared element type.
+        IRExpr::Attribute { object, attribute } => {
+            let IRExpr::Variable(obj_name) = object.as_ref() else {
+                return IRType::Unknown;
+            };
+            let Some(IRType::Class(owner)) =
+                ctx.get_local_info(obj_name).map(|i| i.var_type.clone())
+            else {
+                return IRType::Unknown;
+            };
+            match lookup_field(ctx, &owner, attribute).map(|(_, ty)| ty) {
+                Some(IRType::List(t)) | Some(IRType::Set(t)) => *t,
+                _ => IRType::Unknown,
+            }
+        }
         _ => IRType::Unknown,
     }
 }
@@ -548,9 +652,11 @@ pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
                 if ctx.get_local_index(target).is_none() {
                     // Use the annotation if present; otherwise infer the type
                     // from the value so unannotated float locals become f64.
+                    let inferred = infer_value_type(value, ctx);
                     let var_type = var_type
                         .clone()
-                        .unwrap_or_else(|| infer_value_type(value, ctx));
+                        .map(|annotated| refine_annotation(annotated, &inferred))
+                        .unwrap_or(inferred);
                     // String/bytes locals carry an (offset, length) pair, so they
                     // need a companion local for the length. Reserve one for
                     // `Unknown` locals too: a stdlib call like `os.path.join`
@@ -607,10 +713,13 @@ pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
                 // confidently at scan time (list vars are still Unknown here), so
                 // `for x in some_float_list` remains an i32 bind for now.
                 if ctx.get_local_index(target).is_none() {
-                    let target_ty = if infer_iterable_elem_type(iterable, ctx) == IRType::Float {
-                        IRType::Float
-                    } else {
-                        IRType::Unknown
+                    let target_ty = match infer_iterable_elem_type(iterable, ctx) {
+                        IRType::Float => IRType::Float,
+                        // Iterating a list of instances keeps the element's
+                        // class, so `for it in items: it.field` resolves the
+                        // field instead of reading 0 off an untyped pointer.
+                        class @ IRType::Class(_) => class,
+                        _ => IRType::Unknown,
                     };
                     ctx.add_local(target, target_ty);
                 }
@@ -656,19 +765,9 @@ pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
                     scan_and_allocate_locals(finally_body, ctx);
                 }
             }
-            IRStatement::With {
-                optional_vars,
-                body,
-                ..
-            } => {
-                // Allocate context variable if it exists
-                if let Some(name) = optional_vars {
-                    if ctx.get_local_index(name).is_none() {
-                        ctx.add_local(name, IRType::Unknown);
-                    }
-                }
-                scan_and_allocate_locals(body, ctx);
-            }
+            // No `IRStatement::With` arm: `ir::context_managers` rewrites every
+            // `with` into `__enter__`/`__exit__` calls over ordinary
+            // assignments before the compiler sees the body.
             _ => {}
         }
     }
@@ -860,6 +959,15 @@ pub fn compile_body(
                     func.instruction(&Instruction::LocalGet(mid_len));
                     func.instruction(&Instruction::I32Store(MemArg {
                         offset: 0,
+                        align: 2,
+                        memory_index: 0,
+                    }));
+                    // The slice block is sized exactly for its elements, so its
+                    // capacity equals its length.
+                    func.instruction(&Instruction::LocalGet(mid_ptr));
+                    func.instruction(&Instruction::LocalGet(mid_len));
+                    func.instruction(&Instruction::I32Store(MemArg {
+                        offset: COLLECTION_CAP as u64,
                         align: 2,
                         memory_index: 0,
                     }));
@@ -1648,64 +1756,14 @@ pub fn compile_body(
                 }
             }
 
-            IRStatement::With {
-                context_expr,
-                optional_vars,
-                body,
-            } => {
-                // Context manager implementation
-                // with expr as var: body
-                // This requires calling __enter__ on the context manager and __exit__ after
-
-                let context_var_idx = ctx.add_local("__context_mgr", IRType::Unknown);
-                let exception_flag_idx = ctx
-                    .get_local_index("__exception_flag")
-                    .unwrap_or_else(|| ctx.add_local("__exception_flag", IRType::Int));
-
-                // Evaluate context expression
-                let ctx_type = emit_expr(context_expr, func, ctx, memory_layout, None);
-
-                // Store context manager
-                func.instruction(&Instruction::LocalSet(context_var_idx));
-
-                // If optional_vars is provided, assign it the context manager value
-                if let Some(var_name) = optional_vars {
-                    let var_idx = ctx
-                        .get_local_index(var_name)
-                        .unwrap_or_else(|| ctx.add_local(var_name, ctx_type));
-                    func.instruction(&Instruction::LocalGet(context_var_idx));
-                    func.instruction(&Instruction::LocalSet(var_idx));
-                }
-
-                // Initialize exception flag for the with block
-                let pre_exception_flag_idx = ctx.add_local("__pre_exception_flag", IRType::Int);
-                func.instruction(&Instruction::LocalGet(exception_flag_idx));
-                func.instruction(&Instruction::LocalSet(pre_exception_flag_idx));
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::LocalSet(exception_flag_idx));
-
-                // Execute the body (may raise exceptions)
-                compile_body(body, func, ctx, memory_layout);
-
-                // Check if exception was raised
-                func.instruction(&Instruction::LocalGet(exception_flag_idx));
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::I32Eq);
-                func.instruction(&Instruction::If(BlockType::Empty));
-
-                // No exception: normal exit
-                // Restore pre-with exception state
-                func.instruction(&Instruction::LocalGet(pre_exception_flag_idx));
-                func.instruction(&Instruction::LocalSet(exception_flag_idx));
-
-                func.instruction(&Instruction::Else);
-
-                // Exception occurred: still need to run __exit__ with exception info
-                // Restore pre-with exception state and re-raise if needed
-                func.instruction(&Instruction::LocalGet(pre_exception_flag_idx));
-                func.instruction(&Instruction::LocalSet(exception_flag_idx));
-
-                func.instruction(&Instruction::End);
+            IRStatement::With { .. } => {
+                // `with` is rewritten into explicit `__enter__`/`__exit__`
+                // calls by `ir::context_managers` before codegen runs, so a
+                // surviving one means that pass missed a body.
+                unreachable!(
+                    "`with` statement reached codegen; it should have been desugared by \
+                     ir::context_managers::desugar_with_statements"
+                );
             }
 
             IRStatement::DynamicImport {
@@ -1927,6 +1985,21 @@ pub fn compile_body(
                         func.instruction(&Instruction::LocalGet(ctx.temp_local + 5));
                         func.instruction(&Instruction::I32Eqz);
                         func.instruction(&Instruction::If(BlockType::Empty));
+
+                        // A new key needs an entry the region may not have room
+                        // for; reserve it first, which can move the dict and
+                        // rebind `container` to the larger region. The helper
+                        // reloads the entry count into temp_local + 3, so the
+                        // stores below still address the right slot, and the
+                        // search locals (counter, found) are dead by now.
+                        crate::compiler::expression::emit_collection_reserve(
+                            func,
+                            ctx,
+                            Some(container),
+                            crate::compiler::expression::Reserve::Count(1),
+                            DICT_ENTRY,
+                        );
+
                         // store key at dict_ptr + HEADER + num_entries*DICT_ENTRY
                         func.instruction(&Instruction::LocalGet(ctx.temp_local));
                         func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));

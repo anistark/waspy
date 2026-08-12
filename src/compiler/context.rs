@@ -15,9 +15,19 @@ pub const SCRATCH_LOCALS: u32 = 8;
 /// now heap-allocated via `__alloc`, so it is simply unused static space.)
 pub const COLLECTION_HEAP_BASE: u32 = 131072;
 
-/// Bytes reserved at the start of every collection region for its element/entry
-/// count (an `i32` at offset 0). The first slot follows immediately after.
-pub const COLLECTION_HEADER: u32 = 4;
+/// Bytes reserved at the start of every collection region for its header: the
+/// element/entry count (an `i32` at offset 0) followed by the region's capacity
+/// in elements/entries (an `i32` at [`COLLECTION_CAP`]). The first slot follows
+/// the header. The capacity is what lets `list.append` tell a slot it owns from
+/// the start of the next region, so growing past a literal's size reallocates
+/// instead of silently overwriting the neighbouring collection.
+pub const COLLECTION_HEADER: u32 = 8;
+
+/// Offset of the capacity word inside a collection header. A region whose
+/// capacity reads as 0 (or below its own length) is treated as full, so a
+/// collection built without a capacity is copied on the next append rather than
+/// trusted, the conservative direction.
+pub const COLLECTION_CAP: u32 = 4;
 
 /// Bytes per collection element slot. Wide enough to hold an `f64` without loss,
 /// so float elements round-trip exactly; narrower values (i32 ints/bools,

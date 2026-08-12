@@ -45,7 +45,7 @@ Generate & Optimize
 - Detects and handles project structure and dependencies
 - Supports module-level variables and class definitions with heap-allocated instances — multiple live instances per class, usable as function arguments and return values
 - Object-oriented Python: single inheritance with `super()`, `isinstance`/`issubclass` over the class hierarchy, `@staticmethod`/`@classmethod`/`@property` (with setters), `@dataclass` (generated `__init__`/`__eq__`/`__repr__`), and abstract base classes via `abc.ABC`
-- Collections: lists, dicts, sets, tuples, and ranges — literals, indexing, methods, and membership (`in`/`not in`), with full-precision f64 elements and hash-table sets
+- Collections: lists, dicts, sets, tuples, and ranges: literals, indexing, methods, and membership (`in`/`not in`), with full-precision f64 elements and hash-table sets; lists and dicts reallocate as they grow past their literal's size
 - Exception handling with `try`/`except`/`finally` and `raise`
 - Comprehensions: list, set, and dict comprehensions with filters, multiple generators, nesting, and `{k: v for k, v in pairs}` unpacking
 - Generators with real state preservation: `yield` suspends and resumes, `yield from` delegates, and `next()`/`send()`/`close()` work; user classes implementing `__iter__`/`__next__` iterate in `for` loops with `StopIteration` ending the loop
@@ -54,17 +54,18 @@ Generate & Optimize
 - Extended unpacking: `a, *b, c = xs` binds the starred target to the middle slice as a real list
 - User-written module imports: `import mod`, `import mod as m`, and `from mod import f [as g]` resolve sibling `.py` files (and `pkg/mod.py` packages) and statically link them into the single output WASM module, with each module compiled exactly once however many import paths reach it
 - File I/O through a documented host interface: `open()`, `read([n])`, `write(s)`, `close()`, and `with open(...) as f:` compile to four imported `waspy_host` functions the embedder provides (browser, Node, or any WASM runtime); modules that never call `open()` import nothing
+- Context managers: `with obj as name:` over a user class implementing `__enter__`/`__exit__`, including nested blocks, inherited protocols, and `__exit__` running before an early `return`
 - Bundled standard library runtime: `sys`, `os` (incl. `os.path`), `math`, `random`, `json`, `re`, `datetime`, `logging`, `collections`, `itertools`, `functools`
 
 ## Limitations
 
 - Object instances are never reclaimed — the bump allocator has no `free`, so every instance lives until the module is torn down and `__del__` is not invoked
-- Collections have a fixed compile-time capacity — growing one past its initial size (e.g. `.append` beyond a literal's length) overflows into the next region; runtime growth/reallocation is not yet implemented
+- Lists and dicts grow at runtime (`append`/`extend`/`insert`, and `dict[key] = value` for a new key, reallocate when the region is full), but growth rebinds the variable or field the collection was reached through: one grown inside a function it was *passed* to does not update the caller's binding, and one reached by indexing another collection traps rather than writing out of bounds. Sets are still fixed at their literal's contents
 - Generators cover the common shapes; `yield` inside `try`/`with` and generator methods (`yield` in a class method) are rejected at compile time, and `close()` skips `GeneratorExit`/`finally` semantics
 - Closures capture by value at creation time — a captured variable mutated after the closure is created keeps its old value inside the closure (Python's late-binding cells are a follow-up); float captures are not yet supported
 - Imported user modules share one flat namespace in the output module — two modules defining the same function name collide (first definition wins, with a warning)
 - `f.read()` without a size reads up to 64 KiB per call; `open()` modes must be string literals
-- `with` over a custom context manager does not yet compile ([#5](https://github.com/anistark/waspy/issues/5)); `with open(...)` works
+- A `with` statement needs its context manager's class to be resolvable at compile time (an instantiation, a call with an annotated class return type, or a variable of known class type); `__exit__` runs on the normal and `return` paths, but an exception or a `break` leaving the body skips it, and its return value never suppresses an exception
 - No garbage collection or reference counting — the bump allocator never frees
 
 ### Explicitly unsupported (rejected at compile time)
@@ -79,6 +80,8 @@ The compiler validates syntax up front and rejects these with a located error an
 - Loop `else:` clauses (`for`/`while ... else`)
 - `min()`/`max()` over a single iterable argument (pass the values separately)
 
+Set mutation (`s.add(...)`, `s.remove(...)`) has no implementation yet. It is not rejected up front, because the receiver's type is only known during code generation; the call compiles to a trap, so it fails loudly at runtime instead of silently doing nothing.
+
 ## Installation
 
 ```sh
@@ -89,7 +92,7 @@ Or add it to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-waspy = "0.12.0"
+waspy = "0.13.0"
 ```
 
 ## Quick Start
@@ -330,7 +333,7 @@ Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for details on
 The path to 1.0 focuses on the remaining correctness and runtime gaps:
 
 - Remaining object-model gaps: virtual dispatch through `self` (vtables) and multiple inheritance
-- Growable collections (runtime reallocation past a literal's fixed capacity) and hashed `dict` lookups (sets already use an open-addressing table)
+- Growable sets (lists and dicts already reallocate when full) and hashed `dict` lookups (sets already use an open-addressing table)
 - Garbage collection / reference counting for the bump-allocated heap
 
 ![waspy](./assets/waspy.png)
