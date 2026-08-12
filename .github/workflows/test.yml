@@ -37,4 +37,10 @@ jobs:
       # tests (tests/integration/, tests/unit/). Also covered by the full run
       # above; kept as its own step so a harness failure is visible by name.
       - name: Integration and unit harness (required gate)
-        run: cargo test --all-features --test integration_examples --test integration_coverage --test unit_basics
+        run: >-
+          cargo test --all-features
+          --test integration_examples
+          --test integration_coverage
+          --test unit_basics
+          --test unit_errors
+          --test unit_memory_safety

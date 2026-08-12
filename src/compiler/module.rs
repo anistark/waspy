@@ -53,9 +53,18 @@ fn is_self_ref(expr: &IRExpr) -> bool {
 /// Best-effort type inference for a class field initializer. Only needs to
 /// distinguish floats (an f64 slot) from the i32-shaped default; `params` maps
 /// the enclosing method's parameter names to their annotated types so that
-/// `self.width = width` adopts `width`'s declared type.
-fn infer_field_value_type(value: &IRExpr, params: &HashMap<String, IRType>) -> IRType {
+/// `self.width = width` adopts `width`'s declared type. `classes` names the
+/// module's classes, so `self.origin = Point()` records the instance's class
+/// rather than an untyped pointer.
+fn infer_field_value_type(
+    value: &IRExpr,
+    params: &HashMap<String, IRType>,
+    classes: &HashSet<String>,
+) -> IRType {
     match value {
+        IRExpr::FunctionCall { function_name, .. } if classes.contains(function_name) => {
+            IRType::Class(function_name.clone())
+        }
         IRExpr::Const(IRConstant::Float(_)) => IRType::Float,
         IRExpr::Const(IRConstant::Int(_)) => IRType::Int,
         IRExpr::Const(IRConstant::Bool(_)) => IRType::Bool,
@@ -63,20 +72,24 @@ fn infer_field_value_type(value: &IRExpr, params: &HashMap<String, IRType>) -> I
             params.get(name).cloned().unwrap_or(IRType::Unknown)
         }
         IRExpr::BinaryOp { left, right, .. } => {
-            let lt = infer_field_value_type(left, params);
-            let rt = infer_field_value_type(right, params);
+            let lt = infer_field_value_type(left, params, classes);
+            let rt = infer_field_value_type(right, params, classes);
             if lt == IRType::Float || rt == IRType::Float {
                 IRType::Float
             } else {
                 lt
             }
         }
-        IRExpr::UnaryOp { operand, .. } => infer_field_value_type(operand, params),
+        IRExpr::UnaryOp { operand, .. } => infer_field_value_type(operand, params, classes),
         // Collection-valued fields (e.g. a dict literal stored by a lifted
         // generator local) keep their kind so consumers like len() and
         // indexing know the slot holds a collection pointer.
-        IRExpr::ListLiteral(_) => IRType::List(Box::new(IRType::Unknown)),
-        IRExpr::SetLiteral(_) => IRType::Set(Box::new(IRType::Unknown)),
+        IRExpr::ListLiteral(elems) => {
+            IRType::List(Box::new(shared_element_type(elems, params, classes)))
+        }
+        IRExpr::SetLiteral(elems) => {
+            IRType::Set(Box::new(shared_element_type(elems, params, classes)))
+        }
         IRExpr::TupleLiteral(_) => IRType::Tuple(Vec::new()),
         IRExpr::DictLiteral(_) => {
             IRType::Dict(Box::new(IRType::Unknown), Box::new(IRType::Unknown))
@@ -86,11 +99,136 @@ fn infer_field_value_type(value: &IRExpr, params: &HashMap<String, IRType>) -> I
     }
 }
 
+/// The type every element of a collection literal shares, or `Unknown` when the
+/// literal is empty or mixed.
+fn shared_element_type(
+    elems: &[IRExpr],
+    params: &HashMap<String, IRType>,
+    classes: &HashSet<String>,
+) -> IRType {
+    let mut types = elems
+        .iter()
+        .map(|e| infer_field_value_type(e, params, classes));
+    let Some(first) = types.next() else {
+        return IRType::Unknown;
+    };
+    if types.all(|t| t == first) {
+        first
+    } else {
+        IRType::Unknown
+    }
+}
+
+/// Collect the element types a method contributes to `self.<field>` collections
+/// through mutation: `self.items.append(v)` and `self.items.insert(i, v)`.
+///
+/// A field initialized to an empty literal (`self.items = []`, the ordinary way
+/// to start a collection) has no element type of its own, so what the class puts
+/// into it is the only evidence there is. Without this, iterating the field
+/// binds an untyped element, and reading a member or calling a method on that
+/// element resolves to nothing.
+///
+/// `env` starts as the method's parameters and grows as local assignments are
+/// walked in order, so the common two-step form resolves too:
+///
+/// ```text
+/// item = Item(name, price)
+/// self.items.append(item)
+/// ```
+fn collect_self_field_elements(
+    body: &IRBody,
+    env: &mut HashMap<String, IRType>,
+    classes: &HashSet<String>,
+    out: &mut Vec<(String, IRType)>,
+) {
+    for stmt in &body.statements {
+        if let IRStatement::Assign {
+            target,
+            value,
+            var_type,
+        } = stmt
+        {
+            let ty = var_type
+                .clone()
+                .unwrap_or_else(|| infer_field_value_type(value, env, classes));
+            env.insert(target.clone(), ty);
+        }
+
+        if let IRStatement::Expression(IRExpr::MethodCall {
+            object,
+            method_name,
+            arguments,
+        }) = stmt
+        {
+            // `append(v)` takes the element first; `insert(i, v)` second.
+            let element = match method_name.as_str() {
+                "append" => arguments.first(),
+                "insert" => arguments.get(1),
+                _ => None,
+            };
+            if let (
+                IRExpr::Attribute {
+                    object: receiver,
+                    attribute,
+                },
+                Some(element),
+            ) = (object.as_ref(), element)
+            {
+                if is_self_ref(receiver) {
+                    out.push((
+                        attribute.clone(),
+                        infer_field_value_type(element, env, classes),
+                    ));
+                }
+            }
+        }
+
+        for nested in nested_bodies(stmt) {
+            collect_self_field_elements(nested, &mut env.clone(), classes, out);
+        }
+    }
+}
+
+/// The bodies a statement owns, for the recursive field scans.
+fn nested_bodies(stmt: &IRStatement) -> Vec<&IRBody> {
+    match stmt {
+        IRStatement::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            let mut bodies = vec![then_body.as_ref()];
+            bodies.extend(else_body.as_deref());
+            bodies
+        }
+        IRStatement::While { body, .. } => vec![body.as_ref()],
+        IRStatement::For {
+            body, else_body, ..
+        } => {
+            let mut bodies = vec![body.as_ref()];
+            bodies.extend(else_body.as_deref());
+            bodies
+        }
+        IRStatement::TryExcept {
+            try_body,
+            except_handlers,
+            finally_body,
+        } => {
+            let mut bodies = vec![try_body.as_ref()];
+            bodies.extend(except_handlers.iter().map(|h| &h.body));
+            bodies.extend(finally_body.as_deref());
+            bodies
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// Collect `self.<field> = value` assignments (including augmented ones) from a
 /// method body, recursing into nested blocks, with each field's inferred type.
 fn collect_self_fields(
     body: &IRBody,
     params: &HashMap<String, IRType>,
+    classes: &HashSet<String>,
     out: &mut Vec<(String, IRType)>,
 ) {
     for stmt in &body.statements {
@@ -100,7 +238,10 @@ fn collect_self_fields(
                 attribute,
                 value,
             } if is_self_ref(object) => {
-                out.push((attribute.clone(), infer_field_value_type(value, params)));
+                out.push((
+                    attribute.clone(),
+                    infer_field_value_type(value, params, classes),
+                ));
             }
             IRStatement::AttributeAugAssign {
                 object,
@@ -108,20 +249,23 @@ fn collect_self_fields(
                 value,
                 ..
             } if is_self_ref(object) => {
-                out.push((attribute.clone(), infer_field_value_type(value, params)));
+                out.push((
+                    attribute.clone(),
+                    infer_field_value_type(value, params, classes),
+                ));
             }
             IRStatement::If {
                 then_body,
                 else_body,
                 ..
             } => {
-                collect_self_fields(then_body, params, out);
+                collect_self_fields(then_body, params, classes, out);
                 if let Some(else_body) = else_body {
-                    collect_self_fields(else_body, params, out);
+                    collect_self_fields(else_body, params, classes, out);
                 }
             }
-            IRStatement::While { body, .. } => collect_self_fields(body, params, out),
-            IRStatement::For { body, .. } => collect_self_fields(body, params, out),
+            IRStatement::While { body, .. } => collect_self_fields(body, params, classes, out),
+            IRStatement::For { body, .. } => collect_self_fields(body, params, classes, out),
             _ => {}
         }
     }
@@ -706,6 +850,10 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
     // Python requires a base to be defined before a subclass references it, so
     // a base's ClassInfo is always registered by the time its subclass is
     // processed.
+    // Every class name in the module, so a field initialized or filled with
+    // instances records the element's class instead of a bare pointer.
+    let class_names: HashSet<String> = ir_module.classes.iter().map(|c| c.name.clone()).collect();
+
     for (class_id, cls) in (1i32..).zip(ir_module.classes.iter()) {
         // Single inheritance: resolve the (at most one, enforced during IR
         // conversion) base class. `object` is the implicit root, not a base.
@@ -770,10 +918,9 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
         // Class-level variables occupy instance slots and are also accessible as
         // `ClassName.var`; keep their initializers for that read path.
         for var in &cls.class_vars {
-            let ty = var
-                .var_type
-                .clone()
-                .unwrap_or_else(|| infer_field_value_type(&var.value, &HashMap::new()));
+            let ty = var.var_type.clone().unwrap_or_else(|| {
+                infer_field_value_type(&var.value, &HashMap::new(), &class_names)
+            });
             add_field(&mut class_info, &var.name, ty, &mut current_offset);
             class_info
                 .class_var_values
@@ -803,6 +950,7 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
                     .map(|(n, _)| n.clone()),
             )
             .collect();
+        let mut field_elements: Vec<(String, IRType)> = Vec::new();
         for method in &cls.methods {
             let params: HashMap<String, IRType> = method
                 .params
@@ -810,14 +958,37 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
                 .map(|p| (p.name.clone(), p.param_type.clone()))
                 .collect();
             let mut fields = Vec::new();
-            collect_self_fields(&method.body, &params, &mut fields);
+            collect_self_fields(&method.body, &params, &class_names, &mut fields);
             for (name, ty) in fields {
                 if property_names.contains(&name) {
                     continue;
                 }
                 add_field(&mut class_info, &name, ty, &mut current_offset);
             }
+            collect_self_field_elements(
+                &method.body,
+                &mut params.clone(),
+                &class_names,
+                &mut field_elements,
+            );
         }
+
+        // Fill in the element type of a collection field that was declared
+        // element-less (`self.items = []`) from what the class appends to it.
+        // Only an unresolved element type is filled: an initializer that
+        // already said what it holds wins.
+        for (name, element) in field_elements {
+            if matches!(element, IRType::Unknown) {
+                continue;
+            }
+            match class_info.field_types.get_mut(&name) {
+                Some(IRType::List(elem)) | Some(IRType::Set(elem)) if **elem == IRType::Unknown => {
+                    **elem = element;
+                }
+                _ => {}
+            }
+        }
+
         class_info.instance_size = current_offset as u32;
 
         // Register methods. A property setter is registered under its own

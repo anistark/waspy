@@ -1,6 +1,6 @@
 use crate::compiler::context::{
-    comp_gen_local_name, comp_local_name, strlen_local_name, CompilationContext, COLLECTION_HEADER,
-    COLLECTION_SLOT, DICT_ENTRY,
+    comp_gen_local_name, comp_local_name, strlen_local_name, CompilationContext, COLLECTION_CAP,
+    COLLECTION_HEADER, COLLECTION_SLOT, DICT_ENTRY,
 };
 use crate::compiler::function::{load_field_instr, lookup_field};
 use crate::ir::{
@@ -106,6 +106,33 @@ fn slot_arg() -> MemArg {
         align: 2,
         memory_index: 0,
     }
+}
+
+/// Write a compile-time collection region's header: the element/entry count at
+/// offset 0 and the capacity the region was reserved for at [`COLLECTION_CAP`].
+/// A literal is allocated exactly as large as its contents, so the two are
+/// equal; `list.append` compares them to tell a slot the region owns from the
+/// first byte of the next region.
+fn store_static_header(func: &mut Function, region_ptr: u32, len: u32, cap: u32) {
+    func.instruction(&Instruction::I32Const(region_ptr as i32));
+    func.instruction(&Instruction::I32Const(len as i32));
+    func.instruction(&Instruction::I32Store(slot_arg()));
+    func.instruction(&Instruction::I32Const((region_ptr + COLLECTION_CAP) as i32));
+    func.instruction(&Instruction::I32Const(cap as i32));
+    func.instruction(&Instruction::I32Store(slot_arg()));
+}
+
+/// Write the capacity word of a region whose pointer is in `ptr_local` and
+/// whose capacity is in `cap_local`, for regions built at runtime (`__alloc`
+/// blocks: comprehension results, grown lists, unpacked slices).
+fn store_runtime_cap(func: &mut Function, ptr_local: u32, cap_local: u32) {
+    func.instruction(&Instruction::LocalGet(ptr_local));
+    func.instruction(&Instruction::LocalGet(cap_local));
+    func.instruction(&Instruction::I32Store(MemArg {
+        offset: COLLECTION_CAP as u64,
+        align: 2,
+        memory_index: 0,
+    }));
 }
 
 /// Collections reserve one [`COLLECTION_SLOT`]-byte slot per element, but strings
@@ -794,6 +821,10 @@ fn emit_comprehension(
             func.instruction(&Instruction::I32Add);
             func.instruction(&Instruction::Call(ctx.alloc_func_index));
             func.instruction(&Instruction::LocalSet(res));
+            // The block is sized for `cap` elements even though filters may
+            // produce fewer, so that is the capacity a later `append` can use
+            // before it has to reallocate.
+            store_runtime_cap(func, res, cap);
         }
         IRComprehensionKind::Set => {
             let mask = comp_local(ctx, comp_local_name("mask", depth));
@@ -2503,9 +2534,7 @@ pub fn emit_expr(
             if elements.is_empty() {
                 // Empty list: a header with length 0.
                 let list_ptr = ctx.alloc_collection(COLLECTION_HEADER);
-                func.instruction(&Instruction::I32Const(list_ptr as i32));
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::I32Store(slot_arg()));
+                store_static_header(func, list_ptr, 0, 0);
                 emit_collection_result(func, ctx, list_ptr, COLLECTION_HEADER);
                 return IRType::List(Box::new(IRType::Unknown));
             }
@@ -2513,10 +2542,8 @@ pub fn emit_expr(
             let list_size = COLLECTION_HEADER + elements.len() as u32 * COLLECTION_SLOT;
             let list_ptr = ctx.alloc_collection(list_size);
 
-            // Store length at the beginning
-            func.instruction(&Instruction::I32Const(list_ptr as i32));
-            func.instruction(&Instruction::I32Const(elements.len() as i32));
-            func.instruction(&Instruction::I32Store(slot_arg()));
+            // Store the length and the region's capacity at the beginning
+            store_static_header(func, list_ptr, elements.len() as u32, elements.len() as u32);
 
             // Store each element. A WASM store pops the value first, then the
             // address, so the destination address must be pushed *before* the
@@ -2646,24 +2673,21 @@ pub fn emit_expr(
 
             if elements.is_empty() {
                 let tuple_ptr = ctx.alloc_collection(COLLECTION_HEADER);
-                func.instruction(&Instruction::I32Const(tuple_ptr as i32));
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::I32Store(MemArg {
-                    offset: 0,
-                    align: 2,
-                    memory_index: 0,
-                }));
-                emit_collection_result(func, ctx, tuple_ptr, 4);
+                store_static_header(func, tuple_ptr, 0, 0);
+                emit_collection_result(func, ctx, tuple_ptr, COLLECTION_HEADER);
                 return IRType::Tuple(vec![]);
             }
 
             let tuple_size = COLLECTION_HEADER + elements.len() as u32 * COLLECTION_SLOT;
             let tuple_ptr = ctx.alloc_collection(tuple_size);
 
-            // Store length at the beginning
-            func.instruction(&Instruction::I32Const(tuple_ptr as i32));
-            func.instruction(&Instruction::I32Const(elements.len() as i32));
-            func.instruction(&Instruction::I32Store(slot_arg()));
+            // Store the length and the region's capacity at the beginning
+            store_static_header(
+                func,
+                tuple_ptr,
+                elements.len() as u32,
+                elements.len() as u32,
+            );
 
             // Track element types for heterogeneous tuples
             let mut element_types = Vec::new();
@@ -2690,10 +2714,8 @@ pub fn emit_expr(
             let dict_size = COLLECTION_HEADER + pairs.len() as u32 * DICT_ENTRY;
             let dict_ptr = ctx.alloc_collection(dict_size);
 
-            // Store number of entries
-            func.instruction(&Instruction::I32Const(dict_ptr as i32));
-            func.instruction(&Instruction::I32Const(pairs.len() as i32));
-            func.instruction(&Instruction::I32Store(slot_arg()));
+            // Store the entry count and the region's capacity in entries
+            store_static_header(func, dict_ptr, pairs.len() as u32, pairs.len() as u32);
 
             // Determine key and value types from first pair
             let (key_type, value_type) = if !pairs.is_empty() {
@@ -5115,6 +5137,7 @@ pub fn emit_expr(
                     method_name,
                     arguments,
                     &object_type,
+                    Some(object),
                 ),
                 IRType::Tuple(_element_types) => {
                     emit_tuple_method_call(func, ctx, memory_layout, method_name, arguments)
@@ -5190,14 +5213,31 @@ pub fn emit_expr(
                         IRType::Unknown
                     }
                 }
-                _ => {
-                    // Non-string/list/class methods not yet supported
+                other => {
+                    // A method on a receiver kind with no method support
+                    // yet, set mutation (`s.add(...)`) above all. Consume exactly
+                    // what the receiver left on the stack: one word for a
+                    // pointer-shaped value, two for a string/bytes pair. The
+                    // previous unconditional pair of drops underflowed the
+                    // stack for the one-word case and produced a module that
+                    // failed validation while the compiler reported success.
                     func.instruction(&Instruction::Drop);
-                    func.instruction(&Instruction::Drop);
-                    for arg in arguments {
-                        emit_expr(arg, func, ctx, memory_layout, None);
+                    if matches!(other, IRType::String | IRType::Bytes) {
                         func.instruction(&Instruction::Drop);
                     }
+                    for arg in arguments {
+                        let arg_type = emit_expr(arg, func, ctx, memory_layout, None);
+                        func.instruction(&Instruction::Drop);
+                        if matches!(arg_type, IRType::String | IRType::Bytes) {
+                            func.instruction(&Instruction::Drop);
+                        }
+                    }
+                    // Anything that mutates the receiver would silently do
+                    // nothing, so trap instead of returning a plausible-looking
+                    // value. Read-only methods land here too; they are equally
+                    // unimplemented.
+                    func.instruction(&Instruction::Unreachable);
+                    func.instruction(&Instruction::I32Const(0));
                     IRType::Unknown
                 }
             }
@@ -5723,6 +5763,205 @@ fn emit_file_method_call(
     }
 }
 
+/// How many elements a list must have room for beyond its current length.
+#[derive(Clone, Copy)]
+pub(crate) enum Reserve {
+    /// A fixed count known at compile time (`append`, `insert`, a new dict key).
+    Count(i32),
+    /// A count computed at runtime and held in a local (`extend`).
+    Local(u32),
+}
+
+impl Reserve {
+    fn push(self, func: &mut Function) {
+        match self {
+            Reserve::Count(n) => func.instruction(&Instruction::I32Const(n)),
+            Reserve::Local(idx) => func.instruction(&Instruction::LocalGet(idx)),
+        };
+    }
+}
+
+/// Reallocate a list before a write would run past the end of its region.
+///
+/// On entry `ctx.temp_local` holds the list pointer; on exit it holds the
+/// pointer the caller must write through, which is a fresh, larger `__alloc`
+/// block whenever the region cannot hold `extra` more elements. Capacity
+/// doubles (with a floor of [`LIST_GROWTH_FLOOR`], and never less than what was
+/// asked for), which keeps a loop of appends linear overall.
+///
+/// The new pointer is written back through `receiver` so later reads of the
+/// same variable or field see the grown list. `receiver` is the expression the
+/// method was called on; when it is not something this can assign back to (a
+/// list reached by indexing another collection, or a temporary), the grow path
+/// traps instead, because silently writing into a block nothing else can reach
+/// would lose the elements. Lists that never outgrow their region are
+/// unaffected either way.
+///
+/// Scratch usage: `temp_local + 3..=temp_local + 5`. Callers must not hold live
+/// values there across the call.
+pub(crate) fn emit_collection_reserve(
+    func: &mut Function,
+    ctx: &CompilationContext,
+    receiver: Option<&IRExpr>,
+    extra: Reserve,
+    stride: u32,
+) {
+    let ptr = ctx.temp_local;
+    let len = ctx.temp_local + 3;
+    let cap = ctx.temp_local + 4;
+    let new_ptr = ctx.temp_local + 5;
+
+    // len = load(ptr); cap = load(ptr + COLLECTION_CAP)
+    func.instruction(&Instruction::LocalGet(ptr));
+    func.instruction(&Instruction::I32Load(slot_arg()));
+    func.instruction(&Instruction::LocalSet(len));
+    func.instruction(&Instruction::LocalGet(ptr));
+    func.instruction(&Instruction::I32Load(MemArg {
+        offset: COLLECTION_CAP as u64,
+        align: 2,
+        memory_index: 0,
+    }));
+    func.instruction(&Instruction::LocalSet(cap));
+
+    // Room for `extra` more elements? A region built without a capacity word
+    // reads cap 0 and takes the reallocating path, which is correct but
+    // slower, never the other way round.
+    func.instruction(&Instruction::LocalGet(len));
+    extra.push(func);
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::LocalGet(cap));
+    func.instruction(&Instruction::I32LeS);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    func.instruction(&Instruction::Else);
+
+    let Some(target) = receiver.and_then(|expr| WriteBack::resolve(expr, ctx)) else {
+        // Nowhere to store the grown pointer: fail loudly rather than write
+        // elements into a block the program can never read back.
+        func.instruction(&Instruction::Unreachable);
+        func.instruction(&Instruction::End);
+        return;
+    };
+
+    // cap = max(cap*2, len + extra, LIST_GROWTH_FLOOR)
+    func.instruction(&Instruction::LocalGet(cap));
+    func.instruction(&Instruction::I32Const(2));
+    func.instruction(&Instruction::I32Mul);
+    func.instruction(&Instruction::LocalSet(cap));
+    for lower_bound in [None, Some(extra)] {
+        // `None` is the constant floor; `Some` the requested length.
+        func.instruction(&Instruction::LocalGet(cap));
+        match lower_bound {
+            None => func.instruction(&Instruction::I32Const(LIST_GROWTH_FLOOR)),
+            Some(extra) => {
+                func.instruction(&Instruction::LocalGet(len));
+                extra.push(func);
+                func.instruction(&Instruction::I32Add)
+            }
+        };
+        // Both candidates are on the stack; keep the larger one.
+        func.instruction(&Instruction::LocalGet(cap));
+        match lower_bound {
+            None => func.instruction(&Instruction::I32Const(LIST_GROWTH_FLOOR)),
+            Some(extra) => {
+                func.instruction(&Instruction::LocalGet(len));
+                extra.push(func);
+                func.instruction(&Instruction::I32Add)
+            }
+        };
+        func.instruction(&Instruction::I32GtS);
+        func.instruction(&Instruction::Select);
+        func.instruction(&Instruction::LocalSet(cap));
+    }
+
+    // new_ptr = __alloc(HEADER + cap*stride)
+    func.instruction(&Instruction::LocalGet(cap));
+    func.instruction(&Instruction::I32Const(stride as i32));
+    func.instruction(&Instruction::I32Mul);
+    func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::Call(ctx.alloc_func_index));
+    func.instruction(&Instruction::LocalSet(new_ptr));
+
+    // memory.copy(new_ptr, ptr, HEADER + len*stride): header and live entries.
+    func.instruction(&Instruction::LocalGet(new_ptr));
+    func.instruction(&Instruction::LocalGet(ptr));
+    func.instruction(&Instruction::LocalGet(len));
+    func.instruction(&Instruction::I32Const(stride as i32));
+    func.instruction(&Instruction::I32Mul);
+    func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::MemoryCopy {
+        src_mem: 0,
+        dst_mem: 0,
+    });
+
+    store_runtime_cap(func, new_ptr, cap);
+
+    // The append below writes through the new region.
+    func.instruction(&Instruction::LocalGet(new_ptr));
+    func.instruction(&Instruction::LocalSet(ptr));
+    target.emit(func, new_ptr);
+
+    func.instruction(&Instruction::End);
+}
+
+/// Smallest capacity a grown list is given, so `xs = []` followed by appends
+/// does not reallocate on every element.
+const LIST_GROWTH_FLOOR: i32 = 4;
+
+/// Where a grown list's new pointer is stored so the program keeps seeing it.
+pub(crate) enum WriteBack {
+    /// A local variable: `xs.append(v)`.
+    Local(u32),
+    /// An instance field of an object held in a local: `self.items.append(v)`.
+    Field { object: u32, offset: u64 },
+}
+
+impl WriteBack {
+    /// Resolve the receiver expression of a list method call to somewhere the
+    /// grown pointer can be stored, or `None` when there is no such place.
+    fn resolve(expr: &IRExpr, ctx: &CompilationContext) -> Option<Self> {
+        match expr {
+            IRExpr::Variable(name) => ctx.get_local_index(name).map(WriteBack::Local),
+            IRExpr::Attribute { object, attribute } => {
+                let IRExpr::Variable(obj_name) = object.as_ref() else {
+                    return None;
+                };
+                let info = ctx.get_local_info(obj_name)?;
+                let IRType::Class(class_name) = &info.var_type else {
+                    return None;
+                };
+                let (offset, _) =
+                    crate::compiler::function::lookup_field(ctx, class_name, attribute)?;
+                Some(WriteBack::Field {
+                    object: info.index,
+                    offset,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// Store the pointer held in `value` back into the resolved location.
+    fn emit(&self, func: &mut Function, value: u32) {
+        match *self {
+            WriteBack::Local(index) => {
+                func.instruction(&Instruction::LocalGet(value));
+                func.instruction(&Instruction::LocalSet(index));
+            }
+            WriteBack::Field { object, offset } => {
+                func.instruction(&Instruction::LocalGet(object));
+                func.instruction(&Instruction::LocalGet(value));
+                func.instruction(&Instruction::I32Store(MemArg {
+                    offset,
+                    align: 2,
+                    memory_index: 0,
+                }));
+            }
+        }
+    }
+}
+
 pub fn emit_list_method_call(
     func: &mut Function,
     ctx: &CompilationContext,
@@ -5730,19 +5969,23 @@ pub fn emit_list_method_call(
     method_name: &str,
     arguments: &[IRExpr],
     list_type: &IRType,
+    receiver: Option<&IRExpr>,
 ) -> IRType {
     match method_name {
         "append" => {
             // list.append(value). Entry stack: (list_ptr). Each element occupies
             // one COLLECTION_SLOT; the value is stored at its natural width so a
-            // float keeps full f64 precision. The element grows the list past its
-            // literal capacity (a known limitation — no runtime regrow yet).
+            // float keeps full f64 precision. When the region is full the list
+            // is reallocated first (see `emit_list_grow`), so an append never
+            // writes into the collection that happens to sit next in memory.
             if !arguments.is_empty() {
                 // Emit the value while list_ptr stays safely on the stack below
                 // it, then stash it into a type-appropriate scratch local.
                 let value_type = emit_expr(&arguments[0], func, ctx, memory_layout, None);
                 stash_search_needle(func, ctx, &value_type, ctx.temp_local + 1);
                 func.instruction(&Instruction::LocalSet(ctx.temp_local)); // list_ptr
+
+                emit_collection_reserve(func, ctx, receiver, Reserve::Count(1), COLLECTION_SLOT);
 
                 // length = load(list_ptr)
                 func.instruction(&Instruction::LocalGet(ctx.temp_local));
@@ -5854,6 +6097,16 @@ pub fn emit_list_method_call(
                         }));
                         func.instruction(&Instruction::LocalSet(ctx.temp_local + 2)); // iterable_len
 
+                        // Make room for every element about to be copied in;
+                        // this may replace list_ptr with a larger region.
+                        emit_collection_reserve(
+                            func,
+                            ctx,
+                            receiver,
+                            Reserve::Local(ctx.temp_local + 2),
+                            COLLECTION_SLOT,
+                        );
+
                         // Load list length
                         func.instruction(&Instruction::LocalGet(ctx.temp_local));
                         func.instruction(&Instruction::I32Load(MemArg {
@@ -5951,6 +6204,8 @@ pub fn emit_list_method_call(
                 let value_type = emit_expr(&arguments[1], func, ctx, memory_layout, None);
                 stash_search_needle(func, ctx, &value_type, ctx.temp_local + 1);
                 func.instruction(&Instruction::LocalSet(ctx.temp_local)); // list_ptr
+
+                emit_collection_reserve(func, ctx, receiver, Reserve::Count(1), COLLECTION_SLOT);
 
                 // length = load(list_ptr)
                 func.instruction(&Instruction::LocalGet(ctx.temp_local));

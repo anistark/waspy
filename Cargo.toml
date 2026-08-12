@@ -1,6 +1,6 @@
 [package]
 name = "waspy"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2021"
 rust-version = "1.70.0"
 description = "A Python to WebAssembly compiler written in Rust."
@@ -94,6 +94,10 @@ path = "tests/unit/basics.rs"
 [[test]]
 name = "unit_errors"
 path = "tests/unit/errors.rs"
+
+[[test]]
+name = "unit_memory_safety"
+path = "tests/unit/memory_safety.rs"
 
 # Plugin metadata following wasmrust pattern
 [package.metadata.wasm_plugin]
