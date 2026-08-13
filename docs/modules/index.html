@@ -152,14 +152,14 @@
             controlFlow: {
                 title: "CONTROL FLOW",
                 status: "done",
-                version: "0.13.0",
+                version: "0.14.0",
                 features: [
                     { name: "if/elif/else statements", status: "done", version: "0.1.0" },
                     { name: "while loops", status: "done", version: "0.1.0" },
                     { name: "for loops with list/string iteration", status: "done", version: "0.7.0" },
                     { name: "break and continue in loops", status: "done", version: "0.11.0" },
                     { name: "try/except/finally exception handling", status: "done", version: "0.7.0" },
-                    { name: "with statements over user context managers (__enter__/__exit__, nested, inherited, exit before return)", status: "done", version: "0.13.0", issue: 5 },
+                    { name: "with statements over user context managers (__enter__/__exit__, nested, inherited, exit before return)", status: "done", version: "0.14.0", issue: 5 },
                     { name: "Comparison operations (==, !=, <, <=, >, >=)", status: "done", version: "0.1.0" },
                     { name: "Boolean logic (and, or, not) with short-circuit", status: "done", version: "0.1.0" }
                 ]
@@ -184,7 +184,7 @@
                     { name: "Generic types (List[T], Dict[K,V], Tuple[T,...])", status: "done", version: "0.1.0" },
                     { name: "Union/Optional types", status: "done", version: "0.1.0" },
                     { name: "Custom class type annotations", status: "done", version: "0.1.0" },
-                    { name: "Unannotated locals typed from the value: collection element types, c = C() as an instance, a method call's declared return type", status: "done", version: "0.13.0" }
+                    { name: "Unannotated locals typed from the value: collection element types, c = C() as an instance, a method call's declared return type", status: "done", version: "0.14.0" }
                 ]
             },
             variables: {
@@ -226,11 +226,11 @@
                 version: "0.1.0",
                 features: [
                     { name: "WebAssembly optimization (Binaryen)", status: "done", version: "0.1.0" },
-                    { name: "Compiler options & configuration (reviewed API: optimize + verbosity)", status: "done", version: "0.13.0" },
-                    { name: "Error handling with located messages (line/column, function, hints)", status: "done", version: "0.13.0" },
-                    { name: "Early validation - unsupported syntax rejected before codegen", status: "done", version: "0.13.0" },
-                    { name: "Integration test suite - every example compiled, run, and asserted in CI", status: "done", version: "0.13.0" },
-                    { name: "Comment preservation - python.comments custom section, survives optimization", status: "done", version: "0.13.0" },
+                    { name: "Compiler options & configuration (reviewed API: optimize + verbosity)", status: "done", version: "0.14.0" },
+                    { name: "Error handling with located messages (line/column, function, hints)", status: "done", version: "0.14.0" },
+                    { name: "Early validation - unsupported syntax rejected before codegen", status: "done", version: "0.14.0" },
+                    { name: "Integration test suite - every example compiled, run, and asserted in CI", status: "done", version: "0.14.0" },
+                    { name: "Comment preservation - python.comments custom section, survives optimization", status: "done", version: "0.14.0" },
                     { name: "Memory layout optimization", status: "done", version: "0.1.0" }
                 ]
             },
@@ -260,8 +260,8 @@
                     { name: "List search methods .index(v) & .count(v) with linear search", status: "done", version: "0.7.0" },
                     { name: "Dict literals with memory allocation {'key': value}", status: "done", version: "0.7.0" },
                     { name: "Dict indexing (read & write) dict[key] and dict[key] = value", status: "done", version: "0.7.0" },
-                    { name: "Runtime growth: lists reallocate on append/extend/insert, dicts on a new key", status: "done", version: "0.13.0" },
-                    { name: "Iterating a list of instances binds a typed element (for it in items: it.field)", status: "done", version: "0.13.0" },
+                    { name: "Runtime growth: lists reallocate on append/extend/insert, dicts on a new key", status: "done", version: "0.14.0" },
+                    { name: "Iterating a list of instances binds a typed element (for it in items: it.field)", status: "done", version: "0.14.0" },
                     { name: "Set mutation (.add / .remove) - compiles to a trap, not implemented", status: "todo" }
                 ]
             },
@@ -285,8 +285,8 @@
                     { name: "isinstance / issubclass over the class hierarchy", status: "done", version: "0.12.0" },
                     { name: "@dataclass with generated __init__ / __eq__ / __repr__", status: "done", version: "0.12.0" },
                     { name: "Abstract base classes (abc.ABC + @abstractmethod)", status: "done", version: "0.12.0" },
-                    { name: "Collection fields hold instances: self.items = [] filled by append keeps its element class", status: "done", version: "0.13.0" },
-                    { name: "Collection fields grow through the field, so self.items.append(v) is visible to later reads", status: "done", version: "0.13.0" }
+                    { name: "Collection fields hold instances: self.items = [] filled by append keeps its element class", status: "done", version: "0.14.0" },
+                    { name: "Collection fields grow through the field, so self.items.append(v) is visible to later reads", status: "done", version: "0.14.0" }
                 ]
             },
             builtins: {
@@ -298,20 +298,20 @@
                     { name: "len() - strings, lists, and dicts", status: "done", version: "0.7.0" },
                     { name: "print() - argument handling implemented", status: "done", version: "0.7.0" },
                     { name: "min() & max() - multiple arguments (single-iterable form rejected with a hint)", status: "done", version: "0.7.0" },
-                    { name: "sum() over lists/tuples with optional start value - real element loop", status: "done", version: "0.13.0" }
+                    { name: "sum() over lists/tuples with optional start value - real element loop", status: "done", version: "0.14.0" }
                 ]
             },
             runtimeFeatures: {
                 title: "RUNTIME FEATURES",
                 status: "progress",
-                version: "0.13.0",
+                version: "0.14.0",
                 features: [
                     { name: "Set storage with de-duplication & membership (in / not in)", status: "done" },
-                    { name: "Growable collections - lists and dicts reallocate instead of overflowing their region", status: "done", version: "0.13.0" },
+                    { name: "Growable collections - lists and dicts reallocate instead of overflowing their region", status: "done", version: "0.14.0" },
                     { name: "Dict index assignment with update or append (dict[key] = value)", status: "done" },
-                    { name: "Generator State Management - execution context suspension/resumption", status: "done", version: "0.13.0" },
+                    { name: "Generator State Management - execution context suspension/resumption", status: "done", version: "0.14.0" },
                     { name: "Dynamic Module Loading - runtime module loading and execution", status: "todo" },
-                    { name: "Closure Variable Capture Analysis - detecting and capturing closure variables", status: "done", version: "0.13.0" },
+                    { name: "Closure Variable Capture Analysis - detecting and capturing closure variables", status: "done", version: "0.14.0" },
                     { name: "String Transformation in WASM - full character-by-char transformations", status: "progress" }
                 ]
             },
@@ -358,14 +358,14 @@
             comprehensions: {
                 title: "COMPREHENSIONS",
                 status: "done",
-                version: "0.13.0",
+                version: "0.14.0",
                 features: [
-                    { name: "List comprehensions ([x for x in list])", status: "done", version: "0.13.0" },
-                    { name: "List comprehension filters ([x for x in list if condition])", status: "done", version: "0.13.0" },
-                    { name: "Dict comprehensions ({k: v for k, v in items})", status: "done", version: "0.13.0" },
-                    { name: "Set comprehensions ({x for x in list}) with dedup at construction", status: "done", version: "0.13.0" },
-                    { name: "Multiple generators & nesting ([x for row in m for x in row])", status: "done", version: "0.13.0" },
-                    { name: "Generator expressions (x for x in list), materialized eagerly as lists", status: "done", version: "0.13.0" }
+                    { name: "List comprehensions ([x for x in list])", status: "done", version: "0.14.0" },
+                    { name: "List comprehension filters ([x for x in list if condition])", status: "done", version: "0.14.0" },
+                    { name: "Dict comprehensions ({k: v for k, v in items})", status: "done", version: "0.14.0" },
+                    { name: "Set comprehensions ({x for x in list}) with dedup at construction", status: "done", version: "0.14.0" },
+                    { name: "Multiple generators & nesting ([x for row in m for x in row])", status: "done", version: "0.14.0" },
+                    { name: "Generator expressions (x for x in list), materialized eagerly as lists", status: "done", version: "0.14.0" }
                 ]
             },
             functional: {
@@ -373,27 +373,27 @@
                 status: "done",
                 version: "0.8.0",
                 features: [
-                    { name: "Lambda functions (lambda x: x + 1) compiled to real functions", status: "done", version: "0.13.0" },
-                    { name: "Closures with variable capture (by value at creation)", status: "done", version: "0.13.0" },
-                    { name: "First-class closures: returned, passed as arguments, stored in collections, nested", status: "done", version: "0.13.0" },
-                    { name: "Higher-order functions (passing functions as arguments)", status: "done", version: "0.13.0" },
+                    { name: "Lambda functions (lambda x: x + 1) compiled to real functions", status: "done", version: "0.14.0" },
+                    { name: "Closures with variable capture (by value at creation)", status: "done", version: "0.14.0" },
+                    { name: "First-class closures: returned, passed as arguments, stored in collections, nested", status: "done", version: "0.14.0" },
+                    { name: "Higher-order functions (passing functions as arguments)", status: "done", version: "0.14.0" },
                     { name: "Callable type tracking for function objects", status: "done", version: "0.8.0" }
                 ]
             },
             generators: {
                 title: "GENERATORS & ITERATORS",
                 status: "done",
-                version: "0.13.0",
+                version: "0.14.0",
                 features: [
-                    { name: "Generator functions - yield suspends and resumes with state preserved", status: "done", version: "0.13.0" },
-                    { name: "yield from delegation (ranges, lists, other generators)", status: "done", version: "0.13.0" },
-                    { name: "next(), send() with x = yield resume values, and close()", status: "done", version: "0.13.0" },
-                    { name: "Iterator protocol (__iter__, __next__) on user classes with StopIteration", status: "done", version: "0.13.0" },
+                    { name: "Generator functions - yield suspends and resumes with state preserved", status: "done", version: "0.14.0" },
+                    { name: "yield from delegation (ranges, lists, other generators)", status: "done", version: "0.14.0" },
+                    { name: "next(), send() with x = yield resume values, and close()", status: "done", version: "0.14.0" },
+                    { name: "Iterator protocol (__iter__, __next__) on user classes with StopIteration", status: "done", version: "0.14.0" },
                     { name: "Generator type tracking (Generator[T])", status: "done", version: "0.8.0" },
                     { name: "range() function implementation - all variants", status: "done", version: "0.8.0" },
                     { name: "for loop iteration over ranges with step support", status: "done", version: "0.8.0" },
-                    { name: "Tuple targets in for loops (for a, b in pairs, star targets)", status: "done", version: "0.13.0" },
-                    { name: "enumerate(), zip(), and dict.items()/.keys()/.values() in for loops", status: "done", version: "0.13.0" }
+                    { name: "Tuple targets in for loops (for a, b in pairs, star targets)", status: "done", version: "0.14.0" },
+                    { name: "enumerate(), zip(), and dict.items()/.keys()/.values() in for loops", status: "done", version: "0.14.0" }
                 ]
             },
             imports: {
@@ -407,21 +407,21 @@
                     { name: "Conditional imports in try/except blocks", status: "done", version: "0.8.0" },
                     { name: "Dynamic imports (__import__, importlib)", status: "done", version: "0.8.0" },
                     { name: "Module execution and loading", status: "done", version: "0.8.0" },
-                    { name: "User-defined module files - import mod / from mod import f resolved from sibling .py files and statically linked", status: "done", version: "0.13.0" },
-                    { name: "Namespace access on user modules (mod.f(), mod.CONST, mod.ClassName()) and aliases (import mod as m, from mod import f as g)", status: "done", version: "0.13.0" },
-                    { name: "Module caching - a module imported through several paths compiles once", status: "done", version: "0.13.0" }
+                    { name: "User-defined module files - import mod / from mod import f resolved from sibling .py files and statically linked", status: "done", version: "0.14.0" },
+                    { name: "Namespace access on user modules (mod.f(), mod.CONST, mod.ClassName()) and aliases (import mod as m, from mod import f as g)", status: "done", version: "0.14.0" },
+                    { name: "Module caching - a module imported through several paths compiles once", status: "done", version: "0.14.0" }
                 ]
             },
             fileIo: {
                 title: "FILE I/O",
                 status: "done",
-                version: "0.13.0",
+                version: "0.14.0",
                 features: [
-                    { name: "open(path, mode) via the documented waspy_host import interface (r, w, a, b, + modes folded to flags)", status: "done", version: "0.13.0" },
-                    { name: "read() / read(n) returning strings (64 KiB default cap per call)", status: "done", version: "0.13.0" },
-                    { name: "write(s) returning bytes written; close() and flush()", status: "done", version: "0.13.0" },
-                    { name: "with open(...) as f: context-manager form (desugared to open/body/close)", status: "done", version: "0.13.0" },
-                    { name: "Import section emitted only when open() is used - other modules keep zero imports", status: "done", version: "0.13.0" }
+                    { name: "open(path, mode) via the documented waspy_host import interface (r, w, a, b, + modes folded to flags)", status: "done", version: "0.14.0" },
+                    { name: "read() / read(n) returning strings (64 KiB default cap per call)", status: "done", version: "0.14.0" },
+                    { name: "write(s) returning bytes written; close() and flush()", status: "done", version: "0.14.0" },
+                    { name: "with open(...) as f: context-manager form (desugared to open/body/close)", status: "done", version: "0.14.0" },
+                    { name: "Import section emitted only when open() is used - other modules keep zero imports", status: "done", version: "0.14.0" }
                 ]
             },
             errorHandling: {
@@ -449,7 +449,7 @@
                     { name: "Tuple indexing with type tracking", status: "done", version: "0.8.0" },
                     { name: "Heterogeneous tuples with mixed types", status: "done", version: "0.8.0" },
                     { name: "Tuple unpacking & assignment (a, b = (1, 2))", status: "done", version: "0.8.0" },
-                    { name: "Extended (starred) unpacking (a, *b, c = xs)", status: "done", version: "0.13.0" },
+                    { name: "Extended (starred) unpacking (a, *b, c = xs)", status: "done", version: "0.14.0" },
                     { name: "Tuple methods (.index, .count)", status: "done", version: "0.8.0" },
                     { name: "Named tuples - namedtuple() factory", status: "done", version: "0.8.0" },
                     { name: "String formatting (.format() & % & f-strings)", status: "done" }
@@ -470,7 +470,7 @@
                 status: "progress",
                 features: [
                     { name: "Bump allocator with runtime memory growth", status: "done", version: "0.12.0" },
-                    { name: "Collections carry a capacity and reallocate instead of overflowing their region", status: "done", version: "0.13.0" },
+                    { name: "Collections carry a capacity and reallocate instead of overflowing their region", status: "done", version: "0.14.0" },
                     { name: "Pointer identity across growth (a grown collection visible through every alias)", status: "todo" },
                     { name: "Garbage collection system", status: "todo" },
                     { name: "Reference counting & leak prevention", status: "todo" },

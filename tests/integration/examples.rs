@@ -234,7 +234,7 @@ fn float_list_iteration_binds_f64() {
     );
 }
 
-/// Heap-allocated instances (v0.13.0 P0): two live `Counter` instances mutate
+/// Heap-allocated instances (v0.14.0 P0): two live `Counter` instances mutate
 /// independently. Under the old fixed-address model both names aliased one
 /// instance, so the second constructor call clobbered the first's state.
 #[test]

@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.13.0](https://github.com/anistark/waspy/releases/tag/v0.13.0) - 2026-08-12
+## [0.14.0](https://github.com/anistark/waspy/releases/tag/v0.14.0) - 2026-08-13
 
 ### Added
 - Coverage audit: every bundled `examples/*.py` (plus the multi-file `examples/user_modules_app/` and the project-directory `examples/calculator_project/`) now has an integration test that compiles it, instantiates the WASM with `wasmi`, and asserts concrete runtime results (`tests/integration/coverage.rs`), alongside operator-level unit suites for arithmetic, comparisons, boolean/bitwise logic, conversions, and augmented assignment (`tests/unit/basics.rs`) and for error quality (`tests/unit/errors.rs`). The integration harness gained untyped-call helpers (f64/mixed signatures), a disk-based entry-file compile path, and an in-memory `waspy_host` filesystem that drives `examples/file_io.py` end to end. The suite runs as an explicit named gate in the test workflow

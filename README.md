@@ -92,7 +92,7 @@ Or add it to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-waspy = "0.13.0"
+waspy = "0.14.0"
 ```
 
 ## Quick Start

@@ -1,4 +1,4 @@
-"""Heap-allocated object instances (v0.13.0 P0).
+"""Heap-allocated object instances (v0.14.0 P0).
 
 Each `ClassName(...)` calls the runtime allocator and returns a distinct
 instance pointer, so multiple instances of one class coexist with
