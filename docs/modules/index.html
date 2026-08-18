@@ -158,8 +158,8 @@
                     { name: "while loops", status: "done", version: "0.1.0" },
                     { name: "for loops with list/string iteration", status: "done", version: "0.7.0" },
                     { name: "break and continue in loops", status: "done", version: "0.11.0" },
-                    { name: "try/except/finally exception handling", status: "done", version: "0.7.0" },
-                    { name: "with statements over user context managers (__enter__/__exit__, nested, inherited, exit before return)", status: "done", version: "0.14.0", issue: 5 },
+                    { name: "try/except/finally blocks with real exception propagation (see EXCEPTION HANDLING)", status: "done", version: "0.7.0" },
+                    { name: "with statements over user context managers (__enter__/__exit__, nested, inherited, exit before return / break / continue)", status: "done", version: "0.14.0", issue: 5 },
                     { name: "Comparison operations (==, !=, <, <=, >, >=)", status: "done", version: "0.1.0" },
                     { name: "Boolean logic (and, or, not) with short-circuit", status: "done", version: "0.1.0" }
                 ]
@@ -262,7 +262,7 @@
                     { name: "Dict indexing (read & write) dict[key] and dict[key] = value", status: "done", version: "0.7.0" },
                     { name: "Runtime growth: lists reallocate on append/extend/insert, dicts on a new key", status: "done", version: "0.14.0" },
                     { name: "Iterating a list of instances binds a typed element (for it in items: it.field)", status: "done", version: "0.14.0" },
-                    { name: "Set mutation (.add / .remove) - compiles to a trap, not implemented", status: "todo" }
+                    { name: "Set mutation .add() / .remove() / .discard(), rehashing when the table fills", status: "done", version: "0.15.0" }
                 ]
             },
             classes: {
@@ -426,13 +426,18 @@
             },
             errorHandling: {
                 title: "EXCEPTION HANDLING",
-                status: "done",
+                status: "progress",
                 version: "0.7.0",
                 features: [
-                    { name: "Exception throwing (raise statements)", status: "done", version: "0.7.0" },
-                    { name: "Exception catching by type", status: "done", version: "0.7.0" },
-                    { name: "Built-in exception types (ZeroDivisionError, ValueError, etc.)", status: "done", version: "0.7.0" },
-                    { name: "Exception propagation & finally blocks", status: "done", version: "0.7.0" }
+                    { name: "try / except / finally blocks", status: "done", version: "0.7.0" },
+                    { name: "raise transfers control: it leaves the block, the try body, and the loop it is raised in", status: "done", version: "0.15.0" },
+                    { name: "Propagation across calls: an exception travels out of a callee into the caller's handler", status: "done", version: "0.15.0" },
+                    { name: "Handler matching by type, except (A, B) for either, except Exception for any; unmatched handlers pass it on", status: "done", version: "0.15.0" },
+                    { name: "finally and __exit__ run while an exception propagates, and on return / break / continue", status: "done", version: "0.15.0" },
+                    { name: "An uncaught exception unwinds out of the program and traps", status: "done", version: "0.15.0" },
+                    { name: "Exception objects: the message in raise ValueError(\"...\") is dropped, and except ... as e binds the type code", status: "todo" },
+                    { name: "Subclass matching: except MyBase does not catch a subclass of it (Exception / BaseException catch everything)", status: "todo" },
+                    { name: "Catching runtime faults: an out-of-range index or 1 // 0 traps instead of raising", status: "todo" }
                 ]
             },
             advancedTypes: {

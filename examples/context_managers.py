@@ -26,6 +26,24 @@ class Resource:
         return self.entered * 10 + self.exited
 
 
+class Order:
+    """Records the order cleanups run in: each one appends a digit, so 12 means
+    the `1` cleanup ran before the `2` cleanup."""
+
+    def __init__(self):
+        self.order = 0
+
+    def mark(self, digit: int):
+        self.order = self.order * 10 + digit
+
+    def __enter__(self) -> int:
+        return 1
+
+    def __exit__(self, exc_type: int, exc_value: int, traceback: int) -> int:
+        self.order = self.order * 10 + 2
+        return 0
+
+
 class Scaled(Resource):
     """A subclass inherits the protocol from its base."""
 
@@ -90,6 +108,98 @@ def inherited_protocol() -> int:
     with s as size:
         pass
     return s.doubled() * 100 + s.state()
+
+
+def exit_runs_before_break() -> int:
+    """A `break` leaving the body runs __exit__ first, exactly as a return
+    does. The loop would run three times; the first pass leaves it."""
+    r = Resource(1)
+    i = 0
+    while i < 3:
+        with r as size:
+            break
+        i = i + 1
+    return r.state()
+
+
+def exit_runs_before_continue() -> int:
+    """A `continue` leaving the body runs __exit__ too, once per pass."""
+    r = Resource(1)
+    i = 0
+    while i < 3:
+        i = i + 1
+        with r as size:
+            continue
+    return r.state()
+
+
+def inner_loop_break_stays_inside() -> int:
+    """A `break` that belongs to a loop written inside the body binds to that
+    loop, so __exit__ runs once, on the way out of the block."""
+    r = Resource(1)
+    with r as size:
+        i = 0
+        while i < 3:
+            break
+    return r.state()
+
+
+def finally_runs_before_break() -> int:
+    """`finally` runs on the way out through a `break`, not only on the
+    ordinary path."""
+    r = Resource(1)
+    i = 0
+    while i < 3:
+        try:
+            break
+        finally:
+            r.exited = r.exited + 1
+    return r.exited
+
+
+def finally_runs_before_return() -> int:
+    """`finally` runs on the way out through a `return`."""
+    r = Resource(1)
+    n = finally_returning(r)
+    return r.exited * 10 + n
+
+
+def finally_returning(r: Resource) -> int:
+    try:
+        return 3
+    finally:
+        r.exited = r.exited + 1
+
+
+def cleanup_order_finally_then_exit() -> int:
+    """Cleanups run innermost first: the inner `finally` before the enclosing
+    block's __exit__."""
+    r = Order()
+    n = order_try_in_with(r)
+    return r.order
+
+
+def order_try_in_with(r: Order) -> int:
+    with r as size:
+        try:
+            return 0
+        finally:
+            r.mark(1)
+
+
+def cleanup_order_exit_then_finally() -> int:
+    """The other nesting: __exit__ before the enclosing `finally`."""
+    r = Order()
+    n = order_with_in_try(r)
+    return r.order
+
+
+def order_with_in_try(r: Order) -> int:
+    try:
+        with r as size:
+            return 0
+    finally:
+        r.mark(1)
 
 
 def main() -> int:

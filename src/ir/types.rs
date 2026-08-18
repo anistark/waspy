@@ -127,7 +127,11 @@ pub enum IRStatement {
 /// Except handler for try-except statements
 #[derive(Debug, Clone)]
 pub struct IRExceptHandler {
-    pub exception_type: Option<String>,
+    /// The exception types this handler names. Empty means a bare `except:`,
+    /// which catches everything; `except (A, B):` carries both names, which a
+    /// single `Option<String>` could not, so it used to be read as a bare
+    /// `except` and caught exceptions it should have passed on.
+    pub exception_types: Vec<String>,
     pub name: Option<String>,
     pub body: IRBody,
 }

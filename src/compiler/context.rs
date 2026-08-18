@@ -1,13 +1,22 @@
+use crate::core::errors::{unsupported_feature, ChakraError};
 use crate::ir::{IRExpr, IRType, MethodKind};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+
+/// WASM global holding the pending exception's type code, 0 when none.
+pub const EXC_TYPE_GLOBAL: u32 = 2;
+
+/// WASM global counting user-function calls on the stack below the current
+/// frame, so a propagating exception can tell whether it is about to escape
+/// the program (and must trap) or is returning into a caller that will check.
+pub const CALL_DEPTH_GLOBAL: u32 = 3;
 
 /// Number of scratch/temporary locals reserved for intermediate calculations
 /// (pointer/index bookkeeping, search loops, type coercion, ...). Reserved
 /// per-function in `compile_function` after params and named locals, so these
 /// indices never alias real variables. Keep this >= the largest `temp_local + N`
 /// offset emitted anywhere in the compiler.
-pub const SCRATCH_LOCALS: u32 = 8;
+pub const SCRATCH_LOCALS: u32 = 17;
 
 /// Base address of the collection heap. Sits above the string (from 0) and
 /// bytes (from 32768) regions so collection literals never overlap them. (The
@@ -240,6 +249,33 @@ pub struct CompilationContext {
     /// i32 0) after setting the stop flag. Set per function in
     /// `compile_function`.
     pub current_return_type: IRType,
+    /// Name of the function currently being compiled, used to locate the
+    /// errors reported through [`CompilationContext::report`]. Set per
+    /// function in `compile_function`.
+    pub current_function: Option<String>,
+    /// Block depth of each enclosing `try` body's exception block, innermost
+    /// last. A `raise` (or a call that returns with an exception pending)
+    /// branches to the innermost one, which lands on that `try`'s handler
+    /// dispatch; with the stack empty the exception leaves the function
+    /// instead. Reset per function, and popped before the handlers are
+    /// compiled so an exception raised inside a handler is not caught by its
+    /// own `try`.
+    pub try_stack: Vec<u32>,
+    /// WASM indices of the functions that can raise, directly or through
+    /// something they call. Calls to anything else need no exception check, so
+    /// a program that never raises compiles to exactly what it did before.
+    pub can_raise: std::collections::HashSet<u32>,
+    /// Errors found during code generation.
+    ///
+    /// Codegen runs behind a shared `&CompilationContext` and its emit
+    /// functions return the expression's type, not a `Result`, so a construct
+    /// it cannot generate code for (a method on a receiver kind with no method
+    /// support, above all) used to have no way to say so and could only emit a
+    /// trap. Reporting into this sink turns those into real compile errors:
+    /// the emitted code still traps, keeping the module valid and the stack
+    /// balanced, but `compile_ir_module` fails with the collected errors
+    /// instead of handing back a module that dies at runtime.
+    pub errors: RefCell<Vec<ChakraError>>,
 }
 
 impl CompilationContext {
@@ -272,6 +308,10 @@ impl CompilationContext {
             closure_max_arity: 0,
             return_self: false,
             current_class: None,
+            current_function: None,
+            try_stack: Vec::new(),
+            can_raise: std::collections::HashSet::new(),
+            errors: RefCell::new(Vec::new()),
             current_return_type: IRType::Unknown,
         }
     }
@@ -279,6 +319,25 @@ impl CompilationContext {
     /// Resolve a called or instantiated name through the module's
     /// `from mod import x as y` aliases. A real definition (function or
     /// class) of the name itself always wins over an alias.
+    /// Record a code-generation error against the function being compiled.
+    ///
+    /// The caller still emits code (a trap, and whatever drops keep the stack
+    /// balanced) so the module stays valid and the rest of the program is
+    /// compiled, surfacing every such error in one run rather than one per
+    /// compile. `compile_ir_module` fails once the whole module is walked.
+    pub fn report(&self, message: impl Into<String>) {
+        // The IR carries no source spans, so the function being compiled is
+        // the finest location available; it goes in the message rather than an
+        // `ErrorLocation`, which would have to invent a line number.
+        let message = match &self.current_function {
+            Some(name) => format!("{} (in function '{name}')", message.into()),
+            None => message.into(),
+        };
+        self.errors
+            .borrow_mut()
+            .push(unsupported_feature(message, None));
+    }
+
     pub fn resolve_import_alias<'a>(&'a self, name: &'a str) -> &'a str {
         if self.function_map.contains_key(name) || self.class_map.contains_key(name) {
             return name;

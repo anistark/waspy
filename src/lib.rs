@@ -198,8 +198,13 @@ pub fn compile_python_to_wasm_with_options(
 
     // Generate WASM binary
     log_verbose!("Generating WebAssembly binary...");
-    let raw_wasm = compiler::compile_ir_module(&ir_module);
+    let raw_wasm = compiler::compile_ir_module(&ir_module)?;
     log_debug!("Generated WASM binary: {} bytes", raw_wasm.len());
+
+    // Validate before anything else touches the module: an invalid binary
+    // aborts Binaryen outright, and returning one unoptimized is no better.
+    log_verbose!("Validating generated WebAssembly...");
+    compiler::validate_wasm(&raw_wasm)?;
 
     // Optimize the WASM binary if requested
     if options.optimize {
@@ -480,7 +485,8 @@ fn compile_merged_sources(
     }
 
     // Generate WASM binary from the combined module
-    let raw_wasm = compiler::compile_ir_module(&combined_module);
+    let raw_wasm = compiler::compile_ir_module(&combined_module)?;
+    compiler::validate_wasm(&raw_wasm)?;
 
     // Optimize the WASM binary
     if options.optimize {

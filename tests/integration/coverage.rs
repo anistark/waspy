@@ -234,6 +234,41 @@ fn exceptions_divide_returns_through_try() {
     assert_eq!(result, 2.5);
 }
 
+/// `raise` transfers control: to the matching handler, past the rest of the
+/// body, out of a loop, and out of a call (running the frames' `finally` on
+/// the way). A handler for another type passes the exception on instead of
+/// swallowing it, and catching one lets the function carry on.
+#[test]
+fn exceptions_transfer_control() {
+    let src = read_example("exceptions.py");
+    assert_eq!(call_i32(&src, "caught_here"), 5);
+    assert_eq!(call_i32(&src, "raise_skips_the_rest"), 1);
+    assert_eq!(call_i32(&src, "raise_leaves_the_loop"), 1);
+    assert_eq!(call_i32(&src, "propagates_with_cleanup"), 1);
+    assert_eq!(call_i32(&src, "unmatched_handler_passes_it_on"), 5);
+    assert_eq!(call_i32(&src, "catching_resumes_normally"), 15);
+    assert_eq!(call_i32(&src, "exception_base_catches_any"), 5);
+    assert_eq!(call_i32(&src, "tuple_of_types"), 5);
+    assert_eq!(call_i32(&src, "tuple_of_types_passes_others_on"), 5);
+}
+
+/// An exception nothing catches unwinds out of the program and traps, instead
+/// of letting the outermost function return as if nothing had happened.
+#[test]
+fn an_uncaught_exception_traps_at_the_boundary() {
+    let src = read_example("exceptions.py");
+    let wasm = harness::compile(&src);
+    let (instance, mut store) = harness::instantiate_wasm(&wasm);
+    let call = instance
+        .get_typed_func::<i32, i32>(&store, "check_positive")
+        .expect("exported check_positive");
+    assert_eq!(call.call(&mut store, 3).expect("a positive number"), 3);
+    assert!(
+        call.call(&mut store, -1).is_err(),
+        "an uncaught exception must trap, not return"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // examples/range_example.py
 // ---------------------------------------------------------------------------
@@ -260,6 +295,18 @@ fn set_example_dedup_and_membership() {
     assert_eq!(call_i32(&src, "membership"), 1);
 }
 
+/// Set mutation: `add` (with the rehash that growing past the literal's
+/// capacity needs), `remove`, and `discard`.
+#[test]
+fn set_example_mutation() {
+    let src = read_example("set_example.py");
+    assert_eq!(call_i32(&src, "mutate_size"), 3);
+    // 50 members (0..=49, the literal's 1 among them), 37 present, 77 absent.
+    assert_eq!(call_i32(&src, "grow_and_find"), 5001);
+    assert_eq!(call_i32(&src, "remove_and_discard"), 10);
+    assert_eq!(call_i32(&src, "readd_after_remove"), 21);
+}
+
 // ---------------------------------------------------------------------------
 // examples/tuple_example.py
 // ---------------------------------------------------------------------------
@@ -270,6 +317,7 @@ fn tuple_example_indexing() {
     let src = read_example("tuple_example.py");
     assert_eq!(call_i32(&src, "tuple_sum"), 6);
     assert_eq!(call_i32(&src, "single_element"), 99);
+    assert_eq!(call_f64(&src, "float_tuple"), 5.0);
 }
 
 // ---------------------------------------------------------------------------
@@ -463,4 +511,25 @@ fn context_managers_nest_and_inherit() {
     let src = read_example("context_managers.py");
     assert_eq!(call_i32(&src, "nested_blocks"), 1111);
     assert_eq!(call_i32(&src, "inherited_protocol"), 1011);
+}
+
+/// `break` and `continue` leaving the body run `__exit__` too, and a `break`
+/// belonging to a loop written inside the body does not.
+#[test]
+fn context_managers_exit_on_loop_exits() {
+    let src = read_example("context_managers.py");
+    assert_eq!(call_i32(&src, "exit_runs_before_break"), 11);
+    assert_eq!(call_i32(&src, "exit_runs_before_continue"), 33);
+    assert_eq!(call_i32(&src, "inner_loop_break_stays_inside"), 11);
+}
+
+/// `finally` runs on the `break` and `return` paths, not only on the ordinary
+/// one, and cleanups nest innermost-first in either direction.
+#[test]
+fn finally_runs_on_non_local_exits() {
+    let src = read_example("context_managers.py");
+    assert_eq!(call_i32(&src, "finally_runs_before_break"), 1);
+    assert_eq!(call_i32(&src, "finally_runs_before_return"), 13);
+    assert_eq!(call_i32(&src, "cleanup_order_finally_then_exit"), 12);
+    assert_eq!(call_i32(&src, "cleanup_order_exit_then_finally"), 21);
 }

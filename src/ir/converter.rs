@@ -1359,13 +1359,21 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                     let name = handler_data.name.as_ref().map(|n| n.to_string());
                     let body = &handler_data.body;
                     // Extract exception type from the type expression
-                    let exception_type = if let Some(typ) = typ {
-                        match &**typ {
-                            Expr::Name(name) => Some(name.id.to_string()),
-                            _ => None,
-                        }
-                    } else {
-                        None
+                    // `except E:` names one type, `except (E, F):` several,
+                    // and a bare `except:` none. Anything else (an expression
+                    // computing the type) is treated as a bare except, which
+                    // catches more rather than less.
+                    let exception_types = match typ.map(|t| &**t) {
+                        Some(Expr::Name(name)) => vec![name.id.to_string()],
+                        Some(Expr::Tuple(tuple)) => tuple
+                            .elts
+                            .iter()
+                            .filter_map(|elt| match elt {
+                                Expr::Name(name) => Some(name.id.to_string()),
+                                _ => None,
+                            })
+                            .collect(),
+                        _ => Vec::new(),
                     };
 
                     // Extract name if present
@@ -1375,7 +1383,7 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                     let handler_body = lower_function_body(body, memory_layout)?;
 
                     except_handlers.push(IRExceptHandler {
-                        exception_type,
+                        exception_types,
                         name: handler_name,
                         body: handler_body,
                     });

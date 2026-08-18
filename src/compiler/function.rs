@@ -1,6 +1,7 @@
 use crate::compiler::context::{
     comp_gen_local_name, comp_local_name, strlen_local_name, CompilationContext, LoopContext,
-    COLLECTION_CAP, COLLECTION_HEADER, COLLECTION_SLOT, DICT_ENTRY, SCRATCH_LOCALS,
+    CALL_DEPTH_GLOBAL, COLLECTION_CAP, COLLECTION_HEADER, COLLECTION_SLOT, DICT_ENTRY,
+    EXC_TYPE_GLOBAL, SCRATCH_LOCALS,
 };
 use crate::compiler::expression::{emit_expr, emit_integer_power_operation};
 use crate::ir::{IRBody, IRConstant, IRExpr, IRFunction, IROp, IRStatement, IRType, MemoryLayout};
@@ -16,6 +17,11 @@ pub fn compile_function(
 ) -> Function {
     ctx.locals_map.clear();
     ctx.local_count = 0;
+    // Errors reported from expression codegen are located by this name.
+    ctx.current_function = Some(match owning_class {
+        Some(class) => format!("{class}.{}", ir_func.name),
+        None => ir_func.name.clone(),
+    });
 
     // An `__init__` method returns `self` (its first parameter) so the
     // instantiation site receives the freshly allocated instance pointer as
@@ -102,6 +108,11 @@ pub fn compile_function(
 /// Map a built-in exception type name to the integer code used by the
 /// try/except dispatch. Shared by `raise` and the handler matching so the two
 /// always agree. Unknown names get a sentinel that no specific handler matches.
+/// Type code for a bare `raise` and for exception types the table does not
+/// name. It has to be nonzero: 0 is what the pending-exception global holds
+/// when nothing is in flight.
+const GENERIC_EXCEPTION: i32 = 99;
+
 fn exception_type_code(name: &str) -> i32 {
     match name {
         "ZeroDivisionError" => 1,
@@ -112,8 +123,89 @@ fn exception_type_code(name: &str) -> i32 {
         "AttributeError" => 6,
         "RuntimeError" => 7,
         "StopIteration" => 8,
-        _ => 99,
+        // Anything else, a user-defined exception class above all, gets a
+        // stable code derived from its name, so two different ones do not
+        // share a code and catch each other. `raise` and `except` both come
+        // through here, so they agree by construction.
+        other => name_code(other),
     }
+}
+
+/// A stable, positive code for an exception name outside the table, kept well
+/// clear of the fixed codes and of [`GENERIC_EXCEPTION`].
+fn name_code(name: &str) -> i32 {
+    // FNV-1a, then folded into the positive range starting at 1000.
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in name.as_bytes() {
+        hash ^= *byte as u32;
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    1000 + (hash % 1_000_000) as i32
+}
+
+/// Push this function's default result value, the value a frame returns while
+/// unwinding: nothing observes it, because every caller checks the pending
+/// exception before using a result.
+pub(crate) fn emit_default_result(func: &mut Function, ctx: &CompilationContext) {
+    match ctx.current_return_type {
+        IRType::Float => {
+            func.instruction(&Instruction::F64Const(0.0_f64.into()));
+        }
+        IRType::None => {}
+        _ => {
+            func.instruction(&Instruction::I32Const(0));
+        }
+    }
+}
+
+/// Transfer control to wherever a pending exception has to go next.
+///
+/// Inside a `try`, that is the innermost enclosing `try` body's exception
+/// block, whose end is the handler dispatch. Outside every `try`, the
+/// exception leaves the function: the frame returns its default value and the
+/// caller (which checked after the call) carries on unwinding. With no user
+/// call below this frame the exception has escaped the program, so it traps
+/// there rather than handing the host a value as if nothing had happened.
+///
+/// `extra_depth` is how many block frames the caller has opened since
+/// `ctx.block_depth` was last updated (an `if` wrapping the check, typically),
+/// so the branch target is counted from the right place.
+pub(crate) fn emit_exception_transfer(
+    func: &mut Function,
+    ctx: &CompilationContext,
+    extra_depth: u32,
+) {
+    if let Some(level) = ctx.try_stack.last().copied() {
+        func.instruction(&Instruction::Br(ctx.block_depth + extra_depth - level));
+        return;
+    }
+
+    func.instruction(&Instruction::GlobalGet(CALL_DEPTH_GLOBAL));
+    func.instruction(&Instruction::I32Eqz);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    func.instruction(&Instruction::Unreachable);
+    func.instruction(&Instruction::End);
+    emit_default_result(func, ctx);
+    func.instruction(&Instruction::Return);
+}
+
+/// The check emitted after a call that can raise: if the callee left an
+/// exception pending, keep unwinding instead of using its result.
+pub(crate) fn emit_post_call_check(func: &mut Function, ctx: &CompilationContext) {
+    func.instruction(&Instruction::GlobalGet(EXC_TYPE_GLOBAL));
+    func.instruction(&Instruction::If(BlockType::Empty));
+    // The `if` frame itself is one level deeper than the recorded block depth.
+    emit_exception_transfer(func, ctx, 1);
+    func.instruction(&Instruction::End);
+}
+
+/// Maintain the call-depth counter around a call that can raise. `delta` is +1
+/// before the call and -1 after it.
+pub(crate) fn emit_call_depth_step(func: &mut Function, delta: i32) {
+    func.instruction(&Instruction::GlobalGet(CALL_DEPTH_GLOBAL));
+    func.instruction(&Instruction::I32Const(delta));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::GlobalSet(CALL_DEPTH_GLOBAL));
 }
 
 /// Resolve a class field to its `(byte offset, value type)`, if known.
@@ -1098,15 +1190,9 @@ pub fn compile_body(
                     continue;
                 }
 
-                // Mark exception as raised by setting exception flag
-                // Try to get existing exception flag variable if in a try block
-                let exception_flag_idx = ctx
-                    .get_local_index("__exception_flag")
-                    .unwrap_or_else(|| ctx.add_local("__exception_flag", IRType::Int));
-                let exception_type_idx = ctx
-                    .get_local_index("__exception_type")
-                    .unwrap_or_else(|| ctx.add_local("__exception_type", IRType::Int));
-
+                // Everything else records the exception's type in the module
+                // global and transfers control: to the enclosing `try`'s
+                // handler dispatch, or out of the function when there is none.
                 if let Some(exc_expr) = exception {
                     // Resolve the exception to its type code by name — the same
                     // table the handler dispatch uses — instead of emitting the
@@ -1122,17 +1208,19 @@ pub fn compile_body(
                         IRExpr::Variable(name) | IRExpr::Param(name) => exception_type_code(name),
                         _ => 0,
                     };
+                    // A type code of 0 would read as "nothing pending", so an
+                    // unrecognized name takes the generic code like a bare
+                    // `raise` does.
+                    let code = if code == 0 { GENERIC_EXCEPTION } else { code };
                     func.instruction(&Instruction::I32Const(code));
-                    func.instruction(&Instruction::LocalSet(exception_type_idx));
+                    func.instruction(&Instruction::GlobalSet(EXC_TYPE_GLOBAL));
                 } else {
                     // Bare `raise`: generic exception code.
-                    func.instruction(&Instruction::I32Const(0));
-                    func.instruction(&Instruction::LocalSet(exception_type_idx));
+                    func.instruction(&Instruction::I32Const(GENERIC_EXCEPTION));
+                    func.instruction(&Instruction::GlobalSet(EXC_TYPE_GLOBAL));
                 }
 
-                // Set exception flag to 1
-                func.instruction(&Instruction::I32Const(1));
-                func.instruction(&Instruction::LocalSet(exception_flag_idx));
+                emit_exception_transfer(func, ctx, 0);
             }
 
             IRStatement::While { condition, body } => {
@@ -1220,7 +1308,7 @@ pub fn compile_body(
                         if matches!(t, IRType::String | IRType::Bytes) {
                             func.instruction(&Instruction::Drop);
                         }
-                        func.instruction(&Instruction::Call(setter_idx));
+                        crate::compiler::expression::emit_user_call(func, ctx, setter_idx);
                         // The setter's WASM result (implicit 0) is unused.
                         func.instruction(&Instruction::Drop);
                         continue;
@@ -1341,10 +1429,10 @@ pub fn compile_body(
                         // self for the setter call, then self for the getter.
                         func.instruction(&Instruction::LocalGet(ctx.temp_local));
                         func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                        func.instruction(&Instruction::Call(getter_idx)); // current value
+                        crate::compiler::expression::emit_user_call(func, ctx, getter_idx); // current value
                         emit_expr(value, func, ctx, memory_layout, Some(&value_ty));
                         emit_arith_op(func, op, is_float);
-                        func.instruction(&Instruction::Call(setter_idx));
+                        crate::compiler::expression::emit_user_call(func, ctx, setter_idx);
                         // The setter's WASM result (implicit 0) is unused.
                         func.instruction(&Instruction::Drop);
                         continue;
@@ -1648,27 +1736,28 @@ pub fn compile_body(
                 except_handlers,
                 finally_body,
             } => {
-                // Implement exception handling with a global exception state
-                // We use a special local variable to track if an exception was raised
-                // Reuse the exception-state locals reserved during the scan.
-                let exception_flag_idx = ctx
-                    .get_local_index("__exception_flag")
-                    .unwrap_or_else(|| ctx.add_local("__exception_flag", IRType::Int));
-                let exception_type_idx = ctx
-                    .get_local_index("__exception_type")
-                    .unwrap_or_else(|| ctx.add_local("__exception_type", IRType::Int));
+                // The try body runs inside a block whose end is the handler
+                // dispatch below. A `raise` in the body (or a call that comes
+                // back with an exception pending) branches there, so the rest
+                // of the body is skipped, exactly as Python skips it. Falling
+                // off the end of the body reaches the same dispatch with no
+                // exception pending, which is the ordinary path.
+                func.instruction(&Instruction::Block(BlockType::Empty));
+                ctx.block_depth += 1;
+                ctx.try_stack.push(ctx.block_depth);
 
-                // Initialize exception flag to 0 (no exception)
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::LocalSet(exception_flag_idx));
-
-                // Execute the try block
                 compile_body(try_body, func, ctx, memory_layout);
 
-                // Check if an exception was raised
-                func.instruction(&Instruction::LocalGet(exception_flag_idx));
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::I32Eq);
+                // Leaving the body ends the region this `try` protects: an
+                // exception raised in a handler belongs to the enclosing try,
+                // not to this one.
+                ctx.try_stack.pop();
+                ctx.block_depth -= 1;
+                func.instruction(&Instruction::End);
+
+                // Dispatch. Nothing pending means the body completed.
+                func.instruction(&Instruction::GlobalGet(EXC_TYPE_GLOBAL));
+                func.instruction(&Instruction::I32Eqz);
 
                 // If no exception (flag == 0), skip all except handlers and go to finally
                 func.instruction(&Instruction::If(BlockType::Empty));
@@ -1680,68 +1769,72 @@ pub fn compile_body(
                 func.instruction(&Instruction::Else);
 
                 // Try to match exception handlers
-                for (idx, handler) in except_handlers.iter().enumerate() {
-                    let is_last = idx == except_handlers.len() - 1;
+                for handler in except_handlers.iter() {
+                    // A bare `except:`, and `except Exception:` (or
+                    // `BaseException`), catch anything pending. Python's real
+                    // rule is subclass matching, and every exception is a
+                    // subclass of those two.
+                    let catch_all = handler.exception_types.is_empty()
+                        || handler
+                            .exception_types
+                            .iter()
+                            .any(|name| matches!(name.as_str(), "Exception" | "BaseException"));
 
-                    // Check if this handler matches the exception type
-                    // For now, match any exception if no type is specified, or match by type
-                    if handler.exception_type.is_none() {
-                        // Bare except: catches all exceptions
+                    if catch_all {
                         if let Some(var_name) = &handler.name {
                             let handler_var_idx = ctx
                                 .get_local_index(var_name)
                                 .unwrap_or_else(|| ctx.add_local(var_name, IRType::Unknown));
-                            // Store exception type in the handler variable
-                            func.instruction(&Instruction::LocalGet(exception_type_idx));
+                            // Bind the exception's type code; there are no
+                            // exception objects to bind.
+                            func.instruction(&Instruction::GlobalGet(EXC_TYPE_GLOBAL));
                             func.instruction(&Instruction::LocalSet(handler_var_idx));
                         }
 
-                        // Execute handler body
-                        compile_body(&handler.body, func, ctx, memory_layout);
-
-                        // Clear exception flag
+                        // Caught: nothing is pending any more, so clear it
+                        // before the handler runs (the body may raise again).
                         func.instruction(&Instruction::I32Const(0));
-                        func.instruction(&Instruction::LocalSet(exception_flag_idx));
-                    } else if let Some(exc_type) = &handler.exception_type {
-                        // Typed exception handler: match by the shared type code.
-                        let exc_code = exception_type_code(exc_type.as_str());
+                        func.instruction(&Instruction::GlobalSet(EXC_TYPE_GLOBAL));
 
-                        func.instruction(&Instruction::Block(BlockType::Empty));
-                        // This per-handler block wraps the handler body.
-                        ctx.block_depth += 1;
+                        compile_body(&handler.body, func, ctx, memory_layout);
+                        // Nothing after a catch-all can run.
+                        break;
+                    }
 
-                        // Check if exception type matches
-                        func.instruction(&Instruction::LocalGet(exception_type_idx));
-                        func.instruction(&Instruction::I32Const(exc_code));
+                    func.instruction(&Instruction::Block(BlockType::Empty));
+                    // This per-handler block wraps the handler body.
+                    ctx.block_depth += 1;
+
+                    // Does the pending type match any of the names this
+                    // handler lists? `except (A, B):` matches either.
+                    for (i, name) in handler.exception_types.iter().enumerate() {
+                        func.instruction(&Instruction::GlobalGet(EXC_TYPE_GLOBAL));
+                        func.instruction(&Instruction::I32Const(exception_type_code(name)));
                         func.instruction(&Instruction::I32Eq);
-                        func.instruction(&Instruction::I32Eqz);
-                        func.instruction(&Instruction::BrIf(0)); // Branch to next handler if no match
-
-                        if let Some(var_name) = &handler.name {
-                            let handler_var_idx = ctx
-                                .get_local_index(var_name)
-                                .unwrap_or_else(|| ctx.add_local(var_name, IRType::Unknown));
-                            func.instruction(&Instruction::LocalGet(exception_type_idx));
-                            func.instruction(&Instruction::LocalSet(handler_var_idx));
+                        if i > 0 {
+                            func.instruction(&Instruction::I32Or);
                         }
+                    }
+                    func.instruction(&Instruction::I32Eqz);
+                    func.instruction(&Instruction::BrIf(0)); // no match: next handler
 
-                        // Execute handler body
-                        compile_body(&handler.body, func, ctx, memory_layout);
-
-                        // Clear exception flag and skip remaining handlers
-                        func.instruction(&Instruction::I32Const(0));
-                        func.instruction(&Instruction::LocalSet(exception_flag_idx));
-
-                        ctx.block_depth -= 1;
-                        func.instruction(&Instruction::End);
+                    if let Some(var_name) = &handler.name {
+                        let handler_var_idx = ctx
+                            .get_local_index(var_name)
+                            .unwrap_or_else(|| ctx.add_local(var_name, IRType::Unknown));
+                        func.instruction(&Instruction::GlobalGet(EXC_TYPE_GLOBAL));
+                        func.instruction(&Instruction::LocalSet(handler_var_idx));
                     }
 
-                    if is_last && handler.exception_type.is_some() {
-                        // Add final block for unmatched exceptions
-                        func.instruction(&Instruction::Block(BlockType::Empty));
-                        // If we reach here and exception_flag is still set, no handler matched
-                        func.instruction(&Instruction::End);
-                    }
+                    // Caught: clear before running the body, which may raise an
+                    // exception of its own.
+                    func.instruction(&Instruction::I32Const(0));
+                    func.instruction(&Instruction::GlobalSet(EXC_TYPE_GLOBAL));
+
+                    compile_body(&handler.body, func, ctx, memory_layout);
+
+                    ctx.block_depth -= 1;
+                    func.instruction(&Instruction::End);
                 }
 
                 // Close the exception-dispatch if/else. Each typed handler opens
@@ -1750,10 +1843,21 @@ pub fn compile_body(
                 ctx.block_depth -= 1;
                 func.instruction(&Instruction::End);
 
-                // If there's a finally block, always execute it
+                // `finally` runs on every path that reaches here: the body
+                // completed, a handler caught, or no handler matched and the
+                // exception is still pending. (The `return`/`break`/`continue`
+                // paths jump past this point, so `ir::context_managers` puts a
+                // copy of the body ahead of each of them.)
                 if let Some(finally_body) = finally_body {
                     compile_body(finally_body, func, ctx, memory_layout);
                 }
+
+                // Still pending means no handler matched, so this `try` does
+                // not stop the exception: keep unwinding.
+                func.instruction(&Instruction::GlobalGet(EXC_TYPE_GLOBAL));
+                func.instruction(&Instruction::If(BlockType::Empty));
+                emit_exception_transfer(func, ctx, 1);
+                func.instruction(&Instruction::End);
             }
 
             IRStatement::With { .. } => {
