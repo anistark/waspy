@@ -135,3 +135,208 @@ fn precedence_and_grouping() {
     let src = "def f(a: int, b: int) -> int:\n    return (a + b) * 2\n";
     assert_eq!(call_i32_2(src, "f", 1, 3), 8);
 }
+
+// ---------------------------------------------------------------------------
+// Arithmetic helpers: division by zero, power, and float modulo.
+//
+// The power and float-modulo helpers used to write to WASM locals 0, 1, and 2
+// outright, which are the function's first parameters: `a ** b` clobbered `a`,
+// and in a function whose first locals were not the width the helper assumed,
+// the module failed to validate. Float modulo also subtracted the wrong way
+// round, and float power returned from the *enclosing function* for its
+// special cases and answered the base itself for a fractional exponent.
+// ---------------------------------------------------------------------------
+
+/// Division by zero raises ZeroDivisionError instead of trapping (integers) or
+/// answering inf (floats), and it is catchable and propagates out of calls.
+#[test]
+fn division_by_zero_raises() {
+    let cases: &[&str] = &[
+        "def f() -> int:\n    n = 0\n    try:\n        return 10 // n\n    except ZeroDivisionError:\n        return 5\n",
+        "def f() -> int:\n    n = 0\n    try:\n        return 10 % n\n    except ZeroDivisionError:\n        return 5\n",
+        "def f() -> int:\n    n = 0\n    try:\n        return 10 / n\n    except ZeroDivisionError:\n        return 5\n",
+    ];
+    for src in cases {
+        assert_eq!(call_i32(src, "f"), 5, "in: {src}");
+    }
+
+    let float_div = "def f() -> float:\n\
+                     \x20   d = 0.0\n\
+                     \x20   try:\n\
+                     \x20       return 1.5 / d\n\
+                     \x20   except ZeroDivisionError:\n\
+                     \x20       return 5.0\n";
+    assert_eq!(call_f64(float_div, "f"), 5.0);
+
+    let float_mod = "def f() -> float:\n\
+                     \x20   d = 0.0\n\
+                     \x20   try:\n\
+                     \x20       return 1.5 % d\n\
+                     \x20   except ZeroDivisionError:\n\
+                     \x20       return 5.0\n";
+    assert_eq!(call_f64(float_mod, "f"), 5.0);
+
+    let through_a_call = "def half(n: int, d: int) -> int:\n\
+                          \x20   return n // d\n\
+                          \n\
+                          def f() -> int:\n\
+                          \x20   try:\n\
+                          \x20       return half(10, 0)\n\
+                          \x20   except ZeroDivisionError:\n\
+                          \x20       return 5\n";
+    assert_eq!(call_i32(through_a_call, "f"), 5);
+
+    // A nonzero literal divisor needs no guard, and still divides.
+    assert_eq!(call_i32("def f() -> int:\n    return 10 // 2\n", "f"), 5);
+    assert_eq!(
+        call_i32("def f() -> int:\n    n = 3\n    return 10 % n\n", "f"),
+        1
+    );
+}
+
+/// `**` computes, and leaves its operands alone: reading a parameter after
+/// raising it to a power gives the parameter, not the result.
+#[test]
+fn power_does_not_clobber_its_operands() {
+    let integer = "def g(a: int, b: int) -> int:\n\
+                   \x20   p = a ** b\n\
+                   \x20   return p + a\n\
+                   \n\
+                   def f() -> int:\n\
+                   \x20   return g(2, 3)\n";
+    assert_eq!(call_i32(integer, "f"), 10);
+
+    let float_power = "def g(a: float, b: float) -> float:\n\
+                       \x20   p = a ** b\n\
+                       \x20   return p + a\n\
+                       \n\
+                       def f() -> float:\n\
+                       \x20   return g(2.0, 3.0)\n";
+    assert_eq!(call_f64(float_power, "f"), 10.0);
+
+    // Exponent 0 is 1, and a negative float exponent is the reciprocal.
+    assert_eq!(
+        call_i32("def f() -> int:\n    n = 0\n    return 5 ** n\n", "f"),
+        1
+    );
+    assert_eq!(
+        call_f64(
+            "def f() -> float:\n    b = 0.0 - 2.0\n    return 2.0 ** b\n",
+            "f"
+        ),
+        0.25
+    );
+}
+
+/// Float modulo follows Python's sign convention and reads back the way round
+/// it should: `3.5 % 2.0` is 1.5, and `-1.5 % 2.0` is 0.5.
+#[test]
+fn float_modulo_matches_python() {
+    assert_eq!(
+        call_f64("def f() -> float:\n    d = 2.0\n    return 3.5 % d\n", "f"),
+        1.5
+    );
+    let negative = "def g(a: float, b: float) -> float:\n\
+                    \x20   return a % b\n\
+                    \n\
+                    def f() -> float:\n\
+                    \x20   return g(0.0 - 1.5, 2.0)\n";
+    assert_eq!(call_f64(negative, "f"), 0.5);
+}
+
+/// `str()` renders an integer's digits at runtime. The IR converter used to
+/// erase the call and leave the argument in its place, so `str(123)` *was* the
+/// integer 123: `len(str(n))` answered 0, comparing the result to a literal
+/// never matched, and concatenating it produced the wrong string. Anything it
+/// cannot render (a bool would come out "1" rather than Python's "True", a
+/// float needs a formatter this runtime lacks) is a compile error rather than
+/// an empty string.
+#[test]
+fn str_of_an_int_renders_its_digits() {
+    assert_eq!(
+        call_i32("def f() -> int:\n    return len(str(123))\n", "f"),
+        3
+    );
+    assert_eq!(
+        call_i32(
+            "def f() -> int:\n    a = 1000000\n    return len(str(a))\n",
+            "f"
+        ),
+        7
+    );
+    // The '-' counts, and i32::MIN renders through the unsigned magnitude.
+    assert_eq!(
+        call_i32(
+            "def f() -> int:\n    a = 0 - 123\n    return len(str(a))\n",
+            "f"
+        ),
+        4
+    );
+    // The rendered digits compare equal to the same literal.
+    let compared = "def f() -> int:\n\
+                    \x20   s = str(123)\n\
+                    \x20   if s == \"123\":\n\
+                    \x20       return 1\n\
+                    \x20   return 0\n";
+    assert_eq!(call_i32(compared, "f"), 1);
+    // And concatenate: "x=" + "12".
+    assert_eq!(
+        call_i32("def f() -> int:\n    return len(\"x=\" + str(12))\n", "f"),
+        4
+    );
+    // A string passes straight through.
+    assert_eq!(
+        call_i32("def f() -> int:\n    return len(str(\"abc\"))\n", "f"),
+        3
+    );
+
+    let of_a_bool = harness::try_compile("def f() -> int:\n    return len(str(True))\n")
+        .expect_err("str() of a bool is not supported");
+    assert!(
+        of_a_bool.contains("str() of bool"),
+        "unexpected: {of_a_bool}"
+    );
+}
+
+/// `int` is a 32-bit two's-complement integer, so arithmetic that leaves its
+/// range wraps rather than growing the way CPython's arbitrary-precision `int`
+/// does. This is the one documented place where a compiled program answers
+/// differently without saying so (see the "Numbers" section of `README.md`),
+/// and these assertions are here to keep it deliberate: if the representation
+/// ever changes, they should be updated on purpose, not discovered.
+#[test]
+fn integers_are_32_bit_and_wrap() {
+    // Inside the range, Python's answers.
+    assert_eq!(
+        call_i32(
+            "def f() -> int:\n    a = 1000000\n    b = 1000\n    return a * b\n",
+            "f"
+        ),
+        1_000_000_000
+    );
+    assert_eq!(
+        call_i32("def f() -> int:\n    return 2147483647\n", "f"),
+        i32::MAX
+    );
+
+    // Outside it, two's-complement wraparound. CPython answers 1000000000000,
+    // 2147483648, and 1099511627776 for these three.
+    assert_eq!(
+        call_i32(
+            "def f() -> int:\n    a = 1000000\n    b = 1000000\n    return a * b\n",
+            "f"
+        ),
+        1_000_000_000_000i64 as i32
+    );
+    assert_eq!(
+        call_i32(
+            "def f() -> int:\n    a = 2147483647\n    return a + 1\n",
+            "f"
+        ),
+        i32::MIN
+    );
+    assert_eq!(
+        call_i32("def f() -> int:\n    n = 40\n    return 2 ** n\n", "f"),
+        0
+    );
+}

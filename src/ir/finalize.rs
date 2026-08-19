@@ -12,9 +12,7 @@
 //!   functions). Codegen emits exactly one value per parameter, so without
 //!   this rewrite an omitted default underflowed the stack into invalid WASM.
 
-use crate::ir::{
-    IRBody, IRClass, IRConstant, IRExpr, IRFunction, IRModule, IRParam, IRStatement, IRType,
-};
+use crate::ir::{IRBody, IRClass, IRExpr, IRFunction, IRModule, IRParam, IRStatement, IRType};
 use anyhow::Result;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -162,21 +160,6 @@ fn lift_lambdas(module: &mut IRModule) -> Result<()> {
         let id = LAMBDA_COUNTER.fetch_add(1, Ordering::Relaxed);
         let lambda_name = format!("__lambda_{id}");
 
-        // cap_k = __env[k] preludes, then return the lambda body.
-        let mut statements: Vec<IRStatement> = captured
-            .iter()
-            .enumerate()
-            .map(|(k, cap)| IRStatement::Assign {
-                target: cap.clone(),
-                value: IRExpr::Indexing {
-                    container: Box::new(IRExpr::Variable("__env".to_string())),
-                    index: Box::new(IRExpr::Const(IRConstant::Int(k as i32))),
-                },
-                var_type: None,
-            })
-            .collect();
-        statements.push(IRStatement::Return(Some((**body).clone())));
-
         let mut fn_params = params.clone();
         fn_params.push(IRParam {
             name: "__env".to_string(),
@@ -184,10 +167,36 @@ fn lift_lambdas(module: &mut IRModule) -> Result<()> {
             default_value: None,
         });
 
+        // __cell_k = __env[k] preludes, then return the lambda body. The
+        // environment carries cell *pointers*, so the body reads through them
+        // and sees the current value rather than a copy taken at creation.
+        let mut statements: Vec<IRStatement> = captured
+            .iter()
+            .enumerate()
+            .map(|(k, cap)| IRStatement::Assign {
+                target: cell_local(cap),
+                value: IRExpr::EnvRead {
+                    env: "__env".to_string(),
+                    slot: k as u32,
+                },
+                var_type: Some(IRType::Int),
+            })
+            .collect();
+        statements.push(IRStatement::Return(Some((**body).clone())));
+        let mut lifted_body = IRBody { statements };
+        // The lambda's own captures come from the environment, and anything a
+        // *nested* closure captures from this lambda (its parameters, above
+        // all) needs a cell of its own, exactly as in an ordinary function.
+        let own_cells = cells_of(&lifted_body, &fn_params, &global_names);
+        let mut all_cells: HashSet<String> = captured.iter().cloned().collect();
+        all_cells.extend(own_cells.iter().cloned());
+        cellify(&mut lifted_body, &all_cells);
+        add_cell_setup(&mut lifted_body, &own_cells, &fn_params);
+
         lifted.push(IRFunction {
             name: lambda_name.clone(),
             params: fn_params,
-            body: IRBody { statements },
+            body: lifted_body,
             return_type: IRType::Unknown,
             decorators: Vec::new(),
         });
@@ -200,11 +209,17 @@ fn lift_lambdas(module: &mut IRModule) -> Result<()> {
     };
 
     for func in &mut module.functions {
+        let cells = cells_of(&func.body, &func.params, &global_names);
         visit_body(&mut func.body, &mut rewrite)?;
+        cellify(&mut func.body, &cells);
+        add_cell_setup(&mut func.body, &cells, &func.params);
     }
     for class in &mut module.classes {
         for method in &mut class.methods {
+            let cells = cells_of(&method.body, &method.params, &global_names);
             visit_body(&mut method.body, &mut rewrite)?;
+            cellify(&mut method.body, &cells);
+            add_cell_setup(&mut method.body, &cells, &method.params);
         }
     }
     for var in &mut module.variables {
@@ -213,6 +228,323 @@ fn lift_lambdas(module: &mut IRModule) -> Result<()> {
 
     module.functions.extend(lifted);
     Ok(())
+}
+
+/// Which of this function's own variables a closure inside it captures.
+///
+/// Collected before any lifting, from every lambda in the body, and then
+/// narrowed to names this function actually binds: an inner lambda's free names
+/// include the *outer lambda's* parameters, which are not variables of this
+/// function and get their cells from the environment instead.
+fn cells_of(body: &IRBody, params: &[IRParam], globals: &HashSet<String>) -> HashSet<String> {
+    let mut captured: Vec<String> = Vec::new();
+    let mut collect = |expr: &mut IRExpr| -> Result<()> {
+        match expr {
+            IRExpr::Lambda { params, body, .. } => {
+                let mut bound: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
+                collect_free_names(body, &mut bound, globals, &mut captured);
+            }
+            // An inner lambda lifted before this one: what it captures is read
+            // here, so those names need cells here too.
+            IRExpr::ClosureMake {
+                captured: inner, ..
+            } => {
+                for name in inner {
+                    if !captured.iter().any(|c| c == name) {
+                        captured.push(name.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    };
+    let mut probe = body.clone();
+    let _ = visit_body(&mut probe, &mut collect);
+
+    let mut mine: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+    collect_bound_names(body, &mut mine);
+    captured.into_iter().filter(|c| mine.contains(c)).collect()
+}
+
+/// Every name this body binds: assignment targets, loop variables, and the
+/// targets of an unpacking assignment.
+fn collect_bound_names(body: &IRBody, out: &mut HashSet<String>) {
+    for stmt in &body.statements {
+        match stmt {
+            IRStatement::Assign { target, .. } | IRStatement::AugAssign { target, .. } => {
+                out.insert(target.clone());
+            }
+            IRStatement::For { target, .. } => {
+                out.insert(target.clone());
+            }
+            IRStatement::TupleUnpack { targets, .. } => {
+                for target in targets {
+                    out.insert(target.clone());
+                }
+            }
+            _ => {}
+        }
+        for nested in nested_bodies_ref(stmt) {
+            collect_bound_names(nested, out);
+        }
+    }
+}
+
+/// Create each cell at the top of the function, and seed the ones that start
+/// life as a parameter with the argument they were passed.
+fn add_cell_setup(body: &mut IRBody, cells: &HashSet<String>, params: &[IRParam]) {
+    if cells.is_empty() {
+        return;
+    }
+    let mut names: Vec<&String> = cells.iter().collect();
+    names.sort();
+    let mut setup = Vec::with_capacity(names.len());
+    for name in names {
+        setup.push(IRStatement::Assign {
+            target: cell_local(name),
+            value: IRExpr::CellNew,
+            var_type: Some(IRType::Int),
+        });
+        if params.iter().any(|p| &p.name == name) {
+            setup.push(IRStatement::Expression(IRExpr::CellStore {
+                cell: cell_local(name),
+                value: Box::new(IRExpr::Param(name.clone())),
+            }));
+        }
+    }
+    setup.append(&mut body.statements);
+    body.statements = setup;
+}
+
+/// Prefix for the local that holds a captured variable's cell pointer.
+fn cell_local(name: &str) -> String {
+    format!("__cell_{name}")
+}
+
+/// Turn every variable a closure captures into a shared heap cell.
+///
+/// Python closures capture the *variable*, not its value: a closure reading `v`
+/// sees whatever `v` holds when the closure runs, including changes the
+/// enclosing function made after creating it, and closures made in a loop all
+/// share the one loop variable. Copying the value into the environment at
+/// creation time, which is what this used to do, gets that wrong silently.
+///
+/// So a captured variable lives in a one-slot heap cell instead. The enclosing
+/// function keeps the cell's pointer in a local, writes go through the cell,
+/// reads come back out of it, and the closure environment carries the *pointer*,
+/// so both sides are looking at the same slot. Inside a lifted lambda the same
+/// shape holds: its prologue binds the pointer out of the environment, and its
+/// body reads through it, which is what makes nested closures share a cell all
+/// the way down.
+fn cellify(body: &mut IRBody, cells: &HashSet<String>) {
+    if cells.is_empty() {
+        return;
+    }
+    rewrite_cell_uses(body, cells);
+}
+
+/// Rewrite reads and writes of every name in `cells` to go through its cell.
+fn rewrite_cell_uses(body: &mut IRBody, cells: &HashSet<String>) {
+    let mut out = Vec::with_capacity(body.statements.len());
+    for mut stmt in std::mem::take(&mut body.statements) {
+        // Reads first, so a value expression that mentions the target reads the
+        // cell's current contents rather than the local.
+        visit_stmt_exprs(&mut stmt, &mut |expr| cell_reads(expr, cells));
+
+        match stmt {
+            IRStatement::Assign {
+                ref target,
+                ref value,
+                ..
+            } if cells.contains(target) => {
+                out.push(IRStatement::Expression(IRExpr::CellStore {
+                    cell: cell_local(target),
+                    value: Box::new(value.clone()),
+                }));
+            }
+            IRStatement::AugAssign {
+                ref target,
+                ref value,
+                op,
+            } if cells.contains(target) => {
+                out.push(IRStatement::Expression(IRExpr::CellStore {
+                    cell: cell_local(target),
+                    value: Box::new(IRExpr::BinaryOp {
+                        left: Box::new(IRExpr::CellLoad {
+                            cell: cell_local(target),
+                        }),
+                        right: Box::new(value.clone()),
+                        op,
+                    }),
+                }));
+            }
+            mut other => {
+                for nested in nested_bodies_mut(&mut other) {
+                    rewrite_cell_uses(nested, cells);
+                }
+                // A loop variable is bound by the loop itself, so mirror each
+                // binding into the cell: closures made in the loop share it and
+                // see the last value, as Python's do. Inserted after the walk
+                // above, so the read it makes of the loop local stays a read of
+                // the local rather than becoming a read of the cell.
+                if let IRStatement::For { target, body, .. } = &mut other {
+                    if cells.contains(target) {
+                        let mirror = IRStatement::Expression(IRExpr::CellStore {
+                            cell: cell_local(target),
+                            value: Box::new(IRExpr::Variable(target.clone())),
+                        });
+                        body.statements.insert(0, mirror);
+                    }
+                }
+                out.push(other);
+            }
+        }
+    }
+    body.statements = out;
+}
+
+/// Replace reads of a celled name with a read through its cell.
+fn cell_reads(expr: &mut IRExpr, cells: &HashSet<String>) {
+    match expr {
+        IRExpr::Variable(name) | IRExpr::Param(name) if cells.contains(name) => {
+            *expr = IRExpr::CellLoad {
+                cell: cell_local(name),
+            };
+        }
+        // A closure creation captures the cell pointer, not the value, which is
+        // the whole point: the local named here is the cell local.
+        IRExpr::ClosureMake { captured, .. } => {
+            for name in captured.iter_mut() {
+                if cells.contains(name) {
+                    *name = cell_local(name);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The bodies a statement owns, for the read-only name scan.
+fn nested_bodies_ref(stmt: &IRStatement) -> Vec<&IRBody> {
+    match stmt {
+        IRStatement::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            let mut bodies = vec![then_body.as_ref()];
+            bodies.extend(else_body.as_deref());
+            bodies
+        }
+        IRStatement::While { body, .. } | IRStatement::With { body, .. } => vec![body.as_ref()],
+        IRStatement::For {
+            body, else_body, ..
+        } => {
+            let mut bodies = vec![body.as_ref()];
+            bodies.extend(else_body.as_deref());
+            bodies
+        }
+        IRStatement::TryExcept {
+            try_body,
+            except_handlers,
+            finally_body,
+        } => {
+            let mut bodies = vec![try_body.as_ref()];
+            bodies.extend(except_handlers.iter().map(|h| &h.body));
+            bodies.extend(finally_body.as_deref());
+            bodies
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Every body a statement owns, for the cell rewrite.
+fn nested_bodies_mut(stmt: &mut IRStatement) -> Vec<&mut IRBody> {
+    match stmt {
+        IRStatement::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            let mut bodies = vec![&mut **then_body];
+            if let Some(b) = else_body {
+                bodies.push(&mut **b);
+            }
+            bodies
+        }
+        IRStatement::While { body, .. } | IRStatement::With { body, .. } => vec![&mut **body],
+        IRStatement::For {
+            body, else_body, ..
+        } => {
+            let mut bodies = vec![&mut **body];
+            if let Some(b) = else_body {
+                bodies.push(&mut **b);
+            }
+            bodies
+        }
+        IRStatement::TryExcept {
+            try_body,
+            except_handlers,
+            finally_body,
+        } => {
+            let mut bodies = vec![&mut **try_body];
+            for handler in except_handlers {
+                bodies.push(&mut handler.body);
+            }
+            if let Some(b) = finally_body {
+                bodies.push(&mut **b);
+            }
+            bodies
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Apply `f` to every expression a statement evaluates directly, recursing into
+/// the expression tree (nested bodies are walked separately).
+fn visit_stmt_exprs(stmt: &mut IRStatement, f: &mut impl FnMut(&mut IRExpr)) {
+    let mut walk = |expr: &mut IRExpr| {
+        walk_expr(expr, f);
+    };
+    match stmt {
+        IRStatement::Return(Some(e)) | IRStatement::Yield { value: Some(e) } => walk(e),
+        IRStatement::Raise {
+            exception: Some(e), ..
+        } => walk(e),
+        IRStatement::Assign { value, .. }
+        | IRStatement::AugAssign { value, .. }
+        | IRStatement::Expression(value)
+        | IRStatement::TupleUnpack { value, .. } => walk(value),
+        IRStatement::If { condition, .. } | IRStatement::While { condition, .. } => walk(condition),
+        IRStatement::For { iterable, .. } => walk(iterable),
+        IRStatement::With { context_expr, .. } => walk(context_expr),
+        IRStatement::AttributeAssign { object, value, .. }
+        | IRStatement::AttributeAugAssign { object, value, .. } => {
+            walk(object);
+            walk(value);
+        }
+        IRStatement::IndexAssign {
+            container,
+            index,
+            value,
+        } => {
+            walk(container);
+            walk(index);
+            walk(value);
+        }
+        IRStatement::DynamicImport { module_name, .. } => walk(module_name),
+        _ => {}
+    }
+}
+
+/// Apply `f` to `expr` and, post-order, to every expression inside it.
+fn walk_expr(expr: &mut IRExpr, f: &mut impl FnMut(&mut IRExpr)) {
+    let _ = visit_expr(expr, &mut |e: &mut IRExpr| {
+        f(e);
+        Ok(())
+    });
+    f(expr);
 }
 
 /// Collect the free variable names of `expr` (in first-use order, deduped)
@@ -239,6 +571,16 @@ fn collect_free_names(
 
     match expr {
         IRExpr::Variable(name) | IRExpr::Param(name) => consider(name, bound, out),
+        // The environment is a parameter of the lifted function, never a free
+        // variable of it.
+        IRExpr::EnvRead { .. } | IRExpr::CellNew => {}
+        // A cell is reached through the local holding its pointer, so that
+        // local is what an enclosing closure has to capture.
+        IRExpr::CellLoad { cell } => consider(cell, bound, out),
+        IRExpr::CellStore { cell, value } => {
+            consider(cell, bound, out);
+            collect_free_names(value, bound, globals, out);
+        }
         IRExpr::Const(_) => {}
         IRExpr::BinaryOp { left, right, .. }
         | IRExpr::CompareOp { left, right, .. }
@@ -555,7 +897,13 @@ fn visit_stmt(stmt: &mut IRStatement, f: &mut impl FnMut(&mut IRExpr) -> Result<
 
 fn visit_expr(expr: &mut IRExpr, f: &mut impl FnMut(&mut IRExpr) -> Result<()>) -> Result<()> {
     match expr {
-        IRExpr::Const(_) | IRExpr::Param(_) | IRExpr::Variable(_) => {}
+        IRExpr::Const(_)
+        | IRExpr::Param(_)
+        | IRExpr::Variable(_)
+        | IRExpr::EnvRead { .. }
+        | IRExpr::CellNew
+        | IRExpr::CellLoad { .. } => {}
+        IRExpr::CellStore { value, .. } => visit_expr(value, f)?,
         IRExpr::BinaryOp { left, right, .. }
         | IRExpr::CompareOp { left, right, .. }
         | IRExpr::BoolOp { left, right, .. } => {

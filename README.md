@@ -34,7 +34,7 @@ Generate & Optimize
 - Processes variable declarations and assignments
 - Supports type annotations for function parameters and return values
 - Enables function calls between compiled functions
-- Includes an expanded type system: integers, floats, booleans, strings
+- Includes an expanded type system: integers (32-bit, see [Numbers](#numbers)), floats, booleans, strings
 - Complete string operations support (slicing, concatenation, 20+ methods, formatting)
 - Supports arithmetic operations (`+`, `-`, `*`, `/`, `%`, `//`, `**`)
 - Processes comparison operators (`==`, `!=`, `<`, `<=`, `>`, `>=`)
@@ -57,15 +57,53 @@ Generate & Optimize
 - Context managers: `with obj as name:` over a user class implementing `__enter__`/`__exit__`, including nested blocks, inherited protocols, and `__exit__` running before an early `return`
 - Bundled standard library runtime: `sys`, `os` (incl. `os.path`), `math`, `random`, `json`, `re`, `datetime`, `logging`, `collections`, `itertools`, `functools`
 
+## Numbers
+
+`int` is a 32-bit two's-complement integer, and `float` is an IEEE-754 double.
+
+This is a deliberate narrowing of Python's semantics, and part of the definition
+of the subset waspy accepts rather than an accident of the backend. CPython's
+`int` is arbitrary precision: it grows to hold whatever it is given. Here a
+value that leaves the range -2147483648 to 2147483647 wraps around, so
+
+```python
+1000000 * 1000000   # CPython: 1000000000000    waspy: -727379968
+2 ** 40             # CPython: 1099511627776    waspy: 0
+2147483647 + 1      # CPython: 2147483648       waspy: -2147483648
+```
+
+A program whose integer values stay inside that range gets Python's answers. One
+that leaves it gets two's-complement wraparound, quietly, the way it would in C
+or Rust's release profile.
+
+The alternative was to check every add, subtract, multiply, and power for
+overflow and trap. That makes the divergence loud, but it costs instructions on
+the hottest path in any program and rejects code that deliberately relies on
+wrapping (hashes, checksums, PRNGs). A 64-bit integer would only move the
+boundary rather than remove it: arbitrary precision needs heap-allocated digits
+and an allocator call on every operation, which is a different project.
+
+Everywhere else, waspy holds itself to the opposite standard: a construct either
+produces Python's answer or fails loudly, never a quietly different one. Integer
+width is the single documented exception, so if your program's arithmetic can
+exceed 32 bits, it is not in the supported subset.
+
+Float division by zero and integer division or modulo by zero raise
+`ZeroDivisionError` rather than producing `inf` or trapping.
+
 ## Limitations
 
 - Object instances are never reclaimed — the bump allocator has no `free`, so every instance lives until the module is torn down and `__del__` is not invoked
-- Lists and dicts grow at runtime (`append`/`extend`/`insert`, and `dict[key] = value` for a new key, reallocate when the region is full), but growth rebinds the variable or field the collection was reached through: one grown inside a function it was *passed* to does not update the caller's binding, and one reached by indexing another collection traps rather than writing out of bounds. Sets grow the same way: `add` rehashes into a larger table and rebinds through the same variable or field
+- Lists, dicts, and sets grow at runtime (`append`/`extend`/`insert`, `dict[key] = value` for a new key, and `set.add` reallocate when full). A collection's elements live in a block its header points at, so growing one never moves the collection: a list grown inside a function it was passed to, or reached by indexing another collection, is grown for every other name for it too
 - Generators cover the common shapes; `yield` inside `try`/`with` and generator methods (`yield` in a class method) are rejected at compile time, and `close()` skips `GeneratorExit`/`finally` semantics
-- Closures capture by value at creation time — a captured variable mutated after the closure is created keeps its old value inside the closure (Python's late-binding cells are a follow-up); float captures are not yet supported
+- Closures capture the variable, not a snapshot of it: a captured variable reassigned after the closure is made changes what the closure sees, and closures created in a loop share the loop variable. Capturing a float is not supported yet
 - Imported user modules share one flat namespace in the output module — two modules defining the same function name collide (first definition wins, with a warning)
 - `f.read()` without a size reads up to 64 KiB per call; `open()` modes must be string literals
 - A `with` statement needs its context manager's class to be resolvable at compile time (an instantiation, a call with an annotated class return type, or a variable of known class type). `__exit__` runs on every way out: the normal path, a `return`/`break`/`continue`, and an exception leaving the block. Its return value never suppresses an exception, though, so returning `True` from `__exit__` does not swallow one the way Python's does
+- Division by zero raises `ZeroDivisionError` (integer and float, `/`, `//`, and `%`), catchable like any other exception
+- `**` computes by repeated multiplication: a fractional float exponent (`2.0 ** 0.5`) traps, since it needs exp/log this runtime does not carry, and a negative integer exponent traps because Python's answer is a float an int result cannot hold
+- Sequence indexing is checked: a negative index counts from the end, an index outside the sequence raises `IndexError`, a missing dict key raises `KeyError`, and item assignment into a tuple or a string is a compile error. Slicing clamps instead of raising, as Python's does
+- `int` is 32-bit and wraps on overflow rather than growing like CPython's, which is the one place waspy answers differently without saying so. See [Numbers](#numbers)
 - Exceptions carry a type, not an object: `raise ValueError("message")` records the type and drops the message, and `except ValueError as e` binds the type's code rather than an exception instance. Matching is by exact type name (plus `Exception`/`BaseException`, which catch anything), so a user-defined exception's own base classes are not consulted. Runtime faults the compiler cannot turn into a raise, an out-of-range index or a division by zero, trap rather than raising, so `except ZeroDivisionError:` will not catch `1 // 0`
 - No garbage collection or reference counting — the bump allocator never frees
 

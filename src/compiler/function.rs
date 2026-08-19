@@ -1,7 +1,7 @@
 use crate::compiler::context::{
     comp_gen_local_name, comp_local_name, strlen_local_name, CompilationContext, LoopContext,
-    CALL_DEPTH_GLOBAL, COLLECTION_CAP, COLLECTION_HEADER, COLLECTION_SLOT, DICT_ENTRY,
-    EXC_TYPE_GLOBAL, SCRATCH_LOCALS,
+    CALL_DEPTH_GLOBAL, COLLECTION_CAP, COLLECTION_DATA, COLLECTION_HEADER, COLLECTION_SLOT,
+    DICT_ENTRY, EXC_TYPE_GLOBAL, SCRATCH_LOCALS,
 };
 use crate::compiler::expression::{emit_expr, emit_integer_power_operation};
 use crate::ir::{IRBody, IRConstant, IRExpr, IRFunction, IROp, IRStatement, IRType, MemoryLayout};
@@ -52,6 +52,7 @@ pub fn compile_function(
     ctx.local_count += SCRATCH_LOCALS;
     ctx.temp_local_f64 = ctx.add_local("__f64_scratch", IRType::Float);
     ctx.temp_local_f64_2 = ctx.add_local("__f64_scratch2", IRType::Float);
+    ctx.temp_local_f64_3 = ctx.add_local("__f64_scratch3", IRType::Float);
 
     // Declare locals in index order, coalescing adjacent same-type runs. The
     // local index assigned by `add_local` must match the WASM declaration
@@ -187,6 +188,20 @@ pub(crate) fn emit_exception_transfer(
     func.instruction(&Instruction::End);
     emit_default_result(func, ctx);
     func.instruction(&Instruction::Return);
+}
+
+/// Raise `name` from the point of the call: record the type and transfer
+/// control, exactly as a `raise` statement does. `extra_depth` counts the block
+/// frames the caller has opened since `ctx.block_depth` was last updated.
+pub(crate) fn emit_raise(
+    func: &mut Function,
+    ctx: &CompilationContext,
+    name: &str,
+    extra_depth: u32,
+) {
+    func.instruction(&Instruction::I32Const(exception_type_code(name)));
+    func.instruction(&Instruction::GlobalSet(EXC_TYPE_GLOBAL));
+    emit_exception_transfer(func, ctx, extra_depth);
 }
 
 /// The check emitted after a call that can raise: if the callee left an
@@ -568,6 +583,9 @@ fn collect_return_type(body: &IRBody, ctx: &CompilationContext, out: &mut IRType
 /// their own.
 fn scan_expr_locals(expr: &IRExpr, ctx: &mut CompilationContext, depth: u32) {
     match expr {
+        // A closure environment read touches no locals of its own.
+        IRExpr::EnvRead { .. } | IRExpr::CellNew | IRExpr::CellLoad { .. } => {}
+        IRExpr::CellStore { value, .. } => scan_expr_locals(value, ctx, 0),
         IRExpr::Comprehension {
             kind,
             element,
@@ -1018,7 +1036,12 @@ pub fn compile_body(
                     for (i, target) in targets[..before].iter().enumerate() {
                         func.instruction(&Instruction::LocalGet(ctx.temp_local));
                         func.instruction(&Instruction::I32Load(MemArg {
-                            offset: (COLLECTION_HEADER + (i as u32) * COLLECTION_SLOT) as u64,
+                            offset: COLLECTION_DATA as u64,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                        func.instruction(&Instruction::I32Load(MemArg {
+                            offset: ((i as u32) * COLLECTION_SLOT) as u64,
                             align: 2,
                             memory_index: 0,
                         }));
@@ -1063,6 +1086,16 @@ pub fn compile_body(
                         align: 2,
                         memory_index: 0,
                     }));
+                    // Its elements start immediately after its own header.
+                    func.instruction(&Instruction::LocalGet(mid_ptr));
+                    func.instruction(&Instruction::LocalGet(mid_ptr));
+                    func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
+                    func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::I32Store(MemArg {
+                        offset: COLLECTION_DATA as u64,
+                        align: 2,
+                        memory_index: 0,
+                    }));
 
                     // Slots are contiguous, so the middle slice is one
                     // memory.copy from source slot `before`.
@@ -1070,8 +1103,13 @@ pub fn compile_body(
                     func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
                     func.instruction(&Instruction::I32Add);
                     func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                    func.instruction(&Instruction::I32Load(MemArg {
+                        offset: COLLECTION_DATA as u64,
+                        align: 2,
+                        memory_index: 0,
+                    }));
                     func.instruction(&Instruction::I32Const(
-                        (COLLECTION_HEADER + before as u32 * COLLECTION_SLOT) as i32,
+                        (before as u32 * COLLECTION_SLOT) as i32,
                     ));
                     func.instruction(&Instruction::I32Add);
                     func.instruction(&Instruction::LocalGet(mid_len));
@@ -1094,9 +1132,14 @@ pub fn compile_body(
                         func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
                         func.instruction(&Instruction::I32Mul);
                         func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                        func.instruction(&Instruction::I32Load(MemArg {
+                            offset: COLLECTION_DATA as u64,
+                            align: 2,
+                            memory_index: 0,
+                        }));
                         func.instruction(&Instruction::I32Add);
                         func.instruction(&Instruction::I32Load(MemArg {
-                            offset: COLLECTION_HEADER as u64,
+                            offset: 0,
                             align: 2,
                             memory_index: 0,
                         }));
@@ -1116,12 +1159,17 @@ pub fn compile_body(
                     // type-inferred, so float members still bind as their i32 low
                     // word (a documented follow-up, mirroring the loop-var case).
                     for (i, target) in targets.iter().enumerate() {
-                        // Load tuple pointer
+                        // Load the element block, then the slot inside it.
                         func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                        func.instruction(&Instruction::I32Load(MemArg {
+                            offset: COLLECTION_DATA as u64,
+                            align: 2,
+                            memory_index: 0,
+                        }));
 
-                        // Add offset to get element (HEADER + i*SLOT)
+                        // Add offset to get element (i*SLOT)
                         func.instruction(&Instruction::I32Const(
-                            (COLLECTION_HEADER + (i as u32) * COLLECTION_SLOT) as i32,
+                            ((i as u32) * COLLECTION_SLOT) as i32,
                         ));
                         func.instruction(&Instruction::I32Add);
 
@@ -1363,7 +1411,7 @@ pub fn compile_body(
                             func.instruction(&Instruction::I32RemS);
                         }
                         (IROp::Pow, false) => {
-                            emit_integer_power_operation(func);
+                            emit_integer_power_operation(func, ctx);
                         }
                         (IROp::LShift, false) => {
                             func.instruction(&Instruction::I32Shl);
@@ -1532,18 +1580,24 @@ pub fn compile_body(
                         func.instruction(&Instruction::I32GeS);
                         func.instruction(&Instruction::BrIf(1)); // Break if true
 
-                        // Load element from list[counter]
-                        // Memory: [length:i32][elem0][elem1]... Element i sits at
-                        // byte offset HEADER + i*stride: the base address is
-                        // ptr + counter*stride and the load skips the leading
-                        // length word with a +HEADER (4) element offset.
+                        // Load element from list[counter]. The elements live in
+                        // the block the region's data pointer names, so the
+                        // address is that block plus counter*stride; growing the
+                        // list mid-iteration moves the block, and reading it
+                        // through the header each time is what keeps the loop
+                        // looking at the live elements.
                         func.instruction(&Instruction::LocalGet(iterator_ptr_idx));
+                        func.instruction(&Instruction::I32Load(MemArg {
+                            offset: COLLECTION_DATA as u64,
+                            align: 2,
+                            memory_index: 0,
+                        }));
                         func.instruction(&Instruction::LocalGet(loop_counter_idx));
                         func.instruction(&Instruction::I32Const(elem_stride));
                         func.instruction(&Instruction::I32Mul);
                         func.instruction(&Instruction::I32Add);
                         let elem_arg = MemArg {
-                            offset: COLLECTION_HEADER as u64,
+                            offset: 0,
                             align: 2,
                             memory_index: 0,
                         };
@@ -2000,14 +2054,28 @@ pub fn compile_body(
 
                 match container_type {
                     IRType::List(_) => {
-                        // Address: container_ptr + HEADER + (index * SLOT)
+                        // `xs[-1] = v` means the last element, and an index past
+                        // the end is an error rather than a write into whatever
+                        // follows the region: normalize and check before
+                        // computing the address.
+                        crate::compiler::expression::emit_stored_index_check(
+                            func,
+                            ctx,
+                            ctx.temp_local,
+                            ctx.temp_local + 1,
+                        );
+
+                        // Address: data + (index * SLOT)
                         func.instruction(&Instruction::LocalGet(ctx.temp_local)); // container_ptr
+                        func.instruction(&Instruction::I32Load(MemArg {
+                            offset: COLLECTION_DATA as u64,
+                            align: 2,
+                            memory_index: 0,
+                        }));
                         func.instruction(&Instruction::LocalGet(ctx.temp_local + 1)); // index
                         func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
                         func.instruction(&Instruction::I32Mul); // index * SLOT
-                        func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
-                        func.instruction(&Instruction::I32Add); // + HEADER
-                        func.instruction(&Instruction::I32Add); // container_ptr + HEADER + index*SLOT
+                        func.instruction(&Instruction::I32Add); // data + index*SLOT
 
                         // Store the value at its natural width.
                         push_value(func);
@@ -2047,26 +2115,32 @@ pub fn compile_body(
                         func.instruction(&Instruction::I32GeS);
                         func.instruction(&Instruction::BrIf(1));
 
-                        // key address = dict_ptr + HEADER + counter*DICT_ENTRY
+                        // key address = data + counter*DICT_ENTRY
                         func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                        func.instruction(&Instruction::I32Load(MemArg {
+                            offset: COLLECTION_DATA as u64,
+                            align: 2,
+                            memory_index: 0,
+                        }));
                         func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
                         func.instruction(&Instruction::I32Const(DICT_ENTRY as i32));
                         func.instruction(&Instruction::I32Mul);
-                        func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
-                        func.instruction(&Instruction::I32Add);
                         func.instruction(&Instruction::I32Add);
 
                         // if key_at == key: update value and break
                         cmp_key(func);
                         func.instruction(&Instruction::If(BlockType::Empty));
-                        // value address = dict_ptr + HEADER + counter*DICT_ENTRY + SLOT
+                        // value address = data + counter*DICT_ENTRY + SLOT
                         func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                        func.instruction(&Instruction::I32Load(MemArg {
+                            offset: COLLECTION_DATA as u64,
+                            align: 2,
+                            memory_index: 0,
+                        }));
                         func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
                         func.instruction(&Instruction::I32Const(DICT_ENTRY as i32));
                         func.instruction(&Instruction::I32Mul);
-                        func.instruction(&Instruction::I32Const(
-                            (COLLECTION_HEADER + COLLECTION_SLOT) as i32,
-                        ));
+                        func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
                         func.instruction(&Instruction::I32Add);
                         func.instruction(&Instruction::I32Add);
                         push_value(func); // value (width-aware)
@@ -2091,37 +2165,42 @@ pub fn compile_body(
                         func.instruction(&Instruction::If(BlockType::Empty));
 
                         // A new key needs an entry the region may not have room
-                        // for; reserve it first, which can move the dict and
-                        // rebind `container` to the larger region. The helper
-                        // reloads the entry count into temp_local + 3, so the
-                        // stores below still address the right slot, and the
+                        // for; reserve it first, which moves the dict's entry
+                        // block (never the dict itself) when it is full. The
+                        // helper reloads the entry count into temp_local + 3, so
+                        // the stores below still address the right slot, and the
                         // search locals (counter, found) are dead by now.
                         crate::compiler::expression::emit_collection_reserve(
                             func,
                             ctx,
-                            Some(container),
                             crate::compiler::expression::Reserve::Count(1),
                             DICT_ENTRY,
                         );
 
-                        // store key at dict_ptr + HEADER + num_entries*DICT_ENTRY
+                        // store key at data + num_entries*DICT_ENTRY
                         func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                        func.instruction(&Instruction::I32Load(MemArg {
+                            offset: COLLECTION_DATA as u64,
+                            align: 2,
+                            memory_index: 0,
+                        }));
                         func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
                         func.instruction(&Instruction::I32Const(DICT_ENTRY as i32));
                         func.instruction(&Instruction::I32Mul);
-                        func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
-                        func.instruction(&Instruction::I32Add);
                         func.instruction(&Instruction::I32Add);
                         store_key(func); // key (width-aware)
 
-                        // store value at dict_ptr + HEADER + num_entries*DICT_ENTRY + SLOT
+                        // store value at data + num_entries*DICT_ENTRY + SLOT
                         func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                        func.instruction(&Instruction::I32Load(MemArg {
+                            offset: COLLECTION_DATA as u64,
+                            align: 2,
+                            memory_index: 0,
+                        }));
                         func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
                         func.instruction(&Instruction::I32Const(DICT_ENTRY as i32));
                         func.instruction(&Instruction::I32Mul);
-                        func.instruction(&Instruction::I32Const(
-                            (COLLECTION_HEADER + COLLECTION_SLOT) as i32,
-                        ));
+                        func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
                         func.instruction(&Instruction::I32Add);
                         func.instruction(&Instruction::I32Add);
                         push_value(func); // value (width-aware)
@@ -2137,13 +2216,29 @@ pub fn compile_body(
                         }));
                         func.instruction(&Instruction::End);
                     }
-                    IRType::String => {
-                        // String indexing is read-only in Python, assignment not directly supported
-                        func.instruction(&Instruction::Drop);
-                    }
-                    _ => {
-                        // Unknown container type
-                        func.instruction(&Instruction::Drop);
+                    // Everything else cannot be assigned into. Python raises
+                    // TypeError for a tuple or a string ("does not support item
+                    // assignment"), and a container whose type codegen cannot
+                    // resolve has no layout to write through. Both used to be
+                    // silent: the write was dropped on the floor for a string,
+                    // and a tuple left the stack unbalanced, so the module
+                    // failed validation while the compiler reported success.
+                    other => {
+                        // A string or bytes container left its length word on
+                        // the stack; anything else left nothing.
+                        if matches!(other, IRType::String | IRType::Bytes) {
+                            func.instruction(&Instruction::Drop);
+                        }
+                        let what = match other {
+                            IRType::String => "'str' object".to_string(),
+                            IRType::Bytes => "'bytes' object".to_string(),
+                            IRType::Tuple(_) => "'tuple' object".to_string(),
+                            other => format!("a value of type {}", crate::type_to_string(&other)),
+                        };
+                        ctx.report(format!(
+                            "{what} does not support item assignment. \
+                             Hint: build a new value instead, or use a list"
+                        ));
                     }
                 }
             }

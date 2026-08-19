@@ -1,9 +1,9 @@
 use crate::compiler::context::{
     comp_gen_local_name, comp_local_name, strlen_local_name, CompilationContext, COLLECTION_CAP,
-    COLLECTION_HEADER, COLLECTION_SLOT, DICT_ENTRY,
+    COLLECTION_DATA, COLLECTION_HEADER, COLLECTION_SLOT, DICT_ENTRY,
 };
 use crate::compiler::function::{
-    emit_call_depth_step, emit_post_call_check, load_field_instr, lookup_field,
+    emit_call_depth_step, emit_post_call_check, emit_raise, load_field_instr, lookup_field,
 };
 use crate::ir::{
     IRBoolOp, IRCompareOp, IRComprehensionKind, IRConstant, IRExpr, IRGenerator, IROp, IRType,
@@ -122,12 +122,38 @@ fn store_static_header(func: &mut Function, region_ptr: u32, len: u32, cap: u32)
     func.instruction(&Instruction::I32Const((region_ptr + COLLECTION_CAP) as i32));
     func.instruction(&Instruction::I32Const(cap as i32));
     func.instruction(&Instruction::I32Store(slot_arg()));
+    // A fresh region's elements sit immediately after its header, so the data
+    // pointer starts there. Growth is the only thing that moves it.
+    func.instruction(&Instruction::I32Const(
+        (region_ptr + COLLECTION_DATA) as i32,
+    ));
+    func.instruction(&Instruction::I32Const(
+        (region_ptr + COLLECTION_HEADER) as i32,
+    ));
+    func.instruction(&Instruction::I32Store(slot_arg()));
+}
+
+/// Point a runtime-built region's data pointer at the block right after its
+/// header, the layout every collection starts life in.
+fn store_runtime_data_ptr(func: &mut Function, ptr_local: u32) {
+    func.instruction(&Instruction::LocalGet(ptr_local));
+    func.instruction(&Instruction::LocalGet(ptr_local));
+    func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::I32Store(mem_off(COLLECTION_DATA as u64)));
+}
+
+/// Replace a collection pointer on top of the stack with the address of its
+/// first element.
+fn emit_data_base(func: &mut Function) {
+    func.instruction(&Instruction::I32Load(mem_off(COLLECTION_DATA as u64)));
 }
 
 /// Write the capacity word of a region whose pointer is in `ptr_local` and
 /// whose capacity is in `cap_local`, for regions built at runtime (`__alloc`
 /// blocks: comprehension results, grown lists, unpacked slices).
 fn store_runtime_cap(func: &mut Function, ptr_local: u32, cap_local: u32) {
+    store_runtime_data_ptr(func, ptr_local);
     func.instruction(&Instruction::LocalGet(ptr_local));
     func.instruction(&Instruction::LocalGet(cap_local));
     func.instruction(&Instruction::I32Store(MemArg {
@@ -287,11 +313,16 @@ fn store_stashed_needle(
 // leave a tombstone (state 2) so the members that probed past the removed
 // bucket stay reachable.
 
-/// Bytes of set header: `count`, `cap`, `used`, and a pad word so the first
-/// bucket (and therefore every 8-byte value slot) stays 8-byte aligned.
+/// Bytes of set header: `count`, `cap`, `used`, and a pointer to the bucket
+/// block, which also keeps the block that follows 8-byte aligned so every value
+/// slot is. The buckets sit behind a pointer for the same reason a list's
+/// elements do: rehashing swaps the block without moving the set, so every name
+/// for it keeps seeing the members.
 const SET_HEADER: u32 = 16;
 /// Byte offset of the table capacity within the header.
 const SET_CAP: u32 = 4;
+/// Byte offset of the bucket-block pointer within the set header.
+const SET_DATA: u32 = 12;
 /// Byte offset of `used` within the header: occupied buckets plus tombstones.
 /// Growth is decided on this rather than on the member count, because a
 /// tombstone still costs a probe step, and an insert probe only stops at an
@@ -306,6 +337,21 @@ const SET_DEAD: i32 = 2;
 const SET_BUCKET: u32 = 16;
 /// Byte offset of the value within a bucket (past the state word + padding).
 const SET_BUCKET_VALUE: u32 = 8;
+
+/// Replace a set pointer on top of the stack with the address of its first
+/// bucket.
+fn emit_set_base(func: &mut Function) {
+    func.instruction(&Instruction::I32Load(mem_off(SET_DATA as u64)));
+}
+
+/// Point a set's bucket pointer at the block right after its header.
+fn store_set_data_ptr(func: &mut Function, ptr_local: u32) {
+    func.instruction(&Instruction::LocalGet(ptr_local));
+    func.instruction(&Instruction::LocalGet(ptr_local));
+    func.instruction(&Instruction::I32Const(SET_HEADER as i32));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::I32Store(mem_off(SET_DATA as u64)));
+}
 
 /// Power-of-two capacity for a set literal of `n` elements. Kept at >= 2*n (load
 /// factor <= 0.5) and >= 1 so a probe always finds an empty bucket.
@@ -388,6 +434,10 @@ fn emit_collection_result(
         src_mem: 0,
         dst_mem: 0,
     });
+
+    // The copy carries the template's data pointer, which still points into the
+    // template; repoint it at the copy's own block.
+    store_runtime_data_ptr(func, dst);
 
     func.instruction(&Instruction::LocalGet(dst));
 }
@@ -619,14 +669,15 @@ fn emit_comp_loops(
                 Some(IRType::Float)
             );
             func.instruction(&Instruction::LocalGet(ptr));
+            emit_data_base(func);
             func.instruction(&Instruction::LocalGet(idx));
             func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
             func.instruction(&Instruction::I32Mul);
             func.instruction(&Instruction::I32Add);
             if target_is_float {
-                func.instruction(&Instruction::F64Load(mem_off(COLLECTION_HEADER as u64)));
+                func.instruction(&Instruction::F64Load(mem_off(0)));
             } else {
-                func.instruction(&Instruction::I32Load(mem_off(COLLECTION_HEADER as u64)));
+                func.instruction(&Instruction::I32Load(mem_off(0)));
             }
             func.instruction(&Instruction::LocalSet(target_idx));
         } else {
@@ -635,17 +686,19 @@ fn emit_comp_loops(
             // tuple-unpack limitation).
             let elem = comp_local(ctx, comp_local_name("elem", depth));
             func.instruction(&Instruction::LocalGet(ptr));
+            emit_data_base(func);
             func.instruction(&Instruction::LocalGet(idx));
             func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
             func.instruction(&Instruction::I32Mul);
             func.instruction(&Instruction::I32Add);
-            func.instruction(&Instruction::I32Load(mem_off(COLLECTION_HEADER as u64)));
+            func.instruction(&Instruction::I32Load(mem_off(0)));
             func.instruction(&Instruction::LocalSet(elem));
             for (j, target) in generator.targets.iter().enumerate() {
                 let target_idx = comp_local(ctx, target.clone());
                 func.instruction(&Instruction::LocalGet(elem));
+                emit_data_base(func);
                 func.instruction(&Instruction::I32Load(mem_off(
-                    (COLLECTION_HEADER + j as u32 * COLLECTION_SLOT) as u64,
+                    (j as u32 * COLLECTION_SLOT) as u64,
                 )));
                 func.instruction(&Instruction::LocalSet(target_idx));
             }
@@ -723,10 +776,9 @@ fn emit_stashed_set_insert(
     func.instruction(&Instruction::Block(BlockType::Empty)); // $done
     func.instruction(&Instruction::Loop(BlockType::Empty)); // $probe
 
-    // bkt = res + SET_HEADER + hidx*SET_BUCKET
+    // bkt = buckets(res) + hidx*SET_BUCKET
     func.instruction(&Instruction::LocalGet(res));
-    func.instruction(&Instruction::I32Const(SET_HEADER as i32));
-    func.instruction(&Instruction::I32Add);
+    emit_set_base(func);
     func.instruction(&Instruction::LocalGet(hidx));
     func.instruction(&Instruction::I32Const(SET_BUCKET as i32));
     func.instruction(&Instruction::I32Mul);
@@ -804,6 +856,123 @@ pub(crate) fn emit_user_call(func: &mut Function, ctx: &CompilationContext, inde
     func.instruction(&Instruction::Call(index));
     emit_call_depth_step(func, -1);
     emit_post_call_check(func, ctx);
+}
+
+/// Locals the sequence-index path uses: the container pointer (or a string's
+/// offset) and its length. They sit above the scratch run the expression
+/// helpers use, so an index expression nested inside another one does not
+/// clobber them.
+const INDEX_PTR: u32 = 8;
+const INDEX_LEN: u32 = 9;
+
+/// Normalize and bounds-check an index held in `idx` against the length of the
+/// collection `ptr` points at, for callers that already have both in locals
+/// (index assignment, whose container and index are stashed before the value is
+/// evaluated).
+pub(crate) fn emit_stored_index_check(
+    func: &mut Function,
+    ctx: &CompilationContext,
+    ptr: u32,
+    idx: u32,
+) {
+    let len = ctx.temp_local + INDEX_LEN;
+    func.instruction(&Instruction::LocalGet(ptr));
+    func.instruction(&Instruction::I32Load(slot_arg()));
+    func.instruction(&Instruction::LocalSet(len));
+    emit_index_check(func, ctx, idx, len);
+}
+
+/// Turn a (pointer, index) pair on the stack into the address of that element,
+/// with the index normalized and bounds-checked first. Used by list and tuple
+/// indexing, whose layouts are identical.
+fn emit_sequence_address(func: &mut Function, ctx: &CompilationContext) {
+    let idx = ctx.temp_local;
+    let ptr = ctx.temp_local + INDEX_PTR;
+    let len = ctx.temp_local + INDEX_LEN;
+    func.instruction(&Instruction::LocalSet(idx));
+    func.instruction(&Instruction::LocalSet(ptr));
+    func.instruction(&Instruction::LocalGet(ptr));
+    func.instruction(&Instruction::I32Load(slot_arg()));
+    func.instruction(&Instruction::LocalSet(len));
+    emit_index_check(func, ctx, idx, len);
+
+    func.instruction(&Instruction::LocalGet(ptr));
+    emit_data_base(func);
+    func.instruction(&Instruction::LocalGet(idx));
+    func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+    func.instruction(&Instruction::I32Mul);
+    func.instruction(&Instruction::I32Add);
+}
+
+/// True when a divisor cannot be zero: a nonzero numeric literal. Division by
+/// one of those needs no runtime guard, which keeps `n // 2` and `x / 2.0`
+/// exactly as they were.
+pub(crate) fn divisor_is_never_zero(expr: &IRExpr) -> bool {
+    match expr {
+        IRExpr::Const(IRConstant::Int(n)) => *n != 0,
+        IRExpr::Const(IRConstant::Float(f)) => *f != 0.0,
+        IRExpr::Const(IRConstant::Bool(b)) => *b,
+        _ => false,
+    }
+}
+
+/// Guard a division whose divisor is on top of the stack, raising
+/// `ZeroDivisionError` when it is zero and leaving the operands untouched
+/// otherwise.
+///
+/// Integer division by zero used to trap, which is loud but uncatchable and
+/// not what Python does, and float division by zero produced inf silently.
+/// Both raise now, so `except ZeroDivisionError:` works.
+fn emit_zero_division_guard(func: &mut Function, ctx: &CompilationContext, is_float: bool) {
+    if is_float {
+        func.instruction(&Instruction::LocalTee(ctx.temp_local_f64_2));
+        func.instruction(&Instruction::LocalGet(ctx.temp_local_f64_2));
+        func.instruction(&Instruction::F64Const(f64_const(0.0)));
+        func.instruction(&Instruction::F64Eq);
+    } else {
+        func.instruction(&Instruction::LocalTee(ctx.temp_local));
+        func.instruction(&Instruction::LocalGet(ctx.temp_local));
+        func.instruction(&Instruction::I32Eqz);
+    }
+    func.instruction(&Instruction::If(BlockType::Empty));
+    emit_raise(func, ctx, "ZeroDivisionError", 1);
+    func.instruction(&Instruction::End);
+}
+
+/// Normalize a possibly negative index and bounds-check it.
+///
+/// `xs[-1]` is Python for "the last element", and it used to compute an address
+/// *before* the region: with the count word sitting at offset 0, `xs[-1]` read
+/// the length back as though it were an element. An index past the end read
+/// whatever followed the region. Both answered silently rather than failing, so
+/// the index is folded against the length here and anything still out of range
+/// raises `IndexError`, which is Python's answer and can be caught.
+///
+/// Entry: the index in `idx` and the length in `len`. Exit: `idx` holds a
+/// normalized index that is known to be in range.
+pub(crate) fn emit_index_check(func: &mut Function, ctx: &CompilationContext, idx: u32, len: u32) {
+    // if idx < 0 { idx += len }
+    func.instruction(&Instruction::LocalGet(idx));
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::I32LtS);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    func.instruction(&Instruction::LocalGet(idx));
+    func.instruction(&Instruction::LocalGet(len));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::LocalSet(idx));
+    func.instruction(&Instruction::End);
+
+    // if idx < 0 || idx >= len { raise IndexError }
+    func.instruction(&Instruction::LocalGet(idx));
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::I32LtS);
+    func.instruction(&Instruction::LocalGet(idx));
+    func.instruction(&Instruction::LocalGet(len));
+    func.instruction(&Instruction::I32GeS);
+    func.instruction(&Instruction::I32Or);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    emit_raise(func, ctx, "IndexError", 1);
+    func.instruction(&Instruction::End);
 }
 
 /// Report a literal whose elements do not share one slot width.
@@ -930,7 +1099,8 @@ fn emit_comprehension(
             func.instruction(&Instruction::I32Shl);
             func.instruction(&Instruction::LocalSet(hidx));
 
-            // res = __alloc(SET_HEADER + cap2*SET_BUCKET); store cap2 at res+4.
+            // res = __alloc(SET_HEADER + cap2*SET_BUCKET); store cap2 and the
+            // bucket-block pointer.
             func.instruction(&Instruction::LocalGet(hidx));
             func.instruction(&Instruction::I32Const(SET_BUCKET as i32));
             func.instruction(&Instruction::I32Mul);
@@ -940,7 +1110,8 @@ fn emit_comprehension(
             func.instruction(&Instruction::LocalSet(res));
             func.instruction(&Instruction::LocalGet(res));
             func.instruction(&Instruction::LocalGet(hidx));
-            func.instruction(&Instruction::I32Store(mem_off(4)));
+            func.instruction(&Instruction::I32Store(mem_off(SET_CAP as u64)));
+            store_set_data_ptr(func, res);
             func.instruction(&Instruction::LocalGet(hidx));
             func.instruction(&Instruction::I32Const(1));
             func.instruction(&Instruction::I32Sub);
@@ -970,8 +1141,7 @@ fn emit_comprehension(
                 IRComprehensionKind::List => {
                     // slot address = res + HEADER + widx*SLOT
                     func.instruction(&Instruction::LocalGet(res));
-                    func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
-                    func.instruction(&Instruction::I32Add);
+                    emit_data_base(func);
                     func.instruction(&Instruction::LocalGet(widx));
                     func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
                     func.instruction(&Instruction::I32Mul);
@@ -989,8 +1159,7 @@ fn emit_comprehension(
                 IRComprehensionKind::Dict => {
                     // key slot at res + HEADER + widx*ENTRY, value slot right after
                     func.instruction(&Instruction::LocalGet(res));
-                    func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
-                    func.instruction(&Instruction::I32Add);
+                    emit_data_base(func);
                     func.instruction(&Instruction::LocalGet(widx));
                     func.instruction(&Instruction::I32Const(DICT_ENTRY as i32));
                     func.instruction(&Instruction::I32Mul);
@@ -1452,17 +1621,26 @@ pub fn emit_expr(
                         func.instruction(&Instruction::F64Mul);
                     }
                     IROp::Div => {
+                        if !divisor_is_never_zero(right) {
+                            emit_zero_division_guard(func, ctx, true);
+                        }
                         func.instruction(&Instruction::F64Div);
                     }
                     IROp::Mod => {
-                        emit_float_modulo_operation(func);
+                        if !divisor_is_never_zero(right) {
+                            emit_zero_division_guard(func, ctx, true);
+                        }
+                        emit_float_modulo_operation(func, ctx);
                     }
                     IROp::FloorDiv => {
+                        if !divisor_is_never_zero(right) {
+                            emit_zero_division_guard(func, ctx, true);
+                        }
                         func.instruction(&Instruction::F64Div);
                         func.instruction(&Instruction::F64Floor);
                     }
                     IROp::Pow => {
-                        emit_float_power_operation(func);
+                        emit_float_power_operation(func, ctx);
                     }
                     // New operations - placeholder implementations
                     IROp::MatMul => {
@@ -1488,16 +1666,25 @@ pub fn emit_expr(
                         func.instruction(&Instruction::I32Mul);
                     }
                     IROp::Div => {
+                        if !divisor_is_never_zero(right) {
+                            emit_zero_division_guard(func, ctx, false);
+                        }
                         func.instruction(&Instruction::I32DivS);
                     }
                     IROp::Mod => {
+                        if !divisor_is_never_zero(right) {
+                            emit_zero_division_guard(func, ctx, false);
+                        }
                         func.instruction(&Instruction::I32RemS);
                     }
                     IROp::FloorDiv => {
+                        if !divisor_is_never_zero(right) {
+                            emit_zero_division_guard(func, ctx, false);
+                        }
                         func.instruction(&Instruction::I32DivS);
                     }
                     IROp::Pow => {
-                        emit_integer_power_operation(func);
+                        emit_integer_power_operation(func, ctx);
                     }
                     // New operations
                     IROp::MatMul => {
@@ -1668,10 +1855,9 @@ pub fn emit_expr(
                     func.instruction(&Instruction::LocalGet(mask));
                     func.instruction(&Instruction::I32GtU);
                     func.instruction(&Instruction::BrIf(1));
-                    // bucket = container_ptr + SET_HEADER + idx*SET_BUCKET
+                    // bucket = buckets(container_ptr) + idx*SET_BUCKET
                     func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                    func.instruction(&Instruction::I32Const(SET_HEADER as i32));
-                    func.instruction(&Instruction::I32Add);
+                    emit_set_base(func);
                     func.instruction(&Instruction::LocalGet(idx));
                     func.instruction(&Instruction::I32Const(SET_BUCKET as i32));
                     func.instruction(&Instruction::I32Mul);
@@ -1732,8 +1918,7 @@ pub fn emit_expr(
                     func.instruction(&Instruction::BrIf(1));
                     // slot address = container_ptr + HEADER + counter*SLOT
                     func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                    func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
-                    func.instruction(&Instruction::I32Add);
+                    emit_data_base(func);
                     func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
                     func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
                     func.instruction(&Instruction::I32Mul);
@@ -2455,21 +2640,36 @@ pub fn emit_expr(
                         // they yield an empty string rather than invalid WASM.
                         match arg_types.first() {
                             Some(IRType::String) | Some(IRType::Bytes) => IRType::String,
-                            Some(IRType::Int) | Some(IRType::Bool) => {
+                            // Ints render their decimal digits at runtime. A
+                            // value whose type codegen could not resolve is a
+                            // single i32 word like any other, so it renders the
+                            // same way rather than silently yielding "".
+                            Some(IRType::Int) | Some(IRType::Unknown) => {
                                 func.instruction(&Instruction::Call(ctx.i32_to_str_func_index));
                                 recover_str_pair(func, ctx);
                                 IRType::String
                             }
-                            Some(_) => {
-                                // One stack value (i32 word or f64): drop it
-                                // and yield the empty pair.
-                                func.instruction(&Instruction::Drop);
-                                func.instruction(&Instruction::I32Const(0));
-                                func.instruction(&Instruction::I32Const(0));
-                                IRType::String
-                            }
-                            None => {
-                                // str() with no argument: the empty string.
+                            other => {
+                                // Anything else has no runtime rendering: a
+                                // bool would come out as "1"/"0" rather than
+                                // Python's "True"/"False", a float needs a
+                                // formatter this runtime does not have, and a
+                                // collection needs its elements rendered too.
+                                // Saying so beats returning an empty string.
+                                let what = match other {
+                                    Some(ty) => crate::type_to_string(ty),
+                                    None => "nothing".to_string(),
+                                };
+                                ctx.report(format!(
+                                    "str() of {what} is not supported yet. \
+                                     Hint: str() renders ints and passes strings through"
+                                ));
+                                if matches!(other, Some(IRType::String) | Some(IRType::Bytes)) {
+                                    func.instruction(&Instruction::Drop);
+                                }
+                                if other.is_some() {
+                                    func.instruction(&Instruction::Drop);
+                                }
                                 func.instruction(&Instruction::I32Const(0));
                                 func.instruction(&Instruction::I32Const(0));
                                 IRType::String
@@ -2558,20 +2758,17 @@ pub fn emit_expr(
                             func.instruction(&Instruction::LocalGet(acc_i32));
                         }
                         func.instruction(&Instruction::LocalGet(ptr));
+                        emit_data_base(func);
                         func.instruction(&Instruction::LocalGet(idx));
                         func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
                         func.instruction(&Instruction::I32Mul);
                         func.instruction(&Instruction::I32Add);
                         if is_float {
-                            func.instruction(&Instruction::F64Load(mem_off(
-                                COLLECTION_HEADER as u64,
-                            )));
+                            func.instruction(&Instruction::F64Load(mem_off(0)));
                             func.instruction(&Instruction::F64Add);
                             func.instruction(&Instruction::LocalSet(acc_f64));
                         } else {
-                            func.instruction(&Instruction::I32Load(mem_off(
-                                COLLECTION_HEADER as u64,
-                            )));
+                            func.instruction(&Instruction::I32Load(mem_off(0)));
                             func.instruction(&Instruction::I32Add);
                             func.instruction(&Instruction::LocalSet(acc_i32));
                         }
@@ -2680,9 +2877,13 @@ pub fn emit_expr(
             func.instruction(&Instruction::I32Const(0));
             func.instruction(&Instruction::I32Const(set_size as i32));
             func.instruction(&Instruction::MemoryFill(0));
-            // Store the capacity (count and used at offsets 0 and 8 stay 0).
+            // Store the capacity (count and used at offsets 0 and 8 stay 0) and
+            // point the bucket pointer at the block right after the header.
             func.instruction(&Instruction::I32Const((set_ptr + SET_CAP) as i32));
             func.instruction(&Instruction::I32Const(cap as i32));
+            func.instruction(&Instruction::I32Store(slot_arg()));
+            func.instruction(&Instruction::I32Const((set_ptr + SET_DATA) as i32));
+            func.instruction(&Instruction::I32Const((set_ptr + SET_HEADER) as i32));
             func.instruction(&Instruction::I32Store(slot_arg()));
 
             let idx = ctx.temp_local + 2;
@@ -2708,7 +2909,8 @@ pub fn emit_expr(
                 func.instruction(&Instruction::Block(BlockType::Empty)); // $done
                 func.instruction(&Instruction::Loop(BlockType::Empty)); // $probe
 
-                // bucket = set_ptr + SET_HEADER + idx*SET_BUCKET
+                // bucket = set_ptr's block + idx*SET_BUCKET, which for a fresh
+                // literal is the space right after its header.
                 func.instruction(&Instruction::I32Const((set_ptr + SET_HEADER) as i32));
                 func.instruction(&Instruction::LocalGet(idx));
                 func.instruction(&Instruction::I32Const(SET_BUCKET as i32));
@@ -2863,6 +3065,77 @@ pub fn emit_expr(
             emit_collection_result(func, ctx, dict_ptr, dict_size);
             IRType::Dict(Box::new(key_type), Box::new(value_type))
         }
+        IRExpr::CellNew => {
+            // One slot, wide enough for any captured value.
+            func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+            func.instruction(&Instruction::Call(ctx.alloc_func_index));
+            IRType::Int
+        }
+        IRExpr::CellLoad { cell } => {
+            let Some(index) = ctx.get_local_index(cell) else {
+                ctx.report(format!(
+                    "closure cell '{cell}' is not in scope; this is a code generation bug"
+                ));
+                func.instruction(&Instruction::Unreachable);
+                func.instruction(&Instruction::I32Const(0));
+                return IRType::Unknown;
+            };
+            func.instruction(&Instruction::LocalGet(index));
+            func.instruction(&Instruction::I32Load(mem_off(0)));
+            IRType::Unknown
+        }
+        IRExpr::CellStore { cell, value } => {
+            let Some(index) = ctx.get_local_index(cell) else {
+                ctx.report(format!(
+                    "closure cell '{cell}' is not in scope; this is a code generation bug"
+                ));
+                func.instruction(&Instruction::Unreachable);
+                return IRType::None;
+            };
+            func.instruction(&Instruction::LocalGet(index));
+            let value_type = emit_expr(value, func, ctx, memory_layout, None);
+            match value_type {
+                // A string or bytes value is an (offset, length) pair; the cell
+                // keeps the offset, the same word a collection slot keeps.
+                IRType::String | IRType::Bytes => {
+                    // (offset, length) with the length on top: drop it and keep
+                    // the offset, the same word a collection slot keeps.
+                    func.instruction(&Instruction::Drop);
+                }
+                IRType::Float => {
+                    ctx.report(
+                        "a float captured by a closure is not supported yet. \
+                         Hint: capture an int, or pass the value as an argument"
+                            .to_string(),
+                    );
+                    func.instruction(&Instruction::Drop);
+                    func.instruction(&Instruction::I32Const(0));
+                }
+                _ => {}
+            }
+            func.instruction(&Instruction::I32Store(mem_off(0)));
+            IRType::None
+        }
+        IRExpr::EnvRead { env, slot } => {
+            // A closure environment is [table_slot][captured0][captured1]...,
+            // sharing the collection slot layout so a capture sits at
+            // HEADER + slot*SLOT. The compiler generates both the block and
+            // every read of it, so the slot is in range by construction and
+            // there is nothing to check.
+            let Some(index) = ctx.get_local_index(env) else {
+                ctx.report(format!(
+                    "closure environment '{env}' is not in scope; this is a code generation bug"
+                ));
+                func.instruction(&Instruction::Unreachable);
+                func.instruction(&Instruction::I32Const(0));
+                return IRType::Unknown;
+            };
+            func.instruction(&Instruction::LocalGet(index));
+            func.instruction(&Instruction::I32Load(mem_off(
+                (COLLECTION_HEADER + slot * COLLECTION_SLOT) as u64,
+            )));
+            IRType::Unknown
+        }
         IRExpr::Indexing { container, index } => {
             let container_type = emit_expr(container, func, ctx, memory_layout, None);
             // Hint the index with the container's key type. List/tuple/string
@@ -2880,10 +3153,16 @@ pub fn emit_expr(
                 IRType::String => {
                     // String indexing returns a single character string.
                     // Stack: (offset, length, index) -> result (char_offset, 1)
-                    func.instruction(&Instruction::LocalSet(ctx.temp_local)); // index
-                    func.instruction(&Instruction::Drop); // discard length
-                                                          // Stack: (offset)
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local)); // index
+                    let idx = ctx.temp_local;
+                    let off = ctx.temp_local + INDEX_PTR;
+                    let len = ctx.temp_local + INDEX_LEN;
+                    func.instruction(&Instruction::LocalSet(idx));
+                    func.instruction(&Instruction::LocalSet(len));
+                    func.instruction(&Instruction::LocalSet(off));
+                    emit_index_check(func, ctx, idx, len);
+
+                    func.instruction(&Instruction::LocalGet(off));
+                    func.instruction(&Instruction::LocalGet(idx));
                     func.instruction(&Instruction::I32Add); // offset + index
                                                             // Length is always 1 for a single character
                     func.instruction(&Instruction::I32Const(1));
@@ -2893,10 +3172,16 @@ pub fn emit_expr(
                 IRType::Bytes => {
                     // Bytes indexing returns an integer (byte value 0-255).
                     // Stack: (offset, length, index) -> result (byte)
-                    func.instruction(&Instruction::LocalSet(ctx.temp_local)); // index
-                    func.instruction(&Instruction::Drop); // discard length
-                                                          // Stack: (offset)
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local)); // index
+                    let idx = ctx.temp_local;
+                    let off = ctx.temp_local + INDEX_PTR;
+                    let len = ctx.temp_local + INDEX_LEN;
+                    func.instruction(&Instruction::LocalSet(idx));
+                    func.instruction(&Instruction::LocalSet(len));
+                    func.instruction(&Instruction::LocalSet(off));
+                    emit_index_check(func, ctx, idx, len);
+
+                    func.instruction(&Instruction::LocalGet(off));
+                    func.instruction(&Instruction::LocalGet(idx));
                     func.instruction(&Instruction::I32Add); // offset + index
                                                             // Load unsigned byte (0-255)
                     func.instruction(&Instruction::I32Load8U(MemArg {
@@ -2910,15 +3195,7 @@ pub fn emit_expr(
                 IRType::List(element_type) => {
                     // List indexing: list is stored as [length:i32][elem0][elem1]...
                     // Stack: (list_ptr, index). Address = list_ptr + HEADER + index*SLOT.
-                    func.instruction(&Instruction::LocalSet(ctx.temp_local)); // index
-                                                                              // Stack: (list_ptr)
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local)); // index
-                    func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
-                    func.instruction(&Instruction::I32Mul); // index * SLOT
-                    func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
-                    func.instruction(&Instruction::I32Add); // index*SLOT + HEADER
-                    func.instruction(&Instruction::I32Add); // list_ptr + HEADER + index*SLOT
-
+                    emit_sequence_address(func, ctx);
                     load_collection_word(func, element_type.as_ref(), ctx.temp_local + 1);
 
                     element_type.as_ref().clone()
@@ -2961,6 +3238,14 @@ pub fn emit_expr(
                         // result
                     }
 
+                    // Whether the key turned up. A dict read for a key the
+                    // dict does not hold used to answer 0 (or 0.0), which is a
+                    // real value and indistinguishable from a stored one;
+                    // Python raises KeyError, and so does this now.
+                    let found = ctx.temp_local + INDEX_LEN;
+                    func.instruction(&Instruction::I32Const(0));
+                    func.instruction(&Instruction::LocalSet(found));
+
                     // Loop: while counter < num_entries
                     func.instruction(&Instruction::Block(BlockType::Empty));
                     func.instruction(&Instruction::Loop(BlockType::Empty));
@@ -2971,13 +3256,12 @@ pub fn emit_expr(
                     func.instruction(&Instruction::I32GeS);
                     func.instruction(&Instruction::BrIf(1)); // Break loop
 
-                    // Load key at offset: dict_ptr + HEADER + counter*DICT_ENTRY
+                    // Load key at offset: data + counter*DICT_ENTRY
                     func.instruction(&Instruction::LocalGet(ctx.temp_local)); // dict_ptr
+                    emit_data_base(func);
                     func.instruction(&Instruction::LocalGet(ctx.temp_local + 3)); // counter
                     func.instruction(&Instruction::I32Const(DICT_ENTRY as i32));
                     func.instruction(&Instruction::I32Mul);
-                    func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
-                    func.instruction(&Instruction::I32Add);
                     func.instruction(&Instruction::I32Add);
                     // Load the slot's key and compare with search_key at the key's
                     // natural width (f64 for float keys, i32 word otherwise).
@@ -2992,15 +3276,14 @@ pub fn emit_expr(
                     }
 
                     // If equal, capture the value and break out of the loop.
-                    // Value slot = dict_ptr + HEADER + counter*DICT_ENTRY + SLOT.
+                    // Value slot = data + counter*DICT_ENTRY + SLOT.
                     func.instruction(&Instruction::If(BlockType::Empty));
                     func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                    emit_data_base(func);
                     func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
                     func.instruction(&Instruction::I32Const(DICT_ENTRY as i32));
                     func.instruction(&Instruction::I32Mul);
-                    func.instruction(&Instruction::I32Const(
-                        (COLLECTION_HEADER + COLLECTION_SLOT) as i32,
-                    ));
+                    func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
                     func.instruction(&Instruction::I32Add);
                     func.instruction(&Instruction::I32Add);
                     if is_float_value {
@@ -3011,6 +3294,8 @@ pub fn emit_expr(
                         func.instruction(&Instruction::LocalSet(ctx.temp_local + 4));
                         // result
                     }
+                    func.instruction(&Instruction::I32Const(1));
+                    func.instruction(&Instruction::LocalSet(found));
                     func.instruction(&Instruction::Br(2)); // Break out of the loop
                     func.instruction(&Instruction::End);
 
@@ -3024,7 +3309,13 @@ pub fn emit_expr(
                     func.instruction(&Instruction::End);
                     func.instruction(&Instruction::End);
 
-                    // Push the looked-up value (0 / 0.0 if the key was not found).
+                    func.instruction(&Instruction::LocalGet(found));
+                    func.instruction(&Instruction::I32Eqz);
+                    func.instruction(&Instruction::If(BlockType::Empty));
+                    emit_raise(func, ctx, "KeyError", 1);
+                    func.instruction(&Instruction::End);
+
+                    // Push the looked-up value.
                     match value_type.as_ref() {
                         // Float values keep full f64 precision in their slot.
                         IRType::Float => {
@@ -3051,14 +3342,7 @@ pub fn emit_expr(
                 IRType::Tuple(element_types) => {
                     // Tuple indexing: tuple is stored as [length:i32][elem0][elem1]...
                     // Stack: (tuple_ptr, index). Address = tuple_ptr + HEADER + index*SLOT.
-                    func.instruction(&Instruction::LocalSet(ctx.temp_local)); // index
-                                                                              // Stack: (tuple_ptr)
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local)); // index
-                    func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
-                    func.instruction(&Instruction::I32Mul); // index * SLOT
-                    func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
-                    func.instruction(&Instruction::I32Add); // index*SLOT + HEADER
-                    func.instruction(&Instruction::I32Add); // tuple_ptr + HEADER + index*SLOT
+                    emit_sequence_address(func, ctx);
 
                     // For homogeneous indexing, use first element type
                     // In practice, we'd need to track which index is being accessed
@@ -5247,7 +5531,6 @@ pub fn emit_expr(
                     method_name,
                     arguments,
                     &object_type,
-                    Some(object),
                 ),
                 IRType::Set(_element_type) => emit_set_method_call(
                     func,
@@ -5256,7 +5539,6 @@ pub fn emit_expr(
                     method_name,
                     arguments,
                     &object_type,
-                    Some(object),
                 ),
                 IRType::Tuple(_element_types) => {
                     emit_tuple_method_call(func, ctx, memory_layout, method_name, arguments)
@@ -5494,146 +5776,154 @@ pub fn emit_expr(
     }
 }
 
-/// Emit WebAssembly instructions for the integer power operation (a ** b)
-pub fn emit_integer_power_operation(func: &mut Function) {
-    // Power operation: a ** b
+/// Scratch locals for the arithmetic helpers below, which need several values
+/// live at once. They used to write to locals 0, 1, and 2 outright, which are
+/// the function's first parameters: `a ** b` clobbered `a`, so reading it
+/// afterwards gave the wrong value, and in a function whose first locals are
+/// not the width the helper assumed, the module failed to validate.
+const ARITH_A: u32 = 17;
+const ARITH_B: u32 = 18;
+const ARITH_C: u32 = 19;
 
-    // Save the base value to a local
-    func.instruction(&Instruction::LocalSet(0));
-    func.instruction(&Instruction::LocalSet(1));
+/// `a ** b` over integers, by repeated multiplication.
+///
+/// Python answers a *float* for a negative exponent (`2 ** -1` is 0.5), which
+/// an i32 result cannot hold; this used to answer 0 silently, and traps now.
+pub fn emit_integer_power_operation(func: &mut Function, ctx: &CompilationContext) {
+    let exp = ctx.temp_local + ARITH_A;
+    let base = ctx.temp_local + ARITH_B;
+    let result = ctx.temp_local + ARITH_C;
 
-    // Initialize result to 1
+    // Stack: (base, exp).
+    func.instruction(&Instruction::LocalSet(exp));
+    func.instruction(&Instruction::LocalSet(base));
     func.instruction(&Instruction::I32Const(1));
-    func.instruction(&Instruction::LocalSet(2));
+    func.instruction(&Instruction::LocalSet(result));
 
-    // Check if exponent is 0, if so return 1
-    func.instruction(&Instruction::LocalGet(0));
-    func.instruction(&Instruction::I32Eqz);
-    func.instruction(&Instruction::If(BlockType::Empty));
-    func.instruction(&Instruction::I32Const(1));
-    func.instruction(&Instruction::Br(1));
-    func.instruction(&Instruction::End);
-
-    // Handle negative exponent as special case (return 0 for now)
-    func.instruction(&Instruction::LocalGet(0));
+    // A negative exponent has no integer answer.
+    func.instruction(&Instruction::LocalGet(exp));
     func.instruction(&Instruction::I32Const(0));
     func.instruction(&Instruction::I32LtS);
     func.instruction(&Instruction::If(BlockType::Empty));
-    func.instruction(&Instruction::I32Const(0));
-    func.instruction(&Instruction::Br(1));
+    func.instruction(&Instruction::Unreachable);
     func.instruction(&Instruction::End);
 
-    // Start loop to calculate power
+    // while exp > 0 { result *= base; exp -= 1 }
     func.instruction(&Instruction::Block(BlockType::Empty));
     func.instruction(&Instruction::Loop(BlockType::Empty));
-
-    // Check if exponent is 0, if so break out of loop
-    func.instruction(&Instruction::LocalGet(0));
+    func.instruction(&Instruction::LocalGet(exp));
     func.instruction(&Instruction::I32Eqz);
     func.instruction(&Instruction::BrIf(1));
-
-    // result *= base
-    func.instruction(&Instruction::LocalGet(2));
-    func.instruction(&Instruction::LocalGet(1));
+    func.instruction(&Instruction::LocalGet(result));
+    func.instruction(&Instruction::LocalGet(base));
     func.instruction(&Instruction::I32Mul);
-    func.instruction(&Instruction::LocalSet(2));
-
-    // exponent--
-    func.instruction(&Instruction::LocalGet(0));
+    func.instruction(&Instruction::LocalSet(result));
+    func.instruction(&Instruction::LocalGet(exp));
     func.instruction(&Instruction::I32Const(1));
     func.instruction(&Instruction::I32Sub);
-    func.instruction(&Instruction::LocalSet(0));
-
-    // Loop back
+    func.instruction(&Instruction::LocalSet(exp));
     func.instruction(&Instruction::Br(0));
-
-    // End loop
     func.instruction(&Instruction::End);
     func.instruction(&Instruction::End);
 
-    // Push result to stack
-    func.instruction(&Instruction::LocalGet(2));
+    func.instruction(&Instruction::LocalGet(result));
 }
 
-/// Emit WebAssembly instructions for the float power operation (a ** b)
-pub fn emit_float_power_operation(func: &mut Function) {
-    // Float power operation: base ** exp
-    // Handles special cases: exp=0, exp=1, exp=2, exp=-1
-    // For integer exponents: repeated multiplication
-    // For fractional exponents: returns base as approximation
+/// `a ** b` over floats, by repeated multiplication over an integral exponent
+/// (`x ** -2.0` is `1 / x ** 2`).
+///
+/// A fractional exponent needs exp/log, which this runtime does not have, so it
+/// traps. It used to answer the base itself, silently, and the whole helper
+/// used `return` for its special cases, which returned from the *enclosing
+/// function* rather than from the expression.
+pub fn emit_float_power_operation(func: &mut Function, ctx: &CompilationContext) {
+    let exp = ctx.temp_local_f64;
+    let base = ctx.temp_local_f64_2;
+    let result = ctx.temp_local_f64_3;
+    let count = ctx.temp_local + ARITH_A;
+    let negative = ctx.temp_local + ARITH_B;
 
-    func.instruction(&Instruction::LocalSet(0)); // Save exp to local 0
-    func.instruction(&Instruction::LocalTee(1)); // Save base to local 1, keep on stack
+    // Stack: (base, exp).
+    func.instruction(&Instruction::LocalSet(exp));
+    func.instruction(&Instruction::LocalSet(base));
 
-    // Handle special case: base ** 0 = 1
-    func.instruction(&Instruction::LocalGet(0));
+    // Only an exponent that is a whole number can be done this way.
+    func.instruction(&Instruction::LocalGet(exp));
+    func.instruction(&Instruction::LocalGet(exp));
+    func.instruction(&Instruction::F64Floor);
+    func.instruction(&Instruction::F64Ne);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    func.instruction(&Instruction::Unreachable);
+    func.instruction(&Instruction::End);
+
+    // count = |exp|, negative = exp < 0
+    func.instruction(&Instruction::LocalGet(exp));
+    func.instruction(&Instruction::F64Const(f64_const(0.0)));
+    func.instruction(&Instruction::F64Lt);
+    func.instruction(&Instruction::LocalSet(negative));
+    func.instruction(&Instruction::LocalGet(exp));
+    func.instruction(&Instruction::F64Abs);
+    func.instruction(&Instruction::I32TruncF64S);
+    func.instruction(&Instruction::LocalSet(count));
+
+    // result = 1.0; while count > 0 { result *= base; count -= 1 }
+    func.instruction(&Instruction::F64Const(f64_const(1.0)));
+    func.instruction(&Instruction::LocalSet(result));
+    func.instruction(&Instruction::Block(BlockType::Empty));
+    func.instruction(&Instruction::Loop(BlockType::Empty));
+    func.instruction(&Instruction::LocalGet(count));
+    func.instruction(&Instruction::I32Eqz);
+    func.instruction(&Instruction::BrIf(1));
+    func.instruction(&Instruction::LocalGet(result));
+    func.instruction(&Instruction::LocalGet(base));
+    func.instruction(&Instruction::F64Mul);
+    func.instruction(&Instruction::LocalSet(result));
+    func.instruction(&Instruction::LocalGet(count));
+    func.instruction(&Instruction::I32Const(1));
+    func.instruction(&Instruction::I32Sub);
+    func.instruction(&Instruction::LocalSet(count));
+    func.instruction(&Instruction::Br(0));
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::End);
+
+    // A negative exponent is the reciprocal, and 0 ** -n has none.
+    func.instruction(&Instruction::LocalGet(negative));
+    func.instruction(&Instruction::If(BlockType::Empty));
+    func.instruction(&Instruction::LocalGet(result));
     func.instruction(&Instruction::F64Const(f64_const(0.0)));
     func.instruction(&Instruction::F64Eq);
     func.instruction(&Instruction::If(BlockType::Empty));
-    func.instruction(&Instruction::Drop);
-    func.instruction(&Instruction::Drop);
-    func.instruction(&Instruction::F64Const(f64_const(1.0)));
-    func.instruction(&Instruction::Return);
+    emit_raise(func, ctx, "ZeroDivisionError", 2);
     func.instruction(&Instruction::End);
-
-    // Handle special case: base ** 1 = base
-    func.instruction(&Instruction::LocalGet(0));
     func.instruction(&Instruction::F64Const(f64_const(1.0)));
-    func.instruction(&Instruction::F64Eq);
-    func.instruction(&Instruction::If(BlockType::Empty));
-    func.instruction(&Instruction::Return);
-    func.instruction(&Instruction::End);
-
-    // Handle special case: base ** 2 = base * base
-    func.instruction(&Instruction::LocalGet(0));
-    func.instruction(&Instruction::F64Const(f64_const(2.0)));
-    func.instruction(&Instruction::F64Eq);
-    func.instruction(&Instruction::If(BlockType::Empty));
-    func.instruction(&Instruction::LocalTee(2));
-    func.instruction(&Instruction::LocalGet(2));
-    func.instruction(&Instruction::F64Mul);
-    func.instruction(&Instruction::Return);
-    func.instruction(&Instruction::End);
-
-    // Handle special case: base ** -1 = 1 / base
-    func.instruction(&Instruction::LocalGet(0));
-    func.instruction(&Instruction::F64Const(f64_const(-1.0)));
-    func.instruction(&Instruction::F64Eq);
-    func.instruction(&Instruction::If(BlockType::Empty));
-    func.instruction(&Instruction::F64Const(f64_const(1.0)));
-    func.instruction(&Instruction::LocalGet(1));
+    func.instruction(&Instruction::LocalGet(result));
     func.instruction(&Instruction::F64Div);
-    func.instruction(&Instruction::Return);
+    func.instruction(&Instruction::LocalSet(result));
     func.instruction(&Instruction::End);
 
-    // For other exponents: return base as approximation
-    func.instruction(&Instruction::LocalGet(1));
+    func.instruction(&Instruction::LocalGet(result));
 }
 
-/// Emit WebAssembly instructions for float modulo operation (a % b)
-pub fn emit_float_modulo_operation(func: &mut Function) {
-    // Float modulo: a % b = a - b * floor(a / b)
+/// `a % b` over floats, as `a - b * floor(a / b)`, which is Python's
+/// convention (the result takes the divisor's sign) rather than C's `fmod`.
+///
+/// The subtraction used to run the other way round, so `3.5 % 2.0` answered
+/// -1.5 instead of 1.5 wherever the module happened to validate at all.
+pub fn emit_float_modulo_operation(func: &mut Function, ctx: &CompilationContext) {
+    let divisor = ctx.temp_local_f64;
+    let dividend = ctx.temp_local_f64_2;
 
-    // Stack starts with: a b
+    // Stack: (a, b).
+    func.instruction(&Instruction::LocalSet(divisor));
+    func.instruction(&Instruction::LocalSet(dividend));
 
-    // Save b to local 0
-    func.instruction(&Instruction::LocalSet(0));
-
-    // Save a to local 1
-    func.instruction(&Instruction::LocalSet(1));
-
-    // Compute floor(a / b)
-    func.instruction(&Instruction::LocalGet(1));
-    func.instruction(&Instruction::LocalGet(0));
+    func.instruction(&Instruction::LocalGet(dividend));
+    func.instruction(&Instruction::LocalGet(divisor));
+    func.instruction(&Instruction::LocalGet(dividend));
+    func.instruction(&Instruction::LocalGet(divisor));
     func.instruction(&Instruction::F64Div);
     func.instruction(&Instruction::F64Floor);
-
-    // Compute b * floor(a / b)
-    func.instruction(&Instruction::LocalGet(0));
     func.instruction(&Instruction::F64Mul);
-
-    // Compute a - b * floor(a / b)
-    func.instruction(&Instruction::LocalGet(1));
     func.instruction(&Instruction::F64Sub);
 }
 
@@ -5916,20 +6206,16 @@ impl Reserve {
 /// doubles (with a floor of [`LIST_GROWTH_FLOOR`], and never less than what was
 /// asked for), which keeps a loop of appends linear overall.
 ///
-/// The new pointer is written back through `receiver` so later reads of the
-/// same variable or field see the grown list. `receiver` is the expression the
-/// method was called on; when it is not something this can assign back to (a
-/// list reached by indexing another collection, or a temporary), the grow path
-/// traps instead, because silently writing into a block nothing else can reach
-/// would lose the elements. Lists that never outgrow their region are
-/// unaffected either way.
+/// Only the elements move: the region, and therefore every name for this
+/// collection, stays put. A list grown inside a function it was passed to, or
+/// reached by indexing another collection, is visible to the caller afterwards,
+/// which is what the data-block indirection buys.
 ///
 /// Scratch usage: `temp_local + 3..=temp_local + 5`. Callers must not hold live
 /// values there across the call.
 pub(crate) fn emit_collection_reserve(
     func: &mut Function,
     ctx: &CompilationContext,
-    receiver: Option<&IRExpr>,
     extra: Reserve,
     stride: u32,
 ) {
@@ -5960,14 +6246,6 @@ pub(crate) fn emit_collection_reserve(
     func.instruction(&Instruction::I32LeS);
     func.instruction(&Instruction::If(BlockType::Empty));
     func.instruction(&Instruction::Else);
-
-    let Some(target) = receiver.and_then(|expr| WriteBack::resolve(expr, ctx)) else {
-        // Nowhere to store the grown pointer: fail loudly rather than write
-        // elements into a block the program can never read back.
-        func.instruction(&Instruction::Unreachable);
-        func.instruction(&Instruction::End);
-        return;
-    };
 
     // cap = max(cap*2, len + extra, LIST_GROWTH_FLOOR)
     func.instruction(&Instruction::LocalGet(cap));
@@ -6000,34 +6278,36 @@ pub(crate) fn emit_collection_reserve(
         func.instruction(&Instruction::LocalSet(cap));
     }
 
-    // new_ptr = __alloc(HEADER + cap*stride)
+    // Only the elements move: new_data = __alloc(cap*stride), copy the live
+    // ones across, and point the header at the new block. The region itself
+    // stays where it is, so every name for this collection, the caller's
+    // variable, an element of another collection, a field, a temporary, keeps
+    // seeing the grown contents. That is the whole reason the elements sit
+    // behind a pointer.
     func.instruction(&Instruction::LocalGet(cap));
     func.instruction(&Instruction::I32Const(stride as i32));
     func.instruction(&Instruction::I32Mul);
-    func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
-    func.instruction(&Instruction::I32Add);
     func.instruction(&Instruction::Call(ctx.alloc_func_index));
     func.instruction(&Instruction::LocalSet(new_ptr));
 
-    // memory.copy(new_ptr, ptr, HEADER + len*stride): header and live entries.
+    // memory.copy(new_data, data, len*stride)
     func.instruction(&Instruction::LocalGet(new_ptr));
     func.instruction(&Instruction::LocalGet(ptr));
+    emit_data_base(func);
     func.instruction(&Instruction::LocalGet(len));
     func.instruction(&Instruction::I32Const(stride as i32));
     func.instruction(&Instruction::I32Mul);
-    func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
-    func.instruction(&Instruction::I32Add);
     func.instruction(&Instruction::MemoryCopy {
         src_mem: 0,
         dst_mem: 0,
     });
 
-    store_runtime_cap(func, new_ptr, cap);
-
-    // The append below writes through the new region.
+    func.instruction(&Instruction::LocalGet(ptr));
     func.instruction(&Instruction::LocalGet(new_ptr));
-    func.instruction(&Instruction::LocalSet(ptr));
-    target.emit(func, new_ptr);
+    func.instruction(&Instruction::I32Store(mem_off(COLLECTION_DATA as u64)));
+    func.instruction(&Instruction::LocalGet(ptr));
+    func.instruction(&Instruction::LocalGet(cap));
+    func.instruction(&Instruction::I32Store(mem_off(COLLECTION_CAP as u64)));
 
     func.instruction(&Instruction::End);
 }
@@ -6035,59 +6315,6 @@ pub(crate) fn emit_collection_reserve(
 /// Smallest capacity a grown list is given, so `xs = []` followed by appends
 /// does not reallocate on every element.
 const LIST_GROWTH_FLOOR: i32 = 4;
-
-/// Where a grown list's new pointer is stored so the program keeps seeing it.
-pub(crate) enum WriteBack {
-    /// A local variable: `xs.append(v)`.
-    Local(u32),
-    /// An instance field of an object held in a local: `self.items.append(v)`.
-    Field { object: u32, offset: u64 },
-}
-
-impl WriteBack {
-    /// Resolve the receiver expression of a list method call to somewhere the
-    /// grown pointer can be stored, or `None` when there is no such place.
-    fn resolve(expr: &IRExpr, ctx: &CompilationContext) -> Option<Self> {
-        match expr {
-            IRExpr::Variable(name) => ctx.get_local_index(name).map(WriteBack::Local),
-            IRExpr::Attribute { object, attribute } => {
-                let IRExpr::Variable(obj_name) = object.as_ref() else {
-                    return None;
-                };
-                let info = ctx.get_local_info(obj_name)?;
-                let IRType::Class(class_name) = &info.var_type else {
-                    return None;
-                };
-                let (offset, _) =
-                    crate::compiler::function::lookup_field(ctx, class_name, attribute)?;
-                Some(WriteBack::Field {
-                    object: info.index,
-                    offset,
-                })
-            }
-            _ => None,
-        }
-    }
-
-    /// Store the pointer held in `value` back into the resolved location.
-    fn emit(&self, func: &mut Function, value: u32) {
-        match *self {
-            WriteBack::Local(index) => {
-                func.instruction(&Instruction::LocalGet(value));
-                func.instruction(&Instruction::LocalSet(index));
-            }
-            WriteBack::Field { object, offset } => {
-                func.instruction(&Instruction::LocalGet(object));
-                func.instruction(&Instruction::LocalGet(value));
-                func.instruction(&Instruction::I32Store(MemArg {
-                    offset,
-                    align: 2,
-                    memory_index: 0,
-                }));
-            }
-        }
-    }
-}
 
 /// Smallest capacity a grown set table is given.
 const SET_GROWTH_FLOOR: i32 = 8;
@@ -6110,7 +6337,6 @@ pub fn emit_set_method_call(
     method_name: &str,
     arguments: &[IRExpr],
     set_type: &IRType,
-    receiver: Option<&IRExpr>,
 ) -> IRType {
     let declared = match set_type {
         IRType::Set(elem) if !matches!(elem.as_ref(), IRType::Unknown) => Some(elem.as_ref()),
@@ -6183,125 +6409,118 @@ pub fn emit_set_method_call(
         func.instruction(&Instruction::I32GtS);
         func.instruction(&Instruction::If(BlockType::Empty));
 
-        match receiver.and_then(|expr| WriteBack::resolve(expr, ctx)) {
-            None => {
-                // Nowhere to store the grown table: fail loudly rather than
-                // fill a block the program can never read back.
-                func.instruction(&Instruction::Unreachable);
+        {
+            // The pending element is parked first: the rehash below re-stashes
+            // a needle per member as it re-inserts them.
+            if matches!(elem_ty, IRType::Float) {
+                func.instruction(&Instruction::LocalGet(ctx.temp_local_f64));
+                func.instruction(&Instruction::LocalSet(ctx.temp_local_f64_2));
+            } else {
+                func.instruction(&Instruction::LocalGet(needle));
+                func.instruction(&Instruction::LocalSet(saved));
             }
-            Some(target) => {
-                // The rehash re-stashes a needle per member, so park the
-                // pending element first and restore it afterwards.
-                if matches!(elem_ty, IRType::Float) {
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local_f64));
-                    func.instruction(&Instruction::LocalSet(ctx.temp_local_f64_2));
-                } else {
-                    func.instruction(&Instruction::LocalGet(needle));
-                    func.instruction(&Instruction::LocalSet(saved));
-                }
 
-                // cap = max(cap * 2, SET_GROWTH_FLOOR), still a power of two.
-                func.instruction(&Instruction::LocalGet(cap));
-                func.instruction(&Instruction::I32Const(2));
-                func.instruction(&Instruction::I32Mul);
-                func.instruction(&Instruction::LocalTee(mask));
-                func.instruction(&Instruction::I32Const(SET_GROWTH_FLOOR));
-                func.instruction(&Instruction::LocalGet(mask));
-                func.instruction(&Instruction::I32Const(SET_GROWTH_FLOOR));
-                func.instruction(&Instruction::I32GtS);
-                func.instruction(&Instruction::Select);
-                func.instruction(&Instruction::LocalSet(newp)); // new capacity, briefly
+            // Remember the block being replaced, then size the new one:
+            // newcap = max(cap * 2, SET_GROWTH_FLOOR), still a power of two.
+            func.instruction(&Instruction::LocalGet(ptr));
+            emit_set_base(func);
+            func.instruction(&Instruction::LocalSet(used)); // old bucket block
+            func.instruction(&Instruction::LocalGet(cap));
+            func.instruction(&Instruction::I32Const(2));
+            func.instruction(&Instruction::I32Mul);
+            func.instruction(&Instruction::LocalTee(mask));
+            func.instruction(&Instruction::I32Const(SET_GROWTH_FLOOR));
+            func.instruction(&Instruction::LocalGet(mask));
+            func.instruction(&Instruction::I32Const(SET_GROWTH_FLOOR));
+            func.instruction(&Instruction::I32GtS);
+            func.instruction(&Instruction::Select);
+            func.instruction(&Instruction::LocalSet(idx)); // newcap, briefly
 
-                // table = __alloc(SET_HEADER + newcap * SET_BUCKET), zeroed so
-                // every bucket starts empty and count/used start at 0.
-                func.instruction(&Instruction::LocalGet(newp));
-                func.instruction(&Instruction::I32Const(SET_BUCKET as i32));
-                func.instruction(&Instruction::I32Mul);
-                func.instruction(&Instruction::I32Const(SET_HEADER as i32));
-                func.instruction(&Instruction::I32Add);
-                func.instruction(&Instruction::Call(ctx.alloc_func_index));
-                func.instruction(&Instruction::LocalSet(srcb)); // new table pointer
-                func.instruction(&Instruction::LocalGet(srcb));
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::LocalGet(newp));
-                func.instruction(&Instruction::I32Const(SET_BUCKET as i32));
-                func.instruction(&Instruction::I32Mul);
-                func.instruction(&Instruction::I32Const(SET_HEADER as i32));
-                func.instruction(&Instruction::I32Add);
-                func.instruction(&Instruction::MemoryFill(0));
-                func.instruction(&Instruction::LocalGet(srcb));
-                func.instruction(&Instruction::LocalGet(newp));
-                func.instruction(&Instruction::I32Store(mem_off(SET_CAP as u64)));
+            // buckets = __alloc(newcap * SET_BUCKET), zeroed so every bucket
+            // starts empty.
+            func.instruction(&Instruction::LocalGet(idx));
+            func.instruction(&Instruction::I32Const(SET_BUCKET as i32));
+            func.instruction(&Instruction::I32Mul);
+            func.instruction(&Instruction::Call(ctx.alloc_func_index));
+            func.instruction(&Instruction::LocalSet(newp));
+            func.instruction(&Instruction::LocalGet(newp));
+            func.instruction(&Instruction::I32Const(0));
+            func.instruction(&Instruction::LocalGet(idx));
+            func.instruction(&Instruction::I32Const(SET_BUCKET as i32));
+            func.instruction(&Instruction::I32Mul);
+            func.instruction(&Instruction::MemoryFill(0));
 
-                // mask = newcap - 1; then swap the working locals into place:
-                // `newp` becomes the new table, `srcb` the per-bucket cursor.
-                func.instruction(&Instruction::LocalGet(newp));
-                func.instruction(&Instruction::I32Const(1));
-                func.instruction(&Instruction::I32Sub);
-                func.instruction(&Instruction::LocalSet(mask));
-                func.instruction(&Instruction::LocalGet(srcb));
-                func.instruction(&Instruction::LocalSet(newp));
-
-                // for idx in 0..cap: re-insert every live bucket. Tombstones
-                // and empties are skipped, so the rehash also compacts.
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::LocalSet(idx));
-                func.instruction(&Instruction::Block(BlockType::Empty));
-                func.instruction(&Instruction::Loop(BlockType::Empty));
-                func.instruction(&Instruction::LocalGet(idx));
-                func.instruction(&Instruction::LocalGet(cap));
-                func.instruction(&Instruction::I32GeS);
-                func.instruction(&Instruction::BrIf(1));
-
+            // The set now owns the new block and is empty again; re-inserting
+            // the live members below fills the counts back in. The header
+            // itself does not move, so every name for this set sees all of it.
+            func.instruction(&Instruction::LocalGet(ptr));
+            func.instruction(&Instruction::LocalGet(idx));
+            func.instruction(&Instruction::I32Store(mem_off(SET_CAP as u64)));
+            func.instruction(&Instruction::LocalGet(ptr));
+            func.instruction(&Instruction::LocalGet(newp));
+            func.instruction(&Instruction::I32Store(mem_off(SET_DATA as u64)));
+            for offset in [0, SET_USED] {
                 func.instruction(&Instruction::LocalGet(ptr));
-                func.instruction(&Instruction::I32Const(SET_HEADER as i32));
-                func.instruction(&Instruction::I32Add);
-                func.instruction(&Instruction::LocalGet(idx));
-                func.instruction(&Instruction::I32Const(SET_BUCKET as i32));
-                func.instruction(&Instruction::I32Mul);
-                func.instruction(&Instruction::I32Add);
-                func.instruction(&Instruction::LocalSet(srcb));
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32Store(mem_off(offset as u64)));
+            }
+            func.instruction(&Instruction::LocalGet(idx));
+            func.instruction(&Instruction::I32Const(1));
+            func.instruction(&Instruction::I32Sub);
+            func.instruction(&Instruction::LocalSet(mask));
 
-                func.instruction(&Instruction::LocalGet(srcb));
-                func.instruction(&Instruction::I32Load(slot_arg()));
-                func.instruction(&Instruction::I32Const(SET_LIVE));
-                func.instruction(&Instruction::I32Eq);
-                func.instruction(&Instruction::If(BlockType::Empty));
-                // The bucket holds exactly the stashed representation, so the
-                // member goes straight into the needle without a round trip
-                // through the stack (which a string member could not make: its
-                // bucket keeps one word, not the (offset, length) pair).
-                func.instruction(&Instruction::LocalGet(srcb));
-                if matches!(elem_ty, IRType::Float) {
-                    func.instruction(&Instruction::F64Load(mem_off(SET_BUCKET_VALUE as u64)));
-                    func.instruction(&Instruction::LocalSet(ctx.temp_local_f64));
-                } else {
-                    func.instruction(&Instruction::I32Load(mem_off(SET_BUCKET_VALUE as u64)));
-                    func.instruction(&Instruction::LocalSet(needle));
-                }
-                emit_stashed_set_insert(func, ctx, &elem_ty, newp, mask, hidx, bkt);
-                func.instruction(&Instruction::End);
+            // for i in 0..oldcap: re-insert every live bucket. Tombstones and
+            // empties are skipped, so the rehash compacts as it goes.
+            func.instruction(&Instruction::I32Const(0));
+            func.instruction(&Instruction::LocalSet(idx));
+            func.instruction(&Instruction::Block(BlockType::Empty));
+            func.instruction(&Instruction::Loop(BlockType::Empty));
+            func.instruction(&Instruction::LocalGet(idx));
+            func.instruction(&Instruction::LocalGet(cap));
+            func.instruction(&Instruction::I32GeS);
+            func.instruction(&Instruction::BrIf(1));
 
-                func.instruction(&Instruction::LocalGet(idx));
-                func.instruction(&Instruction::I32Const(1));
-                func.instruction(&Instruction::I32Add);
-                func.instruction(&Instruction::LocalSet(idx));
-                func.instruction(&Instruction::Br(0));
-                func.instruction(&Instruction::End); // loop
-                func.instruction(&Instruction::End); // block
+            func.instruction(&Instruction::LocalGet(used));
+            func.instruction(&Instruction::LocalGet(idx));
+            func.instruction(&Instruction::I32Const(SET_BUCKET as i32));
+            func.instruction(&Instruction::I32Mul);
+            func.instruction(&Instruction::I32Add);
+            func.instruction(&Instruction::LocalSet(srcb));
 
-                // The program must see the new table from here on.
-                func.instruction(&Instruction::LocalGet(newp));
-                func.instruction(&Instruction::LocalSet(ptr));
-                target.emit(func, ptr);
+            func.instruction(&Instruction::LocalGet(srcb));
+            func.instruction(&Instruction::I32Load(slot_arg()));
+            func.instruction(&Instruction::I32Const(SET_LIVE));
+            func.instruction(&Instruction::I32Eq);
+            func.instruction(&Instruction::If(BlockType::Empty));
+            // The bucket holds exactly the stashed representation, so the
+            // member goes straight into the needle without a round trip
+            // through the stack (which a string member could not make: its
+            // bucket keeps one word, not the (offset, length) pair).
+            func.instruction(&Instruction::LocalGet(srcb));
+            if matches!(elem_ty, IRType::Float) {
+                func.instruction(&Instruction::F64Load(mem_off(SET_BUCKET_VALUE as u64)));
+                func.instruction(&Instruction::LocalSet(ctx.temp_local_f64));
+            } else {
+                func.instruction(&Instruction::I32Load(mem_off(SET_BUCKET_VALUE as u64)));
+                func.instruction(&Instruction::LocalSet(needle));
+            }
+            emit_stashed_set_insert(func, ctx, &elem_ty, ptr, mask, hidx, bkt);
+            func.instruction(&Instruction::End);
 
-                if matches!(elem_ty, IRType::Float) {
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local_f64_2));
-                    func.instruction(&Instruction::LocalSet(ctx.temp_local_f64));
-                } else {
-                    func.instruction(&Instruction::LocalGet(saved));
-                    func.instruction(&Instruction::LocalSet(needle));
-                }
+            func.instruction(&Instruction::LocalGet(idx));
+            func.instruction(&Instruction::I32Const(1));
+            func.instruction(&Instruction::I32Add);
+            func.instruction(&Instruction::LocalSet(idx));
+            func.instruction(&Instruction::Br(0));
+            func.instruction(&Instruction::End); // loop
+            func.instruction(&Instruction::End); // block
+
+            if matches!(elem_ty, IRType::Float) {
+                func.instruction(&Instruction::LocalGet(ctx.temp_local_f64_2));
+                func.instruction(&Instruction::LocalSet(ctx.temp_local_f64));
+            } else {
+                func.instruction(&Instruction::LocalGet(saved));
+                func.instruction(&Instruction::LocalSet(needle));
             }
         }
         func.instruction(&Instruction::End); // if (needs growth)
@@ -6342,8 +6561,7 @@ pub fn emit_set_method_call(
     func.instruction(&Instruction::BrIf(1)); // whole table probed: not a member
 
     func.instruction(&Instruction::LocalGet(ptr));
-    func.instruction(&Instruction::I32Const(SET_HEADER as i32));
-    func.instruction(&Instruction::I32Add);
+    emit_set_base(func);
     func.instruction(&Instruction::LocalGet(hidx));
     func.instruction(&Instruction::I32Const(SET_BUCKET as i32));
     func.instruction(&Instruction::I32Mul);
@@ -6416,7 +6634,6 @@ pub fn emit_list_method_call(
     method_name: &str,
     arguments: &[IRExpr],
     list_type: &IRType,
-    receiver: Option<&IRExpr>,
 ) -> IRType {
     match method_name {
         "append" => {
@@ -6432,7 +6649,7 @@ pub fn emit_list_method_call(
                 stash_search_needle(func, ctx, &value_type, ctx.temp_local + 1);
                 func.instruction(&Instruction::LocalSet(ctx.temp_local)); // list_ptr
 
-                emit_collection_reserve(func, ctx, receiver, Reserve::Count(1), COLLECTION_SLOT);
+                emit_collection_reserve(func, ctx, Reserve::Count(1), COLLECTION_SLOT);
 
                 // length = load(list_ptr)
                 func.instruction(&Instruction::LocalGet(ctx.temp_local));
@@ -6441,8 +6658,7 @@ pub fn emit_list_method_call(
 
                 // address = list_ptr + HEADER + length*SLOT
                 func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
-                func.instruction(&Instruction::I32Add);
+                emit_data_base(func);
                 func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
                 func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
                 func.instruction(&Instruction::I32Mul);
@@ -6490,8 +6706,7 @@ pub fn emit_list_method_call(
 
             // address = list_ptr + HEADER + index*SLOT
             func.instruction(&Instruction::LocalGet(ctx.temp_local));
-            func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
-            func.instruction(&Instruction::I32Add);
+            emit_data_base(func);
             func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
             func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
             func.instruction(&Instruction::I32Mul);
@@ -6549,7 +6764,6 @@ pub fn emit_list_method_call(
                         emit_collection_reserve(
                             func,
                             ctx,
-                            receiver,
                             Reserve::Local(ctx.temp_local + 2),
                             COLLECTION_SLOT,
                         );
@@ -6582,16 +6796,14 @@ pub fn emit_list_method_call(
                         // element width (i32 word or full f64) moves intact.
                         // dest = list_ptr + HEADER + list_len*SLOT
                         func.instruction(&Instruction::LocalGet(ctx.temp_local)); // list_ptr
-                        func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
-                        func.instruction(&Instruction::I32Add);
+                        emit_data_base(func);
                         func.instruction(&Instruction::LocalGet(ctx.temp_local + 3)); // list_len
                         func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
                         func.instruction(&Instruction::I32Mul);
                         func.instruction(&Instruction::I32Add);
                         // src = iterable_ptr + HEADER + i*SLOT
                         func.instruction(&Instruction::LocalGet(ctx.temp_local + 1)); // iterable_ptr
-                        func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
-                        func.instruction(&Instruction::I32Add);
+                        emit_data_base(func);
                         func.instruction(&Instruction::LocalGet(ctx.temp_local + 4)); // i
                         func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
                         func.instruction(&Instruction::I32Mul);
@@ -6652,7 +6864,7 @@ pub fn emit_list_method_call(
                 stash_search_needle(func, ctx, &value_type, ctx.temp_local + 1);
                 func.instruction(&Instruction::LocalSet(ctx.temp_local)); // list_ptr
 
-                emit_collection_reserve(func, ctx, receiver, Reserve::Count(1), COLLECTION_SLOT);
+                emit_collection_reserve(func, ctx, Reserve::Count(1), COLLECTION_SLOT);
 
                 // length = load(list_ptr)
                 func.instruction(&Instruction::LocalGet(ctx.temp_local));
@@ -6661,8 +6873,7 @@ pub fn emit_list_method_call(
 
                 // address = list_ptr + HEADER + length*SLOT
                 func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
-                func.instruction(&Instruction::I32Add);
+                emit_data_base(func);
                 func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
                 func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
                 func.instruction(&Instruction::I32Mul);
@@ -6712,8 +6923,7 @@ pub fn emit_list_method_call(
 
                 // slot address = list_ptr + HEADER + i*SLOT; compare to needle
                 func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
-                func.instruction(&Instruction::I32Add);
+                emit_data_base(func);
                 func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
                 func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
                 func.instruction(&Instruction::I32Mul);
@@ -6738,16 +6948,14 @@ pub fn emit_list_method_call(
                 // memory.copy(dest=list[j], src=list[j+1], SLOT)
                 // dest = list_ptr + HEADER + j*SLOT
                 func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
-                func.instruction(&Instruction::I32Add);
+                emit_data_base(func);
                 func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
                 func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
                 func.instruction(&Instruction::I32Mul);
                 func.instruction(&Instruction::I32Add);
                 // src = list_ptr + HEADER + (j+1)*SLOT
                 func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
-                func.instruction(&Instruction::I32Add);
+                emit_data_base(func);
                 func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
                 func.instruction(&Instruction::I32Const(1));
                 func.instruction(&Instruction::I32Add);
@@ -6828,11 +7036,10 @@ pub fn emit_list_method_call(
 
                 // slot address = list_ptr + HEADER + current_index*SLOT
                 func.instruction(&Instruction::LocalGet(ctx.temp_local)); // list_ptr
+                emit_data_base(func);
                 func.instruction(&Instruction::LocalGet(ctx.temp_local + 3)); // current_index
                 func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
                 func.instruction(&Instruction::I32Mul);
-                func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
-                func.instruction(&Instruction::I32Add);
                 func.instruction(&Instruction::I32Add);
 
                 // Compare with the needle (width-aware).
@@ -6904,11 +7111,10 @@ pub fn emit_list_method_call(
 
                 // slot address = list_ptr + HEADER + current_index*SLOT
                 func.instruction(&Instruction::LocalGet(ctx.temp_local)); // list_ptr
+                emit_data_base(func);
                 func.instruction(&Instruction::LocalGet(ctx.temp_local + 3)); // current_index
                 func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
                 func.instruction(&Instruction::I32Mul);
-                func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
-                func.instruction(&Instruction::I32Add);
                 func.instruction(&Instruction::I32Add);
 
                 // Compare with the needle (width-aware).
@@ -6988,11 +7194,10 @@ fn emit_tuple_method_call(
 
                 // slot address = tuple_ptr + HEADER + i*SLOT
                 func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                emit_data_base(func);
                 func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
                 func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
                 func.instruction(&Instruction::I32Mul);
-                func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
-                func.instruction(&Instruction::I32Add);
                 func.instruction(&Instruction::I32Add);
 
                 emit_slot_eq_needle(func, ctx, &value_type, ctx.temp_local + 1);
@@ -7046,11 +7251,10 @@ fn emit_tuple_method_call(
 
                 // slot address = tuple_ptr + HEADER + i*SLOT
                 func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                emit_data_base(func);
                 func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
                 func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
                 func.instruction(&Instruction::I32Mul);
-                func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
-                func.instruction(&Instruction::I32Add);
                 func.instruction(&Instruction::I32Add);
 
                 emit_slot_eq_needle(func, ctx, &value_type, ctx.temp_local + 1);
