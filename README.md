@@ -46,7 +46,7 @@ Generate & Optimize
 - Supports module-level variables and class definitions with heap-allocated instances — multiple live instances per class, usable as function arguments and return values
 - Object-oriented Python: single inheritance with `super()`, `isinstance`/`issubclass` over the class hierarchy, `@staticmethod`/`@classmethod`/`@property` (with setters), `@dataclass` (generated `__init__`/`__eq__`/`__repr__`), and abstract base classes via `abc.ABC`
 - Collections: lists, dicts, sets, tuples, and ranges: literals, indexing, methods, and membership (`in`/`not in`), with full-precision f64 elements and hash-table sets; lists and dicts reallocate as they grow past their literal's size
-- Exception handling with `try`/`except`/`finally` and `raise`
+- Exceptions: `raise` transfers control, `try`/`except`/`finally` catch and clean up, and an exception propagates out of a call into the caller's handler. `except (A, B):` catches either type, `except Exception:` catches any, and an exception nothing catches unwinds out of the program and traps
 - Comprehensions: list, set, and dict comprehensions with filters, multiple generators, nesting, and `{k: v for k, v in pairs}` unpacking
 - Generators with real state preservation: `yield` suspends and resumes, `yield from` delegates, and `next()`/`send()`/`close()` work; user classes implementing `__iter__`/`__next__` iterate in `for` loops with `StopIteration` ending the loop
 - Tuple targets in `for` loops (`for a, b in pairs`, star targets included) and the iterator-shaped builtins: `enumerate(xs[, start])`, `zip(...)`, and `dict.items()`/`.keys()`/`.values()`
@@ -60,12 +60,13 @@ Generate & Optimize
 ## Limitations
 
 - Object instances are never reclaimed — the bump allocator has no `free`, so every instance lives until the module is torn down and `__del__` is not invoked
-- Lists and dicts grow at runtime (`append`/`extend`/`insert`, and `dict[key] = value` for a new key, reallocate when the region is full), but growth rebinds the variable or field the collection was reached through: one grown inside a function it was *passed* to does not update the caller's binding, and one reached by indexing another collection traps rather than writing out of bounds. Sets are still fixed at their literal's contents
+- Lists and dicts grow at runtime (`append`/`extend`/`insert`, and `dict[key] = value` for a new key, reallocate when the region is full), but growth rebinds the variable or field the collection was reached through: one grown inside a function it was *passed* to does not update the caller's binding, and one reached by indexing another collection traps rather than writing out of bounds. Sets grow the same way: `add` rehashes into a larger table and rebinds through the same variable or field
 - Generators cover the common shapes; `yield` inside `try`/`with` and generator methods (`yield` in a class method) are rejected at compile time, and `close()` skips `GeneratorExit`/`finally` semantics
 - Closures capture by value at creation time — a captured variable mutated after the closure is created keeps its old value inside the closure (Python's late-binding cells are a follow-up); float captures are not yet supported
 - Imported user modules share one flat namespace in the output module — two modules defining the same function name collide (first definition wins, with a warning)
 - `f.read()` without a size reads up to 64 KiB per call; `open()` modes must be string literals
-- A `with` statement needs its context manager's class to be resolvable at compile time (an instantiation, a call with an annotated class return type, or a variable of known class type); `__exit__` runs on the normal and `return` paths, but an exception or a `break` leaving the body skips it, and its return value never suppresses an exception
+- A `with` statement needs its context manager's class to be resolvable at compile time (an instantiation, a call with an annotated class return type, or a variable of known class type). `__exit__` runs on every way out: the normal path, a `return`/`break`/`continue`, and an exception leaving the block. Its return value never suppresses an exception, though, so returning `True` from `__exit__` does not swallow one the way Python's does
+- Exceptions carry a type, not an object: `raise ValueError("message")` records the type and drops the message, and `except ValueError as e` binds the type's code rather than an exception instance. Matching is by exact type name (plus `Exception`/`BaseException`, which catch anything), so a user-defined exception's own base classes are not consulted. Runtime faults the compiler cannot turn into a raise, an out-of-range index or a division by zero, trap rather than raising, so `except ZeroDivisionError:` will not catch `1 // 0`
 - No garbage collection or reference counting — the bump allocator never frees
 
 ### Explicitly unsupported (rejected at compile time)
@@ -79,8 +80,9 @@ The compiler validates syntax up front and rejects these with a located error an
 - Metaclasses and other class keywords, multiple inheritance
 - Loop `else:` clauses (`for`/`while ... else`)
 - `min()`/`max()` over a single iterable argument (pass the values separately)
+- Module-level statements other than definitions. A WebAssembly module has no top-level run step, so only definitions run: `X = 1`, `X: int = 1`, `X = helper()`, `X = ClassName()`, `def`, `class`, and imports (a `try`/`except ImportError` guarded import included). A module-level loop, `if`, `try`, bare call statement, augmented assignment, tuple unpacking, or write through a subscript or attribute is rejected, because it would otherwise be compiled away and later reads would silently see the value from before it. Put the code in a function and call it, or drive it from `if __name__ == "__main__":`, which is recognized as the entry point
 
-Set mutation (`s.add(...)`, `s.remove(...)`) has no implementation yet. It is not rejected up front, because the receiver's type is only known during code generation; the call compiles to a trap, so it fails loudly at runtime instead of silently doing nothing.
+Set methods beyond `add`, `remove`, and `discard` (`union`, `intersection`, and friends) are not implemented. Receiver types are only known during code generation, so they are rejected there rather than by the parser's syntax pass, but it is still a compile error naming the method, the receiver's type, and the function it appears in. `remove` of a value the set does not hold traps at runtime, since there is no `KeyError` to raise; `discard` ignores the miss like Python's.
 
 ## Installation
 

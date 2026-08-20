@@ -1,6 +1,7 @@
 use crate::compiler::context::FileIoImports;
 use crate::compiler::context::{ClassInfo, CompilationContext, COLLECTION_HEAP_BASE};
 use crate::compiler::function::{compile_function, resolve_return_type};
+use crate::core::errors::ChakraError;
 use crate::ir::{
     method_kind, IRBody, IRConstant, IRExpr, IRFunction, IRModule, IRStatement, IRType, MethodKind,
     STRING_LEN_PREFIX,
@@ -186,6 +187,233 @@ fn collect_self_field_elements(
         for nested in nested_bodies(stmt) {
             collect_self_field_elements(nested, &mut env.clone(), classes, out);
         }
+    }
+}
+
+/// Which functions can raise, directly or through anything they call.
+///
+/// Only calls to these need an exception check after them, and only these need
+/// the propagation code on their exit paths, so a program that never raises
+/// compiles to exactly what it did before exceptions transferred control.
+///
+/// Resolution is by name and deliberately conservative: a method call marks
+/// every method of that name, and a call to a name that resolves to nothing
+/// (a closure reached through a variable) counts as raising as soon as the
+/// module contains any raiser at all. Over-approximating costs a few checks;
+/// under-approximating would drop an exception on the floor.
+fn functions_that_can_raise(ir_module: &IRModule) -> HashSet<String> {
+    // Registry key -> (raises directly, names it calls).
+    let mut facts: HashMap<String, (bool, HashSet<String>)> = HashMap::new();
+    // A called name -> the registry keys it could reach.
+    let mut by_name: HashMap<String, Vec<String>> = HashMap::new();
+
+    let record = |facts: &mut HashMap<String, (bool, HashSet<String>)>,
+                  by_name: &mut HashMap<String, Vec<String>>,
+                  key: String,
+                  body: &IRBody,
+                  call_name: &str| {
+        let mut raises = false;
+        let mut calls = HashSet::new();
+        scan_raise_and_calls(body, &mut raises, &mut calls);
+        by_name
+            .entry(call_name.to_string())
+            .or_default()
+            .push(key.clone());
+        facts.insert(key, (raises, calls));
+    };
+
+    for func in &ir_module.functions {
+        record(
+            &mut facts,
+            &mut by_name,
+            func.name.clone(),
+            &func.body,
+            &func.name,
+        );
+    }
+    for cls in &ir_module.classes {
+        for method in &cls.methods {
+            let key = method_registry_key(&cls.name, method);
+            record(
+                &mut facts,
+                &mut by_name,
+                key.clone(),
+                &method.body,
+                &method.name,
+            );
+            // `ClassName(...)` runs `__init__`.
+            if method.name == "__init__" {
+                by_name.entry(cls.name.clone()).or_default().push(key);
+            }
+        }
+    }
+
+    let mut raisers: HashSet<String> = facts
+        .iter()
+        .filter(|(_, (raises, _))| *raises)
+        .map(|(key, _)| key.clone())
+        .collect();
+    // A call that resolves to nothing is a closure or a builtin. Only closures
+    // can raise, and only if the module raises anywhere at all.
+    let unresolved_can_raise = !raisers.is_empty();
+
+    loop {
+        let mut grew = false;
+        for (key, (_, calls)) in &facts {
+            if raisers.contains(key) {
+                continue;
+            }
+            let reaches = calls.iter().any(|name| match by_name.get(name) {
+                Some(keys) => keys.iter().any(|k| raisers.contains(k)),
+                None => unresolved_can_raise,
+            });
+            if reaches {
+                raisers.insert(key.clone());
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    raisers
+}
+
+/// Collect whether a body raises, and every name it calls.
+fn scan_raise_and_calls(body: &IRBody, raises: &mut bool, calls: &mut HashSet<String>) {
+    for stmt in &body.statements {
+        if let IRStatement::Raise { exception } = stmt {
+            // `raise StopIteration` is the generator protocol's own signal and
+            // travels on its own global, not the exception path.
+            let name = match exception {
+                Some(IRExpr::FunctionCall { function_name, .. }) => Some(function_name.as_str()),
+                Some(IRExpr::Variable(name)) | Some(IRExpr::Param(name)) => Some(name.as_str()),
+                _ => None,
+            };
+            if name != Some("StopIteration") {
+                *raises = true;
+            }
+        }
+        for expr in statement_exprs(stmt) {
+            scan_expr_calls(expr, calls);
+        }
+        for nested in nested_bodies(stmt) {
+            scan_raise_and_calls(nested, raises, calls);
+        }
+    }
+}
+
+/// Every call name an expression mentions, recursively.
+fn scan_expr_calls(expr: &IRExpr, calls: &mut HashSet<String>) {
+    match expr {
+        IRExpr::FunctionCall {
+            function_name,
+            arguments,
+        } => {
+            calls.insert(function_name.clone());
+            for arg in arguments {
+                scan_expr_calls(arg, calls);
+            }
+        }
+        IRExpr::MethodCall {
+            object,
+            method_name,
+            arguments,
+        } => {
+            calls.insert(method_name.clone());
+            scan_expr_calls(object, calls);
+            for arg in arguments {
+                scan_expr_calls(arg, calls);
+            }
+        }
+        IRExpr::BinaryOp { left, right, .. }
+        | IRExpr::CompareOp { left, right, .. }
+        | IRExpr::BoolOp { left, right, .. } => {
+            scan_expr_calls(left, calls);
+            scan_expr_calls(right, calls);
+        }
+        IRExpr::UnaryOp { operand, .. } => scan_expr_calls(operand, calls),
+        IRExpr::ListLiteral(items) | IRExpr::SetLiteral(items) | IRExpr::TupleLiteral(items) => {
+            for item in items {
+                scan_expr_calls(item, calls);
+            }
+        }
+        IRExpr::DictLiteral(pairs) => {
+            for (k, v) in pairs {
+                scan_expr_calls(k, calls);
+                scan_expr_calls(v, calls);
+            }
+        }
+        IRExpr::Indexing { container, index } => {
+            scan_expr_calls(container, calls);
+            scan_expr_calls(index, calls);
+        }
+        IRExpr::Slicing {
+            container,
+            start,
+            end,
+            step,
+        } => {
+            scan_expr_calls(container, calls);
+            for part in [start, end, step].into_iter().flatten() {
+                scan_expr_calls(part, calls);
+            }
+        }
+        IRExpr::Attribute { object, .. } => scan_expr_calls(object, calls),
+        IRExpr::Comprehension {
+            element,
+            value,
+            generators,
+            ..
+        } => {
+            scan_expr_calls(element, calls);
+            if let Some(value) = value {
+                scan_expr_calls(value, calls);
+            }
+            for generator in generators {
+                scan_expr_calls(&generator.iterable, calls);
+                for condition in &generator.conditions {
+                    scan_expr_calls(condition, calls);
+                }
+            }
+        }
+        IRExpr::RangeCall { start, stop, step } => {
+            scan_expr_calls(stop, calls);
+            for part in [start, step].into_iter().flatten() {
+                scan_expr_calls(part, calls);
+            }
+        }
+        IRExpr::Lambda { body, .. } => scan_expr_calls(body, calls),
+        IRExpr::ClosureMake { lambda_name, .. } => {
+            calls.insert(lambda_name.clone());
+        }
+        IRExpr::DynamicImportExpr { module_name } => scan_expr_calls(module_name, calls),
+        _ => {}
+    }
+}
+
+/// Every expression a statement evaluates directly (nested bodies are walked
+/// separately).
+fn statement_exprs(stmt: &IRStatement) -> Vec<&IRExpr> {
+    match stmt {
+        IRStatement::Return(expr) | IRStatement::Yield { value: expr } => expr.iter().collect(),
+        IRStatement::Raise { exception } => exception.iter().collect(),
+        IRStatement::Assign { value, .. }
+        | IRStatement::AugAssign { value, .. }
+        | IRStatement::Expression(value)
+        | IRStatement::TupleUnpack { value, .. } => vec![value],
+        IRStatement::If { condition, .. } | IRStatement::While { condition, .. } => vec![condition],
+        IRStatement::For { iterable, .. } => vec![iterable],
+        IRStatement::With { context_expr, .. } => vec![context_expr],
+        IRStatement::AttributeAssign { object, value, .. }
+        | IRStatement::AttributeAugAssign { object, value, .. } => vec![object, value],
+        IRStatement::IndexAssign {
+            container,
+            index,
+            value,
+        } => vec![container, index, value],
+        IRStatement::DynamicImport { module_name, .. } => vec![module_name],
+        _ => Vec::new(),
     }
 }
 
@@ -620,7 +848,7 @@ fn module_uses_file_io(ir_module: &IRModule) -> bool {
 }
 
 /// Compile an IR module into WebAssembly binary format
-pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
+pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, ChakraError> {
     let mut module = Module::new();
     let mut ctx = CompilationContext::new();
     // String/bytes offsets are resolved during lowering and carried on the IR
@@ -1079,6 +1307,15 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
         data.active(0, &ConstExpr::i32_const(base as i32), all_bytes);
     }
 
+    // Which functions can raise, as WASM indices, so call sites know whether an
+    // exception check is needed after them. Every function is registered by
+    // now, so the names the analysis works in translate straight to indices.
+    let raisers = functions_that_can_raise(ir_module);
+    ctx.can_raise = raisers
+        .iter()
+        .filter_map(|key| ctx.function_map.get(key).map(|info| info.index))
+        .collect();
+
     // Code section
     let mut codes = CodeSection::new();
 
@@ -1150,6 +1387,34 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
         &ConstExpr::i32_const(0),
     );
 
+    // Global 2: the pending exception's type code (0 = none). `raise` sets it
+    // and transfers control; a `try` reads it to pick a handler, and a handler
+    // that matches clears it. It is a module global rather than a local so an
+    // exception raised inside a call is visible to the caller, which is what
+    // makes propagation work.
+    globals.global(
+        GlobalType {
+            val_type: ValType::I32,
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::i32_const(0),
+    );
+
+    // Global 3: how many user-function calls are on the stack below the frame
+    // running now. Only calls that can raise maintain it. A frame propagating
+    // an exception with nothing below it is the outermost one, so the
+    // exception has escaped the program: it traps there instead of handing the
+    // host a default value as if nothing happened.
+    globals.global(
+        GlobalType {
+            val_type: ValType::I32,
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::i32_const(0),
+    );
+
     // The closure dispatch table: slot i holds lifted lambda i. Emitted only
     // when the module has lambdas.
     let mut tables = TableSection::new();
@@ -1198,5 +1463,30 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Vec<u8> {
         });
     }
 
-    module.finish()
+    // Code generation reports what it cannot generate code for through the
+    // context's error sink (see `CompilationContext::report`). The whole module
+    // is walked first so one compile surfaces every such call, then the
+    // compilation fails rather than returning a module that traps at runtime.
+    let mut errors = ctx.errors.take();
+    if !errors.is_empty() {
+        let first = errors.remove(0);
+        if errors.is_empty() {
+            return Err(first);
+        }
+        // Several: keep the first one's wording and list the rest under it, so
+        // one compile run reports every construct codegen could not emit.
+        let rest = errors
+            .iter()
+            .map(|e| format!("\n  also: {e}"))
+            .collect::<String>();
+        let ChakraError::UnsupportedFeature { message, location } = first else {
+            return Err(first);
+        };
+        return Err(ChakraError::UnsupportedFeature {
+            message: format!("{message}{rest}"),
+            location,
+        });
+    }
+
+    Ok(module.finish())
 }

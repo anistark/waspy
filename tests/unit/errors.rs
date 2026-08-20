@@ -129,3 +129,67 @@ fn single_iterable_min_max_are_rejected() {
         4
     );
 }
+
+/// A hand-built module whose only function reads local 0 while declaring no
+/// parameters and no locals: the exact class of defect (an invalid local
+/// index) that used to reach Binaryen and abort the process.
+fn module_with_invalid_local_index() -> Vec<u8> {
+    let mut wasm = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+    // Type section: one signature, () -> i32.
+    wasm.extend_from_slice(&[0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f]);
+    // Function section: function 0 has that signature.
+    wasm.extend_from_slice(&[0x03, 0x02, 0x01, 0x00]);
+    // Export section: function 0 is exported as "boom".
+    wasm.extend_from_slice(&[0x07, 0x08, 0x01, 0x04, b'b', b'o', b'o', b'm', 0x00, 0x00]);
+    // Code section: no locals, then `local.get 0; end`.
+    wasm.extend_from_slice(&[0x0a, 0x06, 0x01, 0x04, 0x00, 0x20, 0x00, 0x0b]);
+    wasm
+}
+
+/// Invalid generated WebAssembly is reported as a compile error naming the
+/// offending function, instead of being handed to Binaryen (which aborts the
+/// whole process with no file, line, or function to go on).
+#[test]
+fn invalid_generated_wasm_is_a_located_compile_error() {
+    let err = waspy::compiler::validate_wasm(&module_with_invalid_local_index())
+        .expect_err("an invalid local index must be rejected");
+    let err = err.to_string();
+    assert!(
+        err.contains("failed WebAssembly validation"),
+        "unexpected: {err}"
+    );
+    assert!(
+        err.contains("function 'boom'"),
+        "the error must name the function it happened in: {err}"
+    );
+    assert!(
+        err.contains("byte offset"),
+        "the error must carry the offset: {err}"
+    );
+    assert!(
+        err.contains("code generation bug"),
+        "the error must say this is not the user's fault: {err}"
+    );
+}
+
+/// The validation pass runs on every compilation, so anything the compiler
+/// reports as successful is a module a runtime will accept.
+#[test]
+fn compiled_modules_pass_validation() {
+    let wasm = harness::compile(
+        "class Counter:\n\
+         \x20   def __init__(self):\n\
+         \x20       self.items = []\n\
+         \x20   def add(self, v: int):\n\
+         \x20       self.items.append(v)\n\
+         \x20   def total(self) -> int:\n\
+         \x20       return sum(self.items)\n\
+         \n\
+         def run() -> int:\n\
+         \x20   c = Counter()\n\
+         \x20   for i in range(5):\n\
+         \x20       c.add(i)\n\
+         \x20   return c.total()\n",
+    );
+    waspy::compiler::validate_wasm(&wasm).expect("compiled module must validate");
+}

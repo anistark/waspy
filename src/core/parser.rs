@@ -59,7 +59,120 @@ fn line_col(source: &str, offset: usize) -> (usize, usize) {
 /// is that a program using a known-unsupported statement fails here, at the
 /// front door, with an actionable message.
 pub fn validate_supported(ast: &Suite, source: &str) -> Result<()> {
-    validate_body(ast, source, None)
+    validate_body(ast, source, None)?;
+    validate_module_level(ast, source)
+}
+
+/// Reject module-level statements whose effects the compiler silently drops.
+///
+/// A WebAssembly module has no implicit "run the file top to bottom" step:
+/// the host calls exported functions. Waspy compiles module-level variable
+/// definitions by inlining their initializers into the functions that read
+/// them, so `X = 1`, `X = helper()`, and `X = ClassName()` all work. Anything
+/// else written at module level, a loop, a bare call, an augmented or
+/// unpacking assignment, a write through a subscript or attribute, used to
+/// compile "successfully" and then do nothing at all, so the program read the
+/// pre-statement value and got a silently wrong answer.
+///
+/// Those shapes are rejected here with a hint pointing at the two things that
+/// do work: move the code into a function, or drive it from an
+/// `if __name__ == "__main__":` entry point.
+fn validate_module_level(body: &[Stmt], source: &str) -> Result<()> {
+    for stmt in body {
+        let (what, offset) = match stmt {
+            Stmt::For(stmt) => ("'for' loops", stmt.range.start()),
+            Stmt::While(stmt) => ("'while' loops", stmt.range.start()),
+            Stmt::With(stmt) => ("'with' blocks", stmt.range.start()),
+            Stmt::Try(stmt) => {
+                // An import guarded by try/except ImportError is a supported
+                // and common shape; it carries no runtime effect to drop.
+                if is_import_guard(stmt) {
+                    continue;
+                }
+                ("'try' blocks", stmt.range.start())
+            }
+            Stmt::If(stmt) => {
+                // `if __name__ == "__main__":` is the entry-point marker, not
+                // executable module-level code, so it stays allowed.
+                if mentions_dunder_name(&stmt.test) {
+                    continue;
+                }
+                ("'if' statements", stmt.range.start())
+            }
+            Stmt::AugAssign(stmt) => ("augmented assignments", stmt.range.start()),
+            Stmt::Expr(stmt) => {
+                // Docstrings and other bare constants have no effect to drop.
+                if matches!(stmt.value.as_ref(), Expr::Constant(_)) {
+                    continue;
+                }
+                ("call statements", stmt.range.start())
+            }
+            Stmt::Assign(stmt) => {
+                if stmt.targets.iter().all(|t| matches!(t, Expr::Name(_))) {
+                    continue;
+                }
+                (
+                    "assignments to anything but a plain name",
+                    stmt.range.start(),
+                )
+            }
+            Stmt::AnnAssign(stmt) => {
+                if matches!(stmt.target.as_ref(), Expr::Name(_)) {
+                    continue;
+                }
+                (
+                    "assignments to anything but a plain name",
+                    stmt.range.start(),
+                )
+            }
+            _ => continue,
+        };
+
+        return Err(unsupported(
+            format!(
+                "{what} at module level are not supported: a WebAssembly module has no \
+                 top-level run step, so the statement would be compiled away and later reads \
+                 would silently see the value from before it. Hint: move this into a function \
+                 and call it, or drive it from 'if __name__ == \"__main__\":'. \
+                 Module-level definitions (X = 1, X = helper(), X = ClassName()) do work"
+            ),
+            source,
+            offset.into(),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+/// True for `try:` blocks whose body is nothing but imports, the guarded-import
+/// idiom (`try: import ujson except ImportError: import json`).
+fn is_import_guard(stmt: &rustpython_parser::ast::StmtTry) -> bool {
+    let is_imports = |body: &[Stmt]| {
+        !body.is_empty()
+            && body
+                .iter()
+                .all(|s| matches!(s, Stmt::Import(_) | Stmt::ImportFrom(_) | Stmt::Pass(_)))
+    };
+    is_imports(&stmt.body)
+        && stmt.handlers.iter().all(|handler| {
+            let rustpython_parser::ast::ExceptHandler::ExceptHandler(h) = handler;
+            is_imports(&h.body)
+        })
+}
+
+/// True when the expression reads `__name__`, which marks the entry-point
+/// guard rather than ordinary module-level code.
+fn mentions_dunder_name(test: &Expr) -> bool {
+    match test {
+        Expr::Name(name) => name.id.as_str() == "__name__",
+        Expr::Compare(compare) => {
+            mentions_dunder_name(&compare.left)
+                || compare.comparators.iter().any(mentions_dunder_name)
+        }
+        Expr::BoolOp(op) => op.values.iter().any(mentions_dunder_name),
+        Expr::UnaryOp(op) => mentions_dunder_name(&op.operand),
+        _ => false,
+    }
 }
 
 /// Build the located `UnsupportedFeature` error for a node.

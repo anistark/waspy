@@ -308,23 +308,45 @@ fn rewrite_nested(
             let mut handlers = Vec::with_capacity(except_handlers.len());
             for handler in except_handlers {
                 handlers.push(crate::ir::IRExceptHandler {
-                    exception_type: handler.exception_type,
+                    exception_types: handler.exception_types,
                     name: handler.name,
                     body: rewrite_body(handler.body, resolver, &mut env.clone(), return_type)?,
                 });
             }
+            let finally_body = match finally_body {
+                Some(b) => Some(Box::new(rewrite_body(
+                    *b,
+                    resolver,
+                    &mut env.clone(),
+                    return_type,
+                )?)),
+                None => None,
+            };
+
+            // `finally` on the non-local exit paths. Code generation emits the
+            // finally body after the handlers, which the fall-through path
+            // reaches but a `return`, `break`, or `continue` inside the block
+            // jumps straight past, so those used to skip it silently. Each such
+            // exit gets its own copy of the body ahead of it (there are no
+            // landing pads to jump to here), and the trailing copy still covers
+            // the ordinary path, so the body runs exactly once either way.
+            let (mut try_body, mut handlers) = (try_body, handlers);
+            if let Some(finally) = &finally_body {
+                run_cleanup_before_exits(&mut try_body, &finally.statements, return_type, false);
+                for handler in &mut handlers {
+                    run_cleanup_before_exits(
+                        &mut handler.body,
+                        &finally.statements,
+                        return_type,
+                        false,
+                    );
+                }
+            }
+
             IRStatement::TryExcept {
                 try_body,
                 except_handlers: handlers,
-                finally_body: match finally_body {
-                    Some(b) => Some(Box::new(rewrite_body(
-                        *b,
-                        resolver,
-                        &mut env.clone(),
-                        return_type,
-                    )?)),
-                    None => None,
-                },
+                finally_body,
             }
         }
         other => other,
@@ -400,10 +422,22 @@ fn expand_with(
         var_type: Some(enter_returns),
     });
 
+    // The body goes inside a `try` whose `finally` is the `__exit__` call, so
+    // every way out runs it: falling off the end, a `return`/`break`/
+    // `continue` (which `run_cleanup_before_exits` puts a copy ahead of, since
+    // those jump past the trailing one), and an exception leaving the block,
+    // which the try's own propagation path covers now that exceptions transfer
+    // control.
     let mut inner = rewrite_body(body, resolver, &mut env.clone(), return_type)?;
-    run_exit_before_returns(&mut inner, &manager, return_type);
-    out.extend(inner.statements);
-    out.push(exit_call(&manager));
+    let finally = IRBody {
+        statements: vec![exit_call(&manager)],
+    };
+    run_cleanup_before_exits(&mut inner, &finally.statements, return_type, false);
+    out.push(IRStatement::TryExcept {
+        try_body: Box::new(inner),
+        except_handlers: Vec::new(),
+        finally_body: Some(Box::new(finally)),
+    });
 
     Ok(out)
 }
@@ -423,21 +457,38 @@ fn exit_call(manager: &str) -> IRStatement {
     })
 }
 
-/// Run `__exit__` before every `return` inside a `with` body. The returned
-/// expression is evaluated into a temporary first, so it still sees the state
-/// from inside the block, matching Python's order.
-fn run_exit_before_returns(body: &mut IRBody, manager: &str, return_type: &IRType) {
+/// Run `cleanup` before every statement that leaves `body` early: a `return`
+/// anywhere inside it, and a `break`/`continue` that leaves it rather than an
+/// enclosing loop written inside it. The returned expression is evaluated into
+/// a temporary first, so it still sees the state from inside the block,
+/// matching Python's order.
+///
+/// `in_nested_loop` says whether the walk has descended into a loop that lives
+/// inside the block. A `break` down there belongs to that loop and never leaves
+/// the block, so it gets no cleanup; a `return` always leaves, at any depth.
+///
+/// Because both `with` and `try`/`finally` are lowered by the same bottom-up
+/// walk, cleanups compose in Python's order without any extra bookkeeping: the
+/// inner construct inserts its cleanup immediately before the exit statement
+/// first, and the outer one then inserts its own before that same statement,
+/// which lands after the inner cleanup.
+fn run_cleanup_before_exits(
+    body: &mut IRBody,
+    cleanup: &[IRStatement],
+    return_type: &IRType,
+    in_nested_loop: bool,
+) {
     let mut out = Vec::with_capacity(body.statements.len());
     for stmt in std::mem::take(&mut body.statements) {
         match stmt {
             IRStatement::Return(None) => {
-                out.push(exit_call(manager));
+                out.extend(cleanup.iter().cloned());
                 out.push(IRStatement::Return(None));
             }
             IRStatement::Return(Some(IRExpr::Const(c))) => {
-                // A constant cannot observe anything `__exit__` does, so it
+                // A constant cannot observe anything the cleanup does, so it
                 // needs no temporary.
-                out.push(exit_call(manager));
+                out.extend(cleanup.iter().cloned());
                 out.push(IRStatement::Return(Some(IRExpr::Const(c))));
             }
             IRStatement::Return(Some(expr)) => {
@@ -451,18 +502,29 @@ fn run_exit_before_returns(body: &mut IRBody, manager: &str, return_type: &IRTyp
                         other => Some(other.clone()),
                     },
                 });
-                out.push(exit_call(manager));
+                out.extend(cleanup.iter().cloned());
                 out.push(IRStatement::Return(Some(IRExpr::Variable(temp))));
             }
+            stmt @ (IRStatement::Break | IRStatement::Continue) if !in_nested_loop => {
+                out.extend(cleanup.iter().cloned());
+                out.push(stmt);
+            }
             mut other => {
+                let loops_here = in_nested_loop || opens_a_loop(&other);
                 for nested in nested_bodies(&mut other) {
-                    run_exit_before_returns(nested, manager, return_type);
+                    run_cleanup_before_exits(nested, cleanup, return_type, loops_here);
                 }
                 out.push(other);
             }
         }
     }
     body.statements = out;
+}
+
+/// True for statements that own a loop a `break`/`continue` inside them would
+/// bind to, rather than the block being walked.
+fn opens_a_loop(stmt: &IRStatement) -> bool {
+    matches!(stmt, IRStatement::While { .. } | IRStatement::For { .. })
 }
 
 /// Every nested body a statement owns, for the `return` walk.

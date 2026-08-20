@@ -84,5 +84,7 @@ def test_all():
     print("\nAll system call tests completed!")
     return 0
 
-# Run the tests
-test_all()
+# Run the tests. A module-level call statement is compiled away (WASM has no
+# top-level run step), so drive it from the entry point instead.
+if __name__ == "__main__":
+    test_all()
