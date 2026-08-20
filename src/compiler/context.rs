@@ -16,7 +16,7 @@ pub const CALL_DEPTH_GLOBAL: u32 = 3;
 /// per-function in `compile_function` after params and named locals, so these
 /// indices never alias real variables. Keep this >= the largest `temp_local + N`
 /// offset emitted anywhere in the compiler.
-pub const SCRATCH_LOCALS: u32 = 17;
+pub const SCRATCH_LOCALS: u32 = 20;
 
 /// Base address of the collection heap. Sits above the string (from 0) and
 /// bytes (from 32768) regions so collection literals never overlap them. (The
@@ -25,12 +25,18 @@ pub const SCRATCH_LOCALS: u32 = 17;
 pub const COLLECTION_HEAP_BASE: u32 = 131072;
 
 /// Bytes reserved at the start of every collection region for its header: the
-/// element/entry count (an `i32` at offset 0) followed by the region's capacity
-/// in elements/entries (an `i32` at [`COLLECTION_CAP`]). The first slot follows
-/// the header. The capacity is what lets `list.append` tell a slot it owns from
-/// the start of the next region, so growing past a literal's size reallocates
-/// instead of silently overwriting the neighbouring collection.
-pub const COLLECTION_HEADER: u32 = 8;
+/// element/entry count (an `i32` at offset 0), the capacity in elements/entries
+/// (an `i32` at [`COLLECTION_CAP`]), and a pointer to the block holding the
+/// elements themselves (an `i32` at [`COLLECTION_DATA`]), plus a pad word that
+/// keeps the block that follows 8-byte aligned.
+///
+/// The elements live *behind a pointer* so that growing a collection does not
+/// move the collection: `append` reallocates the data block and stores the new
+/// pointer in the header, and every alias, a caller's variable, an element of
+/// another collection, a field, keeps seeing the same header and therefore the
+/// grown contents. A freshly built collection puts its data block immediately
+/// after the header, so construction still writes at compile-time addresses.
+pub const COLLECTION_HEADER: u32 = 16;
 
 /// Offset of the capacity word inside a collection header. A region whose
 /// capacity reads as 0 (or below its own length) is treated as full, so a
@@ -38,14 +44,19 @@ pub const COLLECTION_HEADER: u32 = 8;
 /// trusted, the conservative direction.
 pub const COLLECTION_CAP: u32 = 4;
 
+/// Offset of the data-block pointer inside a collection header. Element `i`
+/// lives at `load(region + COLLECTION_DATA) + i*COLLECTION_SLOT`, never at a
+/// fixed offset from the region itself.
+pub const COLLECTION_DATA: u32 = 8;
+
 /// Bytes per collection element slot. Wide enough to hold an `f64` without loss,
 /// so float elements round-trip exactly; narrower values (i32 ints/bools,
 /// interned string/bytes offsets, collection pointers) occupy the low 4 bytes
 /// and ignore the high 4. List/tuple/set element `i` lives at
-/// `COLLECTION_HEADER + i*COLLECTION_SLOT`; a dict entry is two consecutive
-/// slots (key then value), so entry `i` starts at
-/// `COLLECTION_HEADER + i*2*COLLECTION_SLOT`. Slots sit at 4-byte (not 8-byte)
-/// alignment, which WASM permits — alignment in a load/store is only an
+/// `data + i*COLLECTION_SLOT`, where `data` is the region's
+/// [`COLLECTION_DATA`] pointer; a dict entry is two consecutive slots (key then
+/// value), so entry `i` starts at `data + i*2*COLLECTION_SLOT`. Slots sit at 4-byte (not 8-byte)
+/// alignment, which WASM permits: alignment in a load/store is only an
 /// optimization hint and never affects correctness.
 pub const COLLECTION_SLOT: u32 = 8;
 
@@ -177,6 +188,9 @@ pub struct CompilationContext {
     /// once, e.g. indexing a float-keyed *and* float-valued dict: the key needle
     /// sits here while the looked-up value uses `temp_local_f64`.
     pub temp_local_f64_2: u32,
+    /// Third f64 scratch local. The float power helper needs base, exponent,
+    /// and an accumulating result live at once.
+    pub temp_local_f64_3: u32,
     /// Sequence counter for `for` loops, advanced in identical pre-order by the
     /// local-allocation scan and by codegen so each loop reuses the iterator
     /// helper locals (`__iter_*_{n}`) reserved for it. Reset per function.
@@ -308,6 +322,7 @@ impl CompilationContext {
             closure_max_arity: 0,
             return_self: false,
             current_class: None,
+            temp_local_f64_3: 0,
             current_function: None,
             try_stack: Vec::new(),
             can_raise: std::collections::HashSet::new(),

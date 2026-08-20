@@ -679,6 +679,16 @@ fn closures_capture_variables() {
     assert_eq!(call_i32(&src, "closures_capture_independently"), 308);
 }
 
+/// A closure captures the variable, not a snapshot: it reads the current value
+/// each time it runs, and closures made in a loop share the loop variable.
+#[test]
+fn closures_capture_the_variable_not_its_value() {
+    let src = read_example("closures.py");
+    assert_eq!(call_i32(&src, "reads_the_current_value"), 9);
+    assert_eq!(call_i32(&src, "sees_updates_between_calls"), 33);
+    assert_eq!(call_i32(&src, "loop_closures_share_the_loop_variable"), 22);
+}
+
 /// Lambda plumbing: no-capture lambdas, multiple parameters, zero parameters,
 /// module-level lambdas, and calling a module function from a lambda body.
 #[test]

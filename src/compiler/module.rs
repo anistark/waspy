@@ -3,8 +3,8 @@ use crate::compiler::context::{ClassInfo, CompilationContext, COLLECTION_HEAP_BA
 use crate::compiler::function::{compile_function, resolve_return_type};
 use crate::core::errors::ChakraError;
 use crate::ir::{
-    method_kind, IRBody, IRConstant, IRExpr, IRFunction, IRModule, IRStatement, IRType, MethodKind,
-    STRING_LEN_PREFIX,
+    method_kind, IRBody, IRConstant, IRExpr, IRFunction, IRModule, IROp, IRStatement, IRType,
+    MethodKind, STRING_LEN_PREFIX,
 };
 use std::collections::{HashMap, HashSet};
 use wasm_encoder::{
@@ -294,8 +294,13 @@ fn scan_raise_and_calls(body: &IRBody, raises: &mut bool, calls: &mut HashSet<St
                 *raises = true;
             }
         }
+        if matches!(stmt, IRStatement::IndexAssign { .. }) {
+            // An assignment through an index bounds-checks and can raise
+            // IndexError, exactly as a read does.
+            *raises = true;
+        }
         for expr in statement_exprs(stmt) {
-            scan_expr_calls(expr, calls);
+            scan_expr_calls(expr, raises, calls);
         }
         for nested in nested_bodies(stmt) {
             scan_raise_and_calls(nested, raises, calls);
@@ -303,8 +308,11 @@ fn scan_raise_and_calls(body: &IRBody, raises: &mut bool, calls: &mut HashSet<St
     }
 }
 
-/// Every call name an expression mentions, recursively.
-fn scan_expr_calls(expr: &IRExpr, calls: &mut HashSet<String>) {
+/// Every call name an expression mentions, recursively, and whether it
+/// contains anything that can raise on its own. Indexing is the one that does:
+/// an out-of-range index raises `IndexError` and a missing key `KeyError`, and
+/// the container's type is not known here, so any indexing counts.
+fn scan_expr_calls(expr: &IRExpr, raises: &mut bool, calls: &mut HashSet<String>) {
     match expr {
         IRExpr::FunctionCall {
             function_name,
@@ -312,7 +320,7 @@ fn scan_expr_calls(expr: &IRExpr, calls: &mut HashSet<String>) {
         } => {
             calls.insert(function_name.clone());
             for arg in arguments {
-                scan_expr_calls(arg, calls);
+                scan_expr_calls(arg, raises, calls);
             }
         }
         IRExpr::MethodCall {
@@ -321,32 +329,42 @@ fn scan_expr_calls(expr: &IRExpr, calls: &mut HashSet<String>) {
             arguments,
         } => {
             calls.insert(method_name.clone());
-            scan_expr_calls(object, calls);
+            scan_expr_calls(object, raises, calls);
             for arg in arguments {
-                scan_expr_calls(arg, calls);
+                scan_expr_calls(arg, raises, calls);
             }
         }
-        IRExpr::BinaryOp { left, right, .. }
-        | IRExpr::CompareOp { left, right, .. }
-        | IRExpr::BoolOp { left, right, .. } => {
-            scan_expr_calls(left, calls);
-            scan_expr_calls(right, calls);
+        IRExpr::BinaryOp { left, right, op } => {
+            // Division by zero raises ZeroDivisionError, unless the divisor is
+            // a nonzero literal and cannot be zero.
+            if matches!(op, IROp::Div | IROp::Mod | IROp::FloorDiv)
+                && !crate::compiler::expression::divisor_is_never_zero(right)
+            {
+                *raises = true;
+            }
+            scan_expr_calls(left, raises, calls);
+            scan_expr_calls(right, raises, calls);
         }
-        IRExpr::UnaryOp { operand, .. } => scan_expr_calls(operand, calls),
+        IRExpr::CompareOp { left, right, .. } | IRExpr::BoolOp { left, right, .. } => {
+            scan_expr_calls(left, raises, calls);
+            scan_expr_calls(right, raises, calls);
+        }
+        IRExpr::UnaryOp { operand, .. } => scan_expr_calls(operand, raises, calls),
         IRExpr::ListLiteral(items) | IRExpr::SetLiteral(items) | IRExpr::TupleLiteral(items) => {
             for item in items {
-                scan_expr_calls(item, calls);
+                scan_expr_calls(item, raises, calls);
             }
         }
         IRExpr::DictLiteral(pairs) => {
             for (k, v) in pairs {
-                scan_expr_calls(k, calls);
-                scan_expr_calls(v, calls);
+                scan_expr_calls(k, raises, calls);
+                scan_expr_calls(v, raises, calls);
             }
         }
         IRExpr::Indexing { container, index } => {
-            scan_expr_calls(container, calls);
-            scan_expr_calls(index, calls);
+            *raises = true;
+            scan_expr_calls(container, raises, calls);
+            scan_expr_calls(index, raises, calls);
         }
         IRExpr::Slicing {
             container,
@@ -354,40 +372,40 @@ fn scan_expr_calls(expr: &IRExpr, calls: &mut HashSet<String>) {
             end,
             step,
         } => {
-            scan_expr_calls(container, calls);
+            scan_expr_calls(container, raises, calls);
             for part in [start, end, step].into_iter().flatten() {
-                scan_expr_calls(part, calls);
+                scan_expr_calls(part, raises, calls);
             }
         }
-        IRExpr::Attribute { object, .. } => scan_expr_calls(object, calls),
+        IRExpr::Attribute { object, .. } => scan_expr_calls(object, raises, calls),
         IRExpr::Comprehension {
             element,
             value,
             generators,
             ..
         } => {
-            scan_expr_calls(element, calls);
+            scan_expr_calls(element, raises, calls);
             if let Some(value) = value {
-                scan_expr_calls(value, calls);
+                scan_expr_calls(value, raises, calls);
             }
             for generator in generators {
-                scan_expr_calls(&generator.iterable, calls);
+                scan_expr_calls(&generator.iterable, raises, calls);
                 for condition in &generator.conditions {
-                    scan_expr_calls(condition, calls);
+                    scan_expr_calls(condition, raises, calls);
                 }
             }
         }
         IRExpr::RangeCall { start, stop, step } => {
-            scan_expr_calls(stop, calls);
+            scan_expr_calls(stop, raises, calls);
             for part in [start, step].into_iter().flatten() {
-                scan_expr_calls(part, calls);
+                scan_expr_calls(part, raises, calls);
             }
         }
-        IRExpr::Lambda { body, .. } => scan_expr_calls(body, calls),
+        IRExpr::Lambda { body, .. } => scan_expr_calls(body, raises, calls),
         IRExpr::ClosureMake { lambda_name, .. } => {
             calls.insert(lambda_name.clone());
         }
-        IRExpr::DynamicImportExpr { module_name } => scan_expr_calls(module_name, calls),
+        IRExpr::DynamicImportExpr { module_name } => scan_expr_calls(module_name, raises, calls),
         _ => {}
     }
 }
@@ -719,6 +737,8 @@ fn build_i32_to_str_function(alloc_func_index: u32) -> Function {
 /// Does this expression (or any sub-expression) call `open()`?
 fn expr_uses_open(expr: &IRExpr) -> bool {
     match expr {
+        IRExpr::EnvRead { .. } | IRExpr::CellNew | IRExpr::CellLoad { .. } => false,
+        IRExpr::CellStore { value, .. } => expr_uses_open(value),
         IRExpr::FunctionCall {
             function_name,
             arguments,

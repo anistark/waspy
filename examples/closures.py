@@ -1,8 +1,9 @@
 # Closures: lambdas with full variable capture (#43). A lambda is lifted to a
-# real WASM function; the closure value is a heap environment holding the
-# captured variables (copied at creation) plus the dispatch-table slot, and
-# calls go through call_indirect. Each function returns an i32 checked by the
-# integration tests.
+# real WASM function; the closure value is a heap environment holding a pointer
+# to each captured variable's cell plus the dispatch-table slot, and calls go
+# through call_indirect. Capturing the cell rather than the value is what makes
+# a closure see the variable's *current* contents, the way Python's do. Each
+# function returns an i32 checked by the integration tests.
 
 square = lambda x: x * x
 
@@ -83,3 +84,33 @@ def closures_built_in_comprehension() -> int:
     f0 = fs[0]
     f2 = fs[2]
     return f0(10) + f2(10)  # 22
+
+
+def reads_the_current_value() -> int:
+    """Python closures capture the variable, not a snapshot of it: reassigning
+    after the closure is made changes what the closure sees."""
+    v = 1
+    g = lambda: v
+    v = 9
+    return g()
+
+
+def sees_updates_between_calls() -> int:
+    """The same closure, called either side of an update, answers differently:
+    11 the first time and 22 the second."""
+    v = 11
+    g = lambda: v
+    first = g()
+    v = 22
+    return first + g()
+
+
+def loop_closures_share_the_loop_variable() -> int:
+    """Closures made in a loop share the one loop variable, so after the loop
+    they all see its final value (2), not the value it had at their creation."""
+    fs = []
+    for i in range(3):
+        fs.append(lambda: i)
+    first = fs[0]
+    last = fs[2]
+    return first() * 10 + last()

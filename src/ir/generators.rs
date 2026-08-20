@@ -577,6 +577,10 @@ impl Desugarer<'_> {
 /// the later lambda-lifting pass.
 fn for_each_child(expr: &mut IRExpr, f: &mut impl FnMut(&mut IRExpr)) {
     match expr {
+        // No child expressions: the slot is a constant and the environment is a
+        // parameter.
+        IRExpr::EnvRead { .. } | IRExpr::CellNew | IRExpr::CellLoad { .. } => {}
+        IRExpr::CellStore { value, .. } => f(value),
         IRExpr::BinaryOp { left, right, .. }
         | IRExpr::CompareOp { left, right, .. }
         | IRExpr::BoolOp { left, right, .. } => {

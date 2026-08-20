@@ -1970,6 +1970,23 @@ fn rename_vars(expr: &mut IRExpr, map: &std::collections::HashMap<String, String
         return;
     }
     match expr {
+        IRExpr::EnvRead { env, .. } => {
+            if let Some(renamed) = map.get(env) {
+                *env = renamed.clone();
+            }
+        }
+        IRExpr::CellNew => {}
+        IRExpr::CellLoad { cell } => {
+            if let Some(renamed) = map.get(cell) {
+                *cell = renamed.clone();
+            }
+        }
+        IRExpr::CellStore { cell, value } => {
+            if let Some(renamed) = map.get(cell) {
+                *cell = renamed.clone();
+            }
+            rename_vars(value, map);
+        }
         IRExpr::Variable(name) | IRExpr::Param(name) => {
             if let Some(renamed) = map.get(name) {
                 *name = renamed.clone();
@@ -2335,8 +2352,13 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                             arguments: vec![arg],
                         });
                     }
-                    let type_conversions = ["str", "bool"];
-                    if type_conversions.contains(&function_name.as_str()) {
+                    // `bool(x)` is erased: every value is already carried as
+                    // the i32 word truthiness tests read, so the conversion is
+                    // the identity here. `str(x)` is *not* erased, because it
+                    // has to render digits at runtime; dropping it left
+                    // `str(123)` as the integer 123, so `len(str(n))` answered
+                    // 0 and comparing the result to a literal never matched.
+                    if function_name == "bool" {
                         if call.args.len() != 1 {
                             return Err(anyhow!(
                                 "Type conversion function expects exactly one argument"

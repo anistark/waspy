@@ -956,3 +956,265 @@ fn context_managers_exit_on_the_exception_path() {
     );
     assert_eq!(call_i32(&nested, "f"), 2);
 }
+
+// ---------------------------------------------------------------------------
+// Indexing: negative indices, bounds, and missing keys.
+//
+// An index is normalized against the length and then checked. `xs[-1]` used to
+// compute an address *before* the region and read the count word back as an
+// element, an index past the end read (or wrote) whatever followed the region,
+// and a dict read for a key the dict did not hold answered 0, which is a real
+// value and indistinguishable from a stored one. All three answered silently.
+// ---------------------------------------------------------------------------
+
+/// A negative index counts from the end, on every sequence kind.
+#[test]
+fn negative_indices_count_from_the_end() {
+    assert_eq!(
+        call_i32(
+            "def f() -> int:\n    xs = [10, 20, 30]\n    return xs[-1]\n",
+            "f"
+        ),
+        30
+    );
+    assert_eq!(
+        call_i32(
+            "def f() -> int:\n    xs = [10, 20, 30]\n    return xs[-3]\n",
+            "f"
+        ),
+        10
+    );
+    assert_eq!(
+        call_i32(
+            "def f() -> int:\n    t = (10, 20, 30)\n    return t[-2]\n",
+            "f"
+        ),
+        20
+    );
+    // Through a variable, so the index is not a compile-time constant.
+    assert_eq!(
+        call_i32(
+            "def f() -> int:\n    xs = [10, 20, 30]\n    i = 0 - 1\n    return xs[i]\n",
+            "f"
+        ),
+        30
+    );
+    // And on the assignment side.
+    assert_eq!(
+        call_i32(
+            "def f() -> int:\n    xs = [1, 2, 3]\n    xs[-1] = 99\n    return xs[2]\n",
+            "f"
+        ),
+        99
+    );
+}
+
+/// An index outside the sequence raises IndexError, reading or writing, and it
+/// is catchable like Python's.
+#[test]
+fn out_of_range_indices_raise_index_error() {
+    let read = "def f() -> int:\n\
+                \x20   xs = [1, 2, 3]\n\
+                \x20   try:\n\
+                \x20       return xs[7]\n\
+                \x20   except IndexError:\n\
+                \x20       return 5\n";
+    assert_eq!(call_i32(read, "f"), 5);
+
+    // Far enough negative to stay negative after normalizing.
+    let read_negative = "def f() -> int:\n\
+                         \x20   xs = [1, 2, 3]\n\
+                         \x20   try:\n\
+                         \x20       return xs[0 - 9]\n\
+                         \x20   except IndexError:\n\
+                         \x20       return 5\n";
+    assert_eq!(call_i32(read_negative, "f"), 5);
+
+    let write = "def f() -> int:\n\
+                 \x20   xs = [1, 2, 3]\n\
+                 \x20   try:\n\
+                 \x20       xs[7] = 99\n\
+                 \x20   except IndexError:\n\
+                 \x20       return 5\n\
+                 \x20   return 9\n";
+    assert_eq!(call_i32(write, "f"), 5);
+
+    // A string index is checked the same way.
+    let string = "def f() -> int:\n\
+                  \x20   s = \"abc\"\n\
+                  \x20   try:\n\
+                  \x20       c = s[7]\n\
+                  \x20   except IndexError:\n\
+                  \x20       return 5\n\
+                  \x20   return 9\n";
+    assert_eq!(call_i32(string, "f"), 5);
+}
+
+/// Reading a key a dict does not hold raises KeyError instead of answering 0.
+#[test]
+fn a_missing_dict_key_raises() {
+    let src = "def f() -> int:\n\
+               \x20   d = {1: 10}\n\
+               \x20   try:\n\
+               \x20       return d[2]\n\
+               \x20   except KeyError:\n\
+               \x20       return 5\n";
+    assert_eq!(call_i32(src, "f"), 5);
+
+    // A key that *is* there still reads back, including the value 0, which the
+    // old not-found answer was indistinguishable from.
+    assert_eq!(
+        call_i32(
+            "def f() -> int:\n    d = {1: 0, 2: 7}\n    return d[1] + d[2]\n",
+            "f"
+        ),
+        7
+    );
+}
+
+/// An IndexError raised inside a callee reaches the caller's handler: a
+/// function that indexes counts as one that can raise, so its callers check.
+#[test]
+fn index_errors_propagate_out_of_calls() {
+    let src = "def pick(xs: list, i: int) -> int:\n\
+               \x20   return xs[i]\n\
+               \n\
+               def f() -> int:\n\
+               \x20   xs = [1, 2, 3]\n\
+               \x20   try:\n\
+               \x20       return pick(xs, 7)\n\
+               \x20   except IndexError:\n\
+               \x20       return 5\n";
+    assert_eq!(call_i32(src, "f"), 5);
+}
+
+/// A closure's environment shares the collection slot layout but its first word
+/// is the dispatch table slot, not a length. Reading a capture is a distinct IR
+/// node so it is not bounds-checked against that word, which would have made
+/// every capture read raise IndexError.
+#[test]
+fn closure_captures_are_not_bounds_checked() {
+    let src = "def make_adder(n: int):\n\
+               \x20   return lambda x: x + n\n\
+               \n\
+               def f() -> int:\n\
+               \x20   add5 = make_adder(5)\n\
+               \x20   add9 = make_adder(9)\n\
+               \x20   return add5(3) * 100 + add9(1)\n";
+    assert_eq!(call_i32(src, "f"), 810);
+}
+
+/// Assigning into a tuple or a string is a compile error naming the type, the
+/// way Python raises TypeError. The tuple case used to leave the stack
+/// unbalanced, so the module failed validation while the compiler reported
+/// success; the string case silently dropped the write.
+#[test]
+fn item_assignment_into_immutable_types_is_rejected() {
+    let tuple = try_compile("def f() -> int:\n    t = (1, 2)\n    t[0] = 9\n    return t[0]\n")
+        .expect_err("tuples do not support item assignment");
+    assert!(
+        tuple.contains("'tuple' object does not support item assignment"),
+        "unexpected: {tuple}"
+    );
+
+    let string =
+        try_compile("def f() -> int:\n    s = \"abc\"\n    s[0] = \"z\"\n    return len(s)\n")
+            .expect_err("strings do not support item assignment");
+    assert!(
+        string.contains("'str' object does not support item assignment"),
+        "unexpected: {string}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Pointer identity: a collection's elements live in a block its header points
+// at, so growing one never moves the collection itself.
+//
+// Growth used to reallocate the whole region and rebind the variable or field
+// it was reached through. Every other name for it kept the old pointer: a list
+// grown inside a function it was passed to silently lost the elements added
+// after it outgrew its region (while ones that fit were visible, so it looked
+// intermittent), and a collection reached by indexing another one had nowhere
+// to rebind and trapped.
+// ---------------------------------------------------------------------------
+
+/// A list grown inside a function it was passed to is grown for the caller too,
+/// well past the point where it outgrows its original block.
+#[test]
+fn growth_through_a_parameter_reaches_the_caller() {
+    let src = "def fill(xs: list, n: int):\n\
+               \x20   i = 0\n\
+               \x20   while i < n:\n\
+               \x20       xs.append(i * 2)\n\
+               \x20       i = i + 1\n\
+               \n\
+               def f() -> int:\n\
+               \x20   xs = [1, 2]\n\
+               \x20   fill(xs, 50)\n\
+               \x20   return len(xs) * 1000 + xs[51]\n";
+    // 52 elements, and the last one is 49*2.
+    assert_eq!(call_i32(src, "f"), 52098);
+}
+
+/// A collection reached by indexing another one grows in place, where it used
+/// to trap for want of somewhere to rebind.
+#[test]
+fn growth_through_an_index_works() {
+    let src = "def f() -> int:\n\
+               \x20   rows = [[1, 2]]\n\
+               \x20   rows[0].append(7)\n\
+               \x20   return len(rows[0]) * 10 + rows[0][2]\n";
+    assert_eq!(call_i32(src, "f"), 37);
+
+    // The same through a dict value.
+    let via_dict = "def f() -> int:\n\
+                    \x20   d = {1: [1, 2]}\n\
+                    \x20   d[1].append(7)\n\
+                    \x20   return len(d[1]) * 10 + d[1][2]\n";
+    assert_eq!(call_i32(via_dict, "f"), 37);
+}
+
+/// Two names for one list see each other's growth.
+#[test]
+fn aliases_see_the_same_grown_list() {
+    let src = "def f() -> int:\n\
+               \x20   a = [1, 2]\n\
+               \x20   b = a\n\
+               \x20   i = 0\n\
+               \x20   while i < 10:\n\
+               \x20       b.append(i)\n\
+               \x20       i = i + 1\n\
+               \x20   return len(a)\n";
+    assert_eq!(call_i32(src, "f"), 12);
+}
+
+/// Dicts and sets grow the same way, through a parameter.
+#[test]
+fn dicts_and_sets_grow_through_a_parameter() {
+    let dict = "def put(d: dict):\n\
+                \x20   i = 0\n\
+                \x20   while i < 20:\n\
+                \x20       d[i] = i * 3\n\
+                \x20       i = i + 1\n\
+                \n\
+                def f() -> int:\n\
+                \x20   d = {100: 1}\n\
+                \x20   put(d)\n\
+                \x20   return len(d) * 100 + d[9]\n";
+    assert_eq!(call_i32(dict, "f"), 2127);
+
+    let set = "def put(s: set):\n\
+               \x20   i = 0\n\
+               \x20   while i < 40:\n\
+               \x20       s.add(i)\n\
+               \x20       i = i + 1\n\
+               \n\
+               def f() -> int:\n\
+               \x20   s = {100}\n\
+               \x20   put(s)\n\
+               \x20   n = len(s) * 10\n\
+               \x20   if 37 in s:\n\
+               \x20       n = n + 1\n\
+               \x20   return n\n";
+    assert_eq!(call_i32(set, "f"), 411);
+}

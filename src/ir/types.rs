@@ -234,6 +234,32 @@ pub enum IRExpr {
         method_name: String,
         arguments: Vec<IRExpr>,
     },
+    /// A fresh heap cell: one slot, holding a variable that some closure
+    /// captures. Python closures capture the *variable*, not its value, so a
+    /// captured variable lives in a cell that the enclosing function and every
+    /// closure over it share; reads through the cell see the current value.
+    CellNew,
+    /// Read the value out of the cell whose pointer is held in local `cell`.
+    CellLoad {
+        cell: String,
+    },
+    /// Write `value` into the cell whose pointer is held in local `cell`.
+    /// Evaluates to nothing, so it stands as an expression statement.
+    CellStore {
+        cell: String,
+        value: Box<IRExpr>,
+    },
+    /// A read from a closure's environment block, `__env` slot `slot`.
+    ///
+    /// Compiler-generated and always in range, and the block is not a
+    /// collection: its first word is the dispatch table slot, not a length. It
+    /// used to be written as an `Indexing` over `__env`, which shares the slot
+    /// layout, but that reads the table slot as the length as soon as indexing
+    /// bounds-checks, so environment reads say what they are instead.
+    EnvRead {
+        env: String,
+        slot: u32,
+    },
     // New expression for dynamic imports
     DynamicImportExpr {
         // __import__(module_name) or importlib.import_module(module_name)
@@ -301,6 +327,29 @@ pub enum IRConstant {
 /// Type system for IR
 #[derive(Debug, Clone, PartialEq)]
 pub enum IRType {
+    /// Python's `int`, represented as a 32-bit two's-complement integer.
+    ///
+    /// This is a deliberate narrowing of Python's semantics, and it is part of
+    /// the definition of the subset this compiler accepts rather than an
+    /// accident of the backend. CPython's `int` is arbitrary precision: it
+    /// grows to hold whatever it is given, so `1000000 * 1000000` is
+    /// 1000000000000 and `2 ** 40` is 1099511627776. Here both operands and the
+    /// result are i32, so arithmetic that leaves the range
+    /// -2147483648..=2147483647 wraps around, giving -727379968 and 0 for those
+    /// two expressions.
+    ///
+    /// The alternative was to check every add, subtract, multiply, and power
+    /// for overflow and trap, which costs instructions on the hottest path in
+    /// any program and rejects code that deliberately relies on wrapping. A
+    /// 64-bit integer would only move the boundary rather than remove it, since
+    /// arbitrary precision needs heap-allocated digits and an allocator call on
+    /// every operation.
+    ///
+    /// So the rule is documented instead of enforced: a program whose values
+    /// stay inside the i32 range gets Python's answers, and one that leaves it
+    /// gets two's-complement wraparound. `README.md` states this next to the
+    /// type list, and `tests/unit/basics.rs` pins the behaviour so it stays
+    /// deliberate.
     Int,
     Float,
     Bool,
