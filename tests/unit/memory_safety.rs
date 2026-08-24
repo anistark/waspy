@@ -14,6 +14,9 @@
 //!    call, an augmented or unpacking assignment, a write through a subscript
 //!    or attribute) were compiled away, so later reads saw the value from
 //!    before the statement and the program returned a wrong answer.
+//! 6. An f-string with a value in it kept only its first piece, so
+//!    `f"{n} items"` was the bare integer and `f"Total: {n}"` was the label
+//!    with the value missing.
 //!
 //! Each test asserts the runtime result, so a regression is a failing value
 //! rather than a module that merely compiles.
@@ -21,7 +24,7 @@
 #[path = "../utils/harness.rs"]
 mod harness;
 
-use harness::{call_f64, call_i32, try_compile};
+use harness::{call_f64, call_i32, call_str, call_str_1, try_compile};
 
 /// A minimal context manager, plus whatever function bodies a test needs.
 fn with_manager(bodies: &str) -> String {
@@ -1217,4 +1220,145 @@ fn dicts_and_sets_grow_through_a_parameter() {
                \x20       n = n + 1\n\
                \x20   return n\n";
     assert_eq!(call_i32(set, "f"), 411);
+}
+
+// ---------------------------------------------------------------------------
+// f-strings kept only their first piece
+// ---------------------------------------------------------------------------
+
+/// An f-string with a value in it used to lower to its *first* part alone, so
+/// `f"{n} items"` was the bare integer `n` typed as a `str` and
+/// `f"Total: {n}"` was the literal `"Total: "`. Both compiled without a
+/// complaint and answered wrong.
+#[test]
+fn fstring_interpolates_every_part() {
+    let src = "def leading(n: int) -> str:\n\
+               \x20   return f\"{n} items\"\n\
+               \n\
+               def trailing(n: int) -> str:\n\
+               \x20   return f\"Total: {n}\"\n\
+               \n\
+               def surrounded(n: int) -> str:\n\
+               \x20   return f\"[{n}]\"\n";
+    assert_eq!(call_str_1(src, "leading", 42), "42 items");
+    assert_eq!(call_str_1(src, "trailing", 42), "Total: 42");
+    assert_eq!(call_str_1(src, "surrounded", 42), "[42]");
+}
+
+/// Several placeholders in one f-string, including an expression and a nested
+/// call, concatenate left to right. Each `+` in the chain uses the same scratch
+/// locals, so a chain this long is what catches one clobbering the next.
+#[test]
+fn fstring_chains_many_placeholders() {
+    let src = "def double(n: int) -> int:\n\
+               \x20   return n * 2\n\
+               \n\
+               def f(a: int) -> str:\n\
+               \x20   return f\"a={a} b={a + 1} sum={a + a} twice={double(a)}\"\n";
+    assert_eq!(call_str_1(src, "f", 3), "a=3 b=4 sum=6 twice=6");
+}
+
+/// A string placeholder passes through `str()` unchanged, and an f-string built
+/// from an instance field reads the field.
+#[test]
+fn fstring_interpolates_strings_and_fields() {
+    let src = "class Item:\n\
+               \x20   def __init__(self, name: str, qty: int):\n\
+               \x20       self.name = name\n\
+               \x20       self.qty = qty\n\
+               \n\
+               \x20   def line(self) -> str:\n\
+               \x20       return f\"{self.name} x{self.qty}\"\n\
+               \n\
+               def f() -> str:\n\
+               \x20   it: Item = Item(\"bolt\", 12)\n\
+               \x20   return it.line()\n";
+    assert_eq!(call_str(src, "f"), "bolt x12");
+}
+
+/// An f-string built in a loop accumulates, rather than each pass overwriting
+/// the last with its first piece.
+#[test]
+fn fstring_accumulates_in_a_loop() {
+    let src = "def f(n: int) -> str:\n\
+               \x20   out = \"\"\n\
+               \x20   for i in range(n):\n\
+               \x20       out = out + f\"{i},\"\n\
+               \x20   return out\n";
+    assert_eq!(call_str_1(src, "f", 4), "0,1,2,3,");
+}
+
+/// Constant placeholders fold into the literal, and they fold the way Python
+/// spells them: a bool is `True`, not Rust's `true`, and a whole float keeps
+/// its decimal point.
+#[test]
+fn fstring_folds_constants_python_style() {
+    let src = "def f() -> str:\n\
+               \x20   return f\"{1} {2.5} {3.0} {True} {False}\"\n\
+               \n\
+               def escaped(n: int) -> str:\n\
+               \x20   return f\"{{{n}}}\"\n";
+    assert_eq!(call_str(src, "f"), "1 2.5 3.0 True False");
+    assert_eq!(call_str_1(src, "escaped", 9), "{9}");
+}
+
+/// A format specifier and an `!r`/`!a` conversion change what a placeholder
+/// renders and have no implementation here, so they are rejected rather than
+/// dropped on the floor. `!s` is `str(value)`, which is what a bare placeholder
+/// already does, so it is accepted.
+#[test]
+fn fstring_rejects_specs_and_conversions() {
+    let spec = "def f(x: int) -> str:\n\
+                \x20   return f\"{x:>8}\"\n";
+    let err = try_compile(spec).expect_err("format specifier must be rejected");
+    assert!(
+        err.contains("format specifier"),
+        "expected a format-specifier error, got: {err}"
+    );
+
+    let repr = "def f(x: int) -> str:\n\
+                \x20   return f\"{x!r}\"\n";
+    let err = try_compile(repr).expect_err("!r must be rejected");
+    assert!(err.contains("!r"), "expected an `!r` error, got: {err}");
+
+    let ascii = "def f(x: int) -> str:\n\
+                 \x20   return f\"{x!a}\"\n";
+    let err = try_compile(ascii).expect_err("!a must be rejected");
+    assert!(err.contains("!a"), "expected an `!a` error, got: {err}");
+
+    let str_conv = "def f(x: int) -> str:\n\
+                    \x20   return f\"n={x!s}\"\n";
+    assert_eq!(call_str_1(str_conv, "f", 5), "n=5");
+}
+
+/// A value `str()` cannot render is a compile error, not an empty or partial
+/// string. Floats and bools are the two a program hits first.
+#[test]
+fn fstring_rejects_values_str_cannot_render() {
+    let float = "def f(x: float) -> str:\n\
+                 \x20   return f\"v={x}\"\n";
+    let err = try_compile(float).expect_err("float placeholder must be rejected");
+    assert!(
+        err.contains("str() of float"),
+        "expected a str()-of-float error, got: {err}"
+    );
+
+    let boolean = "def f(x: bool) -> str:\n\
+                   \x20   return f\"v={x}\"\n";
+    let err = try_compile(boolean).expect_err("bool placeholder must be rejected");
+    assert!(
+        err.contains("str() of bool"),
+        "expected a str()-of-bool error, got: {err}"
+    );
+
+    // A float constant folds only where Rust and Python spell it the same
+    // way. Past 1e16 Python switches to exponent notation and Rust does not,
+    // so the placeholder is reported rather than folded to the wrong digits.
+    let big = "def f() -> str:\n\
+               \x20   return f\"v={1e16}\"\n";
+    let err = try_compile(big).expect_err("out-of-range float constant must be rejected");
+    assert!(
+        err.contains("str() of float"),
+        "expected a str()-of-float error, got: {err}"
+    );
 }

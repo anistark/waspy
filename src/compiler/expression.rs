@@ -2661,7 +2661,8 @@ pub fn emit_expr(
                                     None => "nothing".to_string(),
                                 };
                                 ctx.report(format!(
-                                    "str() of {what} is not supported yet. \
+                                    "str() of {what} is not supported yet; an f-string \
+                                     placeholder renders its value through str() too. \
                                      Hint: str() renders ints and passes strings through"
                                 ));
                                 if matches!(other, Some(IRType::String) | Some(IRType::Bytes)) {

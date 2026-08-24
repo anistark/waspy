@@ -44,9 +44,11 @@ def main() -> int:
     pi_value = math.pi
     e_value = math.e
     tau_value = math.tau
-    print(f"Pi: {pi_value}")
-    print(f"E: {e_value}")
-    print(f"Tau: {tau_value}")
+    # A float has no runtime str() yet, so an f-string placeholder cannot
+    # render one; truncate to an int to print the value.
+    print(f"Pi (truncated): {int(pi_value)}")
+    print(f"E (truncated): {int(e_value)}")
+    print(f"Tau (truncated): {int(tau_value)}")
 
     # Test math functions (function references, not calls yet)
     # These test that the functions exist and can be referenced

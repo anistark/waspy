@@ -1,7 +1,9 @@
 use crate::ir::decorators::MethodKind;
 use crate::ir::types::*;
 use anyhow::{anyhow, Context, Result};
-use rustpython_parser::ast::{ArgWithDefault, Arguments, ExceptHandler, Expr, Stmt, Suite};
+use rustpython_parser::ast::{
+    ArgWithDefault, Arguments, ConversionFlag, ExceptHandler, Expr, Stmt, Suite,
+};
 use std::collections::HashSet;
 
 /// Codegen intrinsics backing `for k, v in d.items()` (and `.keys()` /
@@ -2878,114 +2880,72 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
             memory_layout,
         ),
         Expr::JoinedStr(joined_str) => {
-            // F-string support: f"string {expr} more"
-            // JoinedStr contains a list of values: some are Constant strings, some are FormattedValues (expressions)
-            let mut parts = Vec::new();
-            let mut combined_string = String::new();
-            let mut has_variables = false;
+            // f-string: alternate constant text with interpolated values and
+            // concatenate the pieces. `{value}` is Python's `str(value)`, so
+            // each runtime part is lowered as a `str()` call and the whole
+            // f-string reduces to the same `+` chain a user would write by
+            // hand. Adjacent constant text is merged first, so each interned
+            // label is a single blob (the dataclass `__repr__` builder above
+            // uses the same shape).
+            let mut text = String::new();
+            let mut parts: Vec<IRExpr> = Vec::new();
 
             for value in &joined_str.values {
                 match value {
                     Expr::Constant(const_expr) => {
-                        // Plain string part
+                        // Plain text between the placeholders.
                         if let rustpython_parser::ast::Constant::Str(s) = &const_expr.value {
-                            combined_string.push_str(s);
+                            text.push_str(s);
                         }
                     }
                     Expr::FormattedValue(fv) => {
-                        // Variable/expression part like {expr}
-                        has_variables = true;
+                        reject_unsupported_format(fv)?;
 
-                        // If we have accumulated string, add it
-                        if !combined_string.is_empty() {
-                            parts.push(IRExpr::Const(IRConstant::String(combined_string.clone())));
-                            combined_string.clear();
+                        let lowered = lower_expr(&fv.value, memory_layout)?;
+                        // A constant interpolation is rendered here, so
+                        // `f"{2}nd"` stays one string constant rather than
+                        // becoming a runtime concatenation.
+                        match lowered {
+                            IRExpr::Const(constant) => match render_constant(&constant) {
+                                Some(rendered) => text.push_str(&rendered),
+                                None => {
+                                    flush_fstring_text(&mut text, &mut parts, memory_layout);
+                                    parts.push(IRExpr::FunctionCall {
+                                        function_name: "str".to_string(),
+                                        arguments: vec![IRExpr::Const(constant)],
+                                    });
+                                }
+                            },
+                            other => {
+                                flush_fstring_text(&mut text, &mut parts, memory_layout);
+                                parts.push(IRExpr::FunctionCall {
+                                    function_name: "str".to_string(),
+                                    arguments: vec![other],
+                                });
+                            }
                         }
-
-                        // Add the formatted value (convert to string)
-                        let expr_ir = lower_expr(&fv.value, memory_layout)?;
-                        parts.push(expr_ir);
                     }
                     _ => {
                         return Err(anyhow!("Unsupported element in f-string"));
                     }
                 }
             }
+            flush_fstring_text(&mut text, &mut parts, memory_layout);
 
-            // Add any remaining string
-            if !combined_string.is_empty() {
-                parts.push(IRExpr::Const(IRConstant::String(combined_string)));
+            // Nothing to interpolate: the whole f-string is one constant.
+            if parts.is_empty() {
+                memory_layout.add_string("");
+                return Ok(IRExpr::Const(IRConstant::String(String::new())));
             }
 
-            // If no variables, return as single string constant
-            if !has_variables {
-                memory_layout.add_string(
-                    &parts
-                        .iter()
-                        .filter_map(|p| {
-                            if let IRExpr::Const(IRConstant::String(s)) = p {
-                                Some(s.as_str())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join(""),
-                );
-
-                let combined = parts
-                    .into_iter()
-                    .filter_map(|p| {
-                        if let IRExpr::Const(IRConstant::String(s)) = p {
-                            Some(s)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("");
-                return Ok(IRExpr::Const(IRConstant::String(combined)));
-            }
-
-            // If all parts are constants, we can optimize
-            let mut all_const = true;
-            let mut const_parts = Vec::new();
-
-            for part in &parts {
-                match part {
-                    IRExpr::Const(IRConstant::String(s)) => {
-                        const_parts.push(s.clone());
-                    }
-                    IRExpr::Const(IRConstant::Int(i)) => {
-                        const_parts.push(i.to_string());
-                    }
-                    IRExpr::Const(IRConstant::Float(f)) => {
-                        const_parts.push(f.to_string());
-                    }
-                    IRExpr::Const(IRConstant::Bool(b)) => {
-                        const_parts.push(b.to_string());
-                    }
-                    _ => {
-                        all_const = false;
-                        break;
-                    }
-                }
-            }
-
-            if all_const {
-                let result = const_parts.join("");
-                memory_layout.add_string(&result);
-                return Ok(IRExpr::Const(IRConstant::String(result)));
-            }
-
-            // For dynamic f-strings, concatenate parts at runtime
-            // We'll return a list of parts to be joined at runtime
-            // For now, return the first part or a placeholder
-            if !parts.is_empty() {
-                Ok(parts.into_iter().next().unwrap())
-            } else {
-                Ok(IRExpr::Const(IRConstant::String(String::new())))
-            }
+            Ok(parts
+                .into_iter()
+                .reduce(|acc, part| IRExpr::BinaryOp {
+                    left: Box::new(acc),
+                    right: Box::new(part),
+                    op: IROp::Add,
+                })
+                .expect("parts is non-empty"))
         }
         Expr::Lambda(lambda) => {
             let params = process_function_params(&lambda.args, memory_layout)?;
@@ -3003,6 +2963,93 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
         }
         _ => Err(anyhow!("Unsupported expression type: {expr:?}")),
     }
+}
+
+/// Move the accumulated constant text of an f-string into `parts` as one
+/// interned string literal. These strings never pass through the normal
+/// literal-lowering path, so they are registered in the module layout here.
+fn flush_fstring_text(
+    text: &mut String,
+    parts: &mut Vec<IRExpr>,
+    memory_layout: &mut MemoryLayout,
+) {
+    if !text.is_empty() {
+        memory_layout.add_string(text);
+        parts.push(IRExpr::Const(IRConstant::String(std::mem::take(text))));
+    }
+}
+
+/// Render a constant the way Python's `str()` would, for an f-string
+/// placeholder the converter can fold at compile time. `None` means the
+/// constant has no compile-time rendering and has to go through `str()` in
+/// code generation (which reports what it cannot render).
+fn render_constant(constant: &IRConstant) -> Option<String> {
+    match constant {
+        IRConstant::String(s) => Some(s.clone()),
+        IRConstant::Int(i) => Some(i.to_string()),
+        IRConstant::Float(f) => format_float_like_python(*f),
+        // Python spells these `True` and `False`, not Rust's `true`/`false`.
+        IRConstant::Bool(b) => Some(if *b { "True" } else { "False" }.to_string()),
+        _ => None,
+    }
+}
+
+/// `str()` of a float constant, for the placeholders above. Rust and Python
+/// both render the shortest form that round-trips, and both write it
+/// positionally over the range below, so the only difference to make up is the
+/// decimal point Python always keeps (`1.0`, not Rust's `1`). Outside that
+/// range they disagree on where exponent notation starts (Python writes
+/// `1e+16` where Rust writes the digits out), so `None` sends the placeholder
+/// through `str()` to be reported rather than rendered wrong.
+fn format_float_like_python(value: f64) -> Option<String> {
+    let magnitude = value.abs();
+    if !value.is_finite() || (magnitude != 0.0 && !(1e-4..1e16).contains(&magnitude)) {
+        return None;
+    }
+    let rendered = value.to_string();
+    Some(if rendered.contains('.') {
+        rendered
+    } else {
+        format!("{rendered}.0")
+    })
+}
+
+/// Reject the f-string placeholder syntax that would otherwise be dropped on
+/// the floor. A format specifier or an `!r`/`!a` conversion changes what the
+/// placeholder renders, and neither has an implementation here, so honouring
+/// them silently would print the wrong thing.
+fn reject_unsupported_format(fv: &rustpython_parser::ast::ExprFormattedValue) -> Result<()> {
+    // `!s` is `str(value)`, which is what a bare placeholder already does.
+    match fv.conversion {
+        ConversionFlag::None | ConversionFlag::Str => {}
+        ConversionFlag::Repr => {
+            return Err(anyhow!(
+                "f-string conversion '!r' is not supported. \
+                 Hint: interpolate the value itself ({{value}})"
+            ));
+        }
+        ConversionFlag::Ascii => {
+            return Err(anyhow!(
+                "f-string conversion '!a' is not supported. \
+                 Hint: interpolate the value itself ({{value}})"
+            ));
+        }
+    }
+
+    let has_spec = match fv.format_spec.as_deref() {
+        None => false,
+        Some(Expr::JoinedStr(spec)) => !spec.values.is_empty(),
+        Some(_) => true,
+    };
+    if has_spec {
+        return Err(anyhow!(
+            "f-string format specifiers are not supported yet \
+             (the ':' in f\"{{value:.2f}}\"). \
+             Hint: interpolate the value without a specifier ({{value}})"
+        ));
+    }
+
+    Ok(())
 }
 
 /// Simple format string processor for basic placeholders

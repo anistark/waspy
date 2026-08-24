@@ -36,6 +36,7 @@ Generate & Optimize
 - Enables function calls between compiled functions
 - Includes an expanded type system: integers (32-bit, see [Numbers](#numbers)), floats, booleans, strings
 - Complete string operations support (slicing, concatenation, 20+ methods, formatting)
+- F-strings interpolate every placeholder: `f"{count} items"` renders each value with `str()` and concatenates the pieces, so an f-string is the `+` chain you would write by hand. Constant placeholders fold into the literal at compile time
 - Supports arithmetic operations (`+`, `-`, `*`, `/`, `%`, `//`, `**`)
 - Processes comparison operators (`==`, `!=`, `<`, `<=`, `>`, `>=`)
 - Handles boolean operators (`and`, `or`) and bitwise operators (`&`, `|`, `^`, `<<`, `>>`)
@@ -105,6 +106,7 @@ Float division by zero and integer division or modulo by zero raise
 - Sequence indexing is checked: a negative index counts from the end, an index outside the sequence raises `IndexError`, a missing dict key raises `KeyError`, and item assignment into a tuple or a string is a compile error. Slicing clamps instead of raising, as Python's does
 - `int` is 32-bit and wraps on overflow rather than growing like CPython's, which is the one place waspy answers differently without saying so. See [Numbers](#numbers)
 - Exceptions carry a type, not an object: `raise ValueError("message")` records the type and drops the message, and `except ValueError as e` binds the type's code rather than an exception instance. Matching is by exact type name (plus `Exception`/`BaseException`, which catch anything), so a user-defined exception's own base classes are not consulted. Runtime faults the compiler cannot turn into a raise, an out-of-range index or a division by zero, trap rather than raising, so `except ZeroDivisionError:` will not catch `1 // 0`
+- F-string placeholders render through `str()`, so whatever `str()` cannot render cannot be interpolated: a float, a bool, or a collection in a placeholder is a compile error naming the type. Format specifiers (`f"{x:.2f}"`) and the `!r`/`!a` conversions are rejected too, rather than being dropped
 - No garbage collection or reference counting — the bump allocator never frees
 
 ### Explicitly unsupported (rejected at compile time)
