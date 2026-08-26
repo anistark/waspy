@@ -211,6 +211,61 @@ pub fn call_untyped_i32(source: &str, func: &str, args: &[Value]) -> i32 {
     }
 }
 
+/// Read a `str` result out of the module's memory. A compiled function hands
+/// back the blob's offset, and every blob carries its length in the four bytes
+/// before it, whether it is a literal in the data segment or a string built at
+/// runtime (`STRING_LEN_PREFIX` in `src/ir/types.rs`). Reading the length
+/// rather than scanning to a NUL means a wrong length fails the assertion
+/// instead of being papered over.
+pub fn read_str(instance: &Instance, store: &Store<()>, offset: i32) -> String {
+    let memory = instance
+        .get_memory(store, "memory")
+        .expect("exported `memory`");
+    let data = memory.data(store);
+    let start = offset as usize;
+    assert!(start >= 4, "string offset {offset} has no length prefix");
+    let len =
+        u32::from_le_bytes(data[start - 4..start].try_into().expect("length prefix")) as usize;
+    assert!(
+        start + len <= data.len(),
+        "string at {offset} with length {len} runs past memory"
+    );
+    String::from_utf8(data[start..start + len].to_vec()).expect("utf-8 string")
+}
+
+/// Call an exported zero-argument function returning `str`.
+pub fn call_str(source: &str, func: &str) -> String {
+    let (instance, mut store) = instantiate(source);
+    let offset = instance
+        .get_typed_func::<(), i32>(&store, func)
+        .unwrap_or_else(|_| panic!("exported str fn `{func}`"))
+        .call(&mut store, ())
+        .expect("call");
+    read_str(&instance, &store, offset)
+}
+
+/// Call an exported function taking one `i32` argument and returning `str`.
+pub fn call_str_1(source: &str, func: &str, a: i32) -> String {
+    let (instance, mut store) = instantiate(source);
+    let offset = instance
+        .get_typed_func::<i32, i32>(&store, func)
+        .unwrap_or_else(|_| panic!("exported str fn `{func}`"))
+        .call(&mut store, a)
+        .expect("call");
+    read_str(&instance, &store, offset)
+}
+
+/// Call an exported function taking two `i32` arguments and returning `str`.
+pub fn call_str_2(source: &str, func: &str, a: i32, b: i32) -> String {
+    let (instance, mut store) = instantiate(source);
+    let offset = instance
+        .get_typed_func::<(i32, i32), i32>(&store, func)
+        .unwrap_or_else(|_| panic!("exported str fn `{func}`"))
+        .call(&mut store, (a, b))
+        .expect("call");
+    read_str(&instance, &store, offset)
+}
+
 /// Compile an entry `.py` file from disk (unoptimized), resolving its user
 /// module imports like `waspy::compile_python_file` does, and instantiate it.
 pub fn instantiate_file(entry: &Path) -> (Instance, Store<()>) {

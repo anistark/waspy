@@ -11,9 +11,9 @@
 mod harness;
 
 use harness::{
-    call_f64, call_host_fs_i32, call_i32, call_i32_1, call_i32_2, call_instance_i32,
-    call_untyped_f64, call_untyped_i32, examples_dir, instantiate_file, instantiate_with_host_fs,
-    read_example,
+    call_f64, call_host_fs_i32, call_i32, call_i32_1, call_i32_2, call_instance_i32, call_str,
+    call_str_1, call_str_2, call_untyped_f64, call_untyped_i32, examples_dir, instantiate_file,
+    instantiate_with_host_fs, read_example,
 };
 use wasmi::Value;
 
@@ -532,4 +532,33 @@ fn finally_runs_on_non_local_exits() {
     assert_eq!(call_i32(&src, "finally_runs_before_return"), 13);
     assert_eq!(call_i32(&src, "cleanup_order_finally_then_exit"), 12);
     assert_eq!(call_i32(&src, "cleanup_order_exit_then_finally"), 21);
+}
+
+// ---------------------------------------------------------------------------
+// examples/fstrings.py
+// ---------------------------------------------------------------------------
+
+/// Every piece of an f-string reaches the result. Before the fix an f-string
+/// with a value in it kept only its first piece, so `label(3)` was the bare
+/// integer and `summary(...)` was `"a="`.
+#[test]
+fn fstrings_render_every_piece() {
+    let src = read_example("fstrings.py");
+    assert_eq!(call_str_1(&src, "label", 3), "3 items");
+    assert_eq!(call_str_2(&src, "summary", 2, 3), "a=2 b=3 sum=5");
+    assert_eq!(call_str_1(&src, "escaped", 9), "{9}");
+    assert_eq!(call_str_1(&src, "joined", 4), "0,1,2,3,");
+    assert_eq!(call_str(&src, "constants"), "1 2.5 True");
+    assert_eq!(call_str(&src, "item_line"), "bolt x12");
+}
+
+/// The same results measured through `len()`, which is what a caller with no
+/// access to the module's memory sees.
+#[test]
+fn fstrings_have_the_right_lengths() {
+    let src = read_example("fstrings.py");
+    assert_eq!(call_i32(&src, "greet_len"), 13); // "Hello, world!"
+    assert_eq!(call_i32_1(&src, "label_len", 12), 8); // "12 items"
+    assert_eq!(call_i32_2(&src, "summary_len", 2, 3), 13); // "a=2 b=3 sum=5"
+    assert_eq!(call_i32_1(&src, "joined_len", 4), 8); // "0,1,2,3,"
 }
