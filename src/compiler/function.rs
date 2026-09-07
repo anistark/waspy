@@ -38,6 +38,20 @@ pub fn compile_function(
     for param in &ir_func.params {
         ctx.add_local(&param.name, param.param_type.clone());
     }
+    // A string/bytes value is an (offset, length) pair everywhere else in
+    // codegen, but a parameter arrives as the offset alone. Without a
+    // companion, reading the parameter pushed one word where the rest of
+    // codegen expects two, so narrowing it to a single word (as a dict key or a
+    // collection element does) dropped the offset and kept whatever was
+    // underneath. The companion is filled from the blob's own length prefix in
+    // the prologue below. These are added only after every parameter has its
+    // index: WASM parameters are locals 0..n-1, so a companion interleaved
+    // among them would take the index the next parameter must have.
+    for param in &ir_func.params {
+        if matches!(param.param_type, IRType::String | IRType::Bytes) {
+            ctx.add_local(&strlen_local_name(&param.name), IRType::Int);
+        }
+    }
 
     // Scan for variable declarations to allocate locals. The for-loop counter
     // is advanced during the scan and replayed during codegen, so reset it here.
@@ -81,6 +95,30 @@ pub fn compile_function(
     ctx.block_depth = 0;
     ctx.loop_stack.clear();
     ctx.comp_depth.set(0);
+
+    // Prologue: recover each string parameter's length from the four bytes
+    // before its data, so the companion local reserved above is live before any
+    // read of the parameter.
+    for param in &ir_func.params {
+        if !matches!(param.param_type, IRType::String | IRType::Bytes) {
+            continue;
+        }
+        let (Some(off_idx), Some(len_idx)) = (
+            ctx.get_local_index(&param.name),
+            ctx.get_local_index(&strlen_local_name(&param.name)),
+        ) else {
+            continue;
+        };
+        func.instruction(&Instruction::LocalGet(off_idx));
+        func.instruction(&Instruction::I32Const(crate::ir::STRING_LEN_PREFIX as i32));
+        func.instruction(&Instruction::I32Sub);
+        func.instruction(&Instruction::I32Load(MemArg {
+            offset: 0,
+            align: 2,
+            memory_index: 0,
+        }));
+        func.instruction(&Instruction::LocalSet(len_idx));
+    }
 
     // Compile the function body
     compile_body(&ir_func.body, &mut func, ctx, memory_layout);
@@ -332,6 +370,11 @@ fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRType {
             }
         }
         IRExpr::UnaryOp { operand, .. } => infer_value_type(operand, ctx),
+        // A tuple carries one type per position. `for k, v in pairs` needs
+        // these so a string member binds as a string rather than a bare word.
+        IRExpr::TupleLiteral(items) => {
+            IRType::Tuple(items.iter().map(|e| infer_value_type(e, ctx)).collect())
+        }
         // Float-valued stdlib constants (e.g. `math.pi`, `math.e`) must make
         // their local an f64; otherwise the f64 store lands in an i32 slot.
         IRExpr::Attribute { object, attribute } => match object.as_ref() {
@@ -608,16 +651,47 @@ fn scan_expr_locals(expr: &IRExpr, ctx: &mut CompilationContext, depth: u32) {
                 // The loop target binds each element, so a float iterable needs
                 // an f64 local (same rule as the `for` statement's target).
                 if let [target] = generator.targets.as_slice() {
-                    let target_ty =
-                        if infer_iterable_elem_type(&generator.iterable, ctx) == IRType::Float {
-                            IRType::Float
-                        } else {
-                            IRType::Unknown
-                        };
+                    // The target takes the element's type where it can be
+                    // inferred: an f64 element needs an f64 local, and a string
+                    // element needs a `String` local so `len(w)` reads the
+                    // companion length rather than treating the offset as a
+                    // collection pointer.
+                    let target_ty = match infer_iterable_elem_type(&generator.iterable, ctx) {
+                        ty @ (IRType::Float | IRType::String | IRType::Bytes) => ty,
+                        class @ IRType::Class(_) => class,
+                        _ => IRType::Unknown,
+                    };
                     ensure_local(ctx, target, target_ty);
+                    // A string element binds as an (offset, length) pair, and
+                    // the local vector is fixed before codegen runs, so the
+                    // companion has to be reserved here even though the element
+                    // type is not known until then.
+                    ensure_local(ctx, &strlen_local_name(target), IRType::Int);
                 } else {
-                    for target in &generator.targets {
-                        ensure_local(ctx, target, IRType::Unknown);
+                    // `for k, v in pairs`: each target takes its own position's
+                    // type from the tuple, so a string member is a `String`
+                    // local rather than an untyped word.
+                    let member_types = match infer_iterable_elem_type(&generator.iterable, ctx) {
+                        IRType::Tuple(types) if types.len() == generator.targets.len() => {
+                            Some(types)
+                        }
+                        _ => None,
+                    };
+                    for (j, target) in generator.targets.iter().enumerate() {
+                        let ty = match &member_types {
+                            Some(types) => match &types[j] {
+                                t @ (IRType::String | IRType::Bytes | IRType::Float) => t.clone(),
+                                class @ IRType::Class(_) => class.clone(),
+                                _ => IRType::Unknown,
+                            },
+                            None => IRType::Unknown,
+                        };
+                        ensure_local(ctx, target, ty);
+                        // A string element binds as an (offset, length) pair,
+                        // and the local vector is fixed before codegen runs, so
+                        // the companion has to be reserved here even though the
+                        // element type is not known until then.
+                        ensure_local(ctx, &strlen_local_name(target), IRType::Int);
                     }
                 }
                 scan_expr_locals(&generator.iterable, ctx, depth + 1);
@@ -831,7 +905,18 @@ pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
                         class @ IRType::Class(_) => class,
                         _ => IRType::Unknown,
                     };
+                    let target_ty_for_companion = target_ty.clone();
                     ctx.add_local(target, target_ty);
+                    // A string element binds as an (offset, length) pair, the
+                    // same as an assignment target, so it needs the companion
+                    // length local. Without it a read of the loop variable
+                    // pushed one word where the rest of codegen expects two,
+                    // and using it as a dict key dropped the offset instead of
+                    // the length. The element type is not known until codegen,
+                    // so the companion is reserved for every non-float target.
+                    if !matches!(target_ty_for_companion, IRType::Float) {
+                        ctx.add_local(&strlen_local_name(target), IRType::Int);
+                    }
                 }
                 // Reserve this loop's iterator helper locals up front (codegen
                 // can't add locals after the function's local vector is fixed).
@@ -1190,8 +1275,11 @@ pub fn compile_body(
                 then_body,
                 else_body,
             } => {
-                // Emit condition code, ensuring it returns a boolean
-                emit_expr(condition, func, ctx, memory_layout, Some(&IRType::Bool));
+                // Emit the condition and reduce it to Python's truth value:
+                // a str is an (offset, length) pair and a collection is a
+                // pointer, neither of which is a bool on its own.
+                let cond_ty = emit_expr(condition, func, ctx, memory_layout, Some(&IRType::Bool));
+                crate::compiler::expression::emit_truthiness(func, ctx, &cond_ty);
 
                 // If-else block with no result value
                 func.instruction(&Instruction::If(BlockType::Empty));
@@ -1283,7 +1371,8 @@ pub fn compile_body(
                 // Condition check: exit the loop when the condition is false.
                 // Emitted before the inner continue block so this `BrIf(1)` still
                 // targets the outer break block from inside the loop.
-                emit_expr(condition, func, ctx, memory_layout, Some(&IRType::Bool));
+                let cond_ty = emit_expr(condition, func, ctx, memory_layout, Some(&IRType::Bool));
+                crate::compiler::expression::emit_truthiness(func, ctx, &cond_ty);
                 func.instruction(&Instruction::I32Eqz);
                 func.instruction(&Instruction::BrIf(1));
 
@@ -1541,6 +1630,19 @@ pub fn compile_body(
                 // Evaluate the iterable (should return a pointer to list or value)
                 let iterable_type = emit_expr(iterable, func, ctx, memory_layout, None);
 
+                // Give the loop variable the element's type. The scan pass runs
+                // before any list variable has a known element type, so it left
+                // the target `Unknown` and a string element could not have a
+                // method called on it. Codegen does know, so record it here,
+                // before the body is compiled.
+                if let IRType::List(elem) = &iterable_type {
+                    if matches!(**elem, IRType::String | IRType::Bytes) {
+                        if let Some(info) = ctx.locals_map.get_mut(target) {
+                            info.var_type = (**elem).clone();
+                        }
+                    }
+                }
+
                 match iterable_type {
                     ref iter_ty @ (IRType::List(_) | IRType::String) => {
                         // Lists store one COLLECTION_SLOT (8 bytes) per element;
@@ -1609,6 +1711,29 @@ pub fn compile_body(
 
                         // Store element in target variable
                         func.instruction(&Instruction::LocalSet(target_idx));
+
+                        // A string element is stored as its offset alone, so the
+                        // loop variable's length comes from the blob's own prefix
+                        // word. Without it `len(w)` read whatever the companion
+                        // happened to hold.
+                        if matches!(
+                            get_local_type_by_index(ctx, target_idx),
+                            IRType::String | IRType::Bytes
+                        ) {
+                            if let Some(len_idx) = ctx.get_local_index(&strlen_local_name(target)) {
+                                func.instruction(&Instruction::LocalGet(target_idx));
+                                func.instruction(&Instruction::I32Const(
+                                    crate::ir::STRING_LEN_PREFIX as i32,
+                                ));
+                                func.instruction(&Instruction::I32Sub);
+                                func.instruction(&Instruction::I32Load(MemArg {
+                                    offset: 0,
+                                    align: 2,
+                                    memory_index: 0,
+                                }));
+                                func.instruction(&Instruction::LocalSet(len_idx));
+                            }
+                        }
 
                         // Inner block: `continue` lands at its end, which falls
                         // through to the counter increment below.
@@ -1963,7 +2088,21 @@ pub fn compile_body(
                 } else {
                     IRType::Int
                 };
-                emit_expr(index, func, ctx, memory_layout, Some(&index_hint));
+                let key_type = emit_expr(index, func, ctx, memory_layout, Some(&index_hint));
+                // The dict's declared key type is authoritative, but an empty
+                // dict literal has none, so the key expression's own type
+                // decides when the container has not been typed yet.
+                let key_is_string = matches!(
+                    &container_type,
+                    IRType::Dict(k, _) if matches!(k.as_ref(), IRType::String | IRType::Bytes)
+                ) || matches!(key_type, IRType::String | IRType::Bytes);
+
+                // A string key is an (offset, length) pair but a dict slot holds
+                // one word, so the length is dropped here. Without this the pair
+                // left an extra value on the stack and the module did not
+                // validate; it only showed up once loop variables over a list of
+                // strings started being typed as strings.
+                crate::compiler::expression::narrow_element_to_word(func, &key_type);
 
                 // Save index / key at its natural width. A float key is an f64 in
                 // the second f64 scratch, leaving `temp_local_f64` free for a
@@ -2021,6 +2160,24 @@ pub fn compile_body(
                         }));
                         func.instruction(&Instruction::LocalGet(ctx.temp_local_f64_2));
                         func.instruction(&Instruction::F64Eq);
+                    } else if key_is_string {
+                        // Strings compare by content: an equal key built at
+                        // runtime sits at a different offset, so comparing the
+                        // stored words appended a second entry for a key the
+                        // dict already held.
+                        let slot_off = ctx.temp_local + 14;
+                        func.instruction(&Instruction::I32Load(MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                        func.instruction(&Instruction::LocalSet(slot_off));
+                        crate::compiler::expression::emit_str_content_eq(
+                            func,
+                            ctx,
+                            slot_off,
+                            ctx.temp_local + 1,
+                        );
                     } else {
                         func.instruction(&Instruction::I32Load(MemArg {
                             offset: 0,

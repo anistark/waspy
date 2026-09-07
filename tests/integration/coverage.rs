@@ -562,3 +562,58 @@ fn fstrings_have_the_right_lengths() {
     assert_eq!(call_i32_2(&src, "summary_len", 2, 3), 13); // "a=2 b=3 sum=5"
     assert_eq!(call_i32_1(&src, "joined_len", 4), 8); // "0,1,2,3,"
 }
+
+// ---------------------------------------------------------------------------
+// examples/shopping_cart.py
+// ---------------------------------------------------------------------------
+//
+// A whole program rather than a feature demo, and the first of the 0.16.0
+// end-to-end programs. Every value below is what CPython answers for the same
+// source, so this is a differential test against the reference implementation,
+// not a record of what the compiler happens to do.
+
+/// The headline path: three items added through a method that constructs an
+/// `Item` and appends it to a field, summed by a method that calls each
+/// element's own method, then discounted by a rules function.
+/// 9.99*3 + 24.50*2 + 5.00*4 = 98.97, which earns the 5% tier: 94.0215.
+#[test]
+fn shopping_cart_checkout_matches_cpython() {
+    let src = read_example("shopping_cart.py");
+    let total = call_f64(&src, "checkout");
+    assert!(
+        (total - 94.0215).abs() < 1e-9,
+        "checkout() answered {total}, CPython answers 94.0215"
+    );
+}
+
+/// The instances in the list keep their own state: `count` counts the `add`
+/// calls and `units` sums each item's `qty` by iterating the field, so two
+/// items totalling five units answer 2*100 + 5.
+#[test]
+fn shopping_cart_counts_items_and_units() {
+    let src = read_example("shopping_cart.py");
+    assert_eq!(call_i32(&src, "item_count"), 205);
+}
+
+/// A field that starts as an empty list and is never appended to still
+/// iterates zero times rather than reading a stale region. This shape answered
+/// a silently wrong value before the 0.14.0 field-element-type fix.
+#[test]
+fn shopping_cart_empty_total_is_zero() {
+    let src = read_example("shopping_cart.py");
+    assert_eq!(call_f64(&src, "empty_cart_total"), 0.0);
+}
+
+/// The rules function's tiers, including both boundaries. `>=` must include
+/// the boundary itself, so 100.0 is the 10% tier and 50.0 the 5% tier.
+#[test]
+fn shopping_cart_discount_tiers() {
+    let src = read_example("shopping_cart.py");
+    let rate = |total: f64| call_untyped_f64(&src, "discount_rate", &[Value::F64(total.into())]);
+    assert_eq!(rate(120.0), 0.10);
+    assert_eq!(rate(100.0), 0.10);
+    assert_eq!(rate(99.99), 0.05);
+    assert_eq!(rate(50.0), 0.05);
+    assert_eq!(rate(49.99), 0.0);
+    assert_eq!(rate(0.0), 0.0);
+}

@@ -2458,6 +2458,32 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                         arguments.push(lower_expr(arg, memory_layout)?);
                     }
 
+                    // Keyword arguments used to be dropped on the floor: only
+                    // `call.args` was read, so `xs.sort(reverse=True)` reached
+                    // codegen as a bare `sort()` and would have sorted the
+                    // wrong way round without saying so. `sort`'s `reverse` is
+                    // lowered to a positional argument (the only keyword any
+                    // supported method takes); everything else is rejected.
+                    for keyword in &call.keywords {
+                        let name = keyword.arg.as_ref().map(|a| a.to_string());
+                        match (method_name.as_str(), name.as_deref()) {
+                            ("sort", Some("reverse")) => {
+                                arguments.push(lower_expr(&keyword.value, memory_layout)?);
+                            }
+                            (_, Some(kw)) => {
+                                return Err(anyhow!(
+                                    "keyword argument '{kw}' is not supported on '{method_name}()'. \
+                                     Hint: pass the arguments positionally"
+                                ));
+                            }
+                            (_, None) => {
+                                return Err(anyhow!(
+                                    "'**kwargs' is not supported in a call to '{method_name}()'"
+                                ));
+                            }
+                        }
+                    }
+
                     // Compile-time optimization for string method calls on constants
                     if let Expr::Constant(const_expr) = &*attr.value {
                         if let rustpython_parser::ast::Constant::Str(s) = &const_expr.value {
@@ -2692,33 +2718,16 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                                     // Fall through to runtime handling
                                 }
                                 "format" => {
-                                    // Compile-time format string processing
-                                    let mut format_args = Vec::new();
-                                    for arg in &arguments {
-                                        // Try to extract constant string values
-                                        if let IRExpr::Const(IRConstant::String(arg_str)) = arg {
-                                            format_args.push(arg_str.clone());
-                                        } else if let IRExpr::Const(IRConstant::Int(i)) = arg {
-                                            format_args.push(i.to_string());
-                                        } else if let IRExpr::Const(IRConstant::Float(f)) = arg {
-                                            format_args.push(f.to_string());
-                                        } else if let IRExpr::Const(IRConstant::Bool(b)) = arg {
-                                            format_args.push(b.to_string());
-                                        } else {
-                                            // Non-constant argument, can't optimize
-                                            break;
-                                        }
-                                    }
-
-                                    // If all arguments are constants, process format string
-                                    if format_args.len() == arguments.len() {
-                                        if let Ok(result) = process_format_string(s, &format_args) {
-                                            memory_layout.add_string(&result);
-                                            return Ok(IRExpr::Const(IRConstant::String(result)));
-                                        }
-                                    }
-                                    // Fall through to runtime handling
+                                    // "template".format(a, b) lowers to the
+                                    // same `+` chain an f-string does, so a
+                                    // runtime argument interpolates instead of
+                                    // being dropped. Constant arguments fold
+                                    // into the template through the shared
+                                    // `render_constant`, which spells Python's
+                                    // `True` and `1.0` rather than Rust's.
+                                    return lower_format_template(s, arguments, memory_layout);
                                 }
+
                                 // Default: no optimization
                                 _ => {}
                             };
@@ -2963,6 +2972,122 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
         }
         _ => Err(anyhow!("Unsupported expression type: {expr:?}")),
     }
+}
+
+/// Lower `"template".format(args...)` into the concatenation of its pieces,
+/// the same shape an f-string lowers to.
+///
+/// Only automatic (`{}`) and positional (`{0}`) fields are supported. A named
+/// field, a format specifier, or a conversion is rejected rather than ignored,
+/// because honouring none of them while reporting success is how `.format()`
+/// used to return the bare separator.
+fn lower_format_template(
+    template: &str,
+    arguments: Vec<IRExpr>,
+    memory_layout: &mut MemoryLayout,
+) -> Result<IRExpr> {
+    let mut text = String::new();
+    let mut parts: Vec<IRExpr> = Vec::new();
+    let mut next_auto = 0usize;
+    let mut chars = template.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match c {
+            '{' if chars.peek() == Some(&'{') => {
+                chars.next();
+                text.push('{');
+            }
+            '}' if chars.peek() == Some(&'}') => {
+                chars.next();
+                text.push('}');
+            }
+            '{' => {
+                let mut field = String::new();
+                let mut closed = false;
+                for inner in chars.by_ref() {
+                    if inner == '}' {
+                        closed = true;
+                        break;
+                    }
+                    field.push(inner);
+                }
+                if !closed {
+                    return Err(anyhow!(
+                        "unmatched '{{' in the format string \"{template}\""
+                    ));
+                }
+                if field.contains(':') || field.contains('!') {
+                    return Err(anyhow!(
+                        "format specifiers and conversions are not supported in \
+                         str.format() (the '{{{field}}}' field). \
+                         Hint: interpolate the value on its own ({{}})"
+                    ));
+                }
+                let index = if field.is_empty() {
+                    let idx = next_auto;
+                    next_auto += 1;
+                    idx
+                } else {
+                    match field.parse::<usize>() {
+                        Ok(idx) => idx,
+                        Err(_) => {
+                            return Err(anyhow!(
+                                "named fields are not supported in str.format() \
+                                 (the '{{{field}}}' field). \
+                                 Hint: pass the value positionally ({{}})"
+                            ));
+                        }
+                    }
+                };
+                let Some(arg) = arguments.get(index) else {
+                    return Err(anyhow!(
+                        "the format string \"{template}\" refers to argument \
+                         {index}, but only {} were given",
+                        arguments.len()
+                    ));
+                };
+                match arg {
+                    IRExpr::Const(constant) => match render_constant(constant) {
+                        Some(rendered) => text.push_str(&rendered),
+                        None => {
+                            flush_fstring_text(&mut text, &mut parts, memory_layout);
+                            parts.push(IRExpr::FunctionCall {
+                                function_name: "str".to_string(),
+                                arguments: vec![arg.clone()],
+                            });
+                        }
+                    },
+                    other => {
+                        flush_fstring_text(&mut text, &mut parts, memory_layout);
+                        parts.push(IRExpr::FunctionCall {
+                            function_name: "str".to_string(),
+                            arguments: vec![other.clone()],
+                        });
+                    }
+                }
+            }
+            '}' => {
+                return Err(anyhow!(
+                    "unmatched '}}' in the format string \"{template}\""
+                ));
+            }
+            other => text.push(other),
+        }
+    }
+
+    if parts.is_empty() {
+        memory_layout.add_string(&text);
+        return Ok(IRExpr::Const(IRConstant::String(text)));
+    }
+    flush_fstring_text(&mut text, &mut parts, memory_layout);
+    Ok(parts
+        .into_iter()
+        .reduce(|acc, part| IRExpr::BinaryOp {
+            left: Box::new(acc),
+            right: Box::new(part),
+            op: IROp::Add,
+        })
+        .expect("parts is non-empty"))
 }
 
 /// Move the accumulated constant text of an f-string into `parts` as one
