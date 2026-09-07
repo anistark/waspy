@@ -16,7 +16,7 @@ pub const CALL_DEPTH_GLOBAL: u32 = 3;
 /// per-function in `compile_function` after params and named locals, so these
 /// indices never alias real variables. Keep this >= the largest `temp_local + N`
 /// offset emitted anywhere in the compiler.
-pub const SCRATCH_LOCALS: u32 = 20;
+pub const SCRATCH_LOCALS: u32 = 48;
 
 /// Base address of the collection heap. Sits above the string (from 0) and
 /// bytes (from 32768) regions so collection literals never overlap them. (The
@@ -164,6 +164,14 @@ pub struct FileIoImports {
 
 /// Compiled Local variables and function types
 pub struct CompilationContext {
+    /// Each lifted lambda's parameter name and returned expression, keyed by
+    /// the synthesized `__lambda_N` name.
+    ///
+    /// The finalize pass replaces every `Lambda` with a `ClosureMake` before
+    /// code generation runs, so a call site can no longer see what the lambda
+    /// computes. `sorted(seq, key=...)` needs exactly that to know what type
+    /// the key produces, and therefore how to compare two of them.
+    pub lambda_bodies: HashMap<String, (String, crate::ir::IRExpr)>,
     pub locals_map: HashMap<String, LocalInfo>,
     pub local_count: u32,
     pub function_map: HashMap<String, FunctionInfo>,
@@ -298,6 +306,7 @@ impl CompilationContext {
         // Scratch locals are reserved per-function in `compile_function` (after
         // params and named locals are allocated), so nothing is reserved here.
         CompilationContext {
+            lambda_bodies: HashMap::new(),
             locals_map: HashMap::new(),
             local_count: 0,
             function_map: HashMap::new(),

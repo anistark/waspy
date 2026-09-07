@@ -2408,6 +2408,68 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                         }
                     }
 
+                    // `sorted(seq, key=..., reverse=...)`: Python takes both
+                    // as keyword-only arguments, and keywords on a plain call
+                    // were dropped on the floor, so a key was silently ignored
+                    // and a reverse flag never reached code generation. The
+                    // flag is folded into the name (it must be a literal, like
+                    // `list.sort`'s) and the key becomes a second positional
+                    // argument, so code generation sees everything it needs.
+                    if function_name == "sorted" {
+                        if call.args.len() != 1 {
+                            return Err(anyhow!(
+                                "sorted() takes exactly one positional argument; \
+                                 'key' and 'reverse' are keyword-only"
+                            ));
+                        }
+                        let mut key = None;
+                        let mut reverse = false;
+                        for keyword in &call.keywords {
+                            match keyword.arg.as_ref().map(|a| a.to_string()).as_deref() {
+                                Some("key") => {
+                                    key = Some(lower_expr(&keyword.value, memory_layout)?);
+                                }
+                                Some("reverse") => {
+                                    reverse = match lower_expr(&keyword.value, memory_layout)? {
+                                        IRExpr::Const(IRConstant::Bool(b)) => b,
+                                        _ => {
+                                            return Err(anyhow!(
+                                                "sorted()'s 'reverse' must be True or False \
+                                                 written literally. Hint: branch on the flag \
+                                                 and sort in each arm"
+                                            ));
+                                        }
+                                    };
+                                }
+                                Some(other) => {
+                                    return Err(anyhow!(
+                                        "sorted() has no keyword argument '{other}'"
+                                    ));
+                                }
+                                None => {
+                                    return Err(anyhow!(
+                                        "'**kwargs' is not supported in a call to sorted()"
+                                    ));
+                                }
+                            }
+                        }
+                        let mut arguments = vec![lower_expr(&call.args[0], memory_layout)?];
+                        if let Some(key) = key {
+                            arguments.push(key);
+                        }
+                        return Ok(IRExpr::FunctionCall {
+                            // A name no Python source can spell, so a user
+                            // function called `sorted_reverse` cannot collide
+                            // with the descending form and recurse into itself.
+                            function_name: if reverse {
+                                "__sorted_desc".to_string()
+                            } else {
+                                "sorted".to_string()
+                            },
+                            arguments,
+                        });
+                    }
+
                     // next(it) advances an iterator: lower to the protocol
                     // method so the generator pass can dispatch it statically.
                     if function_name == "next" && call.args.len() == 1 {
@@ -2910,6 +2972,21 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                     Expr::FormattedValue(fv) => {
                         reject_unsupported_format(fv)?;
 
+                        // `{x:.2f}` renders through the fixed-point formatter
+                        // rather than `str()`, which cannot render a float.
+                        if let Some(precision) = fixed_precision_spec(fv) {
+                            let value = lower_expr(&fv.value, memory_layout)?;
+                            flush_fstring_text(&mut text, &mut parts, memory_layout);
+                            parts.push(IRExpr::FunctionCall {
+                                function_name: "__format_fixed".to_string(),
+                                arguments: vec![
+                                    value,
+                                    IRExpr::Const(IRConstant::Int(precision as i32)),
+                                ],
+                            });
+                            continue;
+                        }
+
                         let lowered = lower_expr(&fv.value, memory_layout)?;
                         // A constant interpolation is rendered here, so
                         // `f"{2}nd"` stays one string constant rather than
@@ -3166,15 +3243,43 @@ fn reject_unsupported_format(fv: &rustpython_parser::ast::ExprFormattedValue) ->
         Some(Expr::JoinedStr(spec)) => !spec.values.is_empty(),
         Some(_) => true,
     };
-    if has_spec {
+    // `.Nf` is handled (see `fixed_precision_spec`); every other specifier
+    // would change what the placeholder renders and has no implementation, so
+    // honouring it silently is not an option.
+    if has_spec && fixed_precision_spec(fv).is_none() {
         return Err(anyhow!(
-            "f-string format specifiers are not supported yet \
-             (the ':' in f\"{{value:.2f}}\"). \
+            "this f-string format specifier is not supported yet; only \
+             fixed-point '.Nf' is (as in f\"{{value:.2f}}\"). \
              Hint: interpolate the value without a specifier ({{value}})"
         ));
     }
 
     Ok(())
+}
+
+/// The `N` of a `.Nf` format specifier, when the placeholder carries exactly
+/// that and nothing else.
+///
+/// `f"{x:.2f}"` is how a program prints money, and rejecting it was the last
+/// thing standing between a real report and this compiler. Anything richer
+/// (widths, alignment, thousands separators) still goes through the rejection
+/// above rather than being quietly dropped.
+fn fixed_precision_spec(fv: &rustpython_parser::ast::ExprFormattedValue) -> Option<u32> {
+    let Some(Expr::JoinedStr(spec)) = fv.format_spec.as_deref() else {
+        return None;
+    };
+    let [Expr::Constant(part)] = spec.values.as_slice() else {
+        return None;
+    };
+    let rustpython_parser::ast::Constant::Str(text) = &part.value else {
+        return None;
+    };
+    let digits = text.strip_prefix('.')?.strip_suffix('f')?;
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    // More than nine places would overflow the scaled fraction.
+    digits.parse::<u32>().ok().filter(|p| *p <= 9)
 }
 
 /// Simple format string processor for basic placeholders

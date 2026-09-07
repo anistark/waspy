@@ -532,8 +532,23 @@ fn infer_iterable_elem_type(iterable: &IRExpr, ctx: &CompilationContext) -> IRTy
         IRExpr::ListLiteral(elems) | IRExpr::SetLiteral(elems) => literal_elem_type(elems, ctx),
         IRExpr::Variable(name) => match ctx.get_local_info(name).map(|i| i.var_type.clone()) {
             Some(IRType::List(t)) | Some(IRType::Set(t)) => *t,
+            // `for k in d` binds the dict's keys.
+            Some(IRType::Dict(k, _)) => *k,
             _ => IRType::Unknown,
         },
+        // `for c, w in top_words(...)`: the callee's declared return type.
+        // Without this a comprehension over a call binds untyped targets, so a
+        // string member rendered as its pointer inside an f-string.
+        IRExpr::FunctionCall { function_name, .. } => {
+            match ctx
+                .get_function_info(function_name)
+                .map(|f| f.return_type.clone())
+            {
+                Some(IRType::List(t)) | Some(IRType::Set(t)) => *t,
+                Some(IRType::Dict(k, _)) => *k,
+                _ => IRType::Unknown,
+            }
+        }
         // `for x in self.items`: the field's declared element type.
         IRExpr::Attribute { object, attribute } => {
             let IRExpr::Variable(obj_name) = object.as_ref() else {
@@ -998,13 +1013,30 @@ pub fn compile_body(
                     }
                     func.instruction(&Instruction::LocalGet(0));
                 } else if let Some(expr) = expr_opt {
-                    let ty = emit_expr(expr, func, ctx, memory_layout, None);
-                    // A string/bytes value is an (offset, length) pair, but a
-                    // function returns a single word. Drop the length (on top)
-                    // and return the offset; the length-prefixed blob lets a
-                    // caller recover the length via `load(offset - 4)`.
-                    if matches!(ty, IRType::String | IRType::Bytes) {
-                        func.instruction(&Instruction::Drop);
+                    // The declared return type is the expected type, so a value
+                    // of the other numeric width is converted rather than
+                    // returned as-is. `return 10 / n` from a function declared
+                    // `-> int` is the case that matters: true division makes
+                    // that an f64, and an f64 in an i32 result does not
+                    // validate.
+                    let ret_ty = ctx.current_return_type.clone();
+                    let ty = emit_expr(expr, func, ctx, memory_layout, Some(&ret_ty));
+                    match (&ret_ty, &ty) {
+                        (IRType::Int | IRType::Bool, IRType::Float) => {
+                            func.instruction(&Instruction::I32TruncF64S);
+                        }
+                        (IRType::Float, IRType::Int | IRType::Bool) => {
+                            func.instruction(&Instruction::F64ConvertI32S);
+                        }
+                        // A string/bytes value is an (offset, length) pair, but
+                        // a function returns a single word. Drop the length (on
+                        // top) and return the offset; the length-prefixed blob
+                        // lets a caller recover the length via
+                        // `load(offset - 4)`.
+                        (_, IRType::String | IRType::Bytes) => {
+                            func.instruction(&Instruction::Drop);
+                        }
+                        _ => {}
                     }
                 } else {
                     func.instruction(&Instruction::I32Const(0));
@@ -1635,20 +1667,36 @@ pub fn compile_body(
                 // the target `Unknown` and a string element could not have a
                 // method called on it. Codegen does know, so record it here,
                 // before the body is compiled.
-                if let IRType::List(elem) = &iterable_type {
-                    if matches!(**elem, IRType::String | IRType::Bytes) {
+                // Iterating a dict binds its *keys*, so the loop variable
+                // takes the key type, exactly as a list's binds the element.
+                let bound_elem = match &iterable_type {
+                    IRType::List(elem) => Some((**elem).clone()),
+                    IRType::Dict(key, _) => Some((**key).clone()),
+                    _ => None,
+                };
+                if let Some(elem) = bound_elem {
+                    if matches!(elem, IRType::String | IRType::Bytes) {
                         if let Some(info) = ctx.locals_map.get_mut(target) {
-                            info.var_type = (**elem).clone();
+                            info.var_type = elem;
                         }
                     }
                 }
 
                 match iterable_type {
-                    ref iter_ty @ (IRType::List(_) | IRType::String) => {
+                    ref iter_ty @ (IRType::List(_) | IRType::String | IRType::Dict(_, _)) => {
                         // Lists store one COLLECTION_SLOT (8 bytes) per element;
                         // strings keep their legacy 4-byte-per-codepoint stride.
-                        let is_list = matches!(iter_ty, IRType::List(_));
-                        let elem_stride = if is_list { COLLECTION_SLOT as i32 } else { 4 };
+                        // A dict entry is a key slot followed by a value slot,
+                        // and `for k in d` walks the keys, so it strides two
+                        // slots at a time. Iterating a dict used to fall through
+                        // to the branch below and read whatever the stride
+                        // happened to land on, so `for k in d` over three keys
+                        // counted 131072.
+                        let elem_stride = match iter_ty {
+                            IRType::Dict(_, _) => DICT_ENTRY as i32,
+                            IRType::List(_) => COLLECTION_SLOT as i32,
+                            _ => 4,
+                        };
                         // A float list binds each element as f64 (the loop var was
                         // typed Float by the scan); everything else loads an i32.
                         let target_is_float =

@@ -1909,6 +1909,556 @@ pub(crate) fn emit_truthiness(func: &mut Function, ctx: &CompilationContext, ty:
     }
 }
 
+/// Three-way compare two strings by content, given their data offsets, leaving
+/// -1, 0, or 1 on the stack. Ordering is bytewise, which matches Python for
+/// ASCII; the case transforms already trap on a byte at or above 0x80, so a
+/// non-ASCII string cannot reach a sort through them.
+///
+/// Uses the top of the scratch run so it can be called from inside a sort loop,
+/// which owns the lower locals.
+fn emit_str_cmp(func: &mut Function, ctx: &CompilationContext, a_off: u32, b_off: u32) {
+    let la = ctx.temp_local + 24;
+    let lb = ctx.temp_local + 25;
+    let m = ctx.temp_local + 26;
+    let i = ctx.temp_local + 27;
+    let out = ctx.temp_local + 28;
+    let ca = ctx.temp_local + 29;
+    let cb = ctx.temp_local + 30;
+
+    func.instruction(&Instruction::LocalGet(a_off));
+    func.instruction(&Instruction::I32Const(STRING_LEN_PREFIX as i32));
+    func.instruction(&Instruction::I32Sub);
+    func.instruction(&Instruction::I32Load(slot_arg()));
+    func.instruction(&Instruction::LocalSet(la));
+    func.instruction(&Instruction::LocalGet(b_off));
+    func.instruction(&Instruction::I32Const(STRING_LEN_PREFIX as i32));
+    func.instruction(&Instruction::I32Sub);
+    func.instruction(&Instruction::I32Load(slot_arg()));
+    func.instruction(&Instruction::LocalSet(lb));
+
+    // m = min(la, lb): only the shared prefix can differ byte for byte.
+    func.instruction(&Instruction::LocalGet(la));
+    func.instruction(&Instruction::LocalGet(lb));
+    func.instruction(&Instruction::I32LtU);
+    func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+    func.instruction(&Instruction::LocalGet(la));
+    func.instruction(&Instruction::Else);
+    func.instruction(&Instruction::LocalGet(lb));
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::LocalSet(m));
+
+    // Equal through the shared prefix: the shorter string sorts first.
+    func.instruction(&Instruction::LocalGet(la));
+    func.instruction(&Instruction::LocalGet(lb));
+    func.instruction(&Instruction::I32LtU);
+    func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+    func.instruction(&Instruction::I32Const(-1));
+    func.instruction(&Instruction::Else);
+    func.instruction(&Instruction::LocalGet(la));
+    func.instruction(&Instruction::LocalGet(lb));
+    func.instruction(&Instruction::I32GtU);
+    func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+    func.instruction(&Instruction::I32Const(1));
+    func.instruction(&Instruction::Else);
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::LocalSet(out));
+
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::LocalSet(i));
+    func.instruction(&Instruction::Block(BlockType::Empty));
+    func.instruction(&Instruction::Loop(BlockType::Empty));
+    func.instruction(&Instruction::LocalGet(i));
+    func.instruction(&Instruction::LocalGet(m));
+    func.instruction(&Instruction::I32GeU);
+    func.instruction(&Instruction::BrIf(1));
+    func.instruction(&Instruction::LocalGet(a_off));
+    func.instruction(&Instruction::LocalGet(i));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::I32Load8U(byte_arg()));
+    func.instruction(&Instruction::LocalSet(ca));
+    func.instruction(&Instruction::LocalGet(b_off));
+    func.instruction(&Instruction::LocalGet(i));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::I32Load8U(byte_arg()));
+    func.instruction(&Instruction::LocalSet(cb));
+    func.instruction(&Instruction::LocalGet(ca));
+    func.instruction(&Instruction::LocalGet(cb));
+    func.instruction(&Instruction::I32Ne);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    func.instruction(&Instruction::LocalGet(ca));
+    func.instruction(&Instruction::LocalGet(cb));
+    func.instruction(&Instruction::I32LtU);
+    func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+    func.instruction(&Instruction::I32Const(-1));
+    func.instruction(&Instruction::Else);
+    func.instruction(&Instruction::I32Const(1));
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::LocalSet(out));
+    func.instruction(&Instruction::Br(2));
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::LocalGet(i));
+    func.instruction(&Instruction::I32Const(1));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::LocalSet(i));
+    func.instruction(&Instruction::Br(0));
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::End);
+
+    func.instruction(&Instruction::LocalGet(out));
+}
+
+/// Three-way compare two sort keys of type `ty`, given their slot addresses in
+/// `a_addr` and `b_addr`, leaving -1, 0, or 1 on the stack.
+///
+/// A tuple key compares lexicographically, member by member, which is what
+/// makes `key=lambda kv: (-kv[1], kv[0])` order by count and then break ties on
+/// the word the way Python does.
+fn emit_key_cmp(
+    func: &mut Function,
+    ctx: &CompilationContext,
+    ty: &IRType,
+    a_addr: u32,
+    b_addr: u32,
+) {
+    match ty {
+        IRType::Float => {
+            let av = ctx.temp_local_f64_2;
+            let bv = ctx.temp_local_f64_3;
+            func.instruction(&Instruction::LocalGet(a_addr));
+            func.instruction(&Instruction::F64Load(slot_arg()));
+            func.instruction(&Instruction::LocalSet(av));
+            func.instruction(&Instruction::LocalGet(b_addr));
+            func.instruction(&Instruction::F64Load(slot_arg()));
+            func.instruction(&Instruction::LocalSet(bv));
+            func.instruction(&Instruction::LocalGet(av));
+            func.instruction(&Instruction::LocalGet(bv));
+            func.instruction(&Instruction::F64Lt);
+            func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+            func.instruction(&Instruction::I32Const(-1));
+            func.instruction(&Instruction::Else);
+            func.instruction(&Instruction::LocalGet(av));
+            func.instruction(&Instruction::LocalGet(bv));
+            func.instruction(&Instruction::F64Gt);
+            func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+            func.instruction(&Instruction::I32Const(1));
+            func.instruction(&Instruction::Else);
+            func.instruction(&Instruction::I32Const(0));
+            func.instruction(&Instruction::End);
+            func.instruction(&Instruction::End);
+        }
+        IRType::String | IRType::Bytes => {
+            let ao = ctx.temp_local + 22;
+            let bo = ctx.temp_local + 23;
+            func.instruction(&Instruction::LocalGet(a_addr));
+            func.instruction(&Instruction::I32Load(slot_arg()));
+            func.instruction(&Instruction::LocalSet(ao));
+            func.instruction(&Instruction::LocalGet(b_addr));
+            func.instruction(&Instruction::I32Load(slot_arg()));
+            func.instruction(&Instruction::LocalSet(bo));
+            emit_str_cmp(func, ctx, ao, bo);
+        }
+        IRType::Tuple(members) => {
+            // Each slot holds a pointer to the tuple's own region; walk the
+            // members in order and stop at the first that differs.
+            let ap = ctx.temp_local + 18;
+            let bp = ctx.temp_local + 19;
+            let acc = ctx.temp_local + 20;
+            let am = ctx.temp_local + 21;
+            let bm = ctx.temp_local + 31;
+            func.instruction(&Instruction::LocalGet(a_addr));
+            func.instruction(&Instruction::I32Load(slot_arg()));
+            emit_data_base(func);
+            func.instruction(&Instruction::LocalSet(ap));
+            func.instruction(&Instruction::LocalGet(b_addr));
+            func.instruction(&Instruction::I32Load(slot_arg()));
+            emit_data_base(func);
+            func.instruction(&Instruction::LocalSet(bp));
+            func.instruction(&Instruction::I32Const(0));
+            func.instruction(&Instruction::LocalSet(acc));
+            for (idx, member) in members.iter().enumerate() {
+                func.instruction(&Instruction::LocalGet(acc));
+                func.instruction(&Instruction::I32Eqz);
+                func.instruction(&Instruction::If(BlockType::Empty));
+                func.instruction(&Instruction::LocalGet(ap));
+                func.instruction(&Instruction::I32Const(
+                    (idx as u32 * COLLECTION_SLOT) as i32,
+                ));
+                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::LocalSet(am));
+                func.instruction(&Instruction::LocalGet(bp));
+                func.instruction(&Instruction::I32Const(
+                    (idx as u32 * COLLECTION_SLOT) as i32,
+                ));
+                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::LocalSet(bm));
+                emit_key_cmp(func, ctx, member, am, bm);
+                func.instruction(&Instruction::LocalSet(acc));
+                func.instruction(&Instruction::End);
+            }
+            func.instruction(&Instruction::LocalGet(acc));
+        }
+        _ => {
+            let av = ctx.temp_local + 22;
+            let bv = ctx.temp_local + 23;
+            func.instruction(&Instruction::LocalGet(a_addr));
+            func.instruction(&Instruction::I32Load(slot_arg()));
+            func.instruction(&Instruction::LocalSet(av));
+            func.instruction(&Instruction::LocalGet(b_addr));
+            func.instruction(&Instruction::I32Load(slot_arg()));
+            func.instruction(&Instruction::LocalSet(bv));
+            func.instruction(&Instruction::LocalGet(av));
+            func.instruction(&Instruction::LocalGet(bv));
+            func.instruction(&Instruction::I32LtS);
+            func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+            func.instruction(&Instruction::I32Const(-1));
+            func.instruction(&Instruction::Else);
+            func.instruction(&Instruction::LocalGet(av));
+            func.instruction(&Instruction::LocalGet(bv));
+            func.instruction(&Instruction::I32GtS);
+            func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+            func.instruction(&Instruction::I32Const(1));
+            func.instruction(&Instruction::Else);
+            func.instruction(&Instruction::I32Const(0));
+            func.instruction(&Instruction::End);
+            func.instruction(&Instruction::End);
+        }
+    }
+}
+
+/// Best-effort result type of a sort key applied to an element of type
+/// `elem_ty`.
+///
+/// A closure call reports `Unknown`, so a key's type has to come from the
+/// lambda's own body. Only the shapes a sort key actually takes are covered:
+/// the element itself, a constant, a member of it, a negation, and a tuple of
+/// those, which is what `key=lambda kv: (-kv[1], kv[0])` needs in order to
+/// compare by count and then break ties on the word.
+fn infer_key_type(key: &IRExpr, elem_ty: &IRType, ctx: &CompilationContext) -> IRType {
+    match key {
+        // Before the finalize pass, or for a lambda written inline that has not
+        // been lifted.
+        IRExpr::Lambda { params, body, .. } => match params.first() {
+            Some(param) => infer_key_body(body, &param.name, elem_ty),
+            None => IRType::Unknown,
+        },
+        // After lifting, which is what code generation actually sees.
+        IRExpr::ClosureMake { lambda_name, .. } => match ctx.lambda_bodies.get(lambda_name) {
+            Some((param, body)) => infer_key_body(body, param, elem_ty),
+            None => IRType::Unknown,
+        },
+        _ => IRType::Unknown,
+    }
+}
+
+fn infer_key_body(expr: &IRExpr, param: &str, elem_ty: &IRType) -> IRType {
+    match expr {
+        IRExpr::Const(IRConstant::Int(_)) => IRType::Int,
+        IRExpr::Const(IRConstant::Float(_)) => IRType::Float,
+        IRExpr::Const(IRConstant::Bool(_)) => IRType::Bool,
+        IRExpr::Const(IRConstant::String(_)) => IRType::String,
+        IRExpr::Variable(name) | IRExpr::Param(name) if name == param => elem_ty.clone(),
+        IRExpr::UnaryOp { operand, .. } => infer_key_body(operand, param, elem_ty),
+        IRExpr::BinaryOp { left, right, .. } => {
+            let lt = infer_key_body(left, param, elem_ty);
+            let rt = infer_key_body(right, param, elem_ty);
+            if matches!(lt, IRType::Float) || matches!(rt, IRType::Float) {
+                IRType::Float
+            } else if matches!(lt, IRType::String) {
+                IRType::String
+            } else {
+                IRType::Int
+            }
+        }
+        IRExpr::TupleLiteral(items) => IRType::Tuple(
+            items
+                .iter()
+                .map(|item| infer_key_body(item, param, elem_ty))
+                .collect(),
+        ),
+        // The builtins a key commonly ends in.
+        IRExpr::FunctionCall {
+            function_name,
+            arguments,
+        } => match function_name.as_str() {
+            "len" | "int" | "ord" => IRType::Int,
+            "float" => IRType::Float,
+            "str" => IRType::String,
+            "bool" => IRType::Bool,
+            "abs" | "sum" | "min" | "max" => arguments
+                .first()
+                .map(|a| infer_key_body(a, param, elem_ty))
+                .unwrap_or(IRType::Unknown),
+            _ => IRType::Unknown,
+        },
+        // A string method that returns a string keeps the key a string.
+        IRExpr::MethodCall {
+            method_name,
+            object,
+            ..
+        } => match method_name.as_str() {
+            "lower" | "upper" | "strip" | "lstrip" | "rstrip" | "capitalize" | "title"
+            | "replace" => infer_key_body(object, param, elem_ty),
+            "find" | "index" | "count" => IRType::Int,
+            "startswith" | "endswith" => IRType::Bool,
+            _ => IRType::Unknown,
+        },
+        // `kv[0]` on a tuple element takes that member's type; on a list it
+        // takes the element type.
+        IRExpr::Indexing { container, index } => {
+            let base = infer_key_body(container, param, elem_ty);
+            match (&base, index.as_ref()) {
+                (IRType::Tuple(members), IRExpr::Const(IRConstant::Int(i))) => {
+                    members.get(*i as usize).cloned().unwrap_or(IRType::Unknown)
+                }
+                (IRType::List(inner), _) => (**inner).clone(),
+                (IRType::String, _) => IRType::String,
+                _ => IRType::Unknown,
+            }
+        }
+        _ => IRType::Unknown,
+    }
+}
+
+/// Whether a sort key's body needs its parameter's *type* to compile
+/// correctly, which a lambda parameter does not carry.
+///
+/// A lifted lambda's parameter is untyped, so `len(kv)`, `kv[0]`, and
+/// `kv.method()` inside one read the value as an untyped word: indexing a
+/// string offset treats the first four characters as a length, and `len` on a
+/// string reads its bytes rather than its prefix. The sort itself is fine, so
+/// the key is refused rather than the whole construct, and the message says
+/// what to do instead.
+fn key_needs_param_type(expr: &IRExpr, param: &str) -> bool {
+    fn is_param(expr: &IRExpr, param: &str) -> bool {
+        matches!(expr, IRExpr::Variable(n) | IRExpr::Param(n) if n == param)
+    }
+    match expr {
+        IRExpr::Indexing { container, index } => {
+            is_param(container, param)
+                || key_needs_param_type(container, param)
+                || key_needs_param_type(index, param)
+        }
+        IRExpr::MethodCall {
+            object, arguments, ..
+        } => {
+            is_param(object, param)
+                || key_needs_param_type(object, param)
+                || arguments.iter().any(|a| key_needs_param_type(a, param))
+        }
+        IRExpr::FunctionCall { arguments, .. } => arguments
+            .iter()
+            .any(|a| is_param(a, param) || key_needs_param_type(a, param)),
+        IRExpr::UnaryOp { operand, .. } => key_needs_param_type(operand, param),
+        IRExpr::BinaryOp { left, right, .. } => {
+            key_needs_param_type(left, param) || key_needs_param_type(right, param)
+        }
+        IRExpr::TupleLiteral(items) | IRExpr::ListLiteral(items) => {
+            items.iter().any(|i| key_needs_param_type(i, param))
+        }
+        _ => false,
+    }
+}
+
+/// Render an `f64` with a fixed number of decimal places, as `f"{x:.2f}"` does.
+///
+/// Entry stack: the value (an `f64`) and the precision (an `i32` literal, which
+/// the lowering guarantees). Exit stack: the string's `(offset, length)`.
+///
+/// The integer and fractional parts are handled separately so no 64-bit
+/// arithmetic is needed: the fraction is scaled by `10^p` and rounded to
+/// nearest with ties to even, which is what IEEE-754 and CPython both do, and
+/// a fraction that rounds up to a whole carries into the integer part. A
+/// magnitude too large for an `i32` traps rather than printing something
+/// wrong.
+fn emit_format_fixed(func: &mut Function, ctx: &CompilationContext, precision: u32) {
+    let value = ctx.temp_local_f64;
+    let ipart = ctx.temp_local_f64_2;
+    let frac = ctx.temp_local_f64_3;
+    let neg = ctx.temp_local + 32;
+    let blk = ctx.temp_local + 33;
+    let pos = ctx.temp_local + 34;
+    let int_i = ctx.temp_local + 35;
+    let frac_i = ctx.temp_local + 36;
+    let digit = ctx.temp_local + 37;
+    let k = ctx.temp_local + 38;
+    let len = ctx.temp_local + 39;
+
+    let scale = 10f64.powi(precision as i32);
+
+    func.instruction(&Instruction::LocalSet(value));
+
+    // neg = value < 0; work with the magnitude from here on.
+    func.instruction(&Instruction::LocalGet(value));
+    func.instruction(&Instruction::F64Const(f64_const(0.0)));
+    func.instruction(&Instruction::F64Lt);
+    func.instruction(&Instruction::LocalSet(neg));
+    func.instruction(&Instruction::LocalGet(value));
+    func.instruction(&Instruction::F64Abs);
+    func.instruction(&Instruction::LocalSet(value));
+
+    // ipart = floor(value); frac = round((value - ipart) * 10^p)
+    func.instruction(&Instruction::LocalGet(value));
+    func.instruction(&Instruction::F64Floor);
+    func.instruction(&Instruction::LocalSet(ipart));
+    func.instruction(&Instruction::LocalGet(value));
+    func.instruction(&Instruction::LocalGet(ipart));
+    func.instruction(&Instruction::F64Sub);
+    func.instruction(&Instruction::F64Const(f64_const(scale)));
+    func.instruction(&Instruction::F64Mul);
+    func.instruction(&Instruction::F64Nearest);
+    func.instruction(&Instruction::LocalSet(frac));
+
+    // A fraction that rounded up to a whole carries.
+    func.instruction(&Instruction::LocalGet(frac));
+    func.instruction(&Instruction::F64Const(f64_const(scale)));
+    func.instruction(&Instruction::F64Ge);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    func.instruction(&Instruction::F64Const(f64_const(0.0)));
+    func.instruction(&Instruction::LocalSet(frac));
+    func.instruction(&Instruction::LocalGet(ipart));
+    func.instruction(&Instruction::F64Const(f64_const(1.0)));
+    func.instruction(&Instruction::F64Add);
+    func.instruction(&Instruction::LocalSet(ipart));
+    func.instruction(&Instruction::End);
+
+    func.instruction(&Instruction::LocalGet(ipart));
+    func.instruction(&Instruction::I32TruncF64S);
+    func.instruction(&Instruction::LocalSet(int_i));
+    func.instruction(&Instruction::LocalGet(frac));
+    func.instruction(&Instruction::I32TruncF64S);
+    func.instruction(&Instruction::LocalSet(frac_i));
+
+    // A 32-byte scratch block, filled from the right so the digits come out in
+    // order, then shuffled to the front.
+    func.instruction(&Instruction::I32Const(4 + 32 + 1));
+    func.instruction(&Instruction::Call(ctx.alloc_func_index));
+    func.instruction(&Instruction::LocalSet(blk));
+    func.instruction(&Instruction::LocalGet(blk));
+    func.instruction(&Instruction::I32Const(4));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::LocalSet(blk));
+    func.instruction(&Instruction::I32Const(32));
+    func.instruction(&Instruction::LocalSet(pos));
+
+    if precision > 0 {
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::LocalSet(k));
+        func.instruction(&Instruction::Block(BlockType::Empty));
+        func.instruction(&Instruction::Loop(BlockType::Empty));
+        func.instruction(&Instruction::LocalGet(k));
+        func.instruction(&Instruction::I32Const(precision as i32));
+        func.instruction(&Instruction::I32GeS);
+        func.instruction(&Instruction::BrIf(1));
+        func.instruction(&Instruction::LocalGet(frac_i));
+        func.instruction(&Instruction::I32Const(10));
+        func.instruction(&Instruction::I32RemS);
+        func.instruction(&Instruction::LocalSet(digit));
+        func.instruction(&Instruction::LocalGet(frac_i));
+        func.instruction(&Instruction::I32Const(10));
+        func.instruction(&Instruction::I32DivS);
+        func.instruction(&Instruction::LocalSet(frac_i));
+        func.instruction(&Instruction::LocalGet(pos));
+        func.instruction(&Instruction::I32Const(1));
+        func.instruction(&Instruction::I32Sub);
+        func.instruction(&Instruction::LocalSet(pos));
+        func.instruction(&Instruction::LocalGet(blk));
+        func.instruction(&Instruction::LocalGet(pos));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalGet(digit));
+        func.instruction(&Instruction::I32Const(b'0' as i32));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::I32Store8(byte_arg()));
+        func.instruction(&Instruction::LocalGet(k));
+        func.instruction(&Instruction::I32Const(1));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalSet(k));
+        func.instruction(&Instruction::Br(0));
+        func.instruction(&Instruction::End);
+        func.instruction(&Instruction::End);
+
+        func.instruction(&Instruction::LocalGet(pos));
+        func.instruction(&Instruction::I32Const(1));
+        func.instruction(&Instruction::I32Sub);
+        func.instruction(&Instruction::LocalSet(pos));
+        func.instruction(&Instruction::LocalGet(blk));
+        func.instruction(&Instruction::LocalGet(pos));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::I32Const(b'.' as i32));
+        func.instruction(&Instruction::I32Store8(byte_arg()));
+    }
+
+    // Integer digits, at least one so zero prints as "0".
+    func.instruction(&Instruction::Block(BlockType::Empty));
+    func.instruction(&Instruction::Loop(BlockType::Empty));
+    func.instruction(&Instruction::LocalGet(int_i));
+    func.instruction(&Instruction::I32Const(10));
+    func.instruction(&Instruction::I32RemS);
+    func.instruction(&Instruction::LocalSet(digit));
+    func.instruction(&Instruction::LocalGet(int_i));
+    func.instruction(&Instruction::I32Const(10));
+    func.instruction(&Instruction::I32DivS);
+    func.instruction(&Instruction::LocalSet(int_i));
+    func.instruction(&Instruction::LocalGet(pos));
+    func.instruction(&Instruction::I32Const(1));
+    func.instruction(&Instruction::I32Sub);
+    func.instruction(&Instruction::LocalSet(pos));
+    func.instruction(&Instruction::LocalGet(blk));
+    func.instruction(&Instruction::LocalGet(pos));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::LocalGet(digit));
+    func.instruction(&Instruction::I32Const(b'0' as i32));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::I32Store8(byte_arg()));
+    func.instruction(&Instruction::LocalGet(int_i));
+    func.instruction(&Instruction::I32Eqz);
+    func.instruction(&Instruction::BrIf(1));
+    func.instruction(&Instruction::Br(0));
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::End);
+
+    func.instruction(&Instruction::LocalGet(neg));
+    func.instruction(&Instruction::If(BlockType::Empty));
+    func.instruction(&Instruction::LocalGet(pos));
+    func.instruction(&Instruction::I32Const(1));
+    func.instruction(&Instruction::I32Sub);
+    func.instruction(&Instruction::LocalSet(pos));
+    func.instruction(&Instruction::LocalGet(blk));
+    func.instruction(&Instruction::LocalGet(pos));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::I32Const(b'-' as i32));
+    func.instruction(&Instruction::I32Store8(byte_arg()));
+    func.instruction(&Instruction::End);
+
+    // Shuffle the digits to the front of the block and finish the header.
+    func.instruction(&Instruction::I32Const(32));
+    func.instruction(&Instruction::LocalGet(pos));
+    func.instruction(&Instruction::I32Sub);
+    func.instruction(&Instruction::LocalSet(len));
+    func.instruction(&Instruction::LocalGet(blk));
+    func.instruction(&Instruction::LocalGet(blk));
+    func.instruction(&Instruction::LocalGet(pos));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::LocalGet(len));
+    func.instruction(&Instruction::MemoryCopy {
+        src_mem: 0,
+        dst_mem: 0,
+    });
+    func.instruction(&Instruction::LocalGet(blk));
+    func.instruction(&Instruction::I32Const(4));
+    func.instruction(&Instruction::I32Sub);
+    func.instruction(&Instruction::LocalGet(len));
+    func.instruction(&Instruction::I32Store(slot_arg()));
+    func.instruction(&Instruction::LocalGet(blk));
+    func.instruction(&Instruction::LocalGet(len));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::I32Store8(byte_arg()));
+    func.instruction(&Instruction::LocalGet(blk));
+    func.instruction(&Instruction::LocalGet(len));
+}
+
 /// MemArg for a single-byte access. A byte's natural alignment is 1, so the
 /// alignment hint must be 0; anything larger is rejected by the validator.
 fn byte_arg() -> MemArg {
@@ -3155,10 +3705,21 @@ pub fn emit_expr(
                         func.instruction(&Instruction::I32Mul);
                     }
                     IROp::Div => {
+                        // Python 3's `/` is true division: `7 / 2` is 3.5, not
+                        // 3. This emitted an integer divide, so the result was
+                        // silently truncated wherever it was used as a number
+                        // and failed validation wherever a float was expected.
+                        // `//` is the floor division that keeps the integer
+                        // result, and it is unchanged.
                         if !divisor_is_never_zero(right) {
                             emit_zero_division_guard(func, ctx, false);
                         }
-                        func.instruction(&Instruction::I32DivS);
+                        let divisor = ctx.temp_local + 40;
+                        func.instruction(&Instruction::LocalSet(divisor));
+                        func.instruction(&Instruction::F64ConvertI32S);
+                        func.instruction(&Instruction::LocalGet(divisor));
+                        func.instruction(&Instruction::F64ConvertI32S);
+                        func.instruction(&Instruction::F64Div);
                     }
                     IROp::Mod => {
                         if !divisor_is_never_zero(right) {
@@ -3196,7 +3757,13 @@ pub fn emit_expr(
                         func.instruction(&Instruction::I32And);
                     }
                 }
-                IRType::Int
+                // True division is the one integer operator whose result is a
+                // float.
+                if matches!(op, IROp::Div) {
+                    IRType::Float
+                } else {
+                    IRType::Int
+                }
             };
 
             // Cast the result to expected type if needed
@@ -4213,6 +4780,397 @@ pub fn emit_expr(
                             }
                         }
                     }
+                    "__format_fixed" => {
+                        // f"{x:.2f}": the value and a literal precision are on
+                        // the stack; the precision is compile-time so the digit
+                        // loop can be unrolled against it.
+                        let Some(IRExpr::Const(IRConstant::Int(precision))) = arguments.get(1)
+                        else {
+                            ctx.report("an f-string's '.Nf' precision must be a literal");
+                            func.instruction(&Instruction::Unreachable);
+                            func.instruction(&Instruction::I32Const(0));
+                            func.instruction(&Instruction::I32Const(0));
+                            return IRType::String;
+                        };
+                        // The literal precision was pushed as a word; the
+                        // formatter reads it from the instruction stream.
+                        func.instruction(&Instruction::Drop);
+                        if !matches!(arg_types[0], IRType::Float) {
+                            // An int renders through the same path, so
+                            // f"{3:.2f}" is "3.00" as Python has it.
+                            func.instruction(&Instruction::F64ConvertI32S);
+                        }
+                        emit_format_fixed(func, ctx, *precision as u32);
+                        IRType::String
+                    }
+                    "sorted" | "__sorted_desc" => {
+                        // sorted(seq[, key][, reverse]) returns a new list; the
+                        // original is untouched. This used to fall through to
+                        // the generic builtin path and answer a value that had
+                        // nothing to do with sorting, while reporting success.
+                        //
+                        // The lowering folds `reverse` into the name and makes
+                        // `key` the second argument, so both are known here.
+                        let descending = function_name == "__sorted_desc";
+                        if arg_types.is_empty() {
+                            ctx.report("sorted() takes an iterable");
+                            func.instruction(&Instruction::Unreachable);
+                            func.instruction(&Instruction::I32Const(0));
+                            return IRType::Unknown;
+                        }
+                        let elem_ty = match &arg_types[0] {
+                            IRType::List(inner) => (**inner).clone(),
+                            IRType::Tuple(members) => {
+                                members.first().cloned().unwrap_or(IRType::Unknown)
+                            }
+                            other => {
+                                ctx.report(format!(
+                                    "sorted() needs a list or tuple, got {}",
+                                    crate::type_to_string(other)
+                                ));
+                                func.instruction(&Instruction::Unreachable);
+                                func.instruction(&Instruction::I32Const(0));
+                                return IRType::Unknown;
+                            }
+                        };
+                        // With a key the comparison runs on what the key
+                        // returns; without one it runs on the elements.
+                        let key_expr = arguments.get(1);
+                        let key_ty = match key_expr {
+                            Some(k) => {
+                                // A key that reaches into its parameter needs
+                                // that parameter's type, which a lambda does
+                                // not carry, so it would compile to a wrong
+                                // answer rather than a failure.
+                                if let IRExpr::ClosureMake { lambda_name, .. } = k {
+                                    if let Some((param, body)) = ctx.lambda_bodies.get(lambda_name)
+                                    {
+                                        if key_needs_param_type(body, param) {
+                                            ctx.report(
+                                                "sorted()'s 'key' cannot index its argument, \
+                                                 call a method on it, or pass it to len(): a \
+                                                 lambda parameter carries no type, so those \
+                                                 read the value wrongly. Hint: sort by the \
+                                                 element itself, or build the list you want \
+                                                 sorted first",
+                                            );
+                                        }
+                                    }
+                                }
+                                let inferred = infer_key_type(k, &elem_ty, ctx);
+                                if matches!(inferred, IRType::Unknown) {
+                                    ctx.report(
+                                        "sorted() cannot tell what its 'key' returns, so it \
+                                         cannot know how to compare two of them. Hint: give \
+                                         the sequence a known element type, and have the key \
+                                         return the element, one of its members, or a tuple \
+                                         of those",
+                                    );
+                                }
+                                inferred
+                            }
+                            None => elem_ty.clone(),
+                        };
+                        // Comparing values whose type is unknown would compare
+                        // the raw slot words: for a list of tuples that is
+                        // comparing pointers, which leaves the list in
+                        // allocation order while reporting success.
+                        if matches!(key_ty, IRType::Unknown) {
+                            ctx.report(
+                                "sorted() cannot tell what type it is ordering, so it cannot \
+                                 compare two of them. Hint: annotate the sequence (for example \
+                                 `xs: List[Tuple[int, str]] = []`) so its element type is known",
+                            );
+                        }
+
+                        // The sequence pointer is already on the stack; the key
+                        // closure's environment is emitted once, before the
+                        // loops, and reused for every call.
+                        // A dedicated high range: everything below is claimed
+                        // by the expression codegen this arm calls into (the
+                        // key closure's own construction, and `emit_key_cmp`),
+                        // and these have to survive across both.
+                        let src = ctx.temp_local + 32;
+                        let n = ctx.temp_local + 33;
+                        let out = ctx.temp_local + 34;
+                        let keys = ctx.temp_local + 35;
+                        let env = ctx.temp_local + 36;
+                        let i = ctx.temp_local + 37;
+                        let j = ctx.temp_local + 38;
+                        let addr_a = ctx.temp_local + 39;
+                        let addr_b = ctx.temp_local + 40;
+                        // The saved element and key are kept as i32 halves,
+                        // since the scratch run is i32 and an f64 element must
+                        // keep both of its words. These indices stay clear of
+                        // the ones `emit_key_cmp` claims, because the saved
+                        // values have to survive every comparison it emits.
+                        let elem_lo = ctx.temp_local + 41;
+                        let elem_hi = ctx.temp_local + 42;
+                        let key_lo = ctx.temp_local + 43;
+                        let key_hi = ctx.temp_local + 44;
+
+                        // Every argument was already emitted before this
+                        // match, so the key closure's environment sits on top
+                        // of the sequence pointer and comes off first.
+                        if key_expr.is_some() {
+                            func.instruction(&Instruction::LocalSet(env));
+                        }
+                        func.instruction(&Instruction::LocalSet(src));
+                        func.instruction(&Instruction::LocalGet(src));
+                        func.instruction(&Instruction::I32Load(slot_arg()));
+                        func.instruction(&Instruction::LocalSet(n));
+
+                        // out = a fresh list holding a copy of the elements.
+                        func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
+                        func.instruction(&Instruction::LocalGet(n));
+                        func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+                        func.instruction(&Instruction::I32Mul);
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::Call(ctx.alloc_func_index));
+                        func.instruction(&Instruction::LocalSet(out));
+                        store_runtime_data_ptr(func, out);
+                        func.instruction(&Instruction::LocalGet(out));
+                        func.instruction(&Instruction::LocalGet(n));
+                        func.instruction(&Instruction::I32Store(slot_arg()));
+                        func.instruction(&Instruction::LocalGet(out));
+                        func.instruction(&Instruction::LocalGet(n));
+                        func.instruction(&Instruction::I32Store(mem_off(COLLECTION_CAP as u64)));
+                        func.instruction(&Instruction::LocalGet(out));
+                        emit_data_base(func);
+                        func.instruction(&Instruction::LocalGet(src));
+                        emit_data_base(func);
+                        func.instruction(&Instruction::LocalGet(n));
+                        func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+                        func.instruction(&Instruction::I32Mul);
+                        func.instruction(&Instruction::MemoryCopy {
+                            src_mem: 0,
+                            dst_mem: 0,
+                        });
+
+                        if key_expr.is_some() {
+                            // keys[i] = key(out[i]), computed once per element
+                            // rather than on every comparison, which is what
+                            // Python's own sort does.
+                            func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
+                            func.instruction(&Instruction::LocalGet(n));
+                            func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+                            func.instruction(&Instruction::I32Mul);
+                            func.instruction(&Instruction::I32Add);
+                            func.instruction(&Instruction::Call(ctx.alloc_func_index));
+                            func.instruction(&Instruction::LocalSet(keys));
+                            store_runtime_data_ptr(func, keys);
+                            func.instruction(&Instruction::LocalGet(keys));
+                            func.instruction(&Instruction::LocalGet(n));
+                            func.instruction(&Instruction::I32Store(slot_arg()));
+
+                            let Some(type_base) = ctx.closure_type_base else {
+                                ctx.report("sorted()'s 'key' needs closure support in this module");
+                                func.instruction(&Instruction::Unreachable);
+                                func.instruction(&Instruction::I32Const(0));
+                                return IRType::List(Box::new(elem_ty));
+                            };
+
+                            func.instruction(&Instruction::I32Const(0));
+                            func.instruction(&Instruction::LocalSet(i));
+                            func.instruction(&Instruction::Block(BlockType::Empty));
+                            func.instruction(&Instruction::Loop(BlockType::Empty));
+                            func.instruction(&Instruction::LocalGet(i));
+                            func.instruction(&Instruction::LocalGet(n));
+                            func.instruction(&Instruction::I32GeS);
+                            func.instruction(&Instruction::BrIf(1));
+                            // Destination slot, pushed before the value.
+                            func.instruction(&Instruction::LocalGet(keys));
+                            emit_data_base(func);
+                            func.instruction(&Instruction::LocalGet(i));
+                            func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+                            func.instruction(&Instruction::I32Mul);
+                            func.instruction(&Instruction::I32Add);
+                            // key(out[i]): the element word, then the closure
+                            // environment, then the table slot it names.
+                            func.instruction(&Instruction::LocalGet(out));
+                            emit_data_base(func);
+                            func.instruction(&Instruction::LocalGet(i));
+                            func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+                            func.instruction(&Instruction::I32Mul);
+                            func.instruction(&Instruction::I32Add);
+                            func.instruction(&Instruction::I32Load(slot_arg()));
+                            func.instruction(&Instruction::LocalGet(env));
+                            func.instruction(&Instruction::LocalGet(env));
+                            func.instruction(&Instruction::I32Load(slot_arg()));
+                            func.instruction(&Instruction::CallIndirect {
+                                type_index: type_base + 1,
+                                table_index: 0,
+                            });
+                            func.instruction(&Instruction::I32Store(slot_arg()));
+                            func.instruction(&Instruction::LocalGet(i));
+                            func.instruction(&Instruction::I32Const(1));
+                            func.instruction(&Instruction::I32Add);
+                            func.instruction(&Instruction::LocalSet(i));
+                            func.instruction(&Instruction::Br(0));
+                            func.instruction(&Instruction::End);
+                            func.instruction(&Instruction::End);
+                        }
+
+                        // Insertion sort, which is stable: equal keys keep the
+                        // order they came in, exactly as Python's sort does.
+                        let cmp_base = if key_expr.is_some() { keys } else { out };
+                        // The saved key needs an address of its own to compare
+                        // against: shifting overwrites slot `i` on the first
+                        // move, so comparing against the array position there
+                        // would compare against the value just shifted in.
+                        let saved = ctx.temp_local + 45;
+                        func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+                        func.instruction(&Instruction::Call(ctx.alloc_func_index));
+                        func.instruction(&Instruction::LocalSet(saved));
+                        func.instruction(&Instruction::I32Const(1));
+                        func.instruction(&Instruction::LocalSet(i));
+                        func.instruction(&Instruction::Block(BlockType::Empty));
+                        func.instruction(&Instruction::Loop(BlockType::Empty));
+                        func.instruction(&Instruction::LocalGet(i));
+                        func.instruction(&Instruction::LocalGet(n));
+                        func.instruction(&Instruction::I32GeS);
+                        func.instruction(&Instruction::BrIf(1));
+
+                        // Save element i and its key.
+                        func.instruction(&Instruction::LocalGet(out));
+                        emit_data_base(func);
+                        func.instruction(&Instruction::LocalGet(i));
+                        func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+                        func.instruction(&Instruction::I32Mul);
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::LocalSet(addr_a));
+                        func.instruction(&Instruction::LocalGet(addr_a));
+                        func.instruction(&Instruction::I32Load(slot_arg()));
+                        func.instruction(&Instruction::LocalSet(elem_lo));
+                        func.instruction(&Instruction::LocalGet(addr_a));
+                        func.instruction(&Instruction::I32Load(mem_off(4)));
+                        func.instruction(&Instruction::LocalSet(elem_hi));
+                        func.instruction(&Instruction::LocalGet(cmp_base));
+                        emit_data_base(func);
+                        func.instruction(&Instruction::LocalGet(i));
+                        func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+                        func.instruction(&Instruction::I32Mul);
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::LocalSet(addr_b));
+                        func.instruction(&Instruction::LocalGet(addr_b));
+                        func.instruction(&Instruction::I32Load(slot_arg()));
+                        func.instruction(&Instruction::LocalSet(key_lo));
+                        func.instruction(&Instruction::LocalGet(addr_b));
+                        func.instruction(&Instruction::I32Load(mem_off(4)));
+                        func.instruction(&Instruction::LocalSet(key_hi));
+                        func.instruction(&Instruction::LocalGet(saved));
+                        func.instruction(&Instruction::LocalGet(key_lo));
+                        func.instruction(&Instruction::I32Store(slot_arg()));
+                        func.instruction(&Instruction::LocalGet(saved));
+                        func.instruction(&Instruction::LocalGet(key_hi));
+                        func.instruction(&Instruction::I32Store(mem_off(4)));
+
+                        func.instruction(&Instruction::LocalGet(i));
+                        func.instruction(&Instruction::I32Const(1));
+                        func.instruction(&Instruction::I32Sub);
+                        func.instruction(&Instruction::LocalSet(j));
+
+                        func.instruction(&Instruction::Block(BlockType::Empty));
+                        func.instruction(&Instruction::Loop(BlockType::Empty));
+                        func.instruction(&Instruction::LocalGet(j));
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::I32LtS);
+                        func.instruction(&Instruction::BrIf(1));
+                        // Compare key[j] against the saved key, which is parked
+                        // in a scratch slot so it has an address to compare.
+                        func.instruction(&Instruction::LocalGet(cmp_base));
+                        emit_data_base(func);
+                        func.instruction(&Instruction::LocalGet(j));
+                        func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+                        func.instruction(&Instruction::I32Mul);
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::LocalSet(addr_a));
+                        emit_key_cmp(func, ctx, &key_ty, addr_a, saved);
+                        func.instruction(&Instruction::I32Const(0));
+                        if descending {
+                            func.instruction(&Instruction::I32LtS);
+                        } else {
+                            func.instruction(&Instruction::I32GtS);
+                        }
+                        func.instruction(&Instruction::I32Eqz);
+                        func.instruction(&Instruction::BrIf(1));
+
+                        // Shift element and key one place right.
+                        for base in [out, cmp_base] {
+                            func.instruction(&Instruction::LocalGet(base));
+                            emit_data_base(func);
+                            func.instruction(&Instruction::LocalGet(j));
+                            func.instruction(&Instruction::I32Const(1));
+                            func.instruction(&Instruction::I32Add);
+                            func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+                            func.instruction(&Instruction::I32Mul);
+                            func.instruction(&Instruction::I32Add);
+                            func.instruction(&Instruction::LocalGet(base));
+                            emit_data_base(func);
+                            func.instruction(&Instruction::LocalGet(j));
+                            func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+                            func.instruction(&Instruction::I32Mul);
+                            func.instruction(&Instruction::I32Add);
+                            func.instruction(&Instruction::I64Load(slot_arg()));
+                            func.instruction(&Instruction::I64Store(slot_arg()));
+                            if base == out && key_expr.is_none() {
+                                break;
+                            }
+                        }
+
+                        func.instruction(&Instruction::LocalGet(j));
+                        func.instruction(&Instruction::I32Const(1));
+                        func.instruction(&Instruction::I32Sub);
+                        func.instruction(&Instruction::LocalSet(j));
+                        func.instruction(&Instruction::Br(0));
+                        func.instruction(&Instruction::End);
+                        func.instruction(&Instruction::End);
+
+                        // Drop the saved element and key into the hole.
+                        func.instruction(&Instruction::LocalGet(out));
+                        emit_data_base(func);
+                        func.instruction(&Instruction::LocalGet(j));
+                        func.instruction(&Instruction::I32Const(1));
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+                        func.instruction(&Instruction::I32Mul);
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::LocalSet(addr_a));
+                        func.instruction(&Instruction::LocalGet(addr_a));
+                        func.instruction(&Instruction::LocalGet(elem_lo));
+                        func.instruction(&Instruction::I32Store(slot_arg()));
+                        func.instruction(&Instruction::LocalGet(addr_a));
+                        func.instruction(&Instruction::LocalGet(elem_hi));
+                        func.instruction(&Instruction::I32Store(mem_off(4)));
+                        if key_expr.is_some() {
+                            func.instruction(&Instruction::LocalGet(keys));
+                            emit_data_base(func);
+                            func.instruction(&Instruction::LocalGet(j));
+                            func.instruction(&Instruction::I32Const(1));
+                            func.instruction(&Instruction::I32Add);
+                            func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+                            func.instruction(&Instruction::I32Mul);
+                            func.instruction(&Instruction::I32Add);
+                            func.instruction(&Instruction::LocalSet(addr_b));
+                            func.instruction(&Instruction::LocalGet(addr_b));
+                            func.instruction(&Instruction::LocalGet(key_lo));
+                            func.instruction(&Instruction::I32Store(slot_arg()));
+                            func.instruction(&Instruction::LocalGet(addr_b));
+                            func.instruction(&Instruction::LocalGet(key_hi));
+                            func.instruction(&Instruction::I32Store(mem_off(4)));
+                        }
+
+                        func.instruction(&Instruction::LocalGet(i));
+                        func.instruction(&Instruction::I32Const(1));
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::LocalSet(i));
+                        func.instruction(&Instruction::Br(0));
+                        func.instruction(&Instruction::End);
+                        func.instruction(&Instruction::End);
+
+                        func.instruction(&Instruction::LocalGet(out));
+                        IRType::List(Box::new(elem_ty))
+                    }
                     "sum" => {
                         if arg_types.is_empty() {
                             return IRType::Unknown;
@@ -4895,12 +5853,42 @@ pub fn emit_expr(
                     // Stack: (tuple_ptr, index). Address = tuple_ptr + HEADER + index*SLOT.
                     emit_sequence_address(func, ctx);
 
-                    // For homogeneous indexing, use first element type
-                    // In practice, we'd need to track which index is being accessed
-                    let elem_type = if !element_types.is_empty() {
-                        element_types[0].clone()
-                    } else {
-                        IRType::Unknown
+                    // A tuple carries one type per position, so the index
+                    // decides which. This used to answer the *first* member's
+                    // type whatever was indexed, so `pairs[0][1]` on a
+                    // `(int, str)` came back typed `int`: concatenating two of
+                    // them compiled as integer addition and the result was read
+                    // back as a string offset, which is a silent wrong answer.
+                    let elem_type = match index.as_ref() {
+                        IRExpr::Const(IRConstant::Int(i)) => {
+                            let n = element_types.len() as i64;
+                            let norm = if (*i as i64) < 0 {
+                                *i as i64 + n
+                            } else {
+                                *i as i64
+                            };
+                            usize::try_from(norm)
+                                .ok()
+                                .and_then(|k| element_types.get(k))
+                                .cloned()
+                                .unwrap_or(IRType::Unknown)
+                        }
+                        // A computed index can land on any member, so the type
+                        // is only knowable when they all agree.
+                        _ => {
+                            let uniform = element_types.windows(2).all(|pair| pair[0] == pair[1]);
+                            if uniform {
+                                element_types.first().cloned().unwrap_or(IRType::Unknown)
+                            } else {
+                                ctx.report(
+                                    "a tuple whose members have different types can only be \
+                                     indexed with a literal position, since the type of the \
+                                     result decides how it is read. Hint: index with a \
+                                     constant, or use a list",
+                                );
+                                IRType::Unknown
+                            }
+                        }
                     };
 
                     load_collection_word(func, &elem_type, ctx.temp_local + 1);
