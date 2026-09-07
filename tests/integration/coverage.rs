@@ -13,7 +13,7 @@ mod harness;
 use harness::{
     call_f64, call_host_fs_i32, call_i32, call_i32_1, call_i32_2, call_instance_i32, call_str,
     call_str_1, call_str_2, call_untyped_f64, call_untyped_i32, examples_dir, instantiate_file,
-    instantiate_with_host_fs, read_example,
+    instantiate_with_host_fs, read_example, read_str,
 };
 use wasmi::Value;
 
@@ -616,4 +616,88 @@ fn shopping_cart_discount_tiers() {
     assert_eq!(rate(50.0), 0.05);
     assert_eq!(rate(49.99), 0.0);
     assert_eq!(rate(0.0), 0.0);
+}
+
+// ---------------------------------------------------------------------------
+// examples/text_report.py
+// ---------------------------------------------------------------------------
+//
+// The second of the 0.16.0 end-to-end programs, and the one that exercises the
+// most at once: string methods on runtime strings, dict accumulation with
+// string keys, sorting tuples, a comprehension, and fixed-point formatting.
+// The expected report is what CPython prints for the same source.
+
+/// The whole pipeline, asserted as one string: tokenize (strip punctuation and
+/// case-fold each word), count into a dict keyed by those runtime strings, rank
+/// by count with alphabetical tie-breaking, and format. Every line here failed
+/// differently before the fix pass: the counts did not deduplicate, the ranking
+/// came back in allocation order, and the words rendered as pointers.
+#[test]
+fn text_report_matches_cpython() {
+    let src = read_example("text_report.py");
+    let expected = "23 words, 14 unique\n\
+                    longest=quick avg=3.43\n\
+                    fox: 4\n\
+                    the: 4\n\
+                    a: 2";
+    assert_eq!(call_str(&src, "main"), expected);
+}
+
+/// The same report line by line, so a failure says which stage broke rather
+/// than dumping the whole string.
+#[test]
+fn text_report_lines() {
+    let src = read_example("text_report.py");
+    let report = call_str(&src, "main");
+    let lines: Vec<&str> = report.lines().collect();
+    assert_eq!(lines.len(), 5, "report shape: {report:?}");
+    // 23 tokens, 14 distinct after punctuation is stripped and case folded.
+    assert_eq!(lines[0], "23 words, 14 unique");
+    // The mean word length is 79/23 = 3.4347..., which `.2f` rounds to 3.43.
+    assert_eq!(lines[1], "longest=quick avg=3.43");
+    // "fox" and "the" both appear four times, so the alphabetical tie-break
+    // decides the order between them.
+    assert_eq!(lines[2], "fox: 4");
+    assert_eq!(lines[3], "the: 4");
+    assert_eq!(lines[4], "a: 2");
+}
+
+// ---------------------------------------------------------------------------
+// examples/library_project/ (multi-file, compiled from disk)
+// ---------------------------------------------------------------------------
+//
+// The third end-to-end program: a book catalogue split across four modules,
+// with the domain class shared between them. Compiled from its entry file with
+// imports resolved from disk, like `user_modules_app/`.
+
+/// The numeric half of the catalogue: a class holding a list of instances of a
+/// class defined in another module, summed and filtered through methods that
+/// call each element's own methods.
+#[test]
+fn library_project_counts_match_cpython() {
+    let entry = examples_dir().join("library_project").join("main.py");
+    let (instance, mut store) = instantiate_file(&entry);
+    assert_eq!(call_instance_i32(&instance, &mut store, "catalog_size"), 3);
+    assert_eq!(call_instance_i32(&instance, &mut store, "total_copies"), 6);
+    // Two of the three books share an author.
+    assert_eq!(call_instance_i32(&instance, &mut store, "gibson_titles"), 2);
+    assert_eq!(call_instance_i32(&instance, &mut store, "oldest"), 1965);
+    // Three borrows against six copies, one of which is refused because that
+    // title only has a single copy.
+    assert_eq!(call_instance_i32(&instance, &mut store, "borrow_flow"), 4);
+}
+
+/// The string half, which crosses every module boundary: `reports` formats a
+/// `models.Book` that `catalog` built, and `str()` renders the year.
+#[test]
+fn library_project_strings_match_cpython() {
+    let entry = examples_dir().join("library_project").join("main.py");
+    let (instance, mut store) = instantiate_file(&entry);
+    let first = call_instance_i32(&instance, &mut store, "first_line");
+    assert_eq!(read_str(&instance, &store, first), "Dune by Herbert (1965)");
+    let roundtrip = call_instance_i32(&instance, &mut store, "shared_class_roundtrip");
+    assert_eq!(
+        read_str(&instance, &store, roundtrip),
+        "Solaris by Lem: 3 of 4"
+    );
 }
