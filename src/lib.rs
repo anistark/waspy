@@ -420,15 +420,22 @@ fn compile_merged_sources(
             ir_module.functions.len()
         );
 
-        // Check for duplicate function names and add functions
+        // Merged modules share one flat namespace, so two files defining the
+        // same function name cannot both be kept. This used to drop the second
+        // and warn: the build still reported success and every call to either
+        // one reached the first, so `alpha.rate()` and `beta.rate()` both
+        // answered alpha's value. A wrong answer behind a warning is exactly
+        // what the correctness rule forbids, so it is an error now. Resolving
+        // it properly means qualifying names by module and rewriting call sites
+        // per file's imports, which is a milestone of its own.
         for func in ir_module.functions {
             if !function_names.insert(func.name.clone()) {
-                log_warn!(
-                    "Duplicate function '{}' found in file: {}",
+                return Err(anyhow::anyhow!(
+                    "duplicate function '{}' in {filename}: another module in this \
+                     compilation already defines it, and merged modules share one \
+                     namespace. Hint: rename one of them",
                     func.name,
-                    filename
-                );
-                // Skip the duplicate but continue processing
+                ));
             } else {
                 log_debug!("Adding function: {}", func.name);
                 // Add the function

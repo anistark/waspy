@@ -329,6 +329,12 @@ fn scan_expr_calls(expr: &IRExpr, raises: &mut bool, calls: &mut HashSet<String>
             arguments,
         } => {
             calls.insert(method_name.clone());
+            // `str.index()` / `list.index()` raise ValueError when the value is
+            // absent, so a function calling one is a function that can raise
+            // and its callers must check on the way back.
+            if method_name == "index" {
+                *raises = true;
+            }
             scan_expr_calls(object, raises, calls);
             for arg in arguments {
                 scan_expr_calls(arg, raises, calls);
@@ -1330,6 +1336,23 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, ChakraError> {
     // Which functions can raise, as WASM indices, so call sites know whether an
     // exception check is needed after them. Every function is registered by
     // now, so the names the analysis works in translate straight to indices.
+    // A lifted lambda's body, recovered from the function the finalize pass
+    // created for it, so a sort key's result type can be inferred at its call
+    // site. The body is the expression the synthesized function returns, after
+    // any captured-cell prelude.
+    for f in &ir_module.functions {
+        if !f.name.starts_with("__lambda_") {
+            continue;
+        }
+        let Some(param) = f.params.first() else {
+            continue;
+        };
+        if let Some(crate::ir::IRStatement::Return(Some(expr))) = f.body.statements.last() {
+            ctx.lambda_bodies
+                .insert(f.name.clone(), (param.name.clone(), expr.clone()));
+        }
+    }
+
     let raisers = functions_that_can_raise(ir_module);
     ctx.can_raise = raisers
         .iter()
