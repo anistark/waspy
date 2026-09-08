@@ -7904,7 +7904,7 @@ pub fn emit_expr(
                             // this builds a fresh block and leaves the
                             // transformed (offset, length) in its place.
                             if !arguments.is_empty() {
-                                ctx.report(format!("str.{}() takes no arguments", method_name));
+                                ctx.report(format!("str.{method_name}() takes no arguments"));
                                 func.instruction(&Instruction::Unreachable);
                                 func.instruction(&Instruction::I32Const(0));
                                 func.instruction(&Instruction::I32Const(0));
@@ -7920,7 +7920,7 @@ pub fn emit_expr(
                             // this builds a fresh block and leaves the
                             // transformed (offset, length) in its place.
                             if !arguments.is_empty() {
-                                ctx.report(format!("str.{}() takes no arguments", method_name));
+                                ctx.report(format!("str.{method_name}() takes no arguments"));
                                 func.instruction(&Instruction::Unreachable);
                                 func.instruction(&Instruction::I32Const(0));
                                 func.instruction(&Instruction::I32Const(0));
@@ -7956,8 +7956,7 @@ pub fn emit_expr(
                                 }
                                 _ => {
                                     ctx.report(format!(
-                                        "str.{}() takes at most one argument",
-                                        method_name
+                                        "str.{method_name}() takes at most one argument"
                                     ));
                                     func.instruction(&Instruction::Unreachable);
                                     func.instruction(&Instruction::I32Const(0));
@@ -7995,8 +7994,7 @@ pub fn emit_expr(
                                 }
                                 _ => {
                                     ctx.report(format!(
-                                        "str.{}() takes at most one argument",
-                                        method_name
+                                        "str.{method_name}() takes at most one argument"
                                     ));
                                     func.instruction(&Instruction::Unreachable);
                                     func.instruction(&Instruction::I32Const(0));
@@ -8034,8 +8032,7 @@ pub fn emit_expr(
                                 }
                                 _ => {
                                     ctx.report(format!(
-                                        "str.{}() takes at most one argument",
-                                        method_name
+                                        "str.{method_name}() takes at most one argument"
                                     ));
                                     func.instruction(&Instruction::Unreachable);
                                     func.instruction(&Instruction::I32Const(0));
@@ -8053,7 +8050,7 @@ pub fn emit_expr(
                             // this builds a fresh block and leaves the
                             // transformed (offset, length) in its place.
                             if !arguments.is_empty() {
-                                ctx.report(format!("str.{}() takes no arguments", method_name));
+                                ctx.report(format!("str.{method_name}() takes no arguments"));
                                 func.instruction(&Instruction::Unreachable);
                                 func.instruction(&Instruction::I32Const(0));
                                 func.instruction(&Instruction::I32Const(0));
@@ -8069,7 +8066,7 @@ pub fn emit_expr(
                             // this builds a fresh block and leaves the
                             // transformed (offset, length) in its place.
                             if !arguments.is_empty() {
-                                ctx.report(format!("str.{}() takes no arguments", method_name));
+                                ctx.report(format!("str.{method_name}() takes no arguments"));
                                 func.instruction(&Instruction::Unreachable);
                                 func.instruction(&Instruction::I32Const(0));
                                 func.instruction(&Instruction::I32Const(0));
@@ -8119,8 +8116,7 @@ pub fn emit_expr(
                             // the stack is (h_off, h_len, n_off, n_len).
                             if arguments.len() != 1 {
                                 ctx.report(format!(
-                                    "str.{}() takes exactly one argument",
-                                    method_name
+                                    "str.{method_name}() takes exactly one argument"
                                 ));
                                 func.instruction(&Instruction::Unreachable);
                                 func.instruction(&Instruction::I32Const(0));
@@ -8147,8 +8143,7 @@ pub fn emit_expr(
                             // the stack is (h_off, h_len, n_off, n_len).
                             if arguments.len() != 1 {
                                 ctx.report(format!(
-                                    "str.{}() takes exactly one argument",
-                                    method_name
+                                    "str.{method_name}() takes exactly one argument"
                                 ));
                                 func.instruction(&Instruction::Unreachable);
                                 func.instruction(&Instruction::I32Const(0));
@@ -8175,8 +8170,7 @@ pub fn emit_expr(
                             // the stack is (h_off, h_len, n_off, n_len).
                             if arguments.len() != 1 {
                                 ctx.report(format!(
-                                    "str.{}() takes exactly one argument",
-                                    method_name
+                                    "str.{method_name}() takes exactly one argument"
                                 ));
                                 func.instruction(&Instruction::Unreachable);
                                 func.instruction(&Instruction::I32Const(0));
@@ -8203,8 +8197,7 @@ pub fn emit_expr(
                             // the stack is (h_off, h_len, n_off, n_len).
                             if arguments.len() != 1 {
                                 ctx.report(format!(
-                                    "str.{}() takes exactly one argument",
-                                    method_name
+                                    "str.{method_name}() takes exactly one argument"
                                 ));
                                 func.instruction(&Instruction::Unreachable);
                                 func.instruction(&Instruction::I32Const(0));
@@ -8231,8 +8224,7 @@ pub fn emit_expr(
                             // the stack is (h_off, h_len, n_off, n_len).
                             if arguments.len() != 1 {
                                 ctx.report(format!(
-                                    "str.{}() takes exactly one argument",
-                                    method_name
+                                    "str.{method_name}() takes exactly one argument"
                                 ));
                                 func.instruction(&Instruction::Unreachable);
                                 func.instruction(&Instruction::I32Const(0));
@@ -8282,7 +8274,7 @@ pub fn emit_expr(
                             // during lowering; this is the runtime path, which
                             // used to answer False unconditionally.
                             if !arguments.is_empty() {
-                                ctx.report(format!("str.{}() takes no arguments", method_name));
+                                ctx.report(format!("str.{method_name}() takes no arguments"));
                                 func.instruction(&Instruction::Unreachable);
                                 func.instruction(&Instruction::I32Const(0));
                                 return IRType::Bool;
@@ -8297,7 +8289,7 @@ pub fn emit_expr(
                             // during lowering; this is the runtime path, which
                             // used to answer False unconditionally.
                             if !arguments.is_empty() {
-                                ctx.report(format!("str.{}() takes no arguments", method_name));
+                                ctx.report(format!("str.{method_name}() takes no arguments"));
                                 func.instruction(&Instruction::Unreachable);
                                 func.instruction(&Instruction::I32Const(0));
                                 return IRType::Bool;
@@ -8312,7 +8304,7 @@ pub fn emit_expr(
                             // during lowering; this is the runtime path, which
                             // used to answer False unconditionally.
                             if !arguments.is_empty() {
-                                ctx.report(format!("str.{}() takes no arguments", method_name));
+                                ctx.report(format!("str.{method_name}() takes no arguments"));
                                 func.instruction(&Instruction::Unreachable);
                                 func.instruction(&Instruction::I32Const(0));
                                 return IRType::Bool;
@@ -8327,7 +8319,7 @@ pub fn emit_expr(
                             // during lowering; this is the runtime path, which
                             // used to answer False unconditionally.
                             if !arguments.is_empty() {
-                                ctx.report(format!("str.{}() takes no arguments", method_name));
+                                ctx.report(format!("str.{method_name}() takes no arguments"));
                                 func.instruction(&Instruction::Unreachable);
                                 func.instruction(&Instruction::I32Const(0));
                                 return IRType::Bool;
@@ -8342,7 +8334,7 @@ pub fn emit_expr(
                             // during lowering; this is the runtime path, which
                             // used to answer False unconditionally.
                             if !arguments.is_empty() {
-                                ctx.report(format!("str.{}() takes no arguments", method_name));
+                                ctx.report(format!("str.{method_name}() takes no arguments"));
                                 func.instruction(&Instruction::Unreachable);
                                 func.instruction(&Instruction::I32Const(0));
                                 return IRType::Bool;
@@ -8357,7 +8349,7 @@ pub fn emit_expr(
                             // during lowering; this is the runtime path, which
                             // used to answer False unconditionally.
                             if !arguments.is_empty() {
-                                ctx.report(format!("str.{}() takes no arguments", method_name));
+                                ctx.report(format!("str.{method_name}() takes no arguments"));
                                 func.instruction(&Instruction::Unreachable);
                                 func.instruction(&Instruction::I32Const(0));
                                 return IRType::Bool;
@@ -8428,9 +8420,8 @@ pub fn emit_expr(
                             // rather than ignored.
                             if arguments.len() != 1 {
                                 ctx.report(format!(
-                                    "str.{}() takes exactly one argument. \
-                                     Hint: a custom fill character is not supported",
-                                    method_name
+                                    "str.{method_name}() takes exactly one argument. \
+                                     Hint: a custom fill character is not supported"
                                 ));
                                 func.instruction(&Instruction::Unreachable);
                                 func.instruction(&Instruction::I32Const(0));
@@ -8459,9 +8450,8 @@ pub fn emit_expr(
                             // rather than ignored.
                             if arguments.len() != 1 {
                                 ctx.report(format!(
-                                    "str.{}() takes exactly one argument. \
-                                     Hint: a custom fill character is not supported",
-                                    method_name
+                                    "str.{method_name}() takes exactly one argument. \
+                                     Hint: a custom fill character is not supported"
                                 ));
                                 func.instruction(&Instruction::Unreachable);
                                 func.instruction(&Instruction::I32Const(0));
@@ -8490,9 +8480,8 @@ pub fn emit_expr(
                             // rather than ignored.
                             if arguments.len() != 1 {
                                 ctx.report(format!(
-                                    "str.{}() takes exactly one argument. \
-                                     Hint: a custom fill character is not supported",
-                                    method_name
+                                    "str.{method_name}() takes exactly one argument. \
+                                     Hint: a custom fill character is not supported"
                                 ));
                                 func.instruction(&Instruction::Unreachable);
                                 func.instruction(&Instruction::I32Const(0));
@@ -10411,10 +10400,9 @@ pub fn emit_list_method_call(
             // than a no-op; the trap keeps the module valid while the error
             // sink lets the rest of the walk finish and report every such call.
             ctx.report(format!(
-                "'{}' is not supported on a list yet. \
+                "'{method_name}' is not supported on a list yet. \
                  Hint: the supported list methods are append, clear, count, \
-                 extend, index, insert, pop, and remove",
-                method_name
+                 extend, index, insert, pop, and remove"
             ));
             func.instruction(&Instruction::Drop); // list_ptr
             func.instruction(&Instruction::Unreachable);
