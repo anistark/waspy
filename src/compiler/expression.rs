@@ -9855,16 +9855,17 @@ pub fn emit_list_method_call(
             IRType::None
         }
         "insert" => {
-            // list.insert(index, value). Simplified: append at the end (element
-            // shifting to honour the position is not implemented yet). Entry
-            // stack: (list_ptr). The value is stored at its natural width.
+            // list.insert(index, value). Entry stack: (list_ptr). The index is
+            // normalized and clamped like Python's, then the tail is moved one
+            // slot to the right before the value is stored at its natural width.
             if arguments.len() >= 2 {
-                // Index is evaluated for side effects but not yet honoured.
                 emit_expr(&arguments[0], func, ctx, memory_layout, Some(&IRType::Int));
-                func.instruction(&Instruction::Drop);
-
                 let value_type = emit_expr(&arguments[1], func, ctx, memory_layout, None);
                 stash_search_needle(func, ctx, &value_type, ctx.temp_local + 1);
+
+                // Keep the index on the stack until the value has been emitted,
+                // since a nested value expression may use the scratch locals.
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 6)); // index
                 func.instruction(&Instruction::LocalSet(ctx.temp_local)); // list_ptr
 
                 emit_collection_reserve(func, ctx, Reserve::Count(1), COLLECTION_SLOT);
@@ -9874,10 +9875,68 @@ pub fn emit_list_method_call(
                 func.instruction(&Instruction::I32Load(slot_arg()));
                 func.instruction(&Instruction::LocalSet(ctx.temp_local + 2)); // length
 
-                // address = list_ptr + HEADER + length*SLOT
+                // A negative index counts from the end. Unlike item access,
+                // insertion clamps the result into the inclusive [0, length]
+                // range instead of raising IndexError.
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 6));
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
+                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 6));
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 6));
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32LtS);
+                func.instruction(&Instruction::Select);
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 6));
+
+                // Clamp below zero.
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 6));
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 6));
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32LtS);
+                func.instruction(&Instruction::Select);
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 6));
+
+                // Clamp above the current length.
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 6));
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 6));
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
+                func.instruction(&Instruction::I32GtS);
+                func.instruction(&Instruction::Select);
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 6));
+
+                // Shift [index, length) one slot to the right. memory.copy has
+                // memmove semantics, so overlapping source and destination are
+                // safe when the destination starts inside the source range.
                 func.instruction(&Instruction::LocalGet(ctx.temp_local));
                 emit_data_base(func);
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 6));
+                func.instruction(&Instruction::I32Const(1));
+                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+                func.instruction(&Instruction::I32Mul);
+                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                emit_data_base(func);
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 6));
+                func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+                func.instruction(&Instruction::I32Mul);
+                func.instruction(&Instruction::I32Add);
                 func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 6));
+                func.instruction(&Instruction::I32Sub);
+                func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+                func.instruction(&Instruction::I32Mul);
+                func.instruction(&Instruction::MemoryCopy {
+                    src_mem: 0,
+                    dst_mem: 0,
+                });
+
+                // address = data + index*SLOT
+                func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                emit_data_base(func);
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 6));
                 func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
                 func.instruction(&Instruction::I32Mul);
                 func.instruction(&Instruction::I32Add);

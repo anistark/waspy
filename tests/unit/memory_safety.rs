@@ -230,6 +230,26 @@ fn extend_and_insert_grow_too() {
     assert_eq!(call_i32(src, "f"), 377);
 }
 
+/// `list.insert` shifts the existing elements instead of appending the value.
+#[test]
+fn list_insert_honours_position() {
+    let src = "def f() -> int:\n\
+               \x20   xs: list = [1, 2, 3]\n\
+               \x20   xs.insert(0, 99)\n\
+               \x20   return xs[0] * 100 + xs[3]\n";
+    assert_eq!(call_i32(src, "f"), 9903);
+
+    for (index, expected) in [(-99, 9123), (-1, 1293), (1, 1923), (99, 1239)] {
+        let src = format!(
+            "def f() -> int:\n\
+             \x20   xs: list = [1, 2, 3]\n\
+             \x20   xs.insert({index}, 9)\n\
+             \x20   return xs[0] * 1000 + xs[1] * 100 + xs[2] * 10 + xs[3]\n"
+        );
+        assert_eq!(call_i32(&src, "f"), expected, "inserting at {index}");
+    }
+}
+
 /// A list held in an instance field grows through the field, so later reads of
 /// `self.items` see the reallocated region.
 #[test]
