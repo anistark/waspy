@@ -1468,6 +1468,159 @@ tbody tr:hover td.col-waspy {
    Footer (shared)
    ========================================================================== */
 
+/* ==========================================================================
+   Contributors
+   ========================================================================== */
+
+.contributors-panel {
+    background: var(--bg-glass);
+    backdrop-filter: blur(16px);
+    border: 1px solid var(--glass-border);
+    border-radius: 20px;
+    box-shadow: inset 0 1px 0 var(--glass-highlight), var(--shadow-soft);
+    padding: 2rem;
+}
+
+.contributors-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+    gap: 1rem;
+}
+
+.contributors-status {
+    grid-column: 1 / -1;
+    text-align: center;
+    color: var(--text-2);
+    font-size: 0.9rem;
+    padding: 1rem 0;
+}
+
+.contributor {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.55rem;
+    padding: 1.1rem 0.75rem;
+    border-radius: var(--radius);
+    border: 1px solid transparent;
+    text-decoration: none;
+    color: var(--text-1);
+    transition: transform 0.25s ease, border-color 0.25s ease, background 0.25s ease, color 0.25s ease;
+}
+
+.contributor:hover {
+    transform: translateY(-4px);
+    color: var(--text-0);
+    border-color: color-mix(in srgb, var(--amber) 35%, var(--glass-border));
+    background: color-mix(in srgb, var(--amber) 7%, transparent);
+}
+
+.contributor img {
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    border: 2px solid var(--glass-border);
+    background: var(--bg-1);
+    transition: border-color 0.25s ease;
+}
+
+.contributor:hover img {
+    border-color: var(--amber);
+}
+
+.contributor-name {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    font-weight: 600;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.contributor-count {
+    font-size: 0.7rem;
+    color: var(--text-2);
+}
+
+.contribute-cta {
+    margin-top: 2rem;
+    padding: 2.25rem 2.5rem;
+    border-radius: 20px;
+    background: var(--bg-glass);
+    backdrop-filter: blur(16px);
+    border: 1px solid var(--glass-border);
+    box-shadow: inset 0 1px 0 var(--glass-highlight), var(--shadow-soft);
+    position: relative;
+    overflow: hidden;
+}
+
+.contribute-cta::before {
+    content: '';
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 3px;
+    background: var(--grad-warm);
+}
+
+.contribute-cta h3 {
+    font-family: var(--font-display);
+    font-size: 1.5rem;
+    margin-bottom: 0.9rem;
+    color: var(--text-0);
+}
+
+.contribute-cta p {
+    color: var(--text-1);
+    line-height: 1.7;
+    margin-bottom: 1rem;
+}
+
+.contribute-cta .cta-buttons {
+    margin-top: 1.5rem;
+}
+
+@media (max-width: 620px) {
+    .contributors-panel {
+        padding: 1.25rem;
+    }
+
+    .contributors-grid {
+        grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+        gap: 0.6rem;
+    }
+
+    .contributor img {
+        width: 52px;
+        height: 52px;
+    }
+
+    .contribute-cta {
+        padding: 1.5rem 1.35rem;
+    }
+}
+
+/* Footer related projects */
+
+.related-link {
+    padding: 0.4rem 0;
+}
+
+.related-name {
+    display: block;
+    font-family: var(--font-mono);
+    font-weight: 600;
+    color: inherit;
+}
+
+.related-desc {
+    display: block;
+    font-size: 0.78rem;
+    color: var(--text-2);
+    line-height: 1.4;
+    margin-top: 0.15rem;
+}
+
 .site-footer {
     border-top: 1px solid var(--glass-border);
     margin-top: 3rem;

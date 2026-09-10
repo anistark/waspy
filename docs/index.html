@@ -542,6 +542,34 @@ console.log(instance.exports.factorial(5));
             </div>
         </section>
 
+
+        <section class="section" id="contributors">
+            <div class="container">
+                <div class="section-header reveal">
+                    <span class="kicker">The people</span>
+                    <h2>Contributors</h2>
+                    <p class="section-subtitle">Waspy is built in the open by everyone who has sent a patch, an issue, or an idea.</p>
+                </div>
+
+                <div class="contributors-panel reveal">
+                    <div class="contributors-grid" id="contributorsGrid" aria-live="polite">
+                        <p class="contributors-status">Loading contributors from GitHub...</p>
+                    </div>
+                </div>
+
+                <div class="contribute-cta reveal">
+                    <h3>Wanna contribute to Waspy?</h3>
+                    <p>Waspy is free and open source under the MIT license, and it gets better every time someone new pokes at it. A compiler is a big surface: the parser, the IR, codegen, the runtime, the docs you are reading right now. There is room for a first commit at almost any level of experience.</p>
+                    <p>Pick up a good first issue, report a Python snippet that miscompiles, teach the compiler one more builtin, or just tell us what you tried to build and where it broke. Every one of those genuinely moves the project forward, and we would love to work on it together.</p>
+                    <div class="cta-buttons">
+                        <a href="https://github.com/anistark/waspy/blob/main/CONTRIBUTING.md" class="btn btn-primary">Read the contributing guide</a>
+                        <a href="https://github.com/anistark/waspy/issues" class="btn btn-secondary">Browse open issues</a>
+                        <a href="https://github.com/anistark/waspy/discussions" class="btn btn-secondary">Start a discussion</a>
+                    </div>
+                </div>
+            </div>
+        </section>
+
     </main>
 
     <footer class="site-footer">
@@ -554,11 +582,6 @@ console.log(instance.exports.factorial(5));
                         <a href="https://github.com/anistark/waspy" class="social-link" title="GitHub">
                             <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
                                 <path d="M12 0C5.374 0 0 5.373 0 12 0 17.302 3.438 21.8 8.207 23.387c.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.509 11.509 0 0112 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z"/>
-                            </svg>
-                        </a>
-                        <a href="https://crates.io/crates/waspy" class="social-link" title="Crates.io">
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-                                <path d="M12 0L1.608 6v12L12 24l10.392-6V6L12 0zm-1.601 8.4l-2.4 1.385v2.77l2.4 1.385 2.4-1.385v-2.77L10.399 8.4zm3.601 0l-2.4 1.385v2.77l2.4 1.385 2.4-1.385v-2.77L14 8.4z"/>
                             </svg>
                         </a>
                         <a href="https://x.com/kranirudha" class="social-link" title="X (Twitter)">
@@ -588,15 +611,20 @@ console.log(instance.exports.factorial(5));
                     <a href="https://github.com/anistark/waspy/issues" class="footer-link">Issues</a>
                     <a href="https://github.com/anistark/waspy/discussions" class="footer-link">Discussions</a>
                     <a href="https://crates.io/crates/waspy" class="footer-link">Crates.io</a>
+                    <a href="https://docs.rs/waspy/latest/" class="footer-link">docs.rs</a>
                     <a href="https://github.com/anistark/waspy/releases" class="footer-link">Releases</a>
                 </div>
 
                 <div class="footer-section">
-                    <h3>Technology</h3>
-                    <span class="footer-link">Built with Rust 🦀</span>
-                    <span class="footer-link">WebAssembly Target</span>
-                    <span class="footer-link">RustPython Parser</span>
-                    <span class="footer-link">Binaryen Optimizer</span>
+                    <h3>Related</h3>
+                    <a href="https://github.com/anistark/wasmrun" class="footer-link related-link">
+                        <span class="related-name">wasmrun</span>
+                        <span class="related-desc">WASM runtime with debug capabilities</span>
+                    </a>
+                    <a href="https://anistark.github.io/wasmhub/" class="footer-link related-link">
+                        <span class="related-name">wasmhub</span>
+                        <span class="related-desc">Open source hub of WASM language runtimes</span>
+                    </a>
                 </div>
             </div>
 
