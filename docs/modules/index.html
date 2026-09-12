@@ -30,6 +30,7 @@
             <div class="nav-right">
                 <ul class="nav-links">
                     <li><a href="../">Home</a></li>
+                    <li><a href="../programs/">Programs</a></li>
                     <li><a href="./" class="active">Modules</a></li>
                     <li><a href="../changelog/">Changelog</a></li>
                     <li><a href="../paper/">Paper</a></li>
@@ -116,6 +117,7 @@
                 <div class="footer-section">
                     <h3>Pages</h3>
                     <a href="../" class="footer-link">Home</a>
+                    <a href="../programs/" class="footer-link">Programs</a>
                     <a href="../changelog/" class="footer-link">Changelog</a>
                     <a href="https://crates.io/crates/waspy" class="footer-link">Crates.io</a>
                 </div>
@@ -230,6 +232,7 @@
                     { name: "Compiler options & configuration (reviewed API: optimize + verbosity)", status: "done", version: "0.14.0" },
                     { name: "Error handling with located messages (line/column, function, hints)", status: "done", version: "0.14.0" },
                     { name: "Early validation - unsupported syntax rejected before codegen", status: "done", version: "0.14.0" },
+                    { name: "A parse or lowering failure fails the build naming the file, rather than skipping it with a warning", status: "done", version: "0.16.0" },
                     { name: "Integration test suite - every example compiled, run, and asserted in CI", status: "done", version: "0.14.0" },
                     { name: "End-to-end programs asserted under Node and wasmtime, optimized and unoptimized, as a CI gate", status: "done", version: "0.16.0" },
                     { name: "Comment preservation - python.comments custom section, survives optimization", status: "done", version: "0.14.0" },
@@ -246,6 +249,7 @@
                     { name: "Test methods (isdigit, isalpha, isspace, etc.) - compile-time optimized", status: "done", version: "0.3.0" },
                     { name: "Search methods (.find, .count, .startswith, .endswith)", status: "done", version: "0.3.0" },
                     { name: "Transform methods (.split, .join, .replace)", status: "done", version: "0.3.0" },
+                    { name: "A method on a literal receiver answers what the same method on a variable does, .split(sep) included", status: "done", version: "0.16.0" },
                     { name: "Layout methods (.ljust, .rjust, .center)", status: "done", version: "0.3.0" },
                     { name: "% formatting - compile-time for constants", status: "done", version: "0.3.0" },
                     { name: "Every string method works on a runtime receiver, not only a literal (case, trim, search, split/join, replace, layout, predicates)", status: "done", version: "0.16.0" },
@@ -265,6 +269,8 @@
                     { name: "List literals with memory allocation [1, 2, 3]", status: "done", version: "0.7.0" },
                     { name: "List indexing (read & write) list[i] and list[i] = value", status: "done", version: "0.7.0" },
                     { name: "List methods .append(), .pop([i]), .clear(), .insert(i, v)", status: "done", version: "0.7.0" },
+                    { name: ".pop(i) removes the element at i and .index(v) answers its position; a missing value or position traps, as Python raises", status: "done", version: "0.16.0" },
+                    { name: "A method called with the wrong number of arguments is a compile error, not a silently ignored one", status: "done", version: "0.16.0" },
                     { name: "List search methods .index(v) & .count(v) with linear search", status: "done", version: "0.7.0" },
                     { name: "Dict literals with memory allocation {'key': value}", status: "done", version: "0.7.0" },
                     { name: "Dict indexing (read & write) dict[key] and dict[key] = value", status: "done", version: "0.7.0" },

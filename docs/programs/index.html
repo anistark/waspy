@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Programs - What a Waspy Program Looks Like</title>
+    <meta name="description" content="A complete working program compiled by Waspy, and a plain list of the Python shapes that do not compile yet.">
+    <link rel="icon" href="https://raw.githubusercontent.com/anistark/waspy/4e205230f4e029cf5e16a28a75de0ddc06498726/assets/logo.png" type="image/png">
+
+    <script>
+        (function () {
+            var t = localStorage.getItem('theme');
+            if (!t) t = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+            document.documentElement.setAttribute('data-theme', t);
+        })();
+    </script>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700;12..96,800&family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="../style.css">
+
+    <style>
+        .verdict {
+            display: grid;
+            gap: 1rem;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            margin: 2rem 0 3rem;
+        }
+
+        .verdict-card {
+            border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+            border-radius: 12px;
+            padding: 1.25rem 1.35rem;
+        }
+
+        .verdict-card h3 {
+            font-size: 1rem;
+            margin: 0 0 0.6rem;
+        }
+
+        .verdict-card p {
+            margin: 0;
+            font-size: 0.92rem;
+            line-height: 1.6;
+            opacity: 0.85;
+        }
+
+        .verdict-yes h3::before { content: "✓ "; color: #4ade80; }
+        .verdict-loud h3::before { content: "! "; color: #fbbf24; }
+        .verdict-no h3::before { content: "✗ "; color: #f87171; }
+
+        .shapes {
+            list-style: none;
+            margin: 0;
+            padding: 0;
+        }
+
+        .shapes > li {
+            border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+            padding: 0.95rem 0;
+        }
+
+        .shapes > li:last-child { border-bottom: none; }
+
+        .shapes code {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.86em;
+        }
+
+        .shape-head {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem 0.75rem;
+            align-items: baseline;
+            margin-bottom: 0.3rem;
+        }
+
+        .shape-head strong { font-size: 0.98rem; }
+
+        .shape-note {
+            font-size: 0.9rem;
+            line-height: 1.6;
+            opacity: 0.82;
+            margin: 0;
+        }
+
+        .tag {
+            border-radius: 999px;
+            font-size: 0.68rem;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            padding: 0.18rem 0.55rem;
+            text-transform: uppercase;
+            white-space: nowrap;
+        }
+
+        .tag-loud { background: rgba(251, 191, 36, 0.16); color: #fbbf24; }
+        .tag-quiet { background: rgba(248, 113, 113, 0.16); color: #f87171; }
+        .tag-workaround { background: rgba(96, 165, 250, 0.16); color: #60a5fa; }
+
+        .rule {
+            border-left: 3px solid var(--accent, #fbbf24);
+            margin: 2.5rem 0;
+            padding: 0.25rem 0 0.25rem 1.25rem;
+        }
+
+        .rule p {
+            font-size: 1rem;
+            line-height: 1.7;
+            margin: 0 0 0.6rem;
+        }
+
+        .rule p:last-child { margin-bottom: 0; }
+
+        .minute {
+            display: grid;
+            gap: 0.75rem 1.5rem;
+            grid-template-columns: auto 1fr;
+            margin: 1.5rem 0 0;
+        }
+
+        .minute dt {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            opacity: 0.7;
+            white-space: nowrap;
+        }
+
+        .minute dd {
+            font-size: 0.92rem;
+            line-height: 1.6;
+            margin: 0;
+        }
+
+        @media (max-width: 560px) {
+            .minute { grid-template-columns: 1fr; gap: 0.2rem 0; }
+            .minute dd { margin-bottom: 0.8rem; }
+        }
+    </style>
+</head>
+<body>
+    <header class="site-header">
+        <nav class="container">
+            <a class="logo-container" href="../">
+                <img src="https://raw.githubusercontent.com/anistark/waspy/4e205230f4e029cf5e16a28a75de0ddc06498726/assets/logo.png" alt="Waspy Logo" class="logo-img">
+                <div class="logo">waspy</div>
+            </a>
+            <div class="nav-right">
+                <ul class="nav-links">
+                    <li><a href="../">Home</a></li>
+                    <li><a href="./" class="active">Programs</a></li>
+                    <li><a href="../modules/">Modules</a></li>
+                    <li><a href="../changelog/">Changelog</a></li>
+                    <li><a href="../paper/">Paper</a></li>
+                    <li><a href="https://github.com/anistark/waspy">GitHub</a></li>
+                </ul>
+
+                <button class="theme-toggle" id="themeToggle" title="Toggle theme" aria-label="Toggle theme">
+                    <div class="theme-icon">
+                        <svg class="sun-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                            <path d="M12 2.25a.75.75 0 01.75.75v2.25a.75.75 0 01-1.5 0V3a.75.75 0 01.75-.75zM7.5 12a4.5 4.5 0 119 0 4.5 4.5 0 01-9 0zM18.894 6.166a.75.75 0 00-1.06-1.06l-1.591 1.59a.75.75 0 101.06 1.061l1.591-1.59zM21.75 12a.75.75 0 01-.75.75h-2.25a.75.75 0 010-1.5H21a.75.75 0 01.75.75zM17.834 18.894a.75.75 0 001.06-1.06l-1.59-1.591a.75.75 0 10-1.061 1.06l1.59 1.591zM12 18a.75.75 0 01.75.75V21a.75.75 0 01-1.5 0v-2.25A.75.75 0 0112 18zM7.758 17.303a.75.75 0 00-1.061-1.06l-1.591 1.59a.75.75 0 001.06 1.061l1.591-1.59zM6 12a.75.75 0 01-.75.75H3a.75.75 0 010-1.5h2.25A.75.75 0 016 12zM6.697 7.757a.75.75 0 001.06-1.06l-1.59-1.591a.75.75 0 00-1.061 1.06l1.59 1.591z"/>
+                        </svg>
+                        <svg class="moon-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                            <path d="M9.528 1.718a.75.75 0 01.162.819A8.97 8.97 0 009 6a9 9 0 009 9 8.97 8.97 0 003.463-.69.75.75 0 01.981.98 10.503 10.503 0 01-9.694 6.46c-5.799 0-10.5-4.701-10.5-10.5 0-4.368 2.667-8.112 6.46-9.694a.75.75 0 01.818.162z"/>
+                        </svg>
+                    </div>
+                </button>
+            </div>
+        </nav>
+    </header>
+
+    <main class="container container--narrow">
+        <section class="page-hero">
+            <h1>What a Program <span class="accent">Looks Like</span></h1>
+            <p class="subtitle">One complete working program, and a plain list of the shapes that do not compile yet. Read it in a minute and you will know whether your code is in scope.</p>
+        </section>
+
+        <div class="verdict">
+            <div class="verdict-card verdict-yes">
+                <h3>Compiles and runs</h3>
+                <p>Classes holding collections of instances, methods calling methods, string and dict work, comprehensions, f-strings, exceptions, generators, imports across your own files.</p>
+            </div>
+            <div class="verdict-card verdict-loud">
+                <h3>Refused, loudly</h3>
+                <p>Everything not implemented is a compile error naming the construct, its line, the enclosing function, and a workaround. A refusal is the design, not a bug.</p>
+            </div>
+            <div class="verdict-card verdict-no">
+                <h3>Answers differently</h3>
+                <p>One documented case: <code>int</code> is 32 bits and wraps instead of growing. Everywhere else the rule is Python's answer or a loud failure.</p>
+            </div>
+        </div>
+
+        <section class="section">
+            <div class="section-header">
+                <h2>A whole program</h2>
+                <p class="section-subtitle">This is <code>examples/shopping_cart.py</code> from the repository, unedited. Nothing in it was chosen to show off a compiler feature, and its results are asserted against what CPython answers for the same source, under three WebAssembly runtimes.</p>
+            </div>
+
+            <div class="example-window">
+                <div class="example-titlebar">
+                    <div class="window-dots"><span></span><span></span><span></span></div>
+                    <span class="example-filename">shopping_cart.py</span>
+                </div>
+                <pre><code class="language-python">class Item:
+    def __init__(self, name: str, price: float, qty: int):
+        self.name = name
+        self.price = price
+        self.qty = qty
+
+    def subtotal(self) -&gt; float:
+        return self.price * self.qty
+
+
+class Cart:
+    def __init__(self):
+        self.items = []
+        self.count = 0
+
+    def add(self, name: str, price: float, qty: int):
+        item = Item(name, price, qty)
+        self.items.append(item)
+        self.count = self.count + 1
+
+    def total(self) -&gt; float:
+        out: float = 0.0
+        for it in self.items:
+            out = out + it.subtotal()
+        return out
+
+
+def discount_rate(total: float) -&gt; float:
+    if total &gt;= 100.0:
+        return 0.10
+    if total &gt;= 50.0:
+        return 0.05
+    return 0.0
+
+
+def checkout() -&gt; float:
+    cart = Cart()
+    cart.add("widget", 9.99, 3)
+    cart.add("gadget", 24.50, 2)
+    cart.add("doohickey", 5.00, 4)
+    subtotal = cart.total()
+    return subtotal - subtotal * discount_rate(subtotal)</code></pre>
+            </div>
+
+            <dl class="minute">
+                <dt>Annotations</dt>
+                <dd>Parameter and return annotations pick the WebAssembly value types. A collection whose elements you compare, sort, or use as dict keys needs the parameterised form: <code>List[str]</code>, not a bare <code>list</code>.</dd>
+
+                <dt>Entry points</dt>
+                <dd>Every module-level <code>def</code> is exported. There is no top-level run step, so module level holds definitions only; put the code that runs in a function, or under <code>if __name__ == "__main__":</code>.</dd>
+
+                <dt>Imports</dt>
+                <dd><code>import mod</code> and <code>from mod import f</code> resolve sibling <code>.py</code> files from disk and link into the one output module. No PyPI packages: the supported subset is standard-library only.</dd>
+            </dl>
+        </section>
+
+        <div class="rule">
+            <p><strong>The rule the compiler holds itself to:</strong> a construct either produces Python's answer or fails loudly. It never quietly produces a different one.</p>
+            <p>Integer width is the single documented exception. <code>int</code> is a 32-bit two's-complement value, so <code>1000000 * 1000000</code> wraps to <code>-727379968</code> where CPython answers <code>1000000000000</code>. If your arithmetic can exceed 32 bits, your program is not in the supported subset.</p>
+        </div>
+
+        <section class="section">
+            <div class="section-header">
+                <h2>Shapes that do not compile</h2>
+                <p class="section-subtitle">Tagged by what happens when you try. <span class="tag tag-loud">refused</span> is a compile error you will see immediately; <span class="tag tag-quiet">differs</span> is a case where the answer is not Python's; <span class="tag tag-workaround">workaround</span> means there is a supported way to write the same thing.</p>
+            </div>
+
+            <ul class="shapes">
+                <li>
+                    <div class="shape-head">
+                        <strong>Module-level statements other than definitions</strong>
+                        <span class="tag tag-loud">refused</span>
+                        <span class="tag tag-workaround">workaround</span>
+                    </div>
+                    <p class="shape-note">A loop, <code>if</code>, <code>try</code>, bare call, augmented assignment, or write through a subscript at module level. A WebAssembly module has no top-level run step, so the statement would be compiled away. <code>X = 1</code>, <code>X = helper()</code>, <code>X = ClassName()</code>, <code>def</code>, <code>class</code>, and imports do work. Move the rest into a function.</p>
+                </li>
+
+                <li>
+                    <div class="shape-head">
+                        <strong><code>async def</code>, <code>await</code>, <code>async for</code>, <code>async with</code></strong>
+                        <span class="tag tag-loud">refused</span>
+                    </div>
+                    <p class="shape-note">There is no event loop in the output. Planned after 1.0.</p>
+                </li>
+
+                <li>
+                    <div class="shape-head">
+                        <strong><code>*args</code>, <code>**kwargs</code>, keyword-only parameters</strong>
+                        <span class="tag tag-loud">refused</span>
+                    </div>
+                    <p class="shape-note">A WebAssembly function has a fixed signature. Pass the arguments positionally.</p>
+                </li>
+
+                <li>
+                    <div class="shape-head">
+                        <strong><code>match</code>, <code>global</code>, <code>nonlocal</code>, <code>del</code>, <code>assert</code>, <code>except*</code>, <code>type</code> aliases, <code>from x import *</code></strong>
+                        <span class="tag tag-loud">refused</span>
+                    </div>
+                    <p class="shape-note">Not implemented. Each is reported by name with its location.</p>
+                </li>
+
+                <li>
+                    <div class="shape-head">
+                        <strong>Multiple inheritance and metaclasses</strong>
+                        <span class="tag tag-loud">refused</span>
+                    </div>
+                    <p class="shape-note">Single inheritance works, with <code>super().__init__()</code> and <code>super().method()</code>, plus <code>isinstance</code>, <code>@dataclass</code>, and <code>abc.ABC</code>.</p>
+                </li>
+
+                <li>
+                    <div class="shape-head">
+                        <strong>A subclass override reached through an inherited method</strong>
+                        <span class="tag tag-quiet">differs</span>
+                        <span class="tag tag-workaround">workaround</span>
+                    </div>
+                    <p class="shape-note">Dispatch is static, with no vtable. If <code>Media.describe()</code> calls <code>self.kind()</code> and <code>Video</code> overrides <code>kind()</code>, a <code>Video</code> still reaches <code>Media.kind()</code>. Calling the override directly is correct, so call it directly or override <code>describe()</code> too.</p>
+                </li>
+
+                <li>
+                    <div class="shape-head">
+                        <strong>Indexing, measuring, or calling a method on a lambda's parameter</strong>
+                        <span class="tag tag-loud">refused</span>
+                        <span class="tag tag-workaround">workaround</span>
+                    </div>
+                    <p class="shape-note">A lambda's parameters carry no annotation, so <code>lambda kv: kv[1]</code> and <code>lambda w: len(w)</code> are refused rather than answering from an untyped word. Arithmetic and comparison are fine, so <code>sorted(xs, key=lambda v: 0 - v)</code> works. For anything more, use a named <code>def</code>, whose parameters can be annotated.</p>
+                </li>
+
+                <li>
+                    <div class="shape-head">
+                        <strong>A bare <code>list</code> or <code>dict</code> annotation</strong>
+                        <span class="tag tag-workaround">workaround</span>
+                    </div>
+                    <p class="shape-note">The parameterised form is what carries an element type. Write <code>List[str]</code> and <code>Dict[str, int]</code> for any collection whose elements are compared, sorted, or used as dict keys.</p>
+                </li>
+
+                <li>
+                    <div class="shape-head">
+                        <strong>Exception objects and their messages</strong>
+                        <span class="tag tag-quiet">differs</span>
+                    </div>
+                    <p class="shape-note"><code>raise</code>, <code>try</code>/<code>except</code>/<code>finally</code>, and propagation across calls all work. An exception carries its type, not an object: <code>raise ValueError("msg")</code> drops the message and <code>except ValueError as e</code> binds the type's code. Matching is by exact type name, plus <code>Exception</code>, which catches anything.</p>
+                </li>
+
+                <li>
+                    <div class="shape-head">
+                        <strong>f-string format specifiers other than <code>.Nf</code></strong>
+                        <span class="tag tag-loud">refused</span>
+                    </div>
+                    <p class="shape-note"><code>f"{x:.2f}"</code> is how a float gets printed. Widths, alignment, separators, and the <code>!r</code>/<code>!a</code> conversions are refused rather than dropped. A bare float, bool, or collection in a placeholder is also a compile error, since <code>str()</code> cannot render them yet.</p>
+                </li>
+
+                <li>
+                    <div class="shape-head">
+                        <strong><code>**</code> with a fractional or negative exponent</strong>
+                        <span class="tag tag-quiet">differs</span>
+                    </div>
+                    <p class="shape-note">Powers are computed by repeated multiplication. <code>2.0 ** 0.5</code> traps, because it needs exp/log this runtime does not carry, and a negative integer exponent traps because Python's answer is a float an int cannot hold.</p>
+                </li>
+
+                <li>
+                    <div class="shape-head">
+                        <strong>Two modules defining the same function name</strong>
+                        <span class="tag tag-loud">refused</span>
+                        <span class="tag tag-workaround">workaround</span>
+                    </div>
+                    <p class="shape-note">Merged modules share one namespace, so <code>utils.format</code> next to <code>report.format</code> is a compile error naming both files. Rename one. Module-qualified names are the real fix and are not done yet.</p>
+                </li>
+
+                <li>
+                    <div class="shape-head">
+                        <strong>Object lifetime</strong>
+                        <span class="tag tag-quiet">differs</span>
+                    </div>
+                    <p class="shape-note">The allocator has no <code>free</code>: every instance lives until the module is torn down, and <code>__del__</code> is never invoked. A long-running program that allocates in a loop will grow its memory.</p>
+                </li>
+
+                <li>
+                    <div class="shape-head">
+                        <strong>Set methods beyond <code>add</code>, <code>remove</code>, and <code>discard</code></strong>
+                        <span class="tag tag-loud">refused</span>
+                    </div>
+                    <p class="shape-note"><code>union</code>, <code>intersection</code>, and friends are not implemented. Membership, de-duplication, and the three mutators work.</p>
+                </li>
+
+                <li>
+                    <div class="shape-head">
+                        <strong>Third-party packages</strong>
+                        <span class="tag tag-loud">refused</span>
+                    </div>
+                    <p class="shape-note">No PyPI. The bundled standard-library support is <code>sys</code>, <code>os</code> (including <code>os.path</code>), <code>math</code>, <code>random</code>, <code>json</code>, <code>re</code>, <code>datetime</code>, <code>logging</code>, <code>collections</code>, <code>itertools</code>, and <code>functools</code>.</p>
+                </li>
+            </ul>
+        </section>
+
+        <section class="section">
+            <div class="section-header">
+                <h2>Where to look next</h2>
+                <p class="section-subtitle">The repository's <code>examples/</code> directory holds the programs this page is drawn from, each asserted against CPython in the test suite.</p>
+            </div>
+
+            <div class="resource-cards">
+                <a class="resource-card" href="https://github.com/anistark/waspy/blob/main/examples/shopping_cart.py">
+                    <h3>shopping_cart.py</h3>
+                    <p>A domain model: classes holding instances, methods calling methods, float money arithmetic.</p>
+                </a>
+                <a class="resource-card" href="https://github.com/anistark/waspy/blob/main/examples/text_report.py">
+                    <h3>text_report.py</h3>
+                    <p>A word-frequency tool: string methods, dict accumulation, sorting, comprehensions, fixed-point output.</p>
+                </a>
+                <a class="resource-card" href="https://github.com/anistark/waspy/tree/main/examples/library_project">
+                    <h3>library_project/</h3>
+                    <p>Four modules with the domain class shared between them, compiled from the entry file.</p>
+                </a>
+                <a class="resource-card" href="https://github.com/anistark/waspy/blob/main/README.md#limitations">
+                    <h3>README limitations</h3>
+                    <p>The authoritative, exhaustive statement of the supported subset and what it leaves out.</p>
+                </a>
+            </div>
+        </section>
+    </main>
+
+    <footer class="site-footer">
+        <div class="container">
+            <div class="footer-content">
+                <div class="footer-section footer-brand">
+                    <h3>waspy</h3>
+                    <p>A Python to WebAssembly compiler written in Rust, designed for performance and simplicity.</p>
+                </div>
+
+                <div class="footer-section">
+                    <h3>Resources</h3>
+                    <a href="https://github.com/anistark/waspy" class="footer-link">GitHub Repository</a>
+                    <a href="https://github.com/anistark/waspy/blob/main/CONTRIBUTING.md" class="footer-link">Contributing Guide</a>
+                    <a href="https://github.com/anistark/waspy/issues" class="footer-link">Issue Tracker</a>
+                </div>
+
+                <div class="footer-section">
+                    <h3>Pages</h3>
+                    <a href="../" class="footer-link">Home</a>
+                    <a href="../modules/" class="footer-link">Modules</a>
+                    <a href="../changelog/" class="footer-link">Changelog</a>
+                    <a href="https://crates.io/crates/waspy" class="footer-link">Crates.io</a>
+                </div>
+
+                <div class="footer-section">
+                    <h3>Technology</h3>
+                    <span class="footer-link">Built with Rust 🦀</span>
+                    <span class="footer-link">WebAssembly Target</span>
+                </div>
+            </div>
+
+            <div class="footer-bottom">
+                <p>&copy; 2025 Waspy Project. Built with 💛 for the Python community.</p>
+            </div>
+        </div>
+    </footer>
+
+    <script src="../main.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+</body>
+</html>

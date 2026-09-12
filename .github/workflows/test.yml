@@ -44,6 +44,8 @@ jobs:
           --test unit_basics
           --test unit_errors
           --test unit_memory_safety
+          --test unit_miscompiles
+          --test integration_wasmrun_plugin
 
   runtime:
     name: End-to-end programs under real runtimes

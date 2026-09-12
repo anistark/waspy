@@ -104,6 +104,15 @@ path = "tests/unit/errors.rs"
 name = "unit_memory_safety"
 path = "tests/unit/memory_safety.rs"
 
+[[test]]
+name = "unit_miscompiles"
+path = "tests/unit/miscompiles.rs"
+
+[[test]]
+name = "integration_wasmrun_plugin"
+path = "tests/integration/wasmrun_plugin.rs"
+required-features = ["wasm-plugin"]
+
 # Plugin metadata following wasmrust pattern
 [package.metadata.wasm_plugin]
 name = "python"
