@@ -10452,16 +10452,17 @@ pub fn emit_list_method_call(
         _ => {
             // A list method the compiler does not implement used to be dropped
             // on the floor: the receiver was discarded, a 0 pushed in its
-            // place, and compilation reported success. `xs.sort()` and
-            // `xs.reverse()` are not implemented anywhere, so they silently did
-            // nothing and every later read saw the unsorted list. Anything that
-            // mutates or queries the receiver has to be a compile error rather
-            // than a no-op; the trap keeps the module valid while the error
-            // sink lets the rest of the walk finish and report every such call.
+            // place, and compilation reported success. That is how `xs.sort()`
+            // and `xs.reverse()`, which were implemented nowhere, came to
+            // silently do nothing while every later read saw the unsorted list.
+            // Anything that mutates or queries the receiver has to be a compile
+            // error rather than a no-op; the trap keeps the module valid while
+            // the error sink lets the rest of the walk finish and report every
+            // such call.
             ctx.report(format!(
                 "'{method_name}' is not supported on a list yet. \
                  Hint: the supported list methods are append, clear, count, \
-                 extend, index, insert, pop, and remove"
+                 extend, index, insert, pop, remove, reverse, and sort"
             ));
             func.instruction(&Instruction::Drop); // list_ptr
             func.instruction(&Instruction::Unreachable);

@@ -144,6 +144,7 @@
                 version: "0.1.0",
                 features: [
                     { name: "All operators (+, -, *, /, %, //, **)", status: "done", version: "0.1.0" },
+                    { name: "/ is true division and yields a float, // is floor division (Python 3 semantics)", status: "done", version: "0.16.0" },
                     { name: "Type coercion (int/float)", status: "done", version: "0.1.0" },
                     { name: "Bitwise operations (&, |, ^, <<, >>, ~)", status: "done", version: "0.1.0" },
                     { name: "Unary operations (-, +, not)", status: "done", version: "0.1.0" }
@@ -230,6 +231,7 @@
                     { name: "Error handling with located messages (line/column, function, hints)", status: "done", version: "0.14.0" },
                     { name: "Early validation - unsupported syntax rejected before codegen", status: "done", version: "0.14.0" },
                     { name: "Integration test suite - every example compiled, run, and asserted in CI", status: "done", version: "0.14.0" },
+                    { name: "End-to-end programs asserted under Node and wasmtime, optimized and unoptimized, as a CI gate", status: "done", version: "0.16.0" },
                     { name: "Comment preservation - python.comments custom section, survives optimization", status: "done", version: "0.14.0" },
                     { name: "Memory layout optimization", status: "done", version: "0.1.0" }
                 ]
@@ -245,9 +247,14 @@
                     { name: "Search methods (.find, .count, .startswith, .endswith)", status: "done", version: "0.3.0" },
                     { name: "Transform methods (.split, .join, .replace)", status: "done", version: "0.3.0" },
                     { name: "Layout methods (.ljust, .rjust, .center)", status: "done", version: "0.3.0" },
-                    { name: ".format() and % formatting - compile-time for constants", status: "done", version: "0.3.0" },
+                    { name: "% formatting - compile-time for constants", status: "done", version: "0.3.0" },
+                    { name: "Every string method works on a runtime receiver, not only a literal (case, trim, search, split/join, replace, layout, predicates)", status: "done", version: "0.16.0" },
+                    { name: ".format() interpolates runtime values - automatic {} and positional {0} fields (named fields, specifiers, and conversions rejected)", status: "done", version: "0.16.0" },
+                    { name: "Strings compare by content everywhere, so a key built at runtime matches an equal one (dict keys, in over lists and sets)", status: "done", version: "0.16.0" },
+                    { name: "sub in text searches the string", status: "done", version: "0.16.0" },
                     { name: "F-strings - constant placeholders folded into the literal", status: "done", version: "0.3.0" },
-                    { name: "F-strings - dynamic interpolation (every placeholder rendered and concatenated)", status: "done", version: "0.15.0" }
+                    { name: "F-strings - dynamic interpolation (every placeholder rendered and concatenated)", status: "done", version: "0.15.0" },
+                    { name: "F-string fixed-point specifier f\"{value:.2f}\" (every other specifier still refused)", status: "done", version: "0.16.0" }
                 ]
             },
             collections: {
@@ -263,7 +270,13 @@
                     { name: "Dict indexing (read & write) dict[key] and dict[key] = value", status: "done", version: "0.7.0" },
                     { name: "Runtime growth: lists reallocate on append/extend/insert, dicts on a new key", status: "done", version: "0.14.0" },
                     { name: "Iterating a list of instances binds a typed element (for it in items: it.field)", status: "done", version: "0.14.0" },
-                    { name: "Set mutation .add() / .remove() / .discard(), rehashing when the table fills", status: "done", version: "0.15.0" }
+                    { name: "Set mutation .add() / .remove() / .discard(), rehashing when the table fills", status: "done", version: "0.15.0" },
+                    { name: "List methods .sort([reverse]) and .reverse(), in place", status: "done", version: "0.16.0" },
+                    { name: "List slicing xs[a:b] returns a fresh list, negative indices and clamping included (a step other than 1 is rejected)", status: "done", version: "0.16.0" },
+                    { name: "Dict methods .get(key[, default]), .keys(), .values(), .items() - .items() as a value, not only a for iterable", status: "done", version: "0.16.0" },
+                    { name: "in searches dicts and tuples as well as lists and sets; anything unsearchable is a compile error", status: "done", version: "0.16.0" },
+                    { name: "Truthiness follows Python: an empty list, dict, set, or tuple is False", status: "done", version: "0.16.0" },
+                    { name: "A method the compiler does not implement is a compile error rather than a silent no-op", status: "done", version: "0.16.0" }
                 ]
             },
             classes: {
@@ -299,7 +312,8 @@
                     { name: "len() - strings, lists, and dicts", status: "done", version: "0.7.0" },
                     { name: "print() - argument handling implemented", status: "done", version: "0.7.0" },
                     { name: "min() & max() - multiple arguments (single-iterable form rejected with a hint)", status: "done", version: "0.7.0" },
-                    { name: "sum() over lists/tuples with optional start value - real element loop", status: "done", version: "0.14.0" }
+                    { name: "sum() over lists/tuples with optional start value - real element loop", status: "done", version: "0.14.0" },
+                    { name: "sorted(iterable[, key][, reverse]) - stable, over ints, floats, strings, and tuples (a sequence or key whose type cannot be determined is refused, not guessed)", status: "done", version: "0.16.0" }
                 ]
             },
             runtimeFeatures: {
@@ -313,7 +327,7 @@
                     { name: "Generator State Management - execution context suspension/resumption", status: "done", version: "0.14.0" },
                     { name: "Dynamic Module Loading - runtime module loading and execution", status: "todo" },
                     { name: "Closure Variable Capture Analysis - detecting and capturing closure variables", status: "done", version: "0.14.0" },
-                    { name: "String Transformation in WASM - full character-by-char transformations", status: "progress" }
+                    { name: "String Transformation in WASM - full character-by-char transformations", status: "done", version: "0.16.0" }
                 ]
             },
             webInterop: {

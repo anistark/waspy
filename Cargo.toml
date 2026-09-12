@@ -1,6 +1,6 @@
 [package]
 name = "waspy"
-version = "0.15.0"
+version = "0.16.0"
 edition = "2021"
 rust-version = "1.70.0"
 description = "A Python to WebAssembly compiler written in Rust."
@@ -78,6 +78,10 @@ required-features = ["wasm-plugin"]
 [[example]]
 name = "verbose_debug_demo"
 path = "examples/verbose_debug_demo.rs"
+
+[[example]]
+name = "verify_runtime"
+path = "examples/verify_runtime.rs"
 
 # Integration tests (tests/ subdirectories are not auto-discovered by Cargo)
 [[test]]

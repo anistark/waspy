@@ -106,8 +106,9 @@ clean-all: clean
     echo "Removed generated example artifacts."
 
 # Compile every bundled example through the real driver (multi-file examples
-# via their entry file), failing on the first broken one
-verify-examples:
+# via their entry file), then run the end-to-end programs under Node and
+# wasmtime. Fails on the first broken one.
+verify-examples: verify-runtime
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p examples/output
@@ -121,6 +122,8 @@ verify-examples:
     done
     echo "== examples/user_modules_app/main.py"
     cargo run --quiet --example advanced_compiler examples/user_modules_app/main.py >/dev/null
+    echo "== examples/library_project/main.py"
+    cargo run --quiet --example advanced_compiler examples/library_project/main.py >/dev/null
     echo "== examples/basic_operations.py + examples/calculator.py (multi-file)"
     cargo run --quiet --example multi_file_compiler examples/output/verify_combined.wasm \
         examples/basic_operations.py examples/calculator.py >/dev/null
@@ -129,6 +132,24 @@ verify-examples:
         examples/output/verify_project.wasm >/dev/null
     echo ""
     echo "All examples compiled successfully."
+
+# Run the end-to-end programs under real runtimes, not only the test harness.
+# The integration suite asserts the same results with wasmi in-process; this
+# asserts them under the engines a user ships against. Needs `node` and
+# `wasmtime` on PATH.
+verify-runtime:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "== building the end-to-end programs with their runtime checks"
+    cargo run --quiet --example verify_runtime
+    echo ""
+    echo "== node"
+    node scripts/verify_runtime_node.mjs
+    echo ""
+    echo "== wasmtime"
+    python3 scripts/verify_runtime_wasmtime.py
+    echo ""
+    echo "Every end-to-end program answers correctly under both runtimes."
 
 # Time compilation of representative examples (release build, wall clock)
 benchmark:
