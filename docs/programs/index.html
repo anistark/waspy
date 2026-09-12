@@ -138,6 +138,42 @@
             .minute { grid-template-columns: 1fr; gap: 0.2rem 0; }
             .minute dd { margin-bottom: 0.8rem; }
         }
+
+        .cost-table-wrap { overflow-x: auto; margin: 1.5rem 0; }
+
+        .cost-table {
+            border-collapse: collapse;
+            font-size: 0.88rem;
+            min-width: 34rem;
+            width: 100%;
+        }
+
+        .cost-table th,
+        .cost-table td {
+            border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+            padding: 0.6rem 0.9rem 0.6rem 0;
+            text-align: right;
+            white-space: nowrap;
+        }
+
+        .cost-table th:first-child,
+        .cost-table td:first-child { text-align: left; }
+
+        .cost-table th {
+            font-size: 0.72rem;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+            opacity: 0.65;
+            text-transform: uppercase;
+        }
+
+        .cost-table td:first-child {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.82rem;
+        }
+
+        .cost-table tbody tr:last-child td { border-bottom: none; }
+        .cost-note { font-size: 0.85rem; line-height: 1.65; opacity: 0.78; }
     </style>
 </head>
 <body>
@@ -257,6 +293,36 @@ def checkout() -&gt; float:
                 <dt>Imports</dt>
                 <dd><code>import mod</code> and <code>from mod import f</code> resolve sibling <code>.py</code> files from disk and link into the one output module. No PyPI packages: the supported subset is standard-library only.</dd>
             </dl>
+        </section>
+
+        <section class="section">
+            <div class="section-header">
+                <h2>What it costs</h2>
+                <p class="section-subtitle">Median of nine release-build compilations on an Apple M1, via <code>just benchmark</code>. Wall-clock numbers from one machine, so read them for orders of magnitude, not percentages.</p>
+            </div>
+
+            <div class="cost-table-wrap">
+                <table class="cost-table">
+                    <thead>
+                        <tr>
+                            <th>Program</th>
+                            <th>Source</th>
+                            <th>Compile</th>
+                            <th>Module</th>
+                            <th>Compile (opt)</th>
+                            <th>Module (opt)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>shopping_cart</td><td>2.0 KiB</td><td>0.2 ms</td><td>1.4 KiB</td><td>1.2 ms</td><td>1014 B</td></tr>
+                        <tr><td>text_report</td><td>3.4 KiB</td><td>0.4 ms</td><td>6.5 KiB</td><td>5.8 ms</td><td>5.7 KiB</td></tr>
+                        <tr><td>library_project</td><td>3.3 KiB</td><td>0.5 ms</td><td>3.6 KiB</td><td>2.7 ms</td><td>3.1 KiB</td></tr>
+                        <tr><td>nested_collections</td><td>4.7 KiB</td><td>0.5 ms</td><td>13.6 KiB</td><td>4.1 ms</td><td>12.7 KiB</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p class="cost-note">A whole program compiles in well under a millisecond and produces a few kilobytes of WebAssembly, with no interpreter or runtime bundled in: the module is the program. Optimization is where the time goes. Binaryen costs 5 to 15 times the rest of the pipeline and takes 7 to 27% off the module, so it is worth running for something you ship and worth skipping in a fast edit loop, which is what <code>CompilerOptions { optimize: false }</code> is for. The first three rows are the end-to-end programs above; <code>nested_collections</code> is the feature example with the largest module, as a second data point at a different shape.</p>
         </section>
 
         <div class="rule">

@@ -49,6 +49,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Two modules defining the same function name is an error. Merged modules share one flat namespace, so the second definition was dropped with a warning while compilation reported success, and every call to either one reached the first: `alpha.rate()` and `beta.rate()` both answered alpha's value. Resolving this properly means qualifying names by module and rewriting call sites per file's imports, so for now it is refused instead of miscompiled
 
 
+### Performance baseline
+
+First recorded baseline, so later releases have something to compare against.
+Median of nine release-build compilations each on an Apple M1 (Darwin arm64),
+via `just benchmark`. These are wall-clock numbers from one machine: the point
+is to catch an order-of-magnitude regression, not to defend a percentage.
+
+| Program | Source | Compile | Module | Compile (opt) | Module (opt) |
+| --- | --- | --- | --- | --- | --- |
+| `shopping_cart` | 2.0 KiB | 0.2 ms | 1.4 KiB | 1.2 ms | 1014 B |
+| `text_report` | 3.4 KiB | 0.4 ms | 6.5 KiB | 5.8 ms | 5.7 KiB |
+| `library_project` | 3.3 KiB | 0.5 ms | 3.6 KiB | 2.7 ms | 3.1 KiB |
+| `nested_collections` | 4.7 KiB | 0.5 ms | 13.6 KiB | 4.1 ms | 12.7 KiB |
+
+The first three are the end-to-end programs; `nested_collections` is the
+feature example that produces the largest module, as a second data point.
+Binaryen dominates the optimized column, costing 5 to 15 times the rest of the
+pipeline while taking 7 to 27% off the module, so the unoptimized compile is
+the number to watch for a codegen regression.
+
 ## [0.15.0](https://github.com/anistark/waspy/releases/tag/v0.15.0) - 2026-09-07
 
 ### Added

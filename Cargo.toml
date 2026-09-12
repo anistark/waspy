@@ -83,6 +83,10 @@ path = "examples/verbose_debug_demo.rs"
 name = "verify_runtime"
 path = "examples/verify_runtime.rs"
 
+[[example]]
+name = "benchmark"
+path = "examples/benchmark.rs"
+
 # Integration tests (tests/ subdirectories are not auto-discovered by Cargo)
 [[test]]
 name = "integration_examples"

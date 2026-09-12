@@ -151,21 +151,18 @@ verify-runtime:
     echo ""
     echo "Every end-to-end program answers correctly under both runtimes."
 
-# Time compilation of representative examples (release build, wall clock)
+# Compile-time and module-size baseline for the end-to-end programs, median
+# of nine release-build runs each, optimized and unoptimized. Prints a table
+# ready to paste into CHANGELOG.md. Report the machine alongside the numbers:
+# they are wall clock, so they only mean anything next to the hardware.
 benchmark:
     #!/usr/bin/env bash
     set -euo pipefail
-    mkdir -p examples/output
-    echo "Building release examples..."
-    cargo build --quiet --release --example advanced_compiler
-    for f in examples/basic_operations.py examples/typed_demo.py \
-             examples/comprehensions.py examples/generators.py \
-             examples/stdlib_all_modules.py; do
-      echo ""
-      echo "== $f"
-      /usr/bin/time ./target/release/examples/advanced_compiler "$f" 2>&1 \
-        | grep -E "Compilation completed|real|user|sys| KiB| MiB| bytes" || true
-    done
+    cargo build --quiet --release --example benchmark
+    echo "machine: $(uname -sm), $(sysctl -n machdep.cpu.brand_string 2>/dev/null || \
+        grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | xargs || echo unknown)"
+    echo ""
+    ./target/release/examples/benchmark
 
 # Serve the docs website locally (set host to 0.0.0.0 or a tailscale IP to share over the network)
 docs port="8000" host="0.0.0.0":
