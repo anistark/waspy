@@ -44,3 +44,38 @@ jobs:
           --test unit_basics
           --test unit_errors
           --test unit_memory_safety
+          --test unit_miscompiles
+          --test integration_wasmrun_plugin
+
+  runtime:
+    name: End-to-end programs under real runtimes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: extractions/setup-just@v2
+
+      - name: Install wasmtime
+        run: |
+          curl https://wasmtime.dev/install.sh -sSf | bash
+          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+
+      # The whole-program gate. The harness above asserts these same results
+      # with wasmi inside the test process; this asserts them under the engines
+      # a user actually ships against, for both the unoptimized and the
+      # Binaryen-optimized binary, and then compiles every bundled example.
+      # A release does not go out on a red run here.
+      - name: Whole programs under Node and wasmtime (required gate)
+        run: just verify-examples

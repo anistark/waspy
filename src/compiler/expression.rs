@@ -2298,30 +2298,47 @@ fn emit_format_fixed(func: &mut Function, ctx: &CompilationContext, precision: u
     func.instruction(&Instruction::F64Abs);
     func.instruction(&Instruction::LocalSet(value));
 
-    // ipart = floor(value); frac = round((value - ipart) * 10^p)
-    func.instruction(&Instruction::LocalGet(value));
-    func.instruction(&Instruction::F64Floor);
-    func.instruction(&Instruction::LocalSet(ipart));
-    func.instruction(&Instruction::LocalGet(value));
-    func.instruction(&Instruction::LocalGet(ipart));
-    func.instruction(&Instruction::F64Sub);
-    func.instruction(&Instruction::F64Const(f64_const(scale)));
-    func.instruction(&Instruction::F64Mul);
-    func.instruction(&Instruction::F64Nearest);
-    func.instruction(&Instruction::LocalSet(frac));
+    if precision == 0 {
+        // No fraction digit is kept, so there is none whose parity could break
+        // a tie: the digit being rounded into is the integer part's last one.
+        // Splitting the value and rounding the fraction alone loses that, and
+        // `F64Nearest(0.5)` is 0 whatever sits to its left, so `3.5` came out
+        // as `3` where CPython answers `4`. `2.5` and `4.5` were right only
+        // because their integer part was already even. Rounding the whole
+        // magnitude keeps the tie-break on the digit that decides it.
+        func.instruction(&Instruction::LocalGet(value));
+        func.instruction(&Instruction::F64Nearest);
+        func.instruction(&Instruction::LocalSet(ipart));
+        func.instruction(&Instruction::F64Const(f64_const(0.0)));
+        func.instruction(&Instruction::LocalSet(frac));
+    } else {
+        // ipart = floor(value); frac = round((value - ipart) * 10^p). Here the
+        // last kept fraction digit is inside the scaled value, so
+        // `F64Nearest`'s ties-to-even lands on the right digit.
+        func.instruction(&Instruction::LocalGet(value));
+        func.instruction(&Instruction::F64Floor);
+        func.instruction(&Instruction::LocalSet(ipart));
+        func.instruction(&Instruction::LocalGet(value));
+        func.instruction(&Instruction::LocalGet(ipart));
+        func.instruction(&Instruction::F64Sub);
+        func.instruction(&Instruction::F64Const(f64_const(scale)));
+        func.instruction(&Instruction::F64Mul);
+        func.instruction(&Instruction::F64Nearest);
+        func.instruction(&Instruction::LocalSet(frac));
 
-    // A fraction that rounded up to a whole carries.
-    func.instruction(&Instruction::LocalGet(frac));
-    func.instruction(&Instruction::F64Const(f64_const(scale)));
-    func.instruction(&Instruction::F64Ge);
-    func.instruction(&Instruction::If(BlockType::Empty));
-    func.instruction(&Instruction::F64Const(f64_const(0.0)));
-    func.instruction(&Instruction::LocalSet(frac));
-    func.instruction(&Instruction::LocalGet(ipart));
-    func.instruction(&Instruction::F64Const(f64_const(1.0)));
-    func.instruction(&Instruction::F64Add);
-    func.instruction(&Instruction::LocalSet(ipart));
-    func.instruction(&Instruction::End);
+        // A fraction that rounded up to a whole carries.
+        func.instruction(&Instruction::LocalGet(frac));
+        func.instruction(&Instruction::F64Const(f64_const(scale)));
+        func.instruction(&Instruction::F64Ge);
+        func.instruction(&Instruction::If(BlockType::Empty));
+        func.instruction(&Instruction::F64Const(f64_const(0.0)));
+        func.instruction(&Instruction::LocalSet(frac));
+        func.instruction(&Instruction::LocalGet(ipart));
+        func.instruction(&Instruction::F64Const(f64_const(1.0)));
+        func.instruction(&Instruction::F64Add);
+        func.instruction(&Instruction::LocalSet(ipart));
+        func.instruction(&Instruction::End);
+    }
 
     func.instruction(&Instruction::LocalGet(ipart));
     func.instruction(&Instruction::I32TruncF64S);
@@ -8505,13 +8522,26 @@ pub fn emit_expr(
                         }
 
                         _ => {
-                            // Unknown method
-                            func.instruction(&Instruction::Drop);
-                            func.instruction(&Instruction::Drop);
-                            for arg in arguments {
-                                emit_expr(arg, func, ctx, memory_layout, None);
-                                func.instruction(&Instruction::Drop);
-                            }
+                            // A string method the compiler does not implement
+                            // used to drop the receiver's `(offset, length)`
+                            // and every argument and push nothing, so the
+                            // module failed WebAssembly validation and the
+                            // error blamed code generation instead of naming
+                            // the method. The list and dict receivers report
+                            // theirs; this is the same case on a string.
+                            ctx.report(format!(
+                                "'{method_name}' is not supported on a str yet. \
+                                 Hint: the supported string methods are capitalize, \
+                                 center, count, endswith, find, format, index, \
+                                 isalnum, isalpha, isdigit, islower, isspace, \
+                                 isupper, join, ljust, lower, lstrip, replace, \
+                                 rjust, rstrip, split, startswith, strip, title, \
+                                 and upper"
+                            ));
+                            func.instruction(&Instruction::Drop); // length
+                            func.instruction(&Instruction::Drop); // offset
+                            func.instruction(&Instruction::Unreachable);
+                            func.instruction(&Instruction::I32Const(0));
                             IRType::Unknown
                         }
                     }
@@ -9630,6 +9660,19 @@ pub fn emit_set_method_call(
     IRType::None
 }
 
+/// How many positional arguments each supported list method takes, as
+/// `(minimum, maximum)`. `sort`'s optional slot is its `reverse` keyword, which
+/// lowering rewrites into a positional argument.
+fn list_method_arity(method_name: &str) -> Option<(usize, usize)> {
+    Some(match method_name {
+        "append" | "count" | "extend" | "index" | "remove" => (1, 1),
+        "clear" | "reverse" => (0, 0),
+        "insert" => (2, 2),
+        "pop" | "sort" => (0, 1),
+        _ => return None,
+    })
+}
+
 pub fn emit_list_method_call(
     func: &mut Function,
     ctx: &CompilationContext,
@@ -9638,6 +9681,29 @@ pub fn emit_list_method_call(
     arguments: &[IRExpr],
     list_type: &IRType,
 ) -> IRType {
+    // Every arm below reads the arguments it needs and ignored the rest, so
+    // `xs.append(3, 4)` compiled successfully and appended only the 3, and
+    // `xs.clear(9)` dropped its argument on the floor. Python raises a
+    // TypeError for both. Checking the count once here covers every method
+    // rather than repeating it per arm.
+    if let Some((min, max)) = list_method_arity(method_name) {
+        if arguments.len() < min || arguments.len() > max {
+            let takes = if min == max {
+                format!("exactly {min}")
+            } else {
+                format!("{min} to {max}")
+            };
+            ctx.report(format!(
+                "list.{method_name}() takes {takes} argument(s), got {}",
+                arguments.len()
+            ));
+            func.instruction(&Instruction::Drop); // list_ptr
+            func.instruction(&Instruction::Unreachable);
+            func.instruction(&Instruction::I32Const(0));
+            return IRType::Unknown;
+        }
+    }
+
     match method_name {
         "append" => {
             // list.append(value). Entry stack: (list_ptr). Each element occupies
@@ -9679,9 +9745,21 @@ pub fn emit_list_method_call(
             IRType::None
         }
         "pop" => {
-            // list.pop([index]) — pop the given index, else the last element.
-            // Entry stack: (list_ptr). The length is decremented first so the
-            // width-aware element load can be the final value left on the stack.
+            // list.pop([index]) — remove the element at `index` (the last one
+            // by default) and answer it. Entry stack: (list_ptr).
+            //
+            // The index used to be evaluated, stored, and then never used for
+            // anything but the load: the length was decremented and the tail
+            // left where it was, so `[9, 3, 2].pop(0)` answered 9 (right) and
+            // left `[9, 3]` behind (wrong, CPython leaves `[3, 2]`). Every
+            // element above the popped one has to move down a slot, the same
+            // shift `remove` does. This is the mirror of the `insert` position
+            // bug: the argument was read and discarded.
+            let elem_type = match list_type {
+                IRType::List(t) => t.as_ref().clone(),
+                _ => IRType::Unknown,
+            };
+
             func.instruction(&Instruction::LocalSet(ctx.temp_local)); // list_ptr
 
             // length = load(list_ptr)
@@ -9692,6 +9770,17 @@ pub fn emit_list_method_call(
             if !arguments.is_empty() {
                 emit_expr(&arguments[0], func, ctx, memory_layout, Some(&IRType::Int));
                 func.instruction(&Instruction::LocalSet(ctx.temp_local + 2)); // index
+
+                // A negative index counts from the end, as everywhere else.
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
+                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32LtS);
+                func.instruction(&Instruction::Select);
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 2));
             } else {
                 // Last element: index = length - 1
                 func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
@@ -9700,6 +9789,65 @@ pub fn emit_list_method_call(
                 func.instruction(&Instruction::LocalSet(ctx.temp_local + 2)); // index
             }
 
+            // Python raises IndexError for a position the list does not have,
+            // an empty list included. Trap rather than reading a neighbouring
+            // slot, which is what an out-of-range index read does too.
+            func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
+            func.instruction(&Instruction::I32Const(0));
+            func.instruction(&Instruction::I32LtS);
+            func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
+            func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
+            func.instruction(&Instruction::I32GeS);
+            func.instruction(&Instruction::I32Or);
+            func.instruction(&Instruction::If(BlockType::Empty));
+            func.instruction(&Instruction::Unreachable);
+            func.instruction(&Instruction::End);
+
+            // Read the element out before the shift overwrites its slot. A
+            // float keeps its own scratch so the f64 is not truncated; every
+            // other element is one word, a string's being its blob offset.
+            func.instruction(&Instruction::LocalGet(ctx.temp_local));
+            emit_data_base(func);
+            func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
+            func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+            func.instruction(&Instruction::I32Mul);
+            func.instruction(&Instruction::I32Add);
+            if matches!(elem_type, IRType::Float) {
+                func.instruction(&Instruction::F64Load(slot_arg()));
+                func.instruction(&Instruction::LocalSet(ctx.temp_local_f64_2));
+            } else {
+                func.instruction(&Instruction::I32Load(slot_arg()));
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 3));
+            }
+
+            // Shift (index, length) one slot to the left, closing the gap.
+            // memory.copy has memmove semantics, so the overlap is safe.
+            func.instruction(&Instruction::LocalGet(ctx.temp_local));
+            emit_data_base(func);
+            func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
+            func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+            func.instruction(&Instruction::I32Mul);
+            func.instruction(&Instruction::I32Add);
+            func.instruction(&Instruction::LocalGet(ctx.temp_local));
+            emit_data_base(func);
+            func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
+            func.instruction(&Instruction::I32Const(1));
+            func.instruction(&Instruction::I32Add);
+            func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+            func.instruction(&Instruction::I32Mul);
+            func.instruction(&Instruction::I32Add);
+            func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
+            func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
+            func.instruction(&Instruction::I32Sub);
+            func.instruction(&Instruction::I32Const(1));
+            func.instruction(&Instruction::I32Sub);
+            func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+            func.instruction(&Instruction::I32Mul);
+            func.instruction(&Instruction::MemoryCopy {
+                src_mem: 0,
+                dst_mem: 0,
+            });
+
             // length -= 1
             func.instruction(&Instruction::LocalGet(ctx.temp_local));
             func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
@@ -9707,20 +9855,15 @@ pub fn emit_list_method_call(
             func.instruction(&Instruction::I32Sub);
             func.instruction(&Instruction::I32Store(slot_arg()));
 
-            // address = list_ptr + HEADER + index*SLOT
-            func.instruction(&Instruction::LocalGet(ctx.temp_local));
-            emit_data_base(func);
-            func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
-            func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
-            func.instruction(&Instruction::I32Mul);
-            func.instruction(&Instruction::I32Add);
-
-            // Load and return the popped element at its natural width.
-            let elem_type = match list_type {
-                IRType::List(t) => t.as_ref().clone(),
-                _ => IRType::Unknown,
-            };
-            load_collection_word(func, &elem_type, ctx.temp_local + 3);
+            // Answer the element that was removed.
+            if matches!(elem_type, IRType::Float) {
+                func.instruction(&Instruction::LocalGet(ctx.temp_local_f64_2));
+            } else {
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
+                if matches!(elem_type, IRType::String | IRType::Bytes) {
+                    recover_str_pair(func, ctx);
+                }
+            }
             elem_type
         }
         "clear" => {
@@ -10082,9 +10225,12 @@ pub fn emit_list_method_call(
                 }));
                 func.instruction(&Instruction::LocalSet(ctx.temp_local + 2)); // length
 
-                // Initialize index to 0
+                // Initialize index to 0, and `found` to -1 so the check
+                // after the loop can tell "absent" from "found at 0".
                 func.instruction(&Instruction::I32Const(0));
                 func.instruction(&Instruction::LocalSet(ctx.temp_local + 3)); // current_index
+                func.instruction(&Instruction::I32Const(-1));
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 4)); // found
 
                 // Loop: check each element
                 func.instruction(&Instruction::Block(BlockType::Empty));
@@ -10107,9 +10253,17 @@ pub fn emit_list_method_call(
                 // Compare with the needle (width-aware).
                 emit_slot_eq_needle(func, ctx, &value_type, ctx.temp_local + 1);
 
-                // If equal, return current_index
+                // If equal, record the position and leave the loop. The
+                // index used to be pushed and then branched over: a `br` to a
+                // block whose result type is empty discards whatever sits
+                // above the label, so the found index was thrown away and
+                // execution fell out to the `-1` below. `[2, 3].index(2)`
+                // answered -1 for a value the list held, and reported
+                // success. The position goes in a local now, which survives
+                // the branch.
                 func.instruction(&Instruction::If(BlockType::Empty));
                 func.instruction(&Instruction::LocalGet(ctx.temp_local + 3)); // current_index
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 4)); // found
                 func.instruction(&Instruction::Br(2)); // Exit both blocks
                 func.instruction(&Instruction::End);
 
@@ -10126,8 +10280,17 @@ pub fn emit_list_method_call(
                 func.instruction(&Instruction::End);
                 func.instruction(&Instruction::End);
 
-                // Not found, return -1
+                // Python raises ValueError when the value is absent. Nothing
+                // in the compiled module can carry one, so trap, the way
+                // `set.remove` of a missing member does: failing loudly beats
+                // answering an index the caller would then index with.
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 4)); // found
                 func.instruction(&Instruction::I32Const(-1));
+                func.instruction(&Instruction::I32Eq);
+                func.instruction(&Instruction::If(BlockType::Empty));
+                func.instruction(&Instruction::Unreachable);
+                func.instruction(&Instruction::End);
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
             } else {
                 func.instruction(&Instruction::Drop); // Drop list_ptr
                 func.instruction(&Instruction::I32Const(0));
@@ -10452,16 +10615,17 @@ pub fn emit_list_method_call(
         _ => {
             // A list method the compiler does not implement used to be dropped
             // on the floor: the receiver was discarded, a 0 pushed in its
-            // place, and compilation reported success. `xs.sort()` and
-            // `xs.reverse()` are not implemented anywhere, so they silently did
-            // nothing and every later read saw the unsorted list. Anything that
-            // mutates or queries the receiver has to be a compile error rather
-            // than a no-op; the trap keeps the module valid while the error
-            // sink lets the rest of the walk finish and report every such call.
+            // place, and compilation reported success. That is how `xs.sort()`
+            // and `xs.reverse()`, which were implemented nowhere, came to
+            // silently do nothing while every later read saw the unsorted list.
+            // Anything that mutates or queries the receiver has to be a compile
+            // error rather than a no-op; the trap keeps the module valid while
+            // the error sink lets the rest of the walk finish and report every
+            // such call.
             ctx.report(format!(
                 "'{method_name}' is not supported on a list yet. \
                  Hint: the supported list methods are append, clear, count, \
-                 extend, index, insert, pop, and remove"
+                 extend, index, insert, pop, remove, reverse, and sort"
             ));
             func.instruction(&Instruction::Drop); // list_ptr
             func.instruction(&Instruction::Unreachable);

@@ -100,12 +100,16 @@ pub fn try_instantiate(wasm: &[u8]) -> Result<(), String> {
 
 /// Compile several Python files into one module, returning the error as a
 /// string on failure. `sources` is `(file_name, source)` pairs.
+///
+/// Like `try_compile`, the error is formatted with `{:#}` so the anyhow cause
+/// chain comes through: the outer context names the file that failed and the
+/// cause carries the located message, and a test wants to assert on both.
 pub fn try_compile_multi(sources: &[(&str, &str)]) -> Result<Vec<u8>, String> {
     let options = CompilerOptions {
         optimize: false,
         ..CompilerOptions::default()
     };
-    compile_multiple_python_files_with_options(sources, &options).map_err(|e| e.to_string())
+    compile_multiple_python_files_with_options(sources, &options).map_err(|e| format!("{e:#}"))
 }
 
 /// Compile a source string, asserting success.
