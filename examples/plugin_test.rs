@@ -88,11 +88,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if std::path::Path::new(&result.output_path).exists() {
                     println!("    ✅ Output file verified");
                 } else {
-                    println!("    ❌ Output file not found");
+                    return Err(format!(
+                        "plugin reported {} but wrote nothing there",
+                        result.output_path
+                    )
+                    .into());
                 }
             }
             Err(e) => {
-                println!("  ❌ Build failed: {e}");
+                // A failed build used to print a cross and let the process
+                // exit 0, so this example could not tell anyone the plugin was
+                // broken. `tests/integration/wasmrun_plugin.rs` is the real
+                // gate; this at least fails.
+                return Err(format!("plugin build failed: {e}").into());
             }
         }
     } else {

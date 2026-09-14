@@ -2641,29 +2641,18 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                                             .all(|c| c.is_lowercase());
                                     return Ok(IRExpr::Const(IRConstant::Bool(result)));
                                 }
-                                "split" => {
-                                    // split(sep) - compile-time for constant separator
-                                    if !arguments.is_empty() {
-                                        if let IRExpr::Const(IRConstant::String(sep)) =
-                                            &arguments[0]
-                                        {
-                                            let parts: Vec<&str> = s.split(sep.as_str()).collect();
-                                            // For now, convert to simple string representation for constants
-                                            // Real list support would require list IR representation
-                                            let result = format!(
-                                                "[{}]",
-                                                parts
-                                                    .iter()
-                                                    .map(|p| format!("'{p}'"))
-                                                    .collect::<Vec<_>>()
-                                                    .join(", ")
-                                            );
-                                            memory_layout.add_string(&result);
-                                            return Ok(IRExpr::Const(IRConstant::String(result)));
-                                        }
-                                    }
-                                    // Fall through to runtime handling
-                                }
+                                // `split` is deliberately not folded. It used to
+                                // be, for a constant separator, into a *string*
+                                // spelling the result the way Python's `repr`
+                                // does: `"a b a".split(" ")` became the 15-byte
+                                // `['a', 'b', 'a']`, so `len()` answered 15
+                                // instead of 3, iterating it walked characters,
+                                // and using one as a dict key trapped. Nothing
+                                // said so, because compilation succeeded. There
+                                // is no list constant to fold into, so the
+                                // runtime implementation is the only correct
+                                // path; `s.split(sep)` on a variable always took
+                                // it and always answered correctly.
                                 "find" => {
                                     // find(sub) - return index of substring
                                     if !arguments.is_empty() {

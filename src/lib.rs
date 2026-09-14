@@ -284,8 +284,9 @@ pub fn compile_multiple_python_files(sources: &[(&str, &str)], optimize: bool) -
 ///
 /// # Examples
 ///
-/// A file that fails to parse is reported as a warning and skipped, so the
-/// rest of the sources still compile. Only an empty result is an error:
+/// A file that cannot be parsed or compiled fails the whole compilation, and
+/// the error names it. It used to be skipped with a warning, which meant a
+/// build could succeed with a module missing and calls into it answering 0:
 ///
 /// ```
 /// use waspy::{compile_multiple_python_files_with_options, CompilerOptions, Verbosity};
@@ -299,9 +300,9 @@ pub fn compile_multiple_python_files(sources: &[(&str, &str)], optimize: bool) -
 ///     ..CompilerOptions::default()
 /// };
 ///
-/// let wasm = compile_multiple_python_files_with_options(&sources, &options)?;
-/// assert_eq!(&wasm[0..4], b"\0asm");
-/// # anyhow::Ok(())
+/// let err = compile_multiple_python_files_with_options(&sources, &options)
+///     .expect_err("broken.py must fail the build");
+/// assert!(format!("{err:#}").contains("broken.py"));
 /// ```
 pub fn compile_multiple_python_files_with_options(
     sources: &[(&str, &str)],
@@ -315,9 +316,10 @@ pub fn compile_multiple_python_files_with_options(
 ///
 /// Each file is parsed and lowered once; a filename appearing twice is
 /// skipped (a module imported through several paths is compiled and its
-/// module-level state merged exactly once, #41). Functions are de-duplicated
-/// by name (first definition wins, with a warning), and string/bytes layouts
-/// are merged. With `skip_special` set, files matching
+/// module-level state merged exactly once, #41). A file that fails to parse or
+/// lower fails the whole compilation, naming the file. Two files defining the
+/// same function name is an error, since merged modules share one namespace,
+/// and string/bytes layouts are merged. With `skip_special` set, files matching
 /// [`utils::is_special_python_file`] are ignored — the behavior of the
 /// directory-scanning entry points; import-resolved module files bypass it so
 /// a genuine local module named e.g. `config.py` still links.
@@ -387,23 +389,20 @@ fn compile_merged_sources(
 
         log_debug!("Processing file: {filename}");
 
-        // Parse Python to AST
-        let ast = match core::parser::parse_python(source) {
-            Ok(ast) => ast,
-            Err(e) => {
-                log_warn!("Failed to parse {filename}: {e}");
-                continue;
-            }
-        };
-
-        // Lower AST to IR
-        let ir_module = match ir::lower_ast_to_ir(&ast) {
-            Ok(module) => module,
-            Err(e) => {
-                log_warn!("Failed to convert {filename} to IR: {e}");
-                continue;
-            }
-        };
+        // A file the compiler was asked to compile and cannot is an error,
+        // not a warning. Both of these used to `log_warn!` and `continue`,
+        // which dropped the whole file: with one file the caller saw the
+        // useless "No valid functions found in any of the provided files"
+        // instead of the located message with its hint, and in a multi-file
+        // project the build *succeeded* with that module missing. One bad
+        // function anywhere in an imported module took every other function in
+        // it down with it, so a call across the import answered 0 and nothing
+        // said so. That is the silent wrong answer the correctness rule
+        // forbids, and a typo in any imported module reaches it.
+        let ast = core::parser::parse_python(source)
+            .with_context(|| format!("failed to parse {filename}"))?;
+        let ir_module =
+            ir::lower_ast_to_ir(&ast).with_context(|| format!("failed to compile {filename}"))?;
 
         // Skip files that contribute nothing (a constants-only module still
         // carries variables worth merging).

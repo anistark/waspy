@@ -46,7 +46,8 @@ Generate & Optimize
 - Detects and handles project structure and dependencies
 - Supports module-level variables and class definitions with heap-allocated instances — multiple live instances per class, usable as function arguments and return values
 - Object-oriented Python: single inheritance with `super()`, `isinstance`/`issubclass` over the class hierarchy, `@staticmethod`/`@classmethod`/`@property` (with setters), `@dataclass` (generated `__init__`/`__eq__`/`__repr__`), and abstract base classes via `abc.ABC`
-- Collections: lists, dicts, sets, tuples, and ranges: literals, indexing, methods, and membership (`in`/`not in`), with full-precision f64 elements and hash-table sets; lists and dicts reallocate as they grow past their literal's size
+- Collections: lists, dicts, sets, tuples, and ranges: literals, indexing, slicing, methods, and membership (`in`/`not in`), with full-precision f64 elements and hash-table sets; lists and dicts reallocate as they grow past their literal's size. `list.sort`/`list.reverse`/`list.pop(i)`/`list.index`, `dict.get`/`.keys`/`.values`/`.items`, and `sorted(iterable[, key][, reverse])` are all real operations, and an empty collection is falsy as in Python
+- String methods run on a string built at runtime, not only on a literal: case and trim transforms, `find`/`count`/`startswith`/`endswith`, `split`/`join`/`replace`, the layout and predicate methods, and `.format()` with automatic or positional fields. Strings compare by content everywhere, so a key built at runtime matches an equal one already in a dict
 - Exceptions: `raise` transfers control, `try`/`except`/`finally` catch and clean up, and an exception propagates out of a call into the caller's handler. `except (A, B):` catches either type, `except Exception:` catches any, and an exception nothing catches unwinds out of the program and traps
 - Comprehensions: list, set, and dict comprehensions with filters, multiple generators, nesting, and `{k: v for k, v in pairs}` unpacking
 - Generators with real state preservation: `yield` suspends and resumes, `yield from` delegates, and `next()`/`send()`/`close()` work; user classes implementing `__iter__`/`__next__` iterate in `for` loops with `StopIteration` ending the loop
@@ -98,15 +99,20 @@ Float division by zero and integer division or modulo by zero raise
 - Lists, dicts, and sets grow at runtime (`append`/`extend`/`insert`, `dict[key] = value` for a new key, and `set.add` reallocate when full). A collection's elements live in a block its header points at, so growing one never moves the collection: a list grown inside a function it was passed to, or reached by indexing another collection, is grown for every other name for it too
 - Generators cover the common shapes; `yield` inside `try`/`with` and generator methods (`yield` in a class method) are rejected at compile time, and `close()` skips `GeneratorExit`/`finally` semantics
 - Closures capture the variable, not a snapshot of it: a captured variable reassigned after the closure is made changes what the closure sees, and closures created in a loop share the loop variable. Capturing a float is not supported yet
-- Imported user modules share one flat namespace in the output module — two modules defining the same function name collide (first definition wins, with a warning)
+- Imported user modules share one flat namespace in the output module, so two modules defining the same function name is a compile error naming both files. It used to keep the first definition and print a warning, which meant `utils.format` next to `report.format` compiled successfully and answered with the wrong one. Qualifying names by module is the real fix and is not done yet
 - `f.read()` without a size reads up to 64 KiB per call; `open()` modes must be string literals
 - A `with` statement needs its context manager's class to be resolvable at compile time (an instantiation, a call with an annotated class return type, or a variable of known class type). `__exit__` runs on every way out: the normal path, a `return`/`break`/`continue`, and an exception leaving the block. Its return value never suppresses an exception, though, so returning `True` from `__exit__` does not swallow one the way Python's does
 - Division by zero raises `ZeroDivisionError` (integer and float, `/`, `//`, and `%`), catchable like any other exception
 - `**` computes by repeated multiplication: a fractional float exponent (`2.0 ** 0.5`) traps, since it needs exp/log this runtime does not carry, and a negative integer exponent traps because Python's answer is a float an int result cannot hold
 - Sequence indexing is checked: a negative index counts from the end, an index outside the sequence raises `IndexError`, a missing dict key raises `KeyError`, and item assignment into a tuple or a string is a compile error. Slicing clamps instead of raising, as Python's does
+- Where Python raises over a value a collection does not hold, the compiled module traps, since it has no exception object to carry: `list.index(v)` and `set.remove(v)` of a missing value, and `list.pop(i)` with a position the list does not have. `list.count(v)` answers 0 and `set.discard(v)` ignores the miss, both as Python's do
+- A method called with the wrong number of arguments is a compile error, not a silently ignored one: `xs.append(3, 4)` and `xs.clear(9)` are refused. The optional forms Python accepts compile, so `pop()`, `pop(i)`, `sort()`, and `sort(reverse=True)` all work
 - `int` is 32-bit and wraps on overflow rather than growing like CPython's, which is the one place waspy answers differently without saying so. See [Numbers](#numbers)
 - Exceptions carry a type, not an object: `raise ValueError("message")` records the type and drops the message, and `except ValueError as e` binds the type's code rather than an exception instance. Matching is by exact type name (plus `Exception`/`BaseException`, which catch anything), so a user-defined exception's own base classes are not consulted. Runtime faults the compiler cannot turn into a raise, an out-of-range index or a division by zero, trap rather than raising, so `except ZeroDivisionError:` will not catch `1 // 0`
-- F-string placeholders render through `str()`, so whatever `str()` cannot render cannot be interpolated: a float, a bool, or a collection in a placeholder is a compile error naming the type. Format specifiers (`f"{x:.2f}"`) and the `!r`/`!a` conversions are rejected too, rather than being dropped
+- F-string placeholders render through `str()`, so whatever `str()` cannot render cannot be interpolated: a bare float, a bool, or a collection in a placeholder is a compile error naming the type. The one specifier that works is fixed-point, `f"{x:.2f}"`, which is how a float gets printed; every other specifier (widths, alignment, separators) and the `!r`/`!a` conversions are rejected rather than being dropped
+- A lambda's parameters carry no type, so indexing one, calling `len()` on one, or calling a method on one inside the lambda body is a compile error rather than a wrong answer ([#115](https://github.com/anistark/waspy/issues/115)). Arithmetic and comparison are fine, because an untyped word already behaves as the `int` they assume, so `sorted(xs, key=lambda v: 0 - v)` works. For anything that needs the parameter's type, use a named `def`, whose parameters can be annotated: that is why sorting an explicit list of `(-count, word)` tuples is the working shape and `key=lambda kv: (-kv[1], kv[0])` is not
+- A bare `list` or `dict` annotation carries no element type, so a function returning `-> list` loses it and the values inside compare as untyped words. Use the parameterised form (`List[str]`, `Dict[str, int]`) wherever a collection's elements are compared, used as dict keys, or sorted
+- Method dispatch is static: a subclass override is not seen by an inherited base method, so `Media.describe()` calling `self.kind()` on a `Video` instance reaches `Media.kind()`. Calling the override directly is correct. Virtual dispatch needs a vtable and is not implemented
 - No garbage collection or reference counting — the bump allocator never frees
 
 ### Explicitly unsupported (rejected at compile time)
@@ -134,7 +140,7 @@ Or add it to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-waspy = "0.15.0"
+waspy = "0.16.0"
 ```
 
 ## Quick Start
@@ -296,7 +302,7 @@ The type system now includes:
 - **Integers**: Mapped to WebAssembly's `i32` type
 - **Floats**: Supported as `f64` with conversion to `i32` when necessary
 - **Booleans**: Represented as `i32` (`0` for `false`, `1` for `true`)
-- **Strings**: Support for string operations with compile-time optimization
+- **Strings**: An `(offset, length)` pair into linear memory; methods run on a runtime receiver, and a literal receiver is folded at compile time
 - **Type Coercion**: Automatic conversion between compatible types when needed
 
 ### Control Flow

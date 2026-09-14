@@ -106,8 +106,9 @@ clean-all: clean
     echo "Removed generated example artifacts."
 
 # Compile every bundled example through the real driver (multi-file examples
-# via their entry file), failing on the first broken one
-verify-examples:
+# via their entry file), then run the end-to-end programs under Node and
+# wasmtime. Fails on the first broken one.
+verify-examples: verify-runtime
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p examples/output
@@ -121,6 +122,8 @@ verify-examples:
     done
     echo "== examples/user_modules_app/main.py"
     cargo run --quiet --example advanced_compiler examples/user_modules_app/main.py >/dev/null
+    echo "== examples/library_project/main.py"
+    cargo run --quiet --example advanced_compiler examples/library_project/main.py >/dev/null
     echo "== examples/basic_operations.py + examples/calculator.py (multi-file)"
     cargo run --quiet --example multi_file_compiler examples/output/verify_combined.wasm \
         examples/basic_operations.py examples/calculator.py >/dev/null
@@ -130,21 +133,36 @@ verify-examples:
     echo ""
     echo "All examples compiled successfully."
 
-# Time compilation of representative examples (release build, wall clock)
+# Run the end-to-end programs under real runtimes, not only the test harness.
+# The integration suite asserts the same results with wasmi in-process; this
+# asserts them under the engines a user ships against. Needs `node` and
+# `wasmtime` on PATH.
+verify-runtime:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "== building the end-to-end programs with their runtime checks"
+    cargo run --quiet --example verify_runtime
+    echo ""
+    echo "== node"
+    node scripts/verify_runtime_node.mjs
+    echo ""
+    echo "== wasmtime"
+    python3 scripts/verify_runtime_wasmtime.py
+    echo ""
+    echo "Every end-to-end program answers correctly under both runtimes."
+
+# Compile-time and module-size baseline for the end-to-end programs, median
+# of nine release-build runs each, optimized and unoptimized. Prints a table
+# ready to paste into CHANGELOG.md. Report the machine alongside the numbers:
+# they are wall clock, so they only mean anything next to the hardware.
 benchmark:
     #!/usr/bin/env bash
     set -euo pipefail
-    mkdir -p examples/output
-    echo "Building release examples..."
-    cargo build --quiet --release --example advanced_compiler
-    for f in examples/basic_operations.py examples/typed_demo.py \
-             examples/comprehensions.py examples/generators.py \
-             examples/stdlib_all_modules.py; do
-      echo ""
-      echo "== $f"
-      /usr/bin/time ./target/release/examples/advanced_compiler "$f" 2>&1 \
-        | grep -E "Compilation completed|real|user|sys| KiB| MiB| bytes" || true
-    done
+    cargo build --quiet --release --example benchmark
+    echo "machine: $(uname -sm), $(sysctl -n machdep.cpu.brand_string 2>/dev/null || \
+        grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | xargs || echo unknown)"
+    echo ""
+    ./target/release/examples/benchmark
 
 # Serve the docs website locally (set host to 0.0.0.0 or a tailscale IP to share over the network)
 docs port="8000" host="0.0.0.0":

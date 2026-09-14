@@ -13,7 +13,7 @@
 //!   this rewrite an omitted default underflowed the stack into invalid WASM.
 
 use crate::ir::{IRBody, IRClass, IRExpr, IRFunction, IRModule, IRParam, IRStatement, IRType};
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -118,6 +118,96 @@ const BUILTIN_NAMES: [&str; 16] = [
 /// duplicate function names).
 static LAMBDA_COUNTER: AtomicU32 = AtomicU32::new(0);
 
+/// Reject a lambda body that reads one of its own parameters in a way that
+/// needs the parameter's type (#115).
+///
+/// A lambda's parameters carry no annotation, so a lifted lambda's parameter is
+/// `IRType::Unknown` and code generation reads it as a bare word. Arithmetic
+/// and comparison are fine, since an untyped word already behaves as the `i32`
+/// they assume. Indexing it, measuring it, or calling a method on it are not:
+/// `(lambda kv: kv[1])((1, 5))` answered 0 where CPython answers 5, and
+/// `(lambda w: len(w))("abcd")` answered 1684234849, the four bytes read as an
+/// integer. Both compiled and reported success.
+///
+/// Typing a lambda's parameters from its call sites is a typing pass of its
+/// own. Until then this is a compile error rather than a wrong answer, which is
+/// the standard the rest of the subset holds to. The workaround is a named
+/// `def`, whose parameters can be annotated.
+fn reject_untyped_lambda_param_uses(params: &[IRParam], body: &mut IRExpr) -> Result<()> {
+    let names: HashSet<String> = params
+        .iter()
+        .filter(|p| matches!(p.param_type, IRType::Unknown))
+        .map(|p| p.name.clone())
+        .collect();
+    if names.is_empty() {
+        return Ok(());
+    }
+
+    // The parameter is a `Param` inside the lambda body, but a name that also
+    // exists outside can lower to `Variable`; both spellings are checked.
+    let named = |expr: &IRExpr| -> Option<String> {
+        match expr {
+            IRExpr::Param(name) | IRExpr::Variable(name) if names.contains(name) => {
+                Some(name.clone())
+            }
+            _ => None,
+        }
+    };
+
+    let mut offence: Option<(String, String)> = None;
+    visit_expr(body, &mut |expr: &mut IRExpr| {
+        if offence.is_some() {
+            return Ok(());
+        }
+        match expr {
+            IRExpr::Indexing { container, .. } | IRExpr::Slicing { container, .. } => {
+                if let Some(name) = named(container) {
+                    offence = Some((name, "indexed".to_string()));
+                }
+            }
+            IRExpr::Attribute { object, .. } => {
+                if let Some(name) = named(object) {
+                    offence = Some((name, "read as an attribute".to_string()));
+                }
+            }
+            IRExpr::MethodCall {
+                object,
+                method_name,
+                ..
+            } => {
+                if let Some(name) = named(object) {
+                    offence = Some((name, format!("the receiver of '.{method_name}()'")));
+                }
+            }
+            IRExpr::FunctionCall {
+                function_name,
+                arguments,
+            } => {
+                if matches!(
+                    function_name.as_str(),
+                    "len" | "str" | "sum" | "sorted" | "abs"
+                ) {
+                    if let Some(param) = arguments.iter().find_map(&named) {
+                        offence = Some((param, format!("passed to '{function_name}()'")));
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    })?;
+
+    match offence {
+        Some((name, how)) => Err(anyhow!(
+            "a lambda parameter carries no type, so '{name}' cannot be {how} \
+             inside the lambda: the value would be read as an untyped word and \
+             the answer would be wrong. Hint: use a named 'def' whose \
+             parameters are annotated"
+        )),
+        None => Ok(()),
+    }
+}
+
 /// Closure variable capture (#43): hoist every `IRExpr::Lambda` into a real
 /// module function and replace the expression with `IRExpr::ClosureMake`.
 ///
@@ -152,6 +242,8 @@ fn lift_lambdas(module: &mut IRModule) -> Result<()> {
         let IRExpr::Lambda { params, body, .. } = expr else {
             return Ok(());
         };
+
+        reject_untyped_lambda_param_uses(params, body)?;
 
         let mut bound: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
         let mut captured: Vec<String> = Vec::new();
