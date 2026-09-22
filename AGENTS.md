@@ -59,6 +59,8 @@ Waspy is a **single linear compiler pipeline**. Every public entry point in `src
 
 6. **stdlib modules are codegen shims, not a runtime.** `src/stdlib/` provides compile-time support for a fixed allowlist of Python modules (`is_stdlib_module()`). There is no Python interpreter at runtime — each supported module emits inline WASM. Adding a module means teaching the compiler to generate code for it.
 
+7. **A construct either gives Python's answer or fails loudly.** This is the correctness rule the project is built on, and it outranks coverage: a construct the compiler does not implement must be *rejected*, never accepted and ignored. Never emit a placeholder value for something unhandled: an `I32Const(0)` in a `_ =>` arm is a silently wrong answer, and most of the defects found since 0.14.0 were exactly that. Use `CompilationContext::report` (which collects errors while the whole module is still walked) for a codegen-stage refusal, or return an `unsupported_feature` error from the converter for one the IR can see. The single documented exception is integer width: `int` is an i32 and wraps, which `README.md` states under "Numbers".
+
 ---
 
 ## After Every Set of Changes
@@ -260,11 +262,17 @@ type_to_string(ir_type: &IRType) -> String
 
 ## Testing
 
-- **Unit tests** live inline as `#[cfg(test)]` modules alongside source (currently in `src/stdlib/re.rs` and `src/utils/logging.rs`). Add new tests next to the code they cover.
-- **`tests/`** contains the test-layout scaffolding (`fixtures/`, `integration/`, `unit/`, `utils/`) for future integration tests.
-- **Examples double as functional tests.** `just examples` exercises the full pipeline end-to-end against the Python files in `examples/`.
+- **`tests/`** holds the suite, each file its own test target declared in `Cargo.toml`. `tests/utils/harness.rs` is the shared harness (`try_compile`, `instantiate`, `call_i32`, `call_str`, ...): it compiles a source string, instantiates the module under `wasmi`, and calls an export, so a test asserts a **runtime result** rather than a successful compilation.
+  - `unit/basics.rs`: operators, conversions, integer width.
+  - `unit/errors.rs`: located errors and what must be refused.
+  - `unit/memory_safety.rs`: growth, aliasing, checked indexing, validation.
+  - `unit/miscompiles.rs`: regressions for constructs that once compiled "successfully" and answered wrong. **This is where a silent-miscompile fix goes.**
+  - `integration/examples.rs`, `integration/coverage.rs`: every `examples/*.py` compiled, instantiated, and asserted; `integration/wasmrun_plugin.rs` does the same through the plugin (needs `--features wasm-plugin`).
+- **Every expected value is what CPython answers for the same source.** Run the Python first and assert its answer, so a failure means a divergence from the reference implementation rather than a change in what the compiler happens to do. Do not assert what the compiler currently does.
+- **Unit tests may also live inline** as `#[cfg(test)]` modules alongside source (`src/stdlib/re.rs`, `src/utils/logging.rs`) when they cover something with no Python-level surface.
+- **Examples double as functional tests.** `just verify-examples` compiles every bundled example, and depends on `just verify-runtime`, which runs the end-to-end programs under Node and the `wasmtime` CLI (both optimization levels) against checker suffixes in `tests/fixtures/runtime/`.
 - Always run `cargo test --all-features` before committing.
-- CI runs tests on `stable` and enforces zero clippy warnings on Rust 1.88: `cargo clippy --all-targets --all-features -- -D warnings`.
+- CI runs tests on `stable` and enforces zero clippy warnings on Rust 1.88: `cargo clippy --all-targets --all-features -- -D warnings`. There are two named gates: the test binaries, and the runtime verification above.
 
 ---
 
@@ -320,7 +328,7 @@ test: description          # Adding/fixing tests
 | `Cargo.toml` | Version, dependencies, features, plugin metadata — start here |
 | `src/lib.rs` | The entire public API and the pipeline orchestration |
 | `src/ir/types.rs` | `IRType`, `IRModule`, `MemoryLayout` — the IR contract |
-| `src/ir/converter.rs` | AST → IR lowering |
+| `src/ir/converter.rs` | AST → IR lowering; the decorator allowlist and `@singledispatch`/`@total_ordering` lowering |
 | `src/compiler/module.rs` | Top-level WASM codegen entry (`compile_ir_module`) |
 | `src/compiler/context.rs` | `CompilationContext`, `SCRATCH_LOCALS` budget |
 | `src/optimize/wasm.rs` | Binaryen optimization pass |
@@ -362,6 +370,14 @@ test: description          # Adding/fixing tests
 4. Add an example `.py` exercising it and a test.
 5. Remember: these are **compile-time codegen shims**, not a runtime — each call must lower to inline WASM.
 
+### Adding a decorator or a builtin function
+
+1. Decide first whether it changes what the program *computes*. If it does, it must be implemented or refused; there is no third option (see critical rule 7).
+2. A decorator: add the name to `classify_function_decorator` in `src/ir/converter.rs` (module-level functions), to the class-decorator loop in `process_class_definition`, and/or to the match in `ir::decorators::method_kind` (methods), depending on where it can appear. `FunctionDecorator::Inert` is for one with no observable effect; anything else needs a lowering.
+3. A builtin: lower it in `src/ir/converter.rs` if it desugars (like `bool()` or the empty collection constructors), otherwise add an arm to the builtin match in the `FunctionCall` case of `src/compiler/expression.rs`. The `_ =>` arm at the end reports an error, so a name you don't add is refused, which is the intended default.
+4. Keep the stack balanced on the refusal path: drop each argument (twice for a string/bytes pair) and push a placeholder of the right shape before calling `ctx.report`, so the module still validates and one run reports every offending call.
+5. Add a regression test asserting the *runtime result* against CPython's answer for the same source, in `tests/unit/miscompiles.rs`, plus an example if it is user-facing.
+
 ### Adding a compiler option
 
 1. Add the field to `CompilerOptions` in `src/core/options.rs` (and update `Default`).
@@ -392,7 +408,9 @@ test: description          # Adding/fixing tests
 - **Binaryen is a native dependency.** The `binaryen` crate needs a C/C++ toolchain to build. Optimization failures may stem from the build environment, not your code.
 - **Optimization is opt-in and must not affect correctness.** If a binary is only valid after `optimize_wasm()`, the codegen has a bug.
 - **`SCRATCH_LOCALS` is a hard budget.** Codegen that overruns the reserved temporary locals will alias real variables and silently corrupt output. Raise the constant in `src/compiler/context.rs` if you need more.
-- **Multi-file compilation de-duplicates by function name.** Duplicate function names across files are dropped with a warning (first one wins). Memory layouts are merged via `merge_from()` — don't assume single-file offset assumptions hold.
+- **Multi-file compilation shares one flat namespace.** Two files defining the same function name is a hard error naming both files (it used to keep the first and warn, which reported success and answered with the wrong function). Memory layouts are merged via `merge_from()`, so don't assume single-file offset assumptions hold. Anything else that merges per file (`IRModule::dispatch_tables`, variables, imports, classes) has to be extended in the merge loop in `src/lib.rs` too.
+- **Decorators are an allowlist, and so are called names.** `src/ir/converter.rs` classifies every decorator on a function (`classify_function_decorator`) and class, and `ir::decorators::method_kind` classifies every one on a method; anything not on the list is a compile error. Supported: the method kinds (`@staticmethod`/`@classmethod`/`@property`/`@<name>.setter`), `@abstractmethod`, `@dataclass`, `@functools.total_ordering`, `@functools.singledispatch` with `@f.register`, and the caching decorators (`@lru_cache`/`@cache`/`@wraps`, accepted because they change nothing a compiled module can observe). Likewise, a call to a name that is neither a compiled function nor a builtin codegen implements is refused, not compiled to 0. Adding a decorator or builtin means adding it to the allowlist *and* implementing it, never just the former.
+- **`@singledispatch` dispatch is static.** `IRModule::dispatch_tables` (`IRDispatch` in `src/ir/types.rs`) carries each base function's registered arms; the converter fills it, `compile_ir_module` copies it onto `CompilationContext`, and the `FunctionCall` arm in `src/compiler/expression.rs` picks the arm from the *static* IR type of the first argument. There is no runtime type tag on scalars, so an argument whose type is `Unknown` is refused rather than guessed.
 - **stdlib support is an allowlist.** Only modules in `is_stdlib_module()` are recognized; everything else is treated as a user-written module: multi-file compilation links it into the single output module (namespace calls, aliases, and constants resolve statically), and `compile_python_file` resolves it from disk next to the entry file.
 - **A program that calls `open()` imports host functions.** File I/O emits a WASM import section (module `waspy_host`: `open`/`read`/`write`/`close`) that the embedder must provide; every other program keeps zero imports and must stay that way — the import section is emitted only when the IR walk finds an `open()` call.
 - **MSRV vs CI mismatch.** `Cargo.toml` declares MSRV 1.70 but CI builds and lints with Rust 1.88. Don't rely on >1.70 features without bumping the declared `rust-version`.
