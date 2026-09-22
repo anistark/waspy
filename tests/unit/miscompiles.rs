@@ -1364,3 +1364,174 @@ fn empty_constructors_are_empty_literals() {
                \x20   return len(xs) * 100 + len(d) * 10 + len(s)\n";
     assert_eq!(call_i32(src, "f"), 211);
 }
+
+// ---------------------------------------------------------------------------
+// List writes stored the value at its own width, not the element's (#123)
+// ---------------------------------------------------------------------------
+
+/// An int written into a collection whose elements are read as floats is
+/// widened to the slot's width. Every write path stored whatever `emit_expr`
+/// produced, so a 4-byte integer landed in an 8-byte float slot and the
+/// element read back as 1.5e-323 (`append`, `extend`) or 1.0000000000000007
+/// (`insert`, item assignment, which overwrote the slot's low half).
+#[test]
+fn writes_into_a_float_collection_widen_the_value() {
+    let src = "from typing import Dict, List, Set\n\
+               \n\
+               def by_append() -> float:\n\
+               \x20   xs: List[float] = [1.0, 2.0]\n\
+               \x20   xs.append(3)\n\
+               \x20   return xs[2]\n\
+               \n\
+               def by_insert() -> float:\n\
+               \x20   xs: List[float] = [10.0]\n\
+               \x20   xs.insert(0, 4)\n\
+               \x20   return xs[0]\n\
+               \n\
+               def by_subscript() -> float:\n\
+               \x20   xs: List[float] = [1.0, 2.0]\n\
+               \x20   xs[0] = 3\n\
+               \x20   return xs[0]\n\
+               \n\
+               def by_dict_value() -> float:\n\
+               \x20   d: Dict[int, float] = {1: 1.0}\n\
+               \x20   d[2] = 3\n\
+               \x20   return d[2]\n\
+               \n\
+               def by_set_add() -> int:\n\
+               \x20   s: Set[float] = {1.0}\n\
+               \x20   s.add(3)\n\
+               \x20   if 3.0 in s:\n\
+               \x20       return 1\n\
+               \x20   return 0\n";
+    assert_eq!(call_f64(src, "by_append"), 3.0);
+    assert_eq!(call_f64(src, "by_insert"), 4.0);
+    assert_eq!(call_f64(src, "by_subscript"), 3.0);
+    assert_eq!(call_f64(src, "by_dict_value"), 3.0);
+    assert_eq!(call_i32(src, "by_set_add"), 1);
+}
+
+/// The widening reaches a value that arrives through a variable or a call, not
+/// only a literal. The type hint alone does not: it is consumed by constants
+/// and arithmetic, so an int that passed through a local came out an int
+/// whatever the destination asked for. An unannotated local now takes `int`
+/// from the value assigned to it (both live in the same i32 slot, so the local
+/// layout is unchanged), and the conversion happens at the write.
+#[test]
+fn widening_reaches_values_that_arrive_through_a_variable() {
+    let src = "from typing import List\n\
+               \n\
+               def plain(n: int) -> int:\n\
+               \x20   return n\n\
+               \n\
+               def through_a_local() -> float:\n\
+               \x20   n = 3\n\
+               \x20   xs: List[float] = [1.0]\n\
+               \x20   xs.append(n)\n\
+               \x20   return xs[1]\n\
+               \n\
+               def through_a_call() -> float:\n\
+               \x20   xs: List[float] = [1.0]\n\
+               \x20   xs.append(plain(4))\n\
+               \x20   return xs[1]\n\
+               \n\
+               def through_a_parameter(n: int) -> float:\n\
+               \x20   xs: List[float] = [1.0]\n\
+               \x20   xs[0] = n\n\
+               \x20   return xs[0]\n";
+    assert_eq!(call_f64(src, "through_a_local"), 3.0);
+    assert_eq!(call_f64(src, "through_a_call"), 4.0);
+    assert_eq!(call_i32_1(src, "plain", 5), 5);
+}
+
+/// A write the compiler cannot make good on is refused rather than stored at
+/// the wrong width: a float into an int collection (CPython keeps the 2.5; an
+/// int slot cannot, and truncating would lose it), a float into a collection
+/// with no element type to read it back at, a value of unknown type into a
+/// float collection, and an `extend` between lists read at different widths.
+#[test]
+fn writes_that_cannot_be_made_good_on_are_refused() {
+    let cases: [(&str, &str); 4] = [
+        (
+            "from typing import List\n\
+             \n\
+             def f() -> int:\n\
+             \x20   xs: List[int] = [1]\n\
+             \x20   xs.append(2.5)\n\
+             \x20   return xs[1]\n",
+            "truncate",
+        ),
+        (
+            "def f() -> float:\n\
+             \x20   xs = []\n\
+             \x20   xs.append(2.5)\n\
+             \x20   return xs[0]\n",
+            "no known element type",
+        ),
+        (
+            "from typing import List\n\
+             \n\
+             def g():\n\
+             \x20   return 3\n\
+             \n\
+             def f() -> float:\n\
+             \x20   xs: List[float] = [1.0]\n\
+             \x20   xs.append(g())\n\
+             \x20   return xs[1]\n",
+            "unknown type into a collection of floats",
+        ),
+        (
+            "from typing import List\n\
+             \n\
+             def f() -> float:\n\
+             \x20   xs: List[float] = [1.0]\n\
+             \x20   ys: List[int] = [3]\n\
+             \x20   xs.extend(ys)\n\
+             \x20   return xs[1]\n",
+            "different widths",
+        ),
+    ];
+    for (src, expected) in cases {
+        let err = try_compile(src).expect_err("a write at the wrong width must be refused");
+        assert!(
+            err.contains(expected),
+            "expected {expected:?} in the error, got: {err}"
+        );
+    }
+}
+
+/// The paths that were already right stay right: same-width writes of every
+/// element type, and an `extend` between two lists read at the same width.
+#[test]
+fn same_width_writes_are_unaffected() {
+    let src = "from typing import List\n\
+               \n\
+               def ints() -> int:\n\
+               \x20   xs: List[int] = []\n\
+               \x20   xs.append(7)\n\
+               \x20   xs.insert(0, 4)\n\
+               \x20   xs[1] = 9\n\
+               \x20   return xs[0] * 10 + xs[1]\n\
+               \n\
+               def floats() -> float:\n\
+               \x20   xs: List[float] = []\n\
+               \x20   xs.append(1.5)\n\
+               \x20   xs.insert(0, 2.5)\n\
+               \x20   xs[1] = 3.5\n\
+               \x20   return xs[0] + xs[1]\n\
+               \n\
+               def strings() -> int:\n\
+               \x20   xs: List[str] = []\n\
+               \x20   xs.append(\"ab\")\n\
+               \x20   return len(xs[0])\n\
+               \n\
+               def extended() -> float:\n\
+               \x20   xs: List[float] = [1.0]\n\
+               \x20   ys: List[float] = [3.0]\n\
+               \x20   xs.extend(ys)\n\
+               \x20   return xs[1]\n";
+    assert_eq!(call_i32(src, "ints"), 49);
+    assert_eq!(call_f64(src, "floats"), 6.0);
+    assert_eq!(call_i32(src, "strings"), 2);
+    assert_eq!(call_f64(src, "extended"), 3.0);
+}

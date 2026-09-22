@@ -407,6 +407,15 @@ def checkout() -&gt; float:
 
                 <li>
                     <div class="shape-head">
+                        <strong>Mixing float and int in one collection</strong>
+                        <span class="tag tag-loud">refused</span>
+                        <span class="tag tag-workaround">workaround</span>
+                    </div>
+                    <p class="shape-note">Every slot in a collection is read at one width, so a list holds floats or ints, not both. An int written into a float collection is widened for you (<code>xs.append(3)</code> on a <code>List[float]</code>). The other direction is refused, because storing <code>2.5</code> where the slot is read as an integer would truncate it. Make the elements one type.</p>
+                </li>
+
+                <li>
+                    <div class="shape-head">
                         <strong>Reading a field through an unannotated parameter</strong>
                         <span class="tag tag-loud">refused</span>
                         <span class="tag tag-workaround">workaround</span>

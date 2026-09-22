@@ -595,6 +595,95 @@ fn recover_str_pair(func: &mut Function, ctx: &CompilationContext) {
     }));
 }
 
+/// The width a collection's slots are read back at: a list's or set's element
+/// type, a dict's value type. `None` means the container does not have one
+/// (or has not been typed yet), and every write into it is a single word.
+pub(crate) fn collection_element_type(container: &IRType) -> Option<IRType> {
+    match container {
+        IRType::List(t) | IRType::Set(t) => Some(t.as_ref().clone()),
+        IRType::Dict(_, v) => Some(v.as_ref().clone()),
+        _ => None,
+    }
+}
+
+/// Emit a value on its way into a collection slot, at the width the collection
+/// is read back at.
+///
+/// Every write path used to emit the value with no type hint and store whatever
+/// came out (#123), so `xs.append(3)` on a `List[float]` wrote a 4-byte integer
+/// into an 8-byte float slot and the element read back as 1.5e-323. The hint
+/// alone is not enough, because it only reaches constants and arithmetic: a
+/// variable holding an int came out an int whatever was asked for. So the
+/// emitted type is converted here as well.
+///
+/// A conversion that would lose the value, or a float written where the
+/// collection has no float width to read it back at, is a compile error rather
+/// than a silent store: the same stand the mixed-width literal check takes.
+/// `what` names the write for the message ("list.append", "dict value", ...).
+pub(crate) fn emit_collection_element(
+    value: &IRExpr,
+    func: &mut Function,
+    ctx: &CompilationContext,
+    memory_layout: &MemoryLayout,
+    element_type: Option<&IRType>,
+    what: &str,
+) -> IRType {
+    let declared = element_type.filter(|t| !matches!(t, IRType::Unknown | IRType::Any));
+    // The hint is passed only where the conversion it performs is the one
+    // wanted: widening an int to the float width the slot is read at. Passing
+    // an `int` hint would make `emit_expr` truncate a float *constant* before
+    // it ever reached the check below, which is the silent 2.5 -> 2 this is
+    // meant to refuse.
+    let hint = match declared {
+        Some(IRType::Float) => declared,
+        _ => None,
+    };
+    let actual = emit_expr(value, func, ctx, memory_layout, hint);
+
+    match (declared, &actual) {
+        // An int or bool into a float slot widens, which is what the slot is
+        // read back at and what Python's own arithmetic on the element does.
+        (Some(IRType::Float), IRType::Int | IRType::Bool) => {
+            func.instruction(&Instruction::F64ConvertI32S);
+            IRType::Float
+        }
+        // A float into an int slot would have to truncate, losing the value
+        // with nothing said.
+        (Some(IRType::Int | IRType::Bool), IRType::Float) => {
+            ctx.report(format!(
+                "{what} stores a float into a collection whose elements are read as \
+                 integers, which would truncate it. Hint: make the collection's \
+                 elements floats, or convert with int()"
+            ));
+            func.instruction(&Instruction::I32TruncF64S);
+            IRType::Int
+        }
+        // A value of no known type is one word wide by this compiler's
+        // convention, so storing it in a float slot fills half of one. Its
+        // type has to come from somewhere before it can be widened.
+        (Some(IRType::Float), IRType::Unknown | IRType::Any) => {
+            ctx.report(format!(
+                "{what} stores a value of unknown type into a collection of floats. \
+                 Hint: annotate the value it comes from, for example the parameter, \
+                 the local, or the called function's return type"
+            ));
+            IRType::Unknown
+        }
+        // No element width to read an f64 back at: the slot's low word is what
+        // every read takes, so this stored garbage (and failed validation where
+        // a float was expected).
+        (None, IRType::Float) => {
+            ctx.report(format!(
+                "{what} stores a float into a collection with no known element type, so \
+                 the value cannot be read back. Hint: annotate it, for example \
+                 'xs: List[float] = []'"
+            ));
+            IRType::Float
+        }
+        _ => actual,
+    }
+}
+
 /// Stash a freshly emitted search needle (its value is on top of the stack, of
 /// `elem_type`) into a scratch local so a search loop can compare it against
 /// each slot with [`emit_slot_eq_needle`]. Float needles go into the dedicated
@@ -9590,7 +9679,14 @@ pub fn emit_set_method_call(
 
     // The element, then the receiver pointer: the argument is evaluated with
     // the set pointer already under it on the stack.
-    let value_ty = emit_expr(&arguments[0], func, ctx, memory_layout, declared);
+    let value_ty = emit_collection_element(
+        &arguments[0],
+        func,
+        ctx,
+        memory_layout,
+        declared,
+        &format!("set.{method_name}()"),
+    );
     let elem_ty = declared.cloned().unwrap_or(value_ty);
     stash_search_needle(func, ctx, &elem_ty, needle);
     func.instruction(&Instruction::LocalSet(ptr));
@@ -9886,8 +9982,18 @@ pub fn emit_list_method_call(
             // writes into the collection that happens to sit next in memory.
             if !arguments.is_empty() {
                 // Emit the value while list_ptr stays safely on the stack below
-                // it, then stash it into a type-appropriate scratch local.
-                let value_type = emit_expr(&arguments[0], func, ctx, memory_layout, None);
+                // it, then stash it into a type-appropriate scratch local. It
+                // is emitted at the list's element width, not its own, or an
+                // int appended to a float list writes 4 bytes into an 8-byte
+                // slot (#123).
+                let value_type = emit_collection_element(
+                    &arguments[0],
+                    func,
+                    ctx,
+                    memory_layout,
+                    collection_element_type(list_type).as_ref(),
+                    "list.append()",
+                );
                 stash_search_needle(func, ctx, &value_type, ctx.temp_local + 1);
                 func.instruction(&Instruction::LocalSet(ctx.temp_local)); // list_ptr
 
@@ -10064,6 +10170,31 @@ pub fn emit_list_method_call(
                 // Emit the iterable
                 let iterable_type = emit_expr(&arguments[0], func, ctx, memory_layout, None);
 
+                // Elements are copied slot for slot, so the two lists have to
+                // read their slots at the same width. Extending a float list
+                // with an int one used to copy the raw words across and leave
+                // every copied element reading as garbage (#123). Converting
+                // per element would need a typed copy loop; the honest answer
+                // until then is to name the mismatch.
+                let dest_elem = collection_element_type(list_type);
+                let src_elem = collection_element_type(&iterable_type);
+                let width = |t: &Option<IRType>| matches!(t, Some(IRType::Float));
+                if width(&dest_elem) != width(&src_elem) {
+                    ctx.report(format!(
+                        "list.extend() copies elements between lists that are read at \
+                         different widths ('{}' into '{}'). Hint: make both element types \
+                         the same, or append the elements in a loop",
+                        src_elem
+                            .as_ref()
+                            .map(crate::type_to_string)
+                            .unwrap_or_else(|| "unknown".to_string()),
+                        dest_elem
+                            .as_ref()
+                            .map(crate::type_to_string)
+                            .unwrap_or_else(|| "unknown".to_string()),
+                    ));
+                }
+
                 match iterable_type {
                     IRType::List(_) => {
                         // Save iterable_ptr
@@ -10176,7 +10307,14 @@ pub fn emit_list_method_call(
             // slot to the right before the value is stored at its natural width.
             if arguments.len() >= 2 {
                 emit_expr(&arguments[0], func, ctx, memory_layout, Some(&IRType::Int));
-                let value_type = emit_expr(&arguments[1], func, ctx, memory_layout, None);
+                let value_type = emit_collection_element(
+                    &arguments[1],
+                    func,
+                    ctx,
+                    memory_layout,
+                    collection_element_type(list_type).as_ref(),
+                    "list.insert()",
+                );
                 stash_search_needle(func, ctx, &value_type, ctx.temp_local + 1);
 
                 // Keep the index on the stack until the value has been emitted,

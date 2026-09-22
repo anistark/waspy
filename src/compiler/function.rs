@@ -1059,13 +1059,20 @@ pub fn compile_body(
 
                 // An unannotated local is allocated as Unknown (an i32 slot).
                 // Recover the element/entry types of collections so later
-                // indexing knows how to load each slot. Only pointer-shaped
-                // types are adopted, since they share that same i32 slot and
-                // won't disturb the already-fixed local layout. A local the
-                // scan could only type as a collection of Unknown (e.g. a
-                // comprehension result, whose element type is resolved during
-                // codegen) is upgraded the same way once the emitted value
-                // reports the concrete element type.
+                // indexing knows how to load each slot. Only types that live in
+                // that same i32 slot are adopted, so the already-fixed local
+                // layout is undisturbed: every pointer-shaped type, plus `int`
+                // and `bool`. (`float` is an f64 slot and cannot be adopted
+                // here.) A local the scan could only type as a collection of
+                // Unknown (e.g. a comprehension result, whose element type is
+                // resolved during codegen) is upgraded the same way once the
+                // emitted value reports the concrete element type.
+                //
+                // Adopting `int` is what lets a value pass through a local and
+                // still be widened when it is written into a float collection:
+                // `n = 3` followed by `xs.append(n)` used to reach the write
+                // path as Unknown, which is one word wide, and stored 4 bytes
+                // into an 8-byte slot (#123).
                 if let Some(info) = ctx.locals_map.get_mut(target) {
                     let adopt = match (&info.var_type, &value_type) {
                         (IRType::Unknown, _) => matches!(
@@ -1077,6 +1084,8 @@ pub fn compile_body(
                                 | IRType::String
                                 | IRType::Bytes
                                 | IRType::Class(_)
+                                | IRType::Int
+                                | IRType::Bool
                         ),
                         (IRType::List(elem), IRType::List(_))
                         | (IRType::Set(elem), IRType::Set(_)) => **elem == IRType::Unknown,
@@ -2165,7 +2174,23 @@ pub fn compile_body(
                 // scratch local: a float value is an f64 and must live in the
                 // dedicated f64 scratch, not an i32 local. String/bytes values
                 // collapse to their offset word (the length on top is dropped).
-                let value_type = emit_expr(value, func, ctx, memory_layout, None);
+                // The value takes the container's element width, not its own,
+                // or `xs[0] = 3` on a `List[float]` writes an i32 over the low
+                // half of the slot and the element reads back wrong (#123).
+                let element_type =
+                    crate::compiler::expression::collection_element_type(&container_type);
+                let what = match &container_type {
+                    IRType::Dict(_, _) => "a dict value assignment",
+                    _ => "an item assignment",
+                };
+                let value_type = crate::compiler::expression::emit_collection_element(
+                    value,
+                    func,
+                    ctx,
+                    memory_layout,
+                    element_type.as_ref(),
+                    what,
+                );
                 let value_is_float = matches!(value_type, IRType::Float);
                 if value_is_float {
                     func.instruction(&Instruction::LocalSet(ctx.temp_local_f64));
