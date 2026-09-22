@@ -398,6 +398,24 @@ def checkout() -&gt; float:
 
                 <li>
                     <div class="shape-head">
+                        <strong>A decorator the compiler does not implement</strong>
+                        <span class="tag tag-loud">refused</span>
+                        <span class="tag tag-workaround">workaround</span>
+                    </div>
+                    <p class="shape-note">Decorators are an allowlist: the method kinds, <code>@dataclass</code>, <code>@abstractmethod</code>, <code>@functools.total_ordering</code>, <code>@functools.singledispatch</code> with <code>@f.register</code>, and the caching decorators (accepted, no effect). A user-written decorator, <code>@cached_property</code>, or <code>@singledispatchmethod</code> is refused, since applying it would run code the compiler cannot model. <code>functools.partial</code>, <code>reduce</code>, and <code>cmp_to_key</code> are refused when called. Write the wrapper's work inline, or use <code>@property</code> for a cached one.</p>
+                </li>
+
+                <li>
+                    <div class="shape-head">
+                        <strong>Reading a field through an unannotated parameter</strong>
+                        <span class="tag tag-loud">refused</span>
+                        <span class="tag tag-workaround">workaround</span>
+                    </div>
+                    <p class="shape-note"><code>def total(cart): return cart.count</code> has no type for <code>cart</code>, so the read is refused with a hint rather than answering 0. Annotate the parameter (<code>cart: Cart</code>). The rich comparison methods are the exception: an unannotated <code>other</code> in <code>__eq__</code>, <code>__lt__</code>, and the rest is typed as the class.</p>
+                </li>
+
+                <li>
+                    <div class="shape-head">
                         <strong>A bare <code>list</code> or <code>dict</code> annotation</strong>
                         <span class="tag tag-workaround">workaround</span>
                     </div>

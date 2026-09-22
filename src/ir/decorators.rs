@@ -22,8 +22,11 @@ pub enum MethodKind {
 /// conflicting combinations (e.g. `@staticmethod` + `@classmethod`) with a
 /// clear error instead of silently compiling the wrong dispatch.
 ///
-/// Decorators that don't affect binding (user-defined names) are ignored here;
-/// only the standard method-kind decorators participate.
+/// Decorators that don't affect binding but are otherwise harmless
+/// (`@abstractmethod`, the caching decorators) are ignored here. Any other
+/// decorator is an error: one the compiler does not implement used to be
+/// dropped silently, so `@cached_property` read as a plain method whose
+/// attribute access answered 0 (#120).
 pub fn method_kind(
     class_name: &str,
     method_name: &str,
@@ -64,7 +67,29 @@ pub fn method_kind(
                 )
                 .into());
             }
-            _ => None,
+            "abstractmethod" | "abc.abstractmethod" => None,
+            d if matches!(
+                d.strip_prefix("functools.").unwrap_or(d),
+                "lru_cache" | "lru_cache(...)" | "cache" | "wraps(...)"
+            ) =>
+            {
+                None
+            }
+            d => {
+                let hint = match d.strip_prefix("functools.").unwrap_or(d) {
+                    "cached_property" => "; use '@property' (the value is recomputed on each read)",
+                    "singledispatchmethod" => "; dispatch on the argument in the method body",
+                    _ => "",
+                };
+                return Err(crate::core::errors::unsupported_feature(
+                    format!(
+                        "decorator '@{d}' on method '{class_name}.{method_name}' is not \
+                         supported{hint}"
+                    ),
+                    None,
+                )
+                .into());
+            }
         };
 
         if let Some(new_kind) = new_kind {

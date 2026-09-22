@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [Unreleased]
+
+### Added
+- `@functools.singledispatch` dispatches ([#120](https://github.com/anistark/waspy/issues/120)). The decorator was recognised by name and never applied, so `@kind.register` arms were compiled as unrelated functions and every call reached the base implementation: `kind("hi")` answered `kind(5)`'s value and reported success. Each registered arm is now an ordinary function under a synthesized name, recorded against the type its first parameter is annotated with (or the `register(type)` argument), and a call picks the arm by the first argument's static type: the exact type, then `int` for a `bool`, then the nearest base class with an arm, then the base function. A call whose first argument has no known type is refused rather than sent to the base
+- `@functools.total_ordering` derives the ordering methods a class leaves out from the one it defines, spelled the way CPython's implementation spells them (`__gt__` from `__lt__` is `not lt and not eq`, and so on), with `__eq__` falling back to identity. It used to be ignored, so `a > b` on the instances compared their heap pointers and answered allocation order. A class that defines none of the four is refused
+- Ordering between class instances dispatches to the rich comparison method: `a < b` calls `a.__lt__(b)`, or `b.__gt__(a)` when the left class has no `__lt__`, as CPython does. A user-written `__lt__` was ignored entirely before, and a class with no ordering method at all compared pointers where CPython raises `TypeError`; both now either call the method or are refused with CPython's message. An unannotated `other` in a rich comparison method is typed as the class, so `def __lt__(self, other): return self.v < other.v` reads the field it names
+- `list()`, `dict()`, `set()`, and `tuple()` with no argument are the empty literals. They used to fall through to the unknown-call path and answer a null pointer
+- `examples/functools_decorators.py`, demonstrating both decorators with asserted tests
+
+### Changed
+- **A decorator the compiler does not implement is a compile error, on functions, methods, and classes alike.** Any decorator that was not a name was silently dropped, and any name the compiler did not know was silently ignored, so a user-written decorator, `@cached_property` (whose attribute read answered 0), `@partial`-style wrappers, and every other unimplemented decorator compiled to the bare definition and reported success. The allowlist is the method kinds, `@abstractmethod`, `@dataclass`, `@total_ordering`, `@singledispatch`/`@f.register`, and the caching decorators (`@lru_cache`, `@cache`, `@wraps`), which change nothing a compiled module can observe
+- **A call to a name that is neither a function the program defines nor a builtin the compiler implements is a compile error.** It used to push a 0 and report success, so `reduce(add, xs)`, `partial(add, 10)`, `abs(-3)`, `round(x)`, a function imported with `from math import sqrt`, and a misspelled function name all answered 0. The error names the callee
+- **Reading an attribute through a value whose type is not known is a compile error**, with a hint to annotate the parameter or variable it is read from; a field the class does not have is refused too. Both answered 0 before, which is what left `other.v` inside an untyped `__lt__(self, other)` comparing against nothing
+- The stdlib smoke examples (`stdlib_test.py`, `test_json.py`, `test_logging.py`) no longer take functions and classes as values (`f = math.sqrt`, `json.JSONEncoder`); that is not a supported expression, and it now says so
+
 ## [0.16.0](https://github.com/anistark/waspy/releases/tag/v0.16.0) - 2026-09-12
 
 ### Added

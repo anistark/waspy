@@ -907,6 +907,11 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, ChakraError> {
         }
     }
 
+    for table in &ir_module.dispatch_tables {
+        ctx.dispatch_tables
+            .insert(table.base.clone(), table.arms.clone());
+    }
+
     // File I/O (#25): when the program calls `open()` anywhere, the module
     // imports the four `waspy_host` functions. Imported functions occupy the
     // lowest indices of the function index space, so every defined function's

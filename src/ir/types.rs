@@ -8,6 +8,22 @@ pub struct IRModule {
     pub metadata: std::collections::HashMap<String, String>, // Module metadata
     pub memory_layout: MemoryLayout, // String/bytes offsets and object heap layout
     pub comments: Vec<crate::core::comments::SourceComment>, // Comments recovered from the sources
+    /// `functools.singledispatch` tables: one per decorated base function,
+    /// consulted by call codegen to pick the implementation registered for
+    /// the first argument's static type.
+    pub dispatch_tables: Vec<IRDispatch>,
+}
+
+/// A `@functools.singledispatch` function and its registered
+/// implementations. Each `@base.register` definition is lowered to an
+/// ordinary function under a synthesized name and recorded here against the
+/// type its first parameter was annotated with; `base` itself is the
+/// fallback for a type nothing was registered for. Dispatch is static, on the
+/// IR type of the call's first argument.
+#[derive(Debug, Clone)]
+pub struct IRDispatch {
+    pub base: String,
+    pub arms: Vec<(IRType, String)>,
 }
 
 /// IR representation of a function
@@ -431,7 +447,7 @@ pub enum IRCompareOp {
 }
 
 /// Boolean operators in the IR
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IRBoolOp {
     And, // and
     Or,  // or
@@ -571,6 +587,7 @@ impl IRModule {
             metadata: std::collections::HashMap::new(),
             memory_layout: MemoryLayout::new(),
             comments: Vec::new(),
+            dispatch_tables: Vec::new(),
         }
     }
 }

@@ -209,7 +209,10 @@
                     { name: "@memoize decorator (caching)", status: "done", version: "0.6.0" },
                     { name: "@debug decorator (logging)", status: "done", version: "0.6.0" },
                     { name: "@timer decorator (performance)", status: "done", version: "0.6.0" },
-                    { name: "Custom decorator registration", status: "done", version: "0.6.0" }
+                    { name: "Custom decorator registration", status: "done", version: "0.6.0" },
+                    { name: "Rich comparisons on instances: <, <=, >, >= call __lt__/__le__/__gt__/__ge__, with reflection", status: "done", version: "upcoming" },
+                    { name: "Unimplemented decorators are refused (functions, methods, and classes) instead of being silently dropped", status: "done", version: "upcoming" },
+                    { name: "A call to an undefined function, or an attribute read through an untyped value, is a compile error instead of answering 0", status: "done", version: "upcoming" }
                 ]
             },
             projectMgmt: {
@@ -372,7 +375,9 @@
                     { name: "datetime module (datetime, date, time, timedelta, timezone, tzinfo, now, today, fromtimestamp, fromisoformat, strftime, strptime, replace, timestamp, isoformat, weekday, isoweekday, MINYEAR, MAXYEAR) - full runtime support", status: "done", version: "0.9.0" },
                     { name: "collections module (namedtuple, deque, Counter, OrderedDict, defaultdict, ChainMap, UserDict, UserList, UserString)", status: "done", version: "0.8.0" },
                     { name: "itertools module (count, cycle, repeat, chain, compress, dropwhile, filterfalse, groupby, islice, starmap, takewhile, tee, zip_longest, product, permutations, combinations, combinations_with_replacement, accumulate, batched, pairwise)", status: "done", version: "0.8.0" },
-                    { name: "functools module (reduce, partial, partialmethod, wraps, update_wrapper, total_ordering, cmp_to_key, lru_cache, cache, cached_property, singledispatch, singledispatchmethod)", status: "done", version: "0.8.0" },
+                    { name: "functools: @singledispatch with @f.register (static dispatch on the first argument's type), @total_ordering (derives the missing ordering methods)", status: "done", version: "upcoming" },
+                    { name: "functools: @lru_cache, @cache, @wraps (accepted, no observable effect)", status: "done", version: "upcoming" },
+                    { name: "functools: reduce, partial, partialmethod, cmp_to_key, cached_property, singledispatchmethod (refused at compile time)", status: "todo", version: "" },
                     { name: "logging module (DEBUG, INFO, WARNING, ERROR, CRITICAL, NOTSET, debug, info, warning, error, critical, exception, log, basicConfig, getLogger, setLevel, disable, Logger, Handler, StreamHandler, FileHandler, Formatter, Filter, LogRecord)", status: "done", version: "0.9.0" }
                 ]
             },

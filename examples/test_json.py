@@ -86,19 +86,10 @@ def test_json_load_dump():
 
     return 0
 
-def test_json_encoder_decoder():
-    """Test JSONEncoder and JSONDecoder classes."""
-    # These are placeholder tests for encoder/decoder classes
-    encoder = json.JSONEncoder
-    decoder = json.JSONDecoder
-
-    return 0
-
 def main():
     """Run all JSON tests."""
     test_json_dumps()
     test_json_loads()
     test_json_nested()
     test_json_load_dump()
-    test_json_encoder_decoder()
     return 0

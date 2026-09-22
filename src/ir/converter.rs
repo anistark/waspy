@@ -25,25 +25,96 @@ pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
             Stmt::FunctionDef(fundef) => {
                 // Process function definition
                 let name = fundef.name.to_string();
-                let params = process_function_params(&fundef.args, &mut memory_layout)?;
+                let mut params = process_function_params(&fundef.args, &mut memory_layout)?;
                 let return_type = if let Some(returns) = &fundef.returns {
                     type_annotation_to_ir_type(returns)?
                 } else {
                     IRType::Unknown
                 };
 
-                // Extract decorators if any
-                let decorators = fundef
-                    .decorator_list
-                    .iter()
-                    .filter_map(|dec| {
-                        if let Expr::Name(name) = dec {
-                            Some(name.id.to_string())
-                        } else {
-                            None
+                // Every decorator is classified; one the compiler does not
+                // implement is an error rather than a name dropped on the
+                // floor, because a decorator that is accepted and not applied
+                // is a silent wrong answer (#120).
+                let mut decorators = Vec::new();
+                let mut name = name;
+                for dec in &fundef.decorator_list {
+                    match classify_function_decorator(dec, &name)? {
+                        FunctionDecorator::Inert(spelling) => decorators.push(spelling),
+                        FunctionDecorator::Singledispatch => {
+                            if module.dispatch_tables.iter().any(|d| d.base == name) {
+                                return Err(crate::core::errors::unsupported_feature(
+                                    format!("'@singledispatch' function '{name}' is defined twice"),
+                                    None,
+                                )
+                                .into());
+                            }
+                            module.dispatch_tables.push(IRDispatch {
+                                base: name.clone(),
+                                arms: Vec::new(),
+                            });
                         }
-                    })
-                    .collect();
+                        FunctionDecorator::Register { base, explicit } => {
+                            // The dispatch type is the register() argument if
+                            // given, else the first parameter's annotation,
+                            // as in CPython.
+                            let ty = match explicit {
+                                Some(expr) => {
+                                    let ty = type_annotation_to_ir_type(expr)?;
+                                    // `@base.register(float)` on `def _(x)`:
+                                    // the parameter is that type.
+                                    if let Some(p) = params.first_mut() {
+                                        if p.param_type == IRType::Unknown {
+                                            p.param_type = ty.clone();
+                                        }
+                                    }
+                                    ty
+                                }
+                                None => match params.first() {
+                                    Some(p) if p.param_type != IRType::Unknown => {
+                                        p.param_type.clone()
+                                    }
+                                    _ => {
+                                        return Err(crate::core::errors::unsupported_feature(
+                                            format!(
+                                                "'@{base}.register' on function '{name}' needs the type to dispatch on: annotate the first parameter or write '@{base}.register(type)'"
+                                            ),
+                                            None,
+                                        )
+                                        .into());
+                                    }
+                                },
+                            };
+                            let Some(table) =
+                                module.dispatch_tables.iter_mut().find(|d| d.base == base)
+                            else {
+                                return Err(crate::core::errors::unsupported_feature(
+                                    format!(
+                                        "'@{base}.register' on function '{name}': '{base}' is not a '@singledispatch' function defined above it"
+                                    ),
+                                    None,
+                                )
+                                .into());
+                            };
+                            if table.arms.iter().any(|(t, _)| *t == ty) {
+                                return Err(crate::core::errors::unsupported_feature(
+                                    format!(
+                                        "'@{base}.register' registers type '{}' twice",
+                                        crate::type_to_string(&ty)
+                                    ),
+                                    None,
+                                )
+                                .into());
+                            }
+                            // The implementation is an ordinary function
+                            // under a name no Python identifier can spell,
+                            // so the customary `def _` bodies never collide.
+                            let impl_name = format!("{base}__register_{}", table.arms.len());
+                            table.arms.push((ty, impl_name.clone()));
+                            name = impl_name;
+                        }
+                    }
+                }
 
                 let body = lower_function_body(&fundef.body, &mut memory_layout)?;
 
@@ -354,39 +425,45 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
         // `order=True`, ...) changes semantics we don't implement, so it is
         // rejected loudly instead of being silently ignored.
         let mut is_dataclass = false;
+        let mut is_total_ordering = false;
         for dec in &classdef.decorator_list {
-            let (dec_name, has_args) = match dec {
-                Expr::Name(n) => (n.id.to_string(), false),
-                Expr::Attribute(attr) => match &*attr.value {
-                    Expr::Name(base) => (format!("{}.{}", base.id, attr.attr), false),
-                    _ => continue,
-                },
-                Expr::Call(call) => {
-                    let callee = match &*call.func {
-                        Expr::Name(n) => n.id.to_string(),
-                        Expr::Attribute(attr) => match &*attr.value {
-                            Expr::Name(base) => format!("{}.{}", base.id, attr.attr),
-                            _ => continue,
-                        },
-                        _ => continue,
-                    };
-                    (callee, !call.args.is_empty() || !call.keywords.is_empty())
-                }
-                _ => continue,
+            let Some((dec_name, call)) = decorator_spelling(dec) else {
+                return Err(crate::core::errors::unsupported_feature(
+                    format!("unsupported decorator expression on class '{name}'"),
+                    None,
+                )
+                .into());
             };
-            if dec_name == "dataclass" || dec_name == "dataclasses.dataclass" {
-                if has_args {
-                    return Err(crate::core::errors::unsupported_feature(
-                        format!(
-                            "@dataclass arguments (frozen, order, ...) are not supported \
-                             on class '{name}'"
-                        ),
-                        None,
-                    )
-                    .into());
-                }
-                is_dataclass = true;
+            let has_args = call.is_some_and(|c| !c.args.is_empty() || !c.keywords.is_empty());
+            if dec_name == "total_ordering" || dec_name == "functools.total_ordering" {
+                is_total_ordering = true;
+                continue;
             }
+            if dec_name != "dataclass" && dec_name != "dataclasses.dataclass" {
+                // Any other class decorator would run arbitrary code at class
+                // creation, which nothing here models; accepting it and doing
+                // nothing is the silent wrong answer the correctness rule
+                // forbids (#120).
+                return Err(crate::core::errors::unsupported_feature(
+                    format!(
+                        "decorator '@{dec_name}' on class '{name}' is not supported; only \
+                         '@dataclass' and '@functools.total_ordering' are"
+                    ),
+                    None,
+                )
+                .into());
+            }
+            if has_args {
+                return Err(crate::core::errors::unsupported_feature(
+                    format!(
+                        "@dataclass arguments (frozen, order, ...) are not supported \
+                         on class '{name}'"
+                    ),
+                    None,
+                )
+                .into());
+            }
+            is_dataclass = true;
         }
 
         // Dataclass fields come from the annotated class-level assignments, in
@@ -412,18 +489,25 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
 
                     // Capture both bare-name decorators (`@property`) and the
                     // attribute form used by property setters (`@radius.setter`).
-                    let decorators: Vec<String> = method_def
-                        .decorator_list
-                        .iter()
-                        .filter_map(|dec| match dec {
-                            Expr::Name(name) => Some(name.id.to_string()),
-                            Expr::Attribute(attr) => match &*attr.value {
-                                Expr::Name(base) => Some(format!("{}.{}", base.id, attr.attr)),
-                                _ => None,
-                            },
-                            _ => None,
-                        })
-                        .collect();
+                    let mut decorators: Vec<String> = Vec::new();
+                    for dec in &method_def.decorator_list {
+                        match decorator_spelling(dec) {
+                            Some((spelling, None)) => decorators.push(spelling),
+                            Some((spelling, Some(_))) => {
+                                decorators.push(format!("{spelling}(...)"))
+                            }
+                            None => {
+                                return Err(crate::core::errors::unsupported_feature(
+                                    format!(
+                                        "unsupported decorator expression on method \
+                                         '{name}.{method_name}'"
+                                    ),
+                                    None,
+                                )
+                                .into());
+                            }
+                        }
+                    }
 
                     // Classify the method's binding up front so an unsupported
                     // or conflicting decorator stack fails compilation with a
@@ -448,6 +532,21 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
                             if let Some(first) = params.first_mut() {
                                 if first.name == "self" {
                                     first.param_type = IRType::Class(name.clone());
+                                }
+                            }
+                            // A rich comparison method is almost always
+                            // written `def __lt__(self, other)` with `other`
+                            // unannotated; it compares against an instance of
+                            // its own class, so type it that way rather than
+                            // refusing every `other.field` read.
+                            if matches!(
+                                method_name.as_str(),
+                                "__eq__" | "__ne__" | "__lt__" | "__le__" | "__gt__" | "__ge__"
+                            ) {
+                                if let Some(other) = params.get_mut(1) {
+                                    if other.param_type == IRType::Unknown {
+                                        other.param_type = IRType::Class(name.clone());
+                                    }
                                 }
                             }
                         }
@@ -514,6 +613,9 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
         if is_dataclass {
             synthesize_dataclass_methods(&name, &dataclass_fields, &mut methods, memory_layout);
         }
+        if is_total_ordering {
+            synthesize_total_ordering(&name, &mut methods)?;
+        }
 
         Ok(IRClass {
             name,
@@ -524,6 +626,195 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
     } else {
         Err(anyhow!("Expected ClassDef statement"))
     }
+}
+
+/// Spell a decorator expression as its dotted name, plus the call node when it
+/// is written in call form (`@lru_cache(maxsize=None)`, `@kind.register(str)`).
+/// Anything more elaborate than a name, an attribute of a name, or a call of
+/// either is `None`.
+fn decorator_spelling(dec: &Expr) -> Option<(String, Option<&rustpython_parser::ast::ExprCall>)> {
+    fn dotted(expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Name(n) => Some(n.id.to_string()),
+            Expr::Attribute(attr) => match &*attr.value {
+                Expr::Name(base) => Some(format!("{}.{}", base.id, attr.attr)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    match dec {
+        Expr::Call(call) => Some((dotted(&call.func)?, Some(call))),
+        other => Some((dotted(other)?, None)),
+    }
+}
+
+/// What a decorator on a module-level function asks the compiler to do.
+enum FunctionDecorator<'a> {
+    /// Changes nothing about the compiled function: a caching decorator (no
+    /// observable effect beyond speed), a metadata one, or one of the
+    /// compiler's own markers. Kept by name for the decorator registry.
+    Inert(String),
+    /// `@functools.singledispatch`: this function is the fallback of a table.
+    Singledispatch,
+    /// `@base.register` / `@base.register(type)`: this function is one arm.
+    Register {
+        base: String,
+        explicit: Option<&'a Expr>,
+    },
+}
+
+/// Classify a decorator on function `func_name`. A decorator the compiler has
+/// no implementation for is an error: it used to be dropped silently, so
+/// `@partial`-style wrappers and user-written decorators compiled to the bare
+/// function and reported success (#120).
+fn classify_function_decorator<'a>(
+    dec: &'a Expr,
+    func_name: &str,
+) -> Result<FunctionDecorator<'a>> {
+    let unsupported = |what: &str| -> anyhow::Error {
+        crate::core::errors::unsupported_feature(
+            format!("decorator '@{what}' on function '{func_name}' is not supported"),
+            None,
+        )
+        .into()
+    };
+    let Some((name, call)) = decorator_spelling(dec) else {
+        return Err(unsupported("<expression>"));
+    };
+    let bare = name.strip_prefix("functools.").unwrap_or(&name);
+    Ok(match bare {
+        // Memoization only changes speed; `wraps`/`update_wrapper` only change
+        // introspection metadata a compiled module does not carry.
+        "lru_cache" | "cache" | "wraps" | "update_wrapper" => FunctionDecorator::Inert(name),
+        "singledispatch" if call.is_none() => FunctionDecorator::Singledispatch,
+        // The compiler's own registry names (`ir::decorators`) and the
+        // export marker some drivers use.
+        "memoize" | "debug" | "timer" | "default_value" | "type_check" | "pure" | "wasm_export"
+            if !name.starts_with("functools.") =>
+        {
+            FunctionDecorator::Inert(name)
+        }
+        _ => match (name.rsplit_once('.'), call) {
+            (Some((base, "register")), None) if !name.starts_with("functools.") => {
+                FunctionDecorator::Register {
+                    base: base.to_string(),
+                    explicit: None,
+                }
+            }
+            (Some((base, "register")), Some(call)) if !name.starts_with("functools.") => {
+                match (call.args.as_slice(), call.keywords.is_empty()) {
+                    ([ty], true) => FunctionDecorator::Register {
+                        base: base.to_string(),
+                        explicit: Some(ty),
+                    },
+                    _ => return Err(unsupported(&format!("{name}(...)"))),
+                }
+            }
+            _ => return Err(unsupported(&name)),
+        },
+    })
+}
+
+/// `@functools.total_ordering`: derive the ordering methods the class does not
+/// define from the one it does, exactly as CPython's implementation does (each
+/// derived method is spelled in terms of the root operation and `__eq__`).
+/// The class must define at least one of `__lt__`, `__le__`, `__gt__`,
+/// `__ge__`; user-written methods win over derived ones.
+fn synthesize_total_ordering(class_name: &str, methods: &mut Vec<IRFunction>) -> Result<()> {
+    const ORDER: [&str; 4] = ["__lt__", "__le__", "__gt__", "__ge__"];
+    let has = |methods: &[IRFunction], name: &str| methods.iter().any(|m| m.name == name);
+    let Some(root) = ORDER.iter().copied().find(|m| has(methods, m)) else {
+        return Err(crate::core::errors::unsupported_feature(
+            format!(
+                "'@total_ordering' on class '{class_name}' must define at least one of \
+                 __lt__, __le__, __gt__, __ge__"
+            ),
+            None,
+        )
+        .into());
+    };
+
+    // Each derived method as (name, root_negated, joined_with_eq_by), read as
+    // `root(self, other)` or `not root(self, other)`, optionally combined with
+    // `self == other`: `And` means `... and not eq`, `Or` means `... or eq`.
+    let derived: &[(&str, bool, Option<IRBoolOp>)] = match root {
+        "__lt__" => &[
+            ("__gt__", true, Some(IRBoolOp::And)),
+            ("__le__", false, Some(IRBoolOp::Or)),
+            ("__ge__", true, None),
+        ],
+        "__le__" => &[
+            ("__ge__", true, Some(IRBoolOp::Or)),
+            ("__lt__", false, Some(IRBoolOp::And)),
+            ("__gt__", true, None),
+        ],
+        "__gt__" => &[
+            ("__lt__", true, Some(IRBoolOp::And)),
+            ("__ge__", false, Some(IRBoolOp::Or)),
+            ("__le__", true, None),
+        ],
+        _ => &[
+            ("__le__", true, Some(IRBoolOp::Or)),
+            ("__gt__", false, Some(IRBoolOp::And)),
+            ("__lt__", true, None),
+        ],
+    };
+
+    let this = || IRExpr::Variable("self".to_string());
+    let other = || IRExpr::Variable("other".to_string());
+    for &(name, negate_root, join) in derived {
+        if has(methods, name) {
+            continue;
+        }
+        let mut expr = IRExpr::MethodCall {
+            object: Box::new(this()),
+            method_name: root.to_string(),
+            arguments: vec![other()],
+        };
+        if negate_root {
+            expr = IRExpr::UnaryOp {
+                operand: Box::new(expr),
+                op: IRUnaryOp::Not,
+            };
+        }
+        if let Some(op) = join {
+            // `==` on two instances dispatches to the class's `__eq__` when it
+            // has one and to identity otherwise, which is what CPython's
+            // `total_ordering` relies on too.
+            let mut eq = IRExpr::CompareOp {
+                left: Box::new(this()),
+                right: Box::new(other()),
+                op: IRCompareOp::Eq,
+            };
+            if op == IRBoolOp::And {
+                eq = IRExpr::UnaryOp {
+                    operand: Box::new(eq),
+                    op: IRUnaryOp::Not,
+                };
+            }
+            expr = IRExpr::BoolOp {
+                left: Box::new(expr),
+                right: Box::new(eq),
+                op,
+            };
+        }
+        let param = |n: &str| IRParam {
+            name: n.to_string(),
+            param_type: IRType::Class(class_name.to_string()),
+            default_value: None,
+        };
+        methods.push(IRFunction {
+            name: name.to_string(),
+            params: vec![param("self"), param("other")],
+            body: IRBody {
+                statements: vec![IRStatement::Return(Some(expr))],
+            },
+            return_type: IRType::Bool,
+            decorators: Vec::new(),
+        });
+    }
+    Ok(())
 }
 
 /// One `name: type [= default]` field of a `@dataclass` body, in source order.
@@ -2367,6 +2658,21 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                             ));
                         }
                         return lower_expr(&call.args[0], memory_layout);
+                    }
+
+                    // The empty constructors `list()`, `dict()`, `set()`,
+                    // and `tuple()` are the empty literals. With an argument
+                    // they copy or convert an iterable, which is not built,
+                    // so that form falls through to the unknown-call error
+                    // rather than answering a null pointer.
+                    if call.args.is_empty() && call.keywords.is_empty() {
+                        match function_name.as_str() {
+                            "list" => return Ok(IRExpr::ListLiteral(Vec::new())),
+                            "dict" => return Ok(IRExpr::DictLiteral(Vec::new())),
+                            "set" => return Ok(IRExpr::SetLiteral(Vec::new())),
+                            "tuple" => return Ok(IRExpr::TupleLiteral(Vec::new())),
+                            _ => {}
+                        }
                     }
 
                     // range() function

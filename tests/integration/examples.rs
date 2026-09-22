@@ -17,8 +17,8 @@
 mod harness;
 
 use harness::{
-    call_f64, call_i32, call_i32_2, example_python_files, instantiate_wasm, read_example,
-    try_compile, try_compile_multi, try_instantiate, MULTI_FILE_ONLY,
+    call_f64, call_i32, call_i32_1, call_i32_2, call_str, example_python_files, instantiate_wasm,
+    read_example, try_compile, try_compile_multi, try_instantiate, MULTI_FILE_ONLY,
 };
 
 /// Every standalone-compilable example compiles, validates, and instantiates.
@@ -836,4 +836,23 @@ fn generator_methods_are_rejected() {
         err.contains("generator methods are not supported"),
         "unexpected error message: {err}"
     );
+}
+
+/// `@singledispatch` picks the implementation registered for the first
+/// argument's static type: `int`, `str`, `float`, and (a `bool` registration
+/// winning over the `int` one) `bool`.
+#[test]
+fn singledispatch_by_argument_type() {
+    let src = read_example("functools_decorators.py");
+    assert_eq!(call_str(&src, "dispatch_by_type"), "int str:x float bool");
+}
+
+/// `@total_ordering` derives `>`, `<=`, and `>=` from `__lt__` and `__eq__`,
+/// and instance ordering dispatches to them; the loop keeps the greatest
+/// `Version` by calling the derived `__gt__`.
+#[test]
+fn total_ordering_derives_comparisons() {
+    let src = read_example("functools_decorators.py");
+    assert_eq!(call_i32(&src, "ordering_from_lt"), 1111);
+    assert_eq!(call_i32_1(&src, "newest", 6), 15);
 }

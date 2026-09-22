@@ -2903,6 +2903,37 @@ fn emit_stashed_set_insert(
 /// One that can raise is bracketed by the call-depth counter and followed by a
 /// check: if it came back with an exception pending, its result is meaningless
 /// and this frame keeps unwinding instead of using it.
+/// Pick the `@singledispatch` arm registered for `arg_type`: the exact type
+/// first, then (as Python's `bool` is an `int`) an `int` arm for a `bool`
+/// argument, then for an instance the nearest base class with an arm.
+/// `None` means the base function handles it.
+fn select_dispatch_arm<'a>(
+    ctx: &CompilationContext,
+    arms: &'a [(IRType, String)],
+    arg_type: &IRType,
+) -> Option<&'a str> {
+    if let Some((_, name)) = arms.iter().find(|(t, _)| t == arg_type) {
+        return Some(name);
+    }
+    if *arg_type == IRType::Bool {
+        if let Some((_, name)) = arms.iter().find(|(t, _)| *t == IRType::Int) {
+            return Some(name);
+        }
+    }
+    if let IRType::Class(class_name) = arg_type {
+        let mut current = ctx
+            .get_class_info(class_name)
+            .and_then(|ci| ci.base.clone());
+        while let Some(base) = current {
+            if let Some((_, name)) = arms.iter().find(|(t, _)| *t == IRType::Class(base.clone())) {
+                return Some(name);
+            }
+            current = ctx.get_class_info(&base).and_then(|ci| ci.base.clone());
+        }
+    }
+    None
+}
+
 pub(crate) fn emit_user_call(func: &mut Function, ctx: &CompilationContext, index: u32) {
     if !ctx.can_raise.contains(&index) {
         func.instruction(&Instruction::Call(index));
@@ -4092,6 +4123,61 @@ pub fn emit_expr(
                 }
             }
 
+            // Ordering between class instances dispatches to the rich
+            // comparison method, trying the left operand's own (`a < b` is
+            // `a.__lt__(b)`) and then the right operand's reflection (`b.__gt__(a)`),
+            // as CPython does. A class with neither is a compile error: CPython
+            // raises `TypeError`, and comparing the two instance pointers, which
+            // is what this did before (#120), answered by allocation order.
+            if matches!(
+                op,
+                IRCompareOp::Lt | IRCompareOp::LtE | IRCompareOp::Gt | IRCompareOp::GtE
+            ) && (matches!(left_type, IRType::Class(_))
+                || matches!(right_type, IRType::Class(_)))
+            {
+                let (own, reflected, symbol) = match op {
+                    IRCompareOp::Lt => ("__lt__", "__gt__", "<"),
+                    IRCompareOp::LtE => ("__le__", "__ge__", "<="),
+                    IRCompareOp::Gt => ("__gt__", "__lt__", ">"),
+                    _ => ("__ge__", "__le__", ">="),
+                };
+                let method_of = |ty: &IRType, name: &str| match ty {
+                    IRType::Class(c) => ctx
+                        .get_class_info(c)
+                        .and_then(|ci| ci.methods.get(name).copied()),
+                    _ => None,
+                };
+                if let (IRType::Class(_), IRType::Class(_)) = (&left_type, &right_type) {
+                    if let Some(idx) = method_of(&left_type, own) {
+                        emit_user_call(func, ctx, idx);
+                        return IRType::Bool;
+                    }
+                    if let Some(idx) = method_of(&right_type, reflected) {
+                        // Swap the two instance pointers so the right operand
+                        // is `self`.
+                        func.instruction(&Instruction::LocalSet(ctx.temp_local));
+                        func.instruction(&Instruction::LocalSet(ctx.temp_local + 1));
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
+                        emit_user_call(func, ctx, idx);
+                        return IRType::Bool;
+                    }
+                }
+                ctx.report(format!(
+                    "'{symbol}' not supported between instances of '{}' and '{}'",
+                    crate::type_to_string(&left_type),
+                    crate::type_to_string(&right_type)
+                ));
+                for t in [&right_type, &left_type] {
+                    func.instruction(&Instruction::Drop);
+                    if matches!(t, IRType::String | IRType::Bytes) {
+                        func.instruction(&Instruction::Drop);
+                    }
+                }
+                func.instruction(&Instruction::I32Const(0));
+                return IRType::Bool;
+            }
+
             // String/bytes comparison: each operand is an (offset, length) pair,
             // so the stack holds (left_off, left_len, right_off, right_len). The
             // numeric paths below assume single-word scalars and would compare
@@ -4549,6 +4635,57 @@ pub fn emit_expr(
                         }
                     }
                 }
+            }
+
+            // `@functools.singledispatch` (#120): the implementation is chosen
+            // by the static type of the first argument, so that argument is
+            // emitted first to learn its type, then the arm is picked and the
+            // rest of the call proceeds exactly like a call to that arm.
+            if let Some(arms) = ctx.dispatch_tables.get(function_name.as_str()) {
+                let Some(first) = arguments.first() else {
+                    ctx.report(format!(
+                        "'{function_name}' is a @singledispatch function and needs at least \
+                         one argument to dispatch on"
+                    ));
+                    func.instruction(&Instruction::I32Const(0));
+                    return IRType::Unknown;
+                };
+                let first_type = emit_expr(first, func, ctx, memory_layout, None);
+                if matches!(first_type, IRType::String | IRType::Bytes) {
+                    func.instruction(&Instruction::Drop);
+                }
+                let arm = select_dispatch_arm(ctx, arms, &first_type);
+                if arm.is_none() && matches!(first_type, IRType::Unknown | IRType::Any) {
+                    ctx.report(format!(
+                        "cannot dispatch '{function_name}': the type of its argument is not \
+                         known. Hint: annotate the value it is called with"
+                    ));
+                }
+                let target = arm.unwrap_or(function_name.as_str());
+                let Some(info) = ctx.get_function_info(target) else {
+                    ctx.report(format!(
+                        "'{function_name}' dispatches to '{target}', which is not compiled"
+                    ));
+                    func.instruction(&Instruction::Drop);
+                    func.instruction(&Instruction::I32Const(0));
+                    return IRType::Unknown;
+                };
+                let (index, return_type, param_types) = (
+                    info.index,
+                    info.return_type.clone(),
+                    info.param_types.clone(),
+                );
+                for (i, arg) in arguments.iter().enumerate().skip(1) {
+                    let t = emit_expr(arg, func, ctx, memory_layout, param_types.get(i));
+                    if matches!(t, IRType::String | IRType::Bytes) {
+                        func.instruction(&Instruction::Drop);
+                    }
+                }
+                emit_user_call(func, ctx, index);
+                if matches!(return_type, IRType::String | IRType::Bytes) {
+                    recover_str_pair(func, ctx);
+                }
+                return return_type;
             }
 
             // Push arguments onto the stack in order. For a call to a known user
@@ -5321,7 +5458,21 @@ pub fn emit_expr(
                         IRType::Unknown
                     }
                     _ => {
-                        // Unknown function, return default value
+                        // A name that is neither a compiled function nor a
+                        // builtin the compiler implements. This used to push
+                        // a 0 and report success, so a call to `reduce`,
+                        // `partial`, `abs`, or a misspelled name answered 0
+                        // (#120). Balance the stack and report it.
+                        for t in arg_types.iter().rev() {
+                            func.instruction(&Instruction::Drop);
+                            if matches!(t, IRType::String | IRType::Bytes) {
+                                func.instruction(&Instruction::Drop);
+                            }
+                        }
+                        ctx.report(format!(
+                            "call to '{function_name}', which is not a function this \
+                             program defines or a builtin the compiler implements"
+                        ));
                         func.instruction(&Instruction::I32Const(0));
                         IRType::Unknown
                     }
@@ -6379,13 +6530,35 @@ pub fn emit_expr(
                         }
                         field_ty
                     } else {
+                        // CPython raises AttributeError; answering 0 here
+                        // reported success with a wrong value.
+                        ctx.report(format!("'{class_name}' has no attribute '{attribute}'"));
                         func.instruction(&Instruction::Drop);
                         func.instruction(&Instruction::I32Const(0));
                         IRType::Unknown
                     }
                 }
-                _ => {
+                other => {
+                    // An attribute read through a value whose type is not
+                    // known, most often an unannotated parameter, used to
+                    // answer 0 and report success, so `other.v` inside
+                    // `def __lt__(self, other)` compared against nothing
+                    // (#120). The rich comparison methods type `other` as
+                    // the class when it is unannotated; anything else must
+                    // say what it is.
+                    let hint = if matches!(other, IRType::Unknown | IRType::Any) {
+                        ". Hint: annotate the parameter or variable it is read from"
+                    } else {
+                        ""
+                    };
+                    ctx.report(format!(
+                        "cannot read attribute '{attribute}' of a value of type '{}'{hint}",
+                        crate::type_to_string(other)
+                    ));
                     func.instruction(&Instruction::Drop);
+                    if matches!(other, IRType::String | IRType::Bytes) {
+                        func.instruction(&Instruction::Drop);
+                    }
                     func.instruction(&Instruction::I32Const(0));
                     IRType::Unknown
                 }

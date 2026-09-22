@@ -982,3 +982,385 @@ fn two_modules_with_the_same_function_name_are_refused() {
         "expected the name and the second file, got: {err}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Decorators that were accepted and never applied (#120)
+// ---------------------------------------------------------------------------
+
+/// `@functools.singledispatch` dispatches on the first argument's static type:
+/// the exact registration first, then `int` for a `bool` (Python's `bool` is
+/// an `int`), then the nearest base class with an arm, then the base
+/// function. The decorator used to be dropped, so every call reached the
+/// base implementation and `kind("hi")` answered `kind(5)`'s value.
+#[test]
+fn singledispatch_picks_the_registered_implementation() {
+    let src = "from functools import singledispatch\n\
+               \n\
+               class A:\n\
+               \x20   def __init__(self):\n\
+               \x20       self.v = 0\n\
+               \n\
+               class B(A):\n\
+               \x20   def __init__(self):\n\
+               \x20       self.v = 1\n\
+               \n\
+               @singledispatch\n\
+               def kind(x: int) -> int:\n\
+               \x20   return 1\n\
+               \n\
+               @kind.register\n\
+               def _(x: str) -> int:\n\
+               \x20   return 2 + len(x)\n\
+               \n\
+               @kind.register(float)\n\
+               def _(x) -> int:\n\
+               \x20   return 7\n\
+               \n\
+               @kind.register\n\
+               def _(x: A) -> int:\n\
+               \x20   return 9\n\
+               \n\
+               def by_type() -> int:\n\
+               \x20   s = \"hi\"\n\
+               \x20   return kind(s) * 1000 + kind(5) * 100 + kind(2.5) * 10 + kind(True)\n\
+               \n\
+               def by_base_class() -> int:\n\
+               \x20   b = B()\n\
+               \x20   return kind(b)\n";
+    assert_eq!(call_i32(src, "by_type"), 4171);
+    assert_eq!(call_i32(src, "by_base_class"), 9);
+}
+
+/// A dispatch that cannot be decided statically is refused rather than sent
+/// to the base function, and a registration the compiler cannot type is
+/// refused at lowering.
+#[test]
+fn singledispatch_refuses_what_it_cannot_decide() {
+    let untyped_call = "from functools import singledispatch\n\
+                        \n\
+                        @singledispatch\n\
+                        def kind(x: int) -> int:\n\
+                        \x20   return 1\n\
+                        \n\
+                        @kind.register\n\
+                        def _(x: str) -> int:\n\
+                        \x20   return 2\n\
+                        \n\
+                        def g(v):\n\
+                        \x20   return kind(v)\n";
+    let err = try_compile(untyped_call).expect_err("an untyped dispatch argument must be refused");
+    assert!(
+        err.contains("cannot dispatch 'kind'"),
+        "expected the dispatch to be named, got: {err}"
+    );
+
+    let untyped_arm = "from functools import singledispatch\n\
+                       \n\
+                       @singledispatch\n\
+                       def kind(x: int) -> int:\n\
+                       \x20   return 1\n\
+                       \n\
+                       @kind.register\n\
+                       def _(x) -> int:\n\
+                       \x20   return 2\n";
+    let err = try_compile(untyped_arm).expect_err("an untyped register() arm must be refused");
+    assert!(
+        err.contains("kind.register") && err.contains("annotate"),
+        "expected the registration and a hint, got: {err}"
+    );
+}
+
+/// `@functools.total_ordering` derives the three ordering methods the class
+/// leaves out from the one it defines, spelled the way CPython spells them.
+/// It used to be ignored, and `a > b` on the instances compared their heap
+/// pointers, so the answer was allocation order.
+#[test]
+fn total_ordering_derives_the_missing_comparisons() {
+    let from_lt = "from functools import total_ordering\n\
+                   \n\
+                   @total_ordering\n\
+                   class N:\n\
+                   \x20   def __init__(self, v: int):\n\
+                   \x20       self.v = v\n\
+                   \x20   def __eq__(self, other) -> bool:\n\
+                   \x20       return self.v == other.v\n\
+                   \x20   def __lt__(self, other) -> bool:\n\
+                   \x20       return self.v < other.v\n\
+                   \n\
+                   def f() -> int:\n\
+                   \x20   a = N(5)\n\
+                   \x20   b = N(3)\n\
+                   \x20   c = N(5)\n\
+                   \x20   r = 0\n\
+                   \x20   if a > b:\n\
+                   \x20       r += 1\n\
+                   \x20   if a >= c:\n\
+                   \x20       r += 10\n\
+                   \x20   if b <= a:\n\
+                   \x20       r += 100\n\
+                   \x20   if a <= b:\n\
+                   \x20       r += 1000\n\
+                   \x20   if c > a:\n\
+                   \x20       r += 10000\n\
+                   \x20   return r\n";
+    assert_eq!(call_i32(from_lt, "f"), 111);
+
+    // Rooted at `__ge__`, with the default identity `__eq__`.
+    let from_ge = "from functools import total_ordering\n\
+                   \n\
+                   @total_ordering\n\
+                   class N:\n\
+                   \x20   def __init__(self, v: int):\n\
+                   \x20       self.v = v\n\
+                   \x20   def __ge__(self, other) -> bool:\n\
+                   \x20       return self.v >= other.v\n\
+                   \n\
+                   def f() -> int:\n\
+                   \x20   a = N(5)\n\
+                   \x20   b = N(3)\n\
+                   \x20   r = 0\n\
+                   \x20   if a > b:\n\
+                   \x20       r += 1\n\
+                   \x20   if b < a:\n\
+                   \x20       r += 10\n\
+                   \x20   if a <= b:\n\
+                   \x20       r += 100\n\
+                   \x20   if a <= a:\n\
+                   \x20       r += 1000\n\
+                   \x20   return r\n";
+    assert_eq!(call_i32(from_ge, "f"), 1011);
+
+    let no_root = "from functools import total_ordering\n\
+                   \n\
+                   @total_ordering\n\
+                   class N:\n\
+                   \x20   def __init__(self, v: int):\n\
+                   \x20       self.v = v\n";
+    let err = try_compile(no_root).expect_err("total_ordering needs a root comparison");
+    assert!(
+        err.contains("__lt__, __le__, __gt__, __ge__"),
+        "expected the required methods to be listed, got: {err}"
+    );
+}
+
+/// Ordering between instances dispatches to the rich comparison method, the
+/// left operand's own first and then the right operand's reflection, as
+/// CPython does. A user-written `__lt__` used to be ignored entirely (the
+/// instance pointers were compared), and a class with no ordering method at
+/// all, which CPython refuses with `TypeError`, compared the same way.
+#[test]
+fn instance_ordering_dispatches_to_the_dunder_or_is_refused() {
+    let src = "class N:\n\
+               \x20   def __init__(self, v: int):\n\
+               \x20       self.v = v\n\
+               \x20   def __lt__(self, other) -> bool:\n\
+               \x20       return self.v < other.v\n\
+               \n\
+               class M:\n\
+               \x20   def __init__(self, v: int):\n\
+               \x20       self.v = v\n\
+               \x20   def __gt__(self, other: \"N\") -> bool:\n\
+               \x20       return self.v > other.v\n\
+               \n\
+               def f() -> int:\n\
+               \x20   a = N(5)\n\
+               \x20   b = N(3)\n\
+               \x20   m = M(9)\n\
+               \x20   r = 0\n\
+               \x20   if b < a:\n\
+               \x20       r += 1\n\
+               \x20   if a < m:\n\
+               \x20       r += 10\n\
+               \x20   if a < b:\n\
+               \x20       r += 100\n\
+               \x20   return r\n";
+    assert_eq!(call_i32(src, "f"), 11);
+
+    let none = "class N:\n\
+                \x20   def __init__(self, v: int):\n\
+                \x20       self.v = v\n\
+                \n\
+                def f() -> int:\n\
+                \x20   if N(3) < N(5):\n\
+                \x20       return 1\n\
+                \x20   return 0\n";
+    let err = try_compile(none).expect_err("ordering without a dunder must be refused");
+    assert!(
+        err.contains("'<' not supported between instances of 'N' and 'N'"),
+        "expected CPython's message, got: {err}"
+    );
+
+    let scalar = "class N:\n\
+                  \x20   def __init__(self, v: int):\n\
+                  \x20       self.v = v\n\
+                  \n\
+                  def f() -> int:\n\
+                  \x20   if N(3) < 5:\n\
+                  \x20       return 1\n\
+                  \x20   return 0\n";
+    let err = try_compile(scalar).expect_err("ordering against a scalar must be refused");
+    assert!(
+        err.contains("'N' and 'int'"),
+        "expected both operand types, got: {err}"
+    );
+}
+
+/// The caching decorators change nothing a compiled module can observe, so
+/// they are accepted; every other decorator the compiler does not implement
+/// is refused, on functions, methods, and classes alike. Each of these used to
+/// be dropped silently: `@cached_property` read as a plain method whose
+/// attribute access answered 0.
+#[test]
+fn unimplemented_decorators_are_refused_and_caching_ones_accepted() {
+    let cached = "from functools import lru_cache, cache\n\
+                  \n\
+                  @lru_cache(maxsize=None)\n\
+                  def fib(n: int) -> int:\n\
+                  \x20   if n < 2:\n\
+                  \x20       return n\n\
+                  \x20   return fib(n - 1) + fib(n - 2)\n\
+                  \n\
+                  @cache\n\
+                  def twice(n: int) -> int:\n\
+                  \x20   return n * 2\n\
+                  \n\
+                  def f() -> int:\n\
+                  \x20   return twice(fib(10))\n";
+    assert_eq!(call_i32(cached, "f"), 110);
+
+    let cases: [(&str, &str); 3] = [
+        (
+            "def deco(fn):\n\
+             \x20   return fn\n\
+             \n\
+             @deco\n\
+             def g(x: int) -> int:\n\
+             \x20   return x + 1\n",
+            "'@deco' on function 'g'",
+        ),
+        (
+            "from functools import cached_property\n\
+             \n\
+             class N:\n\
+             \x20   def __init__(self, v: int):\n\
+             \x20       self.v = v\n\
+             \x20   @cached_property\n\
+             \x20   def d(self) -> int:\n\
+             \x20       return self.v * 2\n",
+            "'@cached_property' on method 'N.d'",
+        ),
+        (
+            "def deco(cls):\n\
+             \x20   return cls\n\
+             \n\
+             @deco\n\
+             class N:\n\
+             \x20   def __init__(self, v: int):\n\
+             \x20       self.v = v\n",
+            "'@deco' on class 'N'",
+        ),
+    ];
+    for (src, expected) in cases {
+        let err = try_compile(src).expect_err("an unimplemented decorator must be refused");
+        assert!(
+            err.contains(expected),
+            "expected {expected:?} in the error, got: {err}"
+        );
+    }
+}
+
+/// A call to a name that is neither a compiled function nor a builtin the
+/// compiler implements pushed a 0 and reported success, so `reduce(add, xs)`,
+/// `partial(add, 10)`, `abs(-3)`, and a misspelled function name all
+/// answered 0. It names the callee now.
+#[test]
+fn a_call_to_an_unknown_function_is_refused() {
+    let cases: [&str; 3] = [
+        "from functools import reduce\n\
+         \n\
+         def add(a: int, b: int) -> int:\n\
+         \x20   return a + b\n\
+         \n\
+         def f() -> int:\n\
+         \x20   return reduce(add, [1, 2, 3])\n",
+        "def f() -> int:\n\
+         \x20   return abs(-3)\n",
+        "def total(a: int) -> int:\n\
+         \x20   return a\n\
+         \n\
+         def f() -> int:\n\
+         \x20   return totl(3)\n",
+    ];
+    for (src, name) in cases.iter().zip(["reduce", "abs", "totl"]) {
+        let err = try_compile(src).expect_err("an unknown callee must be refused");
+        assert!(
+            err.contains(&format!("call to '{name}'")),
+            "expected '{name}' to be named, got: {err}"
+        );
+    }
+}
+
+/// An attribute read through a value whose type is not known (an unannotated
+/// parameter, most often) answered 0 and reported success, which is what
+/// left `def __lt__(self, other): return self.v < other.v` comparing against
+/// nothing. The rich comparison methods now type an unannotated `other` as
+/// the class; everywhere else the read is refused with a hint, and a field
+/// the class does not have is refused too.
+#[test]
+fn attribute_reads_through_untyped_values_are_refused() {
+    let dunder = "class N:\n\
+                  \x20   def __init__(self, v: int):\n\
+                  \x20       self.v = v\n\
+                  \x20   def __eq__(self, other) -> bool:\n\
+                  \x20       return self.v == other.v\n\
+                  \n\
+                  def f() -> int:\n\
+                  \x20   if N(4) == N(4):\n\
+                  \x20       return 1\n\
+                  \x20   return 0\n";
+    assert_eq!(call_i32(dunder, "f"), 1);
+
+    let untyped = "class N:\n\
+                   \x20   def __init__(self, v: int):\n\
+                   \x20       self.v = v\n\
+                   \n\
+                   def val(other) -> int:\n\
+                   \x20   return other.v\n\
+                   \n\
+                   def f() -> int:\n\
+                   \x20   return val(N(5))\n";
+    let err = try_compile(untyped).expect_err("a read through an untyped value must be refused");
+    assert!(
+        err.contains("attribute 'v'") && err.contains("annotate"),
+        "expected the attribute and a hint, got: {err}"
+    );
+
+    let missing = "class N:\n\
+                   \x20   def __init__(self, v: int):\n\
+                   \x20       self.v = v\n\
+                   \n\
+                   def f() -> int:\n\
+                   \x20   return N(1).w\n";
+    let err = try_compile(missing).expect_err("a missing field must be refused");
+    assert!(
+        err.contains("'N' has no attribute 'w'"),
+        "expected the class and the attribute, got: {err}"
+    );
+}
+
+/// `list()`, `dict()`, `set()`, and `tuple()` with no argument are the empty
+/// literals. They used to fall through to the unknown-call path and answer a
+/// null pointer typed as nothing in particular.
+#[test]
+fn empty_constructors_are_empty_literals() {
+    let src = "def f() -> int:\n\
+               \x20   xs = list()\n\
+               \x20   d = dict()\n\
+               \x20   s = set()\n\
+               \x20   xs.append(4)\n\
+               \x20   xs.append(5)\n\
+               \x20   s.add(2)\n\
+               \x20   d[1] = 5\n\
+               \x20   return len(xs) * 100 + len(d) * 10 + len(s)\n";
+    assert_eq!(call_i32(src, "f"), 211);
+}

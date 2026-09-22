@@ -32,12 +32,6 @@ def test_logger():
     logger = logging.getLogger("myapp.submodule")
     return 0
 
-def test_handlers():
-    """Test handler classes."""
-    handler = logging.StreamHandler
-    formatter = logging.Formatter
-    return 0
-
 def test_log_with_level():
     """Test logging.log() with explicit level."""
     logging.log(logging.INFO, "Message with explicit level")
@@ -61,7 +55,6 @@ def main():
     test_basic_logging()
     test_logging_config()
     test_logger()
-    test_handlers()
     test_log_with_level()
     test_warn_alias()
     test_fatal_alias()

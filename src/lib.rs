@@ -446,6 +446,9 @@ fn compile_merged_sources(
         combined_module.variables.extend(ir_module.variables);
         combined_module.imports.extend(ir_module.imports);
         combined_module.classes.extend(ir_module.classes);
+        combined_module
+            .dispatch_tables
+            .extend(ir_module.dispatch_tables);
 
         // Merge this file's string/bytes layout into the combined module.
         combined_module

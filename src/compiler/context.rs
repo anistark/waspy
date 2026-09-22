@@ -184,6 +184,11 @@ pub struct CompilationContext {
     /// `from mod import name as alias` bindings for user modules:
     /// alias -> real (merged) function or class name.
     pub import_aliases: HashMap<String, String>,
+    /// `@functools.singledispatch` tables, keyed by the base function's name:
+    /// (registered type, implementation function name) in registration
+    /// order. Call codegen picks the arm matching the first argument's static
+    /// type and falls back to the base function itself.
+    pub dispatch_tables: HashMap<String, Vec<(IRType, String)>>,
     /// File-I/O host import indices; `Some` only when the module uses file
     /// operations (an `open()` call somewhere in its IR).
     pub file_io: Option<FileIoImports>,
@@ -313,6 +318,7 @@ impl CompilationContext {
             class_map: HashMap::new(),
             user_modules: HashMap::new(),
             import_aliases: HashMap::new(),
+            dispatch_tables: HashMap::new(),
             file_io: None,
             module_vars: HashMap::new(),
             temp_local: 0,
