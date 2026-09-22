@@ -56,7 +56,7 @@ Generate & Optimize
 - Closures with full variable capture: lambdas compile to real functions dispatched through a `call_indirect` table, capture enclosing variables (by value), and work as first-class values — returned, passed as arguments, and stored in collections
 - Extended unpacking: `a, *b, c = xs` binds the starred target to the middle slice as a real list
 - User-written module imports: `import mod`, `import mod as m`, and `from mod import f [as g]` resolve sibling `.py` files (and `pkg/mod.py` packages) and statically link them into the single output WASM module, with each module compiled exactly once however many import paths reach it
-- File I/O through a documented host interface: `open()`, `read([n])`, `write(s)`, `close()`, and `with open(...) as f:` compile to four imported `waspy_host` functions the embedder provides (browser, Node, or any WASM runtime); modules that never call `open()` import nothing
+- File I/O through a documented host interface: `open()`, `read([n])`, `write(s)`, `close()`, and `with open(...) as f:` compile to four imported `waspy_host` functions the embedder provides (browser, Node, or any WASM runtime); modules that never call `open()` import nothing. The embedder owns confinement: see [File I/O and the host interface](#file-io-and-the-host-interface)
 - Context managers: `with obj as name:` over a user class implementing `__enter__`/`__exit__`, including nested blocks, inherited protocols, and `__exit__` running before an early `return`
 - Bundled standard library runtime: `sys`, `os` (incl. `os.path`), `math`, `random`, `json`, `re`, `datetime`, `logging`, `collections`, `itertools`, `functools`
 
@@ -337,7 +337,37 @@ Enhanced error reporting system:
 - Python syntax errors report their line and column
 - Known-unsupported constructs are rejected before code generation with the construct named, its location, the enclosing function, and a workaround hint
 - Specific error types for different issues (parsing, type errors, unsupported features, name errors)
-- Warnings for potential problems that don't prevent compilation (e.g. cross-module function name collisions)
+- A construct the compiler cannot compile correctly is an error, not a warning: two modules defining the same function name, a decorator it does not implement, a call to a name it does not know, and a write it cannot make good on all fail the build rather than reporting success
+
+### File I/O and the host interface
+
+A program that calls `open()` compiles to a module importing four functions from
+the `waspy_host` namespace. Nothing else in the compiler emits an import, so a
+module that never calls `open()` instantiates with an empty import object.
+
+| Import | Signature | Result |
+|--------|-----------|--------|
+| `waspy_host.open` | `(path_ptr: i32, path_len: i32, flags: i32) -> i32` | file descriptor, or `-1` |
+| `waspy_host.read` | `(fd: i32, buf_ptr: i32, len: i32) -> i32` | bytes read, `0` at EOF, negative on error |
+| `waspy_host.write` | `(fd: i32, buf_ptr: i32, len: i32) -> i32` | bytes written, negative on error |
+| `waspy_host.close` | `(fd: i32) -> i32` | `0` on success |
+
+`path_ptr`/`path_len` and `buf_ptr`/`len` address the module's own linear
+memory, which the host reads and writes through the exported `memory`. `flags`
+is the Python mode string folded at compile time: `1` read, `2` write, `4`
+append, `8` binary, `16` update, or-ed together, so `"w+b"` is `26`. A size-less
+`f.read()` asks for at most one 64 KiB page per call.
+
+**The embedder owns confinement.** The compiled program chooses the path string
+it passes to `waspy_host.open`, so a host that forwards it to the real
+filesystem hands the program whatever the process itself can reach. Nothing in
+the module constrains that, and nothing in the compiler can: the path is a
+runtime value. A host that runs untrusted or third-party Python should resolve
+the path against a directory it picked, reject anything that escapes it, and
+enforce its own limits on descriptor count and transfer size, the way WASI's
+preopened directories do. The reference hosts in this repo are backed by an
+in-memory map and touch no filesystem at all; they are test fixtures, not a
+sandbox to copy.
 
 ### Comment Preservation
 
