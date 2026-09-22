@@ -590,12 +590,13 @@ fn keys_from_a_bare_and_a_parameterised_annotation_both_deduplicate() {
     assert_eq!(call_i32(parameterised, "f"), 2);
 }
 
-/// Dispatch is static, so a subclass override is invisible to a base method
-/// that calls it through `self`: `Media.describe()` reaches `Media.kind()` even
-/// on a `Video`. Calling the override directly is correct. Pinned as-is; it
-/// changes to "video:b" when virtual dispatch lands.
+/// A base method calling `self.kind()` reaches the subclass's override, the
+/// plain template-method pattern. Dispatch used to be static everywhere, so
+/// `Media.describe()` reached `Media.kind()` on a `Video` and answered
+/// "media:b" while reporting success. This test pinned that wrong answer until
+/// the vtable landed.
 #[test]
-fn an_inherited_method_still_uses_static_dispatch() {
+fn an_inherited_method_reaches_the_subclass_override() {
     let src = "class Media:\n\
                \x20   def __init__(self, name: str):\n\
                \x20       self.name = name\n\
@@ -620,11 +621,7 @@ fn an_inherited_method_still_uses_static_dispatch() {
                \x20   v: Video = Video(\"b\")\n\
                \x20   return v.kind()\n";
     assert_eq!(call_str(src, "direct"), "video");
-    assert_eq!(
-        call_str(src, "inherited"),
-        "media:b",
-        "an inherited base method is expected to still reach the base override"
-    );
+    assert_eq!(call_str(src, "inherited"), "video:b");
 }
 
 // ---------------------------------------------------------------------------
@@ -1534,4 +1531,201 @@ fn same_width_writes_are_unaffected() {
     assert_eq!(call_f64(src, "floats"), 6.0);
     assert_eq!(call_i32(src, "strings"), 2);
     assert_eq!(call_f64(src, "extended"), 3.0);
+}
+
+// ---------------------------------------------------------------------------
+// Overrides reached through a base method (virtual dispatch)
+// ---------------------------------------------------------------------------
+
+/// The override is found through every route an instance can be reached by: a
+/// `self` call inside a base method, a variable declared as the base, a
+/// parameter declared as the base, and an element of a list of the base. All
+/// four used to answer with the base's implementation.
+#[test]
+fn an_override_is_reached_through_every_route() {
+    let src = "from typing import List\n\
+               \n\
+               class A:\n\
+               \x20   def k(self) -> int:\n\
+               \x20       return 1\n\
+               \x20   def via_self(self) -> int:\n\
+               \x20       return self.k()\n\
+               \n\
+               class B(A):\n\
+               \x20   def k(self) -> int:\n\
+               \x20       return 2\n\
+               \n\
+               class C(B):\n\
+               \x20   pass\n\
+               \n\
+               def through_a_parameter(a: A) -> int:\n\
+               \x20   return a.k()\n\
+               \n\
+               def by_self() -> int:\n\
+               \x20   return A().via_self() * 100 + B().via_self() * 10 + C().via_self()\n\
+               \n\
+               def by_parameter() -> int:\n\
+               \x20   a = through_a_parameter(A())\n\
+               \x20   b = through_a_parameter(B())\n\
+               \x20   c = through_a_parameter(C())\n\
+               \x20   return a * 100 + b * 10 + c\n\
+               \n\
+               def by_variable() -> int:\n\
+               \x20   v: A = B()\n\
+               \x20   return v.k()\n\
+               \n\
+               def by_list_element() -> int:\n\
+               \x20   xs: List[A] = [A(), B(), C()]\n\
+               \x20   total = 0\n\
+               \x20   for x in xs:\n\
+               \x20       total = total * 10 + x.k()\n\
+               \x20   return total\n";
+    // C inherits B's override, so every route answers 1, 2, 2 in turn.
+    assert_eq!(call_i32(src, "by_self"), 122);
+    assert_eq!(call_i32(src, "by_parameter"), 122);
+    assert_eq!(call_i32(src, "by_variable"), 2);
+    assert_eq!(call_i32(src, "by_list_element"), 122);
+}
+
+/// A `@property` getter and `__eq__` dispatch on the runtime class too: both
+/// are reached from a base method (or the `==` operator) holding the base's
+/// static type, so both had the same defect.
+#[test]
+fn overridden_properties_and_eq_dispatch_on_the_runtime_class() {
+    let property = "class A:\n\
+                    \x20   def __init__(self, v: int):\n\
+                    \x20       self.v = v\n\
+                    \x20   @property\n\
+                    \x20   def scale(self) -> int:\n\
+                    \x20       return 10\n\
+                    \x20   def scaled(self) -> int:\n\
+                    \x20       return self.v * self.scale\n\
+                    \n\
+                    class B(A):\n\
+                    \x20   @property\n\
+                    \x20   def scale(self) -> int:\n\
+                    \x20       return 20\n\
+                    \n\
+                    def f() -> int:\n\
+                    \x20   return A(2).scaled() * 1000 + B(2).scaled()\n";
+    assert_eq!(call_i32(property, "f"), 20040);
+
+    let equality = "class A:\n\
+                    \x20   def __init__(self, v: int):\n\
+                    \x20       self.v = v\n\
+                    \x20   def __eq__(self, other) -> bool:\n\
+                    \x20       return False\n\
+                    \n\
+                    class B(A):\n\
+                    \x20   def __eq__(self, other) -> bool:\n\
+                    \x20       return self.v == other.v\n\
+                    \n\
+                    def compare(x: A, y: A) -> int:\n\
+                    \x20   if x == y:\n\
+                    \x20       return 1\n\
+                    \x20   return 0\n\
+                    \n\
+                    def f() -> int:\n\
+                    \x20   return compare(B(3), B(3)) * 10 + compare(A(3), A(3))\n";
+    assert_eq!(call_i32(equality, "f"), 10);
+}
+
+/// What virtual dispatch must not change: `super().method()` is non-virtual in
+/// Python, so an override extending its base does not recurse; a method
+/// nothing overrides keeps its direct call; and an exception raised inside an
+/// override still propagates, which the indirect call has to account for
+/// itself.
+#[test]
+fn virtual_dispatch_leaves_the_other_paths_alone() {
+    let supered = "class A:\n\
+                   \x20   def m(self) -> str:\n\
+                   \x20       return \"a\"\n\
+                   \n\
+                   class B(A):\n\
+                   \x20   def m(self) -> str:\n\
+                   \x20       return super().m() + \"b\"\n\
+                   \n\
+                   class C(B):\n\
+                   \x20   def m(self) -> str:\n\
+                   \x20       return super().m() + \"c\"\n\
+                   \n\
+                   def f() -> str:\n\
+                   \x20   return C().m()\n";
+    assert_eq!(call_str(supered, "f"), "abc");
+
+    let not_overridden = "class A:\n\
+                          \x20   def m(self) -> int:\n\
+                          \x20       return 7\n\
+                          \n\
+                          class B(A):\n\
+                          \x20   def other(self) -> int:\n\
+                          \x20       return 1\n\
+                          \n\
+                          def f() -> int:\n\
+                          \x20   return B().m() + A().m()\n";
+    assert_eq!(call_i32(not_overridden, "f"), 14);
+
+    let raising = "class A:\n\
+                   \x20   def m(self) -> int:\n\
+                   \x20       return 1\n\
+                   \n\
+                   class B(A):\n\
+                   \x20   def m(self) -> int:\n\
+                   \x20       raise ValueError\n\
+                   \n\
+                   def call(a: A) -> int:\n\
+                   \x20   return a.m()\n\
+                   \n\
+                   def caught() -> int:\n\
+                   \x20   try:\n\
+                   \x20       return call(B())\n\
+                   \x20   except ValueError:\n\
+                   \x20       return 42\n\
+                   \n\
+                   def not_raised() -> int:\n\
+                   \x20   try:\n\
+                   \x20       return call(A())\n\
+                   \x20   except ValueError:\n\
+                   \x20       return 42\n";
+    assert_eq!(call_i32(raising, "caught"), 42);
+    assert_eq!(call_i32(raising, "not_raised"), 1);
+}
+
+/// Every implementation of an overridden name is reached through one indirect
+/// call, which names a single WebAssembly signature, so an override that
+/// changes the parameters or the return type is refused. Python allows it;
+/// dispatching it here would trap at the call with nothing useful said.
+#[test]
+fn an_override_with_a_different_signature_is_refused() {
+    let arity = "class A:\n\
+                 \x20   def m(self) -> int:\n\
+                 \x20       return 1\n\
+                 \n\
+                 class B(A):\n\
+                 \x20   def m(self, k: int) -> int:\n\
+                 \x20       return k\n\
+                 \n\
+                 def f() -> int:\n\
+                 \x20   return A().m()\n";
+    let err = try_compile(arity).expect_err("a different arity must be refused");
+    assert!(
+        err.contains("'B.m' overrides 'A.m'"),
+        "expected both methods named, got: {err}"
+    );
+
+    let returns = "class A:\n\
+                   \x20   def m(self) -> int:\n\
+                   \x20       return 1\n\
+                   \n\
+                   class B(A):\n\
+                   \x20   def m(self) -> float:\n\
+                   \x20       return 2.0\n\
+                   \n\
+                   def f() -> int:\n\
+                   \x20   return A().m()\n";
+    let err = try_compile(returns).expect_err("a different return type must be refused");
+    assert!(
+        err.contains("same parameter and return types"),
+        "expected the hint, got: {err}"
+    );
 }

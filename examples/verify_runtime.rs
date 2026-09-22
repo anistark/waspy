@@ -78,6 +78,14 @@ const PROGRAMS: &[Program] = &[
         source: Source::Project("examples/library_project"),
         checks: "tests/fixtures/runtime/library_project_checks.py",
     },
+    // Not an end-to-end program, but the only one that compiles to
+    // `call_indirect` through the dispatch table, which is worth running under
+    // a real engine rather than only the in-process harness.
+    Program {
+        name: "oop_polymorphism",
+        source: Source::File("examples/oop_polymorphism.py"),
+        checks: "tests/fixtures/runtime/oop_polymorphism_checks.py",
+    },
 ];
 
 fn main() -> Result<()> {

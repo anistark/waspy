@@ -18,6 +18,14 @@ pub const CALL_DEPTH_GLOBAL: u32 = 3;
 /// offset emitted anywhere in the compiler.
 pub const SCRATCH_LOCALS: u32 = 48;
 
+/// Locals reserved per function to hold the receiver of a virtual method call
+/// while its arguments are emitted, one per nesting level. Argument emission
+/// runs arbitrary codegen (which uses the scratch run above), so the receiver
+/// cannot live there; and a nested virtual call in an argument must not reuse
+/// the outer call's slot, hence one per level rather than one per function.
+/// A call nested deeper than this is a compile error, not a wrong answer.
+pub const VCALL_LOCALS: u32 = 8;
+
 /// Base address of the collection heap. Sits above the string (from 0) and
 /// bytes (from 32768) regions so collection literals never overlap them. (The
 /// 65536..131072 range was once a fixed object-instance region; instances are
@@ -184,6 +192,25 @@ pub struct CompilationContext {
     /// `from mod import name as alias` bindings for user modules:
     /// alias -> real (merged) function or class name.
     pub import_aliases: HashMap<String, String>,
+    /// Virtual method dispatch: the column each overridden method name takes in
+    /// the vtable, and the `call_indirect` type index its implementations share.
+    /// A method name is here only when some class overrides an ancestor's
+    /// definition of it, so a program with no overrides emits no table and
+    /// every call stays direct.
+    pub virtual_slots: HashMap<String, (u32, u32)>,
+    /// Table index of vtable row 0. The rows share table 0 with the closure
+    /// dispatch slots, which occupy the indices below this.
+    pub vtable_base: u32,
+    /// Columns per row, so row `c` starts at `vtable_base + c * vtable_stride`.
+    pub vtable_stride: u32,
+    /// The vtable's own entries (function indices), row-major, so a call site
+    /// can ask what a column can reach without the table section.
+    pub vtable_entries: Vec<u32>,
+    /// Base index of this function's run of [`VCALL_LOCALS`] receiver slots.
+    pub vcall_local_base: u32,
+    /// How many virtual calls are mid-emission, which picks the receiver slot.
+    /// A `Cell` because expression codegen holds `&CompilationContext`.
+    pub vcall_depth: Cell<u32>,
     /// `@functools.singledispatch` tables, keyed by the base function's name:
     /// (registered type, implementation function name) in registration
     /// order. Call codegen picks the arm matching the first argument's static
@@ -318,6 +345,12 @@ impl CompilationContext {
             class_map: HashMap::new(),
             user_modules: HashMap::new(),
             import_aliases: HashMap::new(),
+            virtual_slots: HashMap::new(),
+            vtable_base: 0,
+            vtable_stride: 0,
+            vtable_entries: Vec::new(),
+            vcall_local_base: 0,
+            vcall_depth: Cell::new(0),
             dispatch_tables: HashMap::new(),
             file_io: None,
             module_vars: HashMap::new(),
@@ -403,6 +436,47 @@ impl CompilationContext {
             .collect();
         ids.sort_unstable();
         ids
+    }
+
+    /// Does a call to `method_name` on a receiver statically typed `class_name`
+    /// have to dispatch through the vtable?
+    ///
+    /// Only when some class assignable to `class_name` resolves the name to a
+    /// different implementation than `class_name` itself does. A method nothing
+    /// overrides, a leaf class, and a call on a class with no subclasses all
+    /// answer `None` and keep the direct call they have always had, so a
+    /// program without overrides compiles to exactly what it did before.
+    ///
+    /// Returns the vtable column and the `call_indirect` type index.
+    pub fn virtual_call(&self, class_name: &str, method_name: &str) -> Option<(u32, u32)> {
+        let &(column, type_index) = self.virtual_slots.get(method_name)?;
+        let own = self.get_class_info(class_name)?.methods.get(method_name)?;
+        let overridden = self
+            .class_map
+            .values()
+            .filter(|info| self.is_class_or_subclass(&info.name, class_name))
+            .any(|info| info.methods.get(method_name) != Some(own));
+        overridden.then_some((column, type_index))
+    }
+
+    /// Every implementation reachable through vtable column `column`: one per
+    /// class row, so a caller can ask whether any of them can raise.
+    pub fn virtual_implementations(&self, column: u32) -> impl Iterator<Item = u32> + '_ {
+        let stride = self.vtable_stride;
+        self.vtable_entries
+            .iter()
+            .skip(column as usize)
+            .step_by(stride.max(1) as usize)
+            .copied()
+    }
+
+    /// The local holding the receiver of the virtual call currently being
+    /// emitted. `None` once calls nest deeper than [`VCALL_LOCALS`], which the
+    /// caller reports rather than emitting a call that would read the wrong
+    /// receiver.
+    pub fn vcall_local(&self) -> Option<u32> {
+        let depth = self.vcall_depth.get();
+        (depth < VCALL_LOCALS).then(|| self.vcall_local_base + depth)
     }
 
     /// Reserve a fresh, uniquely addressed region of `size` bytes for a

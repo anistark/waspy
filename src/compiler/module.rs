@@ -1289,6 +1289,147 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, ChakraError> {
         ctx.add_class(class_info);
     }
 
+    // Virtual method dispatch. Dispatch used to be static everywhere: a call
+    // was compiled to the implementation the receiver's *declared* class holds,
+    // so `self.kind()` inside a base method reached the base's version even
+    // when the instance was a subclass that overrode it, and the plain
+    // template-method pattern answered with the wrong implementation while
+    // reporting success.
+    //
+    // A method name is given a vtable column when some class overrides an
+    // ancestor's definition of it. Every other call keeps its direct `call`, so
+    // a program with no overrides is byte for byte what it was.
+    //
+    // The rows are indexed by the class id already stamped into every instance
+    // at offset 0, which is what makes the lookup a load and two arithmetic
+    // ops: row `class_id - 1` (ids start at 1), column per method name.
+    let mut virtual_names: Vec<String> = Vec::new();
+    for cls in &ir_module.classes {
+        for method in &cls.methods {
+            let name = &method.name;
+            // `__init__` is only ever reached from an instantiation site, whose
+            // class is known exactly, and `super().__init__()`, which Python
+            // defines as non-virtual. Property accessors and the static and
+            // class method kinds do not dispatch on an instance at all.
+            if name == "__init__" || virtual_names.contains(name) {
+                continue;
+            }
+            // A plain method and a `@property` getter both dispatch on an
+            // instance, so both can be overridden out from under a base
+            // method. The static and class kinds never see an instance.
+            let dispatches_on_instance = ctx
+                .get_class_info(&cls.name)
+                .and_then(|ci| ci.method_kinds.get(name).copied())
+                .is_some_and(|k| matches!(k, MethodKind::Instance | MethodKind::PropertyGetter));
+            if !dispatches_on_instance {
+                continue;
+            }
+            // Overriding means some ancestor also defines the name textually.
+            let mut ancestor = ctx.get_class_info(&cls.name).and_then(|ci| ci.base.clone());
+            while let Some(base) = ancestor {
+                let Some(base_info) = ctx.get_class_info(&base) else {
+                    break;
+                };
+                if base_info.method_owner.get(name) == Some(&base) {
+                    virtual_names.push(name.clone());
+                    break;
+                }
+                ancestor = base_info.base.clone();
+            }
+        }
+    }
+    virtual_names.sort();
+
+    // Every implementation of a virtual name is reached through one
+    // `call_indirect`, which names a single type: they must agree on their
+    // WebAssembly signature. Python does not require that, so a disagreement is
+    // reported rather than left to trap on the call at runtime.
+    let signature_of = |owner: &str, name: &str| -> Option<(Vec<ValType>, ValType)> {
+        let info = ctx.get_function_info(&format!("{owner}::{name}"))?;
+        Some((
+            info.param_types.iter().map(ir_type_to_wasm_type).collect(),
+            ir_type_to_wasm_type(&info.return_type),
+        ))
+    };
+    let mut virtual_slots: Vec<(String, u32)> = Vec::new();
+    for name in &virtual_names {
+        // The root of the hierarchy that introduced the name fixes the
+        // signature, and its function index doubles as the type index: the type
+        // section emits one type per defined function, in function order.
+        let mut owners: Vec<(String, u32)> = Vec::new();
+        for cls in &ir_module.classes {
+            let Some(ci) = ctx.get_class_info(&cls.name) else {
+                continue;
+            };
+            if ci.method_owner.get(name) == Some(&cls.name) {
+                if let Some(idx) = ci.methods.get(name) {
+                    owners.push((cls.name.clone(), *idx));
+                }
+            }
+        }
+        let Some((root_owner, root_idx)) = owners.first().cloned() else {
+            continue;
+        };
+        let Some(root_sig) = signature_of(&root_owner, name) else {
+            continue;
+        };
+        let mut agreed = true;
+        for (owner, _) in owners.iter().skip(1) {
+            if signature_of(owner, name).as_ref() != Some(&root_sig) {
+                ctx.report(format!(
+                    "'{owner}.{name}' overrides '{root_owner}.{name}' with a different \
+                     signature, so a call through a '{root_owner}' cannot reach both. \
+                     Hint: give the override the same parameter and return types"
+                ));
+                agreed = false;
+            }
+        }
+        if agreed {
+            virtual_slots.push((name.clone(), root_idx - import_count));
+        }
+    }
+
+    let vtable_stride = virtual_slots.len() as u32;
+    let max_class_id = ir_module
+        .classes
+        .iter()
+        .filter_map(|c| ctx.get_class_info(&c.name).map(|ci| ci.class_id))
+        .max()
+        .unwrap_or(0);
+    let mut vtable_entries: Vec<u32> = Vec::new();
+    // The rows sit after the closure slots in the shared table, and every call
+    // site bakes this base in, so it has to be known before any body is
+    // compiled rather than when the table is finally written out.
+    ctx.vtable_base = lambda_functions.len() as u32;
+    if vtable_stride > 0 {
+        for (column, (name, type_index)) in virtual_slots.iter().enumerate() {
+            ctx.virtual_slots
+                .insert(name.clone(), (column as u32, *type_index));
+        }
+        // Row per class id, column per virtual name, holding that class's
+        // resolved implementation. `ClassInfo::methods` already carries every
+        // inherited method, so a class that does not override the name lands on
+        // the one it inherited. A class outside the hierarchy has no
+        // implementation to point at; its cell takes the root's, which no call
+        // can reach (the receiver's static type decides that) and which keeps
+        // the segment free of null entries.
+        for class_id in 1..=max_class_id {
+            let resolved: Vec<u32> = virtual_slots
+                .iter()
+                .map(|(name, type_index)| {
+                    ctx.class_map
+                        .values()
+                        .find(|ci| ci.class_id == class_id)
+                        .and_then(|ci| ci.methods.get(name).copied())
+                        .unwrap_or(*type_index + import_count)
+                })
+                .collect();
+            vtable_entries.extend(resolved);
+        }
+        ctx.vtable_stride = vtable_stride;
+        ctx.vtable_entries = vtable_entries.clone();
+    }
+
     // Export memory
     exports.export("memory", wasm_encoder::ExportKind::Memory, 0);
 
@@ -1463,26 +1604,34 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, ChakraError> {
         &ConstExpr::i32_const(0),
     );
 
-    // The closure dispatch table: slot i holds lifted lambda i. Emitted only
-    // when the module has lambdas.
+    // One funcref table carries both indirect-call mechanisms: the closure
+    // slots first (slot i holds lifted lambda i), then the vtable rows, so
+    // `call_indirect` always names table 0 and a module needing either gets
+    // exactly one table.
     let mut tables = TableSection::new();
     let mut elements = ElementSection::new();
-    if !lambda_functions.is_empty() {
+    let mut table_entries: Vec<u32> = lambda_functions
+        .iter()
+        .map(|(idx, _)| *idx + import_count)
+        .collect();
+    debug_assert_eq!(
+        ctx.vtable_base as usize,
+        table_entries.len(),
+        "vtable rows must start where the call sites were told they do"
+    );
+    table_entries.extend(vtable_entries.iter().copied());
+    if !table_entries.is_empty() {
         tables.table(TableType {
             element_type: RefType::FUNCREF,
             table64: false,
-            minimum: lambda_functions.len() as u64,
-            maximum: Some(lambda_functions.len() as u64),
+            minimum: table_entries.len() as u64,
+            maximum: Some(table_entries.len() as u64),
             shared: false,
         });
-        let func_indices: Vec<u32> = lambda_functions
-            .iter()
-            .map(|(idx, _)| *idx + import_count)
-            .collect();
         elements.active(
             None,
             &ConstExpr::i32_const(0),
-            Elements::Functions(func_indices.into()),
+            Elements::Functions(table_entries.clone().into()),
         );
     }
 
@@ -1490,13 +1639,13 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, ChakraError> {
     // Export (7), Element (9), Code (10), Data (11). Code must precede Data or
     // strict validators (and Binaryen's reader) reject the module, which
     // previously disabled optimization.
-    if !lambda_functions.is_empty() {
+    if !table_entries.is_empty() {
         module.section(&tables);
     }
     module.section(&memories);
     module.section(&globals);
     module.section(&exports);
-    if !lambda_functions.is_empty() {
+    if !table_entries.is_empty() {
         module.section(&elements);
     }
     module.section(&codes);

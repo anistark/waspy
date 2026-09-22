@@ -1,7 +1,7 @@
 use crate::compiler::context::{
     comp_gen_local_name, comp_local_name, strlen_local_name, CompilationContext, LoopContext,
     CALL_DEPTH_GLOBAL, COLLECTION_CAP, COLLECTION_DATA, COLLECTION_HEADER, COLLECTION_SLOT,
-    DICT_ENTRY, EXC_TYPE_GLOBAL, SCRATCH_LOCALS,
+    DICT_ENTRY, EXC_TYPE_GLOBAL, SCRATCH_LOCALS, VCALL_LOCALS,
 };
 use crate::compiler::expression::{emit_expr, emit_integer_power_operation};
 use crate::ir::{IRBody, IRConstant, IRExpr, IRFunction, IROp, IRStatement, IRType, MemoryLayout};
@@ -64,6 +64,13 @@ pub fn compile_function(
     // declared as f64 and used for operand juggling during int/float coercion.
     ctx.temp_local = ctx.local_count;
     ctx.local_count += SCRATCH_LOCALS;
+    // Receiver slots for virtual method calls, one per nesting level. Held
+    // apart from the scratch run above because a call's arguments are emitted
+    // between the receiver being stashed and being read back, and that
+    // emission uses the scratch locals freely.
+    ctx.vcall_local_base = ctx.local_count;
+    ctx.local_count += VCALL_LOCALS;
+    ctx.vcall_depth.set(0);
     ctx.temp_local_f64 = ctx.add_local("__f64_scratch", IRType::Float);
     ctx.temp_local_f64_2 = ctx.add_local("__f64_scratch2", IRType::Float);
     ctx.temp_local_f64_3 = ctx.add_local("__f64_scratch3", IRType::Float);

@@ -45,6 +45,7 @@ Generate & Optimize
 - Performs automatic WebAssembly optimization using Binaryen
 - Detects and handles project structure and dependencies
 - Supports module-level variables and class definitions with heap-allocated instances — multiple live instances per class, usable as function arguments and return values
+- Virtual dispatch: a method call reaches the override the receiver's runtime class defines, so a base method calling `self.method()` gets the subclass's version (the template-method pattern), including through a variable, a parameter, or a list element declared as the base. `@property` getters and `__eq__` dispatch the same way, and `super().method()` stays non-virtual as in Python
 - Object-oriented Python: single inheritance with `super()`, `isinstance`/`issubclass` over the class hierarchy, `@staticmethod`/`@classmethod`/`@property` (with setters), `@dataclass` (generated `__init__`/`__eq__`/`__repr__`), abstract base classes via `abc.ABC`, and rich comparisons: `==` calls `__eq__`, and `<`/`<=`/`>`/`>=` between instances call `__lt__`/`__le__`/`__gt__`/`__ge__` (the left operand's own, then the right operand's reflection, as CPython does)
 - `functools` decorators that change what a program computes are implemented: `@singledispatch` with `@f.register` (dispatch is static, on the first argument's type) and `@total_ordering` (the missing ordering methods are derived from the one defined). `@lru_cache`/`@cache` are accepted and change nothing observable. A decorator the compiler does not implement, on a function, method, or class, is a compile error rather than a name dropped on the floor
 - Collections: lists, dicts, sets, tuples, and ranges: literals, indexing, slicing, methods, and membership (`in`/`not in`), with full-precision f64 elements and hash-table sets; lists and dicts reallocate as they grow past their literal's size. `list.sort`/`list.reverse`/`list.pop(i)`/`list.index`, `dict.get`/`.keys`/`.values`/`.items`, and `sorted(iterable[, key][, reverse])` are all real operations, and an empty collection is falsy as in Python
@@ -100,6 +101,7 @@ Float division by zero and integer division or modulo by zero raise
 - Lists, dicts, and sets grow at runtime (`append`/`extend`/`insert`, `dict[key] = value` for a new key, and `set.add` reallocate when full). A collection's elements live in a block its header points at, so growing one never moves the collection: a list grown inside a function it was passed to, or reached by indexing another collection, is grown for every other name for it too
 - Generators cover the common shapes; `yield` inside `try`/`with` and generator methods (`yield` in a class method) are rejected at compile time, and `close()` skips `GeneratorExit`/`finally` semantics
 - Closures capture the variable, not a snapshot of it: a captured variable reassigned after the closure is made changes what the closure sees, and closures created in a loop share the loop variable. Capturing a float is not supported yet
+- Every implementation of an overridden method is reached through one indirect call, which names a single WebAssembly signature, so an override that changes the parameter or return types is a compile error naming both methods
 - Imported user modules share one flat namespace in the output module, so two modules defining the same function name is a compile error naming both files. It used to keep the first definition and print a warning, which meant `utils.format` next to `report.format` compiled successfully and answered with the wrong one. Qualifying names by module is the real fix and is not done yet
 - `f.read()` without a size reads up to 64 KiB per call; `open()` modes must be string literals
 - A `with` statement needs its context manager's class to be resolvable at compile time (an instantiation, a call with an annotated class return type, or a variable of known class type). `__exit__` runs on every way out: the normal path, a `return`/`break`/`continue`, and an exception leaving the block. Its return value never suppresses an exception, though, so returning `True` from `__exit__` does not swallow one the way Python's does
@@ -145,7 +147,7 @@ Or add it to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-waspy = "0.16.0"
+waspy = "0.17.0"
 ```
 
 ## Quick Start

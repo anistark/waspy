@@ -2992,6 +2992,139 @@ fn emit_stashed_set_insert(
 /// One that can raise is bracketed by the call-depth counter and followed by a
 /// check: if it came back with an exception pending, its result is meaningless
 /// and this frame keeps unwinding instead of using it.
+/// Emit a method call that dispatches on the receiver's runtime class.
+///
+/// The receiver pointer is already on the stack and stays there as the
+/// implicit `self`; it is also stashed, because the table index is computed
+/// from its class tag *after* the arguments have been emitted, and by then the
+/// stack position is buried. The slot is picked by nesting depth, so a virtual
+/// call inside another's argument list keeps its own.
+///
+/// The index is `vtable_base + (class_id - 1) * stride + column`: class ids
+/// start at 1 and are stamped into every instance at offset 0 by
+/// `__alloc_obj`, so the whole lookup is one load and three arithmetic ops.
+#[allow(clippy::too_many_arguments)]
+fn emit_virtual_call(
+    func: &mut Function,
+    ctx: &CompilationContext,
+    memory_layout: &MemoryLayout,
+    method_name: &str,
+    arguments: &[IRExpr],
+    param_types: &[IRType],
+    ret: IRType,
+    column: u32,
+    type_index: u32,
+) -> IRType {
+    let Some(receiver) = ctx.vcall_local() else {
+        ctx.report(format!(
+            "'{method_name}' is called through more nested virtual method calls than the \
+             compiler reserves room for. Hint: assign an intermediate result to a variable"
+        ));
+        func.instruction(&Instruction::Drop);
+        func.instruction(&Instruction::Unreachable);
+        func.instruction(&Instruction::I32Const(0));
+        return ret;
+    };
+
+    // Keep the receiver on the stack as `self` and stash a copy for the index.
+    func.instruction(&Instruction::LocalTee(receiver));
+
+    let depth = ctx.vcall_depth.get();
+    ctx.vcall_depth.set(depth + 1);
+    for (i, arg) in arguments.iter().enumerate() {
+        let t = emit_expr(arg, func, ctx, memory_layout, param_types.get(i + 1));
+        if matches!(t, IRType::String | IRType::Bytes) {
+            func.instruction(&Instruction::Drop);
+        }
+    }
+    ctx.vcall_depth.set(depth);
+
+    func.instruction(&Instruction::LocalGet(receiver));
+    func.instruction(&Instruction::I32Load(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
+    func.instruction(&Instruction::I32Const(1));
+    func.instruction(&Instruction::I32Sub);
+    func.instruction(&Instruction::I32Const(ctx.vtable_stride as i32));
+    func.instruction(&Instruction::I32Mul);
+    func.instruction(&Instruction::I32Const((ctx.vtable_base + column) as i32));
+    func.instruction(&Instruction::I32Add);
+
+    // The callee is not known here, so the exception bookkeeping `emit_user_call`
+    // does for a direct call is applied when *any* implementation of this name
+    // can raise: skipping it would strand a propagating exception at the
+    // dispatch, which is a wrong answer rather than a slower one.
+    let raises = ctx
+        .virtual_implementations(column)
+        .any(|f| ctx.can_raise.contains(&f));
+    if raises {
+        emit_call_depth_step(func, 1);
+    }
+    func.instruction(&Instruction::CallIndirect {
+        type_index,
+        table_index: 0,
+    });
+    if raises {
+        emit_call_depth_step(func, -1);
+        emit_post_call_check(func, ctx);
+    }
+
+    if matches!(ret, IRType::String | IRType::Bytes) {
+        recover_str_pair(func, ctx);
+    }
+    ret
+}
+
+/// Dispatch `==` through the vtable when a subclass overrides `__eq__`.
+///
+/// Unlike a method call, both operands are already on the stack as
+/// `(self, other)`, so the receiver is buried. The argument is lifted into a
+/// scratch local, a copy of the receiver is taken, and the pair is rebuilt.
+/// The whole sequence is straight-line with no nested expression emission, so
+/// the ordinary scratch locals are safe here.
+fn emit_virtual_compare(
+    func: &mut Function,
+    ctx: &CompilationContext,
+    column: u32,
+    type_index: u32,
+) {
+    let other = ctx.temp_local;
+    let receiver = ctx.temp_local + 1;
+    func.instruction(&Instruction::LocalSet(other));
+    func.instruction(&Instruction::LocalTee(receiver));
+    func.instruction(&Instruction::LocalGet(other));
+
+    func.instruction(&Instruction::LocalGet(receiver));
+    func.instruction(&Instruction::I32Load(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
+    func.instruction(&Instruction::I32Const(1));
+    func.instruction(&Instruction::I32Sub);
+    func.instruction(&Instruction::I32Const(ctx.vtable_stride as i32));
+    func.instruction(&Instruction::I32Mul);
+    func.instruction(&Instruction::I32Const((ctx.vtable_base + column) as i32));
+    func.instruction(&Instruction::I32Add);
+
+    let raises = ctx
+        .virtual_implementations(column)
+        .any(|f| ctx.can_raise.contains(&f));
+    if raises {
+        emit_call_depth_step(func, 1);
+    }
+    func.instruction(&Instruction::CallIndirect {
+        type_index,
+        table_index: 0,
+    });
+    if raises {
+        emit_call_depth_step(func, -1);
+        emit_post_call_check(func, ctx);
+    }
+}
+
 /// Pick the `@singledispatch` arm registered for `arg_type`: the exact type
 /// first, then (as Python's `bool` is an `int`) an `int` arm for a `bool`
 /// argument, then for an instance the nearest base class with an arm.
@@ -4203,7 +4336,19 @@ pub fn emit_expr(
                         .get_class_info(class_name)
                         .and_then(|ci| ci.methods.get("__eq__").copied());
                     if let Some(eq_idx) = eq_method {
-                        emit_user_call(func, ctx, eq_idx);
+                        // `==` dispatches on the left operand, and a subclass
+                        // that overrides `__eq__` must be the one that answers.
+                        // Both operands are already on the stack, so the
+                        // receiver is under the argument and the general
+                        // helper (which emits its own arguments) does not fit;
+                        // the index is computed from a copy of the receiver
+                        // taken before the argument was pushed.
+                        match ctx.virtual_call(class_name, "__eq__") {
+                            Some((column, type_index)) => {
+                                emit_virtual_compare(func, ctx, column, type_index);
+                            }
+                            None => emit_user_call(func, ctx, eq_idx),
+                        }
                         if matches!(op, IRCompareOp::NotEq) {
                             func.instruction(&Instruction::I32Eqz);
                         }
@@ -6598,6 +6743,23 @@ pub fn emit_expr(
                             .get_function_info(&format!("{owner}::{attribute}"))
                             .map(|f| f.return_type.clone())
                             .unwrap_or(IRType::Unknown);
+                        // A getter a subclass overrides is reached through the
+                        // vtable, so `self.p` inside a base method reads the
+                        // subclass's property on a subclass instance.
+                        if let Some((column, type_index)) = ctx.virtual_call(class_name, attribute)
+                        {
+                            return emit_virtual_call(
+                                func,
+                                ctx,
+                                memory_layout,
+                                attribute,
+                                &[],
+                                &[],
+                                ret,
+                                column,
+                                type_index,
+                            );
+                        }
                         emit_user_call(func, ctx, getter_idx);
                         // A call result is a single word; rebuild the
                         // string/bytes pair.
@@ -8861,6 +9023,29 @@ pub fn emit_expr(
                             .get_function_info(&format!("{owner}::{method_name}"))
                             .map(|f| (f.param_types.clone(), f.return_type.clone()))
                             .unwrap_or((Vec::new(), IRType::Unknown));
+
+                        // A method some subclass overrides dispatches through
+                        // the vtable on the receiver's *runtime* class, not the
+                        // class it is declared as. Everything else keeps its
+                        // direct call.
+                        if kind == MethodKind::Instance {
+                            if let Some((column, type_index)) =
+                                ctx.virtual_call(class_name, method_name)
+                            {
+                                return emit_virtual_call(
+                                    func,
+                                    ctx,
+                                    memory_layout,
+                                    method_name,
+                                    arguments,
+                                    &param_types,
+                                    ret,
+                                    column,
+                                    type_index,
+                                );
+                            }
+                        }
+
                         // A static or class method ignores the instance: drop
                         // the pointer, and for a classmethod push the static
                         // class's id as the implicit `cls` instead.

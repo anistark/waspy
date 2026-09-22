@@ -380,11 +380,11 @@ def checkout() -&gt; float:
 
                 <li>
                     <div class="shape-head">
-                        <strong>A subclass override reached through an inherited method</strong>
-                        <span class="tag tag-quiet">differs</span>
+                        <strong>An override that changes the signature</strong>
+                        <span class="tag tag-loud">refused</span>
                         <span class="tag tag-workaround">workaround</span>
                     </div>
-                    <p class="shape-note">Dispatch is static, with no vtable. If <code>Media.describe()</code> calls <code>self.kind()</code> and <code>Video</code> overrides <code>kind()</code>, a <code>Video</code> still reaches <code>Media.kind()</code>. Calling the override directly is correct, so call it directly or override <code>describe()</code> too.</p>
+                    <p class="shape-note">Every implementation of an overridden method is reached through one indirect call, which names a single WebAssembly signature, so <code>def m(self)</code> in the base and <code>def m(self, k: int)</code> in the subclass is refused. Give the override the same parameters and return type.</p>
                 </li>
 
                 <li>

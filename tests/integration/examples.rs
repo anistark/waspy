@@ -856,3 +856,25 @@ fn total_ordering_derives_comparisons() {
     assert_eq!(call_i32(&src, "ordering_from_lt"), 1111);
     assert_eq!(call_i32_1(&src, "newest", 6), 15);
 }
+
+/// A base method calling `self.channel()` reaches each subclass's override,
+/// and a subclass that defines none of its own reaches the one it inherits.
+#[test]
+fn polymorphism_renders_through_the_override() {
+    let src = read_example("oop_polymorphism.py");
+    assert_eq!(call_str(&src, "render_base"), "none -> nobody");
+    assert_eq!(call_str(&src, "render_email"), "email -> a@b.c");
+    assert_eq!(call_str(&src, "render_sms"), "sms -> 555");
+    // Priority defines no channel(), so it reaches SMS's.
+    assert_eq!(call_str(&src, "render_inherited_override"), "sms -> 555");
+}
+
+/// One call site over a list holding three runtime classes, and a call through
+/// a parameter declared as the base. `Priority.cost()` extends `SMS.cost()`
+/// through `super()`, which stays non-virtual.
+#[test]
+fn polymorphism_dispatches_on_the_runtime_class() {
+    let src = read_example("oop_polymorphism.py");
+    assert_eq!(call_f64(&src, "total_cost"), 0.01 + 0.07 + 0.07 * 3.0);
+    assert_eq!(call_f64(&src, "priority_cost"), 0.07 * 3.0);
+}
