@@ -78,9 +78,25 @@ const PROGRAMS: &[Program] = &[
         source: Source::Project("examples/library_project"),
         checks: "tests/fixtures/runtime/library_project_checks.py",
     },
-    // Not an end-to-end program, but the only one that compiles to
-    // `call_indirect` through the dispatch table, which is worth running under
-    // a real engine rather than only the in-process harness.
+    Program {
+        name: "expression_evaluator",
+        source: Source::File("examples/expression_evaluator.py"),
+        checks: "tests/fixtures/runtime/expression_evaluator_checks.py",
+    },
+    Program {
+        name: "grid_algorithms",
+        source: Source::File("examples/grid_algorithms.py"),
+        checks: "tests/fixtures/runtime/grid_algorithms_checks.py",
+    },
+    Program {
+        name: "order_ledger",
+        source: Source::File("examples/order_ledger.py"),
+        checks: "tests/fixtures/runtime/order_ledger_checks.py",
+    },
+    // Not an end-to-end program, but a focused exercise of `call_indirect`
+    // through the dispatch table (inherited overrides, a `super()` chain, one
+    // call site over three runtime classes), which is worth running under a
+    // real engine rather than only the in-process harness.
     Program {
         name: "oop_polymorphism",
         source: Source::File("examples/oop_polymorphism.py"),

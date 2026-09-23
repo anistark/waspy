@@ -1268,8 +1268,9 @@ fn unimplemented_decorators_are_refused_and_caching_ones_accepted() {
 
 /// A call to a name that is neither a compiled function nor a builtin the
 /// compiler implements pushed a 0 and reported success, so `reduce(add, xs)`,
-/// `partial(add, 10)`, `abs(-3)`, and a misspelled function name all
-/// answered 0. It names the callee now.
+/// `partial(add, 10)`, `divmod(7, 2)`, and a misspelled function name all
+/// answered 0. It names the callee now. (`abs()` was on this list until it was
+/// implemented.)
 #[test]
 fn a_call_to_an_unknown_function_is_refused() {
     let cases: [&str; 3] = [
@@ -1281,14 +1282,14 @@ fn a_call_to_an_unknown_function_is_refused() {
          def f() -> int:\n\
          \x20   return reduce(add, [1, 2, 3])\n",
         "def f() -> int:\n\
-         \x20   return abs(-3)\n",
+         \x20   return divmod(7, 2)[0]\n",
         "def total(a: int) -> int:\n\
          \x20   return a\n\
          \n\
          def f() -> int:\n\
          \x20   return totl(3)\n",
     ];
-    for (src, name) in cases.iter().zip(["reduce", "abs", "totl"]) {
+    for (src, name) in cases.iter().zip(["reduce", "divmod", "totl"]) {
         let err = try_compile(src).expect_err("an unknown callee must be refused");
         assert!(
             err.contains(&format!("call to '{name}'")),
@@ -1728,4 +1729,971 @@ fn an_override_with_a_different_signature_is_refused() {
         err.contains("same parameter and return types"),
         "expected the hint, got: {err}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Program four: a single character of a string, item assignment, and int()
+// ---------------------------------------------------------------------------
+
+/// `s[i]` is a real one-character string wherever it goes. It used to be a
+/// pointer into the source string, which is right while the value stays on the
+/// stack; but a string is narrowed to its offset to fit a word (an argument, a
+/// field, a list element, a return value) and its length is recovered from the
+/// four bytes before that offset, which for an interior pointer are the
+/// preceding characters. Every one of these answered something else, silently.
+#[test]
+fn a_string_index_is_a_real_string_wherever_it_goes() {
+    let src = "from typing import List\n\
+               \n\
+               class Holder:\n\
+               \x20   def __init__(self, t: str):\n\
+               \x20       self.t = t\n\
+               \n\
+               def length(ch: str) -> int:\n\
+               \x20   return len(ch)\n\
+               \n\
+               def is_digit(ch: str) -> int:\n\
+               \x20   if ch.isdigit():\n\
+               \x20       return 1\n\
+               \x20   return 0\n\
+               \n\
+               def first(s: str) -> str:\n\
+               \x20   return s[0]\n\
+               \n\
+               def as_argument() -> int:\n\
+               \x20   s = \"a1\"\n\
+               \x20   return length(s[1]) * 10 + is_digit(s[1])\n\
+               \n\
+               def in_a_field() -> int:\n\
+               \x20   s = \"xy\"\n\
+               \x20   return len(Holder(s[1]).t)\n\
+               \n\
+               def in_a_list() -> int:\n\
+               \x20   s = \"ab\"\n\
+               \x20   xs: List[str] = [s[0], s[1]]\n\
+               \x20   return len(xs[0]) + len(xs[1])\n\
+               \n\
+               def returned() -> int:\n\
+               \x20   return len(first(\"hello\"))\n";
+    // Before: 1627389952-ish garbage, 2013265920, -905969662, and 5.
+    assert_eq!(call_i32(src, "as_argument"), 11);
+    assert_eq!(call_i32(src, "in_a_field"), 1);
+    assert_eq!(call_i32(src, "in_a_list"), 2);
+    assert_eq!(call_i32(src, "returned"), 1);
+}
+
+/// `for ch in s` binds each character as a one-character string. It shared the
+/// collection loop, which reads a length and a data pointer from a collection
+/// header that a string does not have, so it walked unrelated memory.
+#[test]
+fn iterating_a_string_binds_each_character() {
+    let src = "from typing import List\n\
+               \n\
+               def is_digit(ch: str) -> int:\n\
+               \x20   if ch.isdigit():\n\
+               \x20       return 1\n\
+               \x20   return 0\n\
+               \n\
+               def digits() -> int:\n\
+               \x20   n = 0\n\
+               \x20   for ch in \"a1b22\":\n\
+               \x20       n += is_digit(ch)\n\
+               \x20   return n\n\
+               \n\
+               def collected() -> int:\n\
+               \x20   xs: List[str] = []\n\
+               \x20   for ch in \"abc\":\n\
+               \x20       xs.append(ch)\n\
+               \x20   return len(xs) * 10 + len(xs[2])\n\
+               \n\
+               def broke_out() -> int:\n\
+               \x20   n = 0\n\
+               \x20   for ch in \"abcdef\":\n\
+               \x20       if ch == \"d\":\n\
+               \x20           break\n\
+               \x20       n += 1\n\
+               \x20   return n\n";
+    assert_eq!(call_i32(src, "digits"), 3);
+    assert_eq!(call_i32(src, "collected"), 31);
+    assert_eq!(call_i32(src, "broke_out"), 3);
+}
+
+/// `c[k] = v` with a key or value that does real work. The container pointer
+/// and the key sat in scratch locals while the key and the value were emitted,
+/// and those expressions use the same scratch locals, so `xs[1] = ys[2]`
+/// wrote through whatever the nested index left behind.
+#[test]
+fn item_assignment_survives_a_key_or_value_that_does_work() {
+    let src = "from typing import Dict, List\n\
+               \n\
+               def value_is_an_index() -> int:\n\
+               \x20   xs: List[int] = [0, 0, 0]\n\
+               \x20   ys: List[int] = [5, 6, 7]\n\
+               \x20   xs[1] = ys[2]\n\
+               \x20   return xs[1]\n\
+               \n\
+               def key_is_an_index() -> int:\n\
+               \x20   xs: List[int] = [0, 0, 0]\n\
+               \x20   ys: List[int] = [5, 6, 2]\n\
+               \x20   xs[ys[2]] = 9\n\
+               \x20   return xs[2]\n\
+               \n\
+               def dict_keys_from_a_string() -> int:\n\
+               \x20   d: Dict[str, int] = {}\n\
+               \x20   s = \"abab\"\n\
+               \x20   i = 0\n\
+               \x20   while i < len(s):\n\
+               \x20       d[s[i]] = i\n\
+               \x20       i += 1\n\
+               \x20   return len(d) * 10 + d[\"b\"]\n\
+               \n\
+               def dict_key_is_a_method_call() -> int:\n\
+               \x20   d: Dict[str, int] = {}\n\
+               \x20   s = \"ab\"\n\
+               \x20   d[s.upper()] = 4\n\
+               \x20   return d[\"AB\"]\n";
+    assert_eq!(call_i32(src, "value_is_an_index"), 7);
+    assert_eq!(call_i32(src, "key_is_an_index"), 9);
+    assert_eq!(call_i32(src, "dict_keys_from_a_string"), 23);
+    assert_eq!(call_i32(src, "dict_key_is_a_method_call"), 4);
+}
+
+/// `int(s)` parses a string the way CPython does, and raises a catchable
+/// `ValueError` where CPython does. It used to answer the string's *length*
+/// and leave its offset on the stack: `int("12")` was 2, and every argument
+/// after it in a call shifted by one.
+#[test]
+fn int_of_a_string_parses_it() {
+    // (source text, CPython's answer, or None for ValueError)
+    let cases: [(&str, Option<i32>); 20] = [
+        ("12", Some(12)),
+        ("345", Some(345)),
+        ("  42  ", Some(42)),
+        ("-7", Some(-7)),
+        ("+9", Some(9)),
+        ("1_000", Some(1000)),
+        ("0", Some(0)),
+        ("007", Some(7)),
+        ("\\t8\\n", Some(8)),
+        ("", None),
+        ("  ", None),
+        ("abc", None),
+        ("1_", None),
+        ("_1", None),
+        ("1__0", None),
+        ("1.5", None),
+        ("12a", None),
+        ("-", None),
+        ("+ 3", None),
+        ("4 5", None),
+    ];
+    for (text, expected) in cases {
+        let src = format!(
+            "def f() -> int:\n\
+             \x20   s = \"{text}\"\n\
+             \x20   try:\n\
+             \x20       return int(s)\n\
+             \x20   except ValueError:\n\
+             \x20       return -999\n"
+        );
+        assert_eq!(
+            call_i32(&src, "f"),
+            expected.unwrap_or(-999),
+            "int({text:?})"
+        );
+    }
+
+    // The result composes: before, the stranded offset shifted the call.
+    let composed = "class Num:\n\
+                    \x20   def __init__(self, v: int):\n\
+                    \x20       self.v = v\n\
+                    \n\
+                    def f() -> int:\n\
+                    \x20   return Num(int(\"12\")).v + int(\"30\")\n";
+    assert_eq!(call_i32(composed, "f"), 42);
+
+    // The ValueError propagates out of a call, so its callers check for it.
+    let propagated = "def parse(s: str) -> int:\n\
+                      \x20   return int(s)\n\
+                      \n\
+                      def f() -> int:\n\
+                      \x20   try:\n\
+                      \x20       return parse(\"x\")\n\
+                      \x20   except ValueError:\n\
+                      \x20       return 1\n";
+    assert_eq!(call_i32(propagated, "f"), 1);
+}
+
+/// What `int()` and `float()` cannot do honestly is refused: `float()` of a
+/// string needs correctly rounded parsing (it converted the string's length
+/// before), and `int()` of a collection or instance is a TypeError in CPython
+/// (it passed the pointer through as a number).
+#[test]
+fn conversions_that_cannot_be_made_good_on_are_refused() {
+    let float_of_str = "def f() -> float:\n\
+                        \x20   return float(\"2.5\")\n";
+    let err = try_compile(float_of_str).expect_err("float() of a string must be refused");
+    assert!(err.contains("float() of a string"), "got: {err}");
+
+    let int_of_list = "from typing import List\n\
+                       \n\
+                       def f() -> int:\n\
+                       \x20   xs: List[int] = [1]\n\
+                       \x20   return int(xs)\n";
+    let err = try_compile(int_of_list).expect_err("int() of a list must be refused");
+    assert!(err.contains("TypeError"), "got: {err}");
+}
+
+// ---------------------------------------------------------------------------
+// Program five: arithmetic, augmented assignment, fields, and fresh objects
+// ---------------------------------------------------------------------------
+
+/// Python's `//` and `%` floor; WebAssembly's `div_s` and `rem_s` truncate
+/// toward zero. The two agree when the operands share a sign and differ by one
+/// step when they do not, so every program with a negative operand got a
+/// different number. The 0.15.0 arithmetic sweep checked division by zero and
+/// never a negative operand.
+#[test]
+fn floor_division_and_modulo_follow_python() {
+    let src = "def f(a: int, b: int) -> int:\n\
+               \x20   return (a // b) * 1000 + (a % b)\n";
+    // (a, b, CPython's a // b, CPython's a % b)
+    for (a, b, q, r) in [
+        (-7, 2, -4, 1),
+        (7, -2, -4, -1),
+        (-7, -2, 3, -1),
+        (7, 2, 3, 1),
+        (-7, 3, -3, 2),
+        (7, -3, -3, -2),
+        (-6, 3, -2, 0),
+    ] {
+        assert_eq!(
+            harness::call_i32_2(src, "f", a, b),
+            q * 1000 + r,
+            "{a} // {b} and {a} % {b}"
+        );
+    }
+}
+
+/// `x op= v` is `x = x op v` and shares its codegen. It carried a separate
+/// copy of the arithmetic, which was wrong in its own ways: string `+=` added a
+/// length to an offset, `/=` divided as integers, float `%=` subtracted the
+/// wrong way round. A list `+=` extends in place, as Python's does, so another
+/// name for the same list sees it.
+#[test]
+fn augmented_assignment_matches_the_plain_form() {
+    let src = "from typing import List\n\
+               \n\
+               def string_plus() -> int:\n\
+               \x20   line = \"\"\n\
+               \x20   for ch in \"abc\":\n\
+               \x20       line += ch\n\
+               \x20   line += \"!\"\n\
+               \x20   return len(line)\n\
+               \n\
+               def float_div() -> float:\n\
+               \x20   x = 7.0\n\
+               \x20   x /= 2\n\
+               \x20   return x\n\
+               \n\
+               def float_mod() -> float:\n\
+               \x20   x = -7.5\n\
+               \x20   x %= 2.0\n\
+               \x20   return x\n\
+               \n\
+               def int_floor_mod() -> int:\n\
+               \x20   x = -7\n\
+               \x20   x %= 3\n\
+               \x20   y = -7\n\
+               \x20   y //= 2\n\
+               \x20   return x * 10 + y\n\
+               \n\
+               def list_extends_in_place() -> int:\n\
+               \x20   xs: List[int] = [1]\n\
+               \x20   ys = xs\n\
+               \x20   xs += [2, 3]\n\
+               \x20   return len(ys)\n";
+    assert_eq!(call_i32(src, "string_plus"), 4);
+    assert_eq!(call_f64(src, "float_div"), 3.5);
+    assert_eq!(call_f64(src, "float_mod"), 0.5);
+    // -7 % 3 is 2 and -7 // 2 is -4.
+    assert_eq!(call_i32(src, "int_floor_mod"), 16);
+    assert_eq!(call_i32(src, "list_extends_in_place"), 3);
+
+    // An int local cannot become a float mid-function, so `/=` on one is
+    // refused rather than truncated back into its slot.
+    let int_div = "def f() -> int:\n\
+                   \x20   x = 7\n\
+                   \x20   x /= 2\n\
+                   \x20   return x\n";
+    let err = try_compile(int_div).expect_err("'/=' on an int local must be refused");
+    assert!(err.contains("makes 'x' a float"), "got: {err}");
+}
+
+/// The same for fields. The field version also held the object pointer in a
+/// scratch local while the value was emitted, and did nothing at all for a
+/// field the class does not have.
+#[test]
+fn augmented_assignment_to_a_field() {
+    let src = "from typing import List\n\
+               \n\
+               class C:\n\
+               \x20   def __init__(self):\n\
+               \x20       self.n = -7\n\
+               \x20       self.t = 0.5\n\
+               \x20       self.s = \"\"\n\
+               \x20       self.xs = [1]\n\
+               \n\
+               def modulo() -> int:\n\
+               \x20   c = C()\n\
+               \x20   c.n %= 3\n\
+               \x20   return c.n\n\
+               \n\
+               def float_plus() -> float:\n\
+               \x20   c = C()\n\
+               \x20   c.t += 1\n\
+               \x20   return c.t\n\
+               \n\
+               def string_plus() -> int:\n\
+               \x20   c = C()\n\
+               \x20   c.s += \"ab\"\n\
+               \x20   c.s += \"c\"\n\
+               \x20   return len(c.s)\n\
+               \n\
+               def list_in_place() -> int:\n\
+               \x20   c = C()\n\
+               \x20   ys = c.xs\n\
+               \x20   c.xs += [2, 3]\n\
+               \x20   return len(ys)\n\
+               \n\
+               def value_does_work() -> int:\n\
+               \x20   c = C()\n\
+               \x20   zs = [10, 20, 30]\n\
+               \x20   c.n += zs[2]\n\
+               \x20   return c.n\n";
+    assert_eq!(call_i32(src, "modulo"), 2);
+    assert_eq!(call_f64(src, "float_plus"), 1.5);
+    assert_eq!(call_i32(src, "string_plus"), 3);
+    assert_eq!(call_i32(src, "list_in_place"), 3);
+    assert_eq!(call_i32(src, "value_does_work"), 23);
+
+    let missing = "class C:\n\
+                   \x20   def __init__(self):\n\
+                   \x20       self.n = 0\n\
+                   \n\
+                   def f() -> int:\n\
+                   \x20   c = C()\n\
+                   \x20   c.nope += 1\n\
+                   \x20   return 0\n";
+    let err = try_compile(missing).expect_err("a missing field must be refused");
+    assert!(err.contains("'C' has no attribute 'nope'"), "got: {err}");
+}
+
+/// A string field started from a literal (`self.s = ""`) was typed as nothing
+/// in particular, so every read of it lost its length: `c.s = "abc";
+/// len(c.s)` answered 6513249, the bytes "abc" read as an integer. Only fields
+/// set from an annotated parameter came out right. A write to a field the
+/// class never declares used to vanish; it is refused now.
+#[test]
+fn string_fields_keep_their_type_and_unknown_fields_are_refused() {
+    let src = "class C:\n\
+               \x20   def __init__(self):\n\
+               \x20       self.s = \"\"\n\
+               \x20   def add(self, t: str):\n\
+               \x20       self.s = self.s + t\n\
+               \n\
+               def assigned() -> int:\n\
+               \x20   c = C()\n\
+               \x20   c.s = \"abc\"\n\
+               \x20   return len(c.s)\n\
+               \n\
+               def grown_in_a_method() -> int:\n\
+               \x20   c = C()\n\
+               \x20   c.add(\"ab\")\n\
+               \x20   c.add(\"c\")\n\
+               \x20   return len(c.s)\n";
+    assert_eq!(call_i32(src, "assigned"), 3);
+    assert_eq!(call_i32(src, "grown_in_a_method"), 3);
+
+    let undeclared = "class C:\n\
+                      \x20   def __init__(self):\n\
+                      \x20       self.n = 0\n\
+                      \n\
+                      def f() -> int:\n\
+                      \x20   c = C()\n\
+                      \x20   c.other = 1\n\
+                      \x20   return c.n\n";
+    let err = try_compile(undeclared).expect_err("a write to an undeclared field must be refused");
+    assert!(err.contains("no attribute 'other' to assign"), "got: {err}");
+}
+
+/// Every evaluation of a literal is a new object. A literal built into one
+/// compile-time region per site, so a function called twice returned the same
+/// list both times, the second call reset the first result, a literal whose
+/// element recursed into its own function had its earlier elements
+/// overwritten, and a recursive loop over `range()` shared one range object
+/// between activations.
+#[test]
+fn every_evaluation_of_a_literal_is_a_new_object() {
+    let src = "from typing import List\n\
+               \n\
+               def make(n: int) -> List[int]:\n\
+               \x20   xs: List[int] = []\n\
+               \x20   xs.append(n)\n\
+               \x20   return xs\n\
+               \n\
+               def pair() -> List[int]:\n\
+               \x20   return [7, 8]\n\
+               \n\
+               def depth(n: int) -> int:\n\
+               \x20   if n == 0:\n\
+               \x20       return 0\n\
+               \x20   return len(nest(n - 1))\n\
+               \n\
+               def nest(n: int) -> List[int]:\n\
+               \x20   return [n, depth(n), n + 5]\n\
+               \n\
+               def walk(n: int) -> int:\n\
+               \x20   total = 0\n\
+               \x20   for i in range(n):\n\
+               \x20       total += 1 + walk(i)\n\
+               \x20   return total\n\
+               \n\
+               def two_calls() -> int:\n\
+               \x20   a = make(1)\n\
+               \x20   b = make(2)\n\
+               \x20   b.append(3)\n\
+               \x20   return len(a) * 10 + a[0]\n\
+               \n\
+               def two_literal_results() -> int:\n\
+               \x20   p = pair()\n\
+               \x20   q = pair()\n\
+               \x20   q.append(9)\n\
+               \x20   return len(p)\n\
+               \n\
+               def recursion_mid_build() -> int:\n\
+               \x20   r = nest(2)\n\
+               \x20   return r[0] * 100 + r[1] * 10 + r[2]\n\
+               \n\
+               def recursion_over_range() -> int:\n\
+               \x20   return walk(4)\n";
+    assert_eq!(call_i32(src, "two_calls"), 11);
+    assert_eq!(call_i32(src, "two_literal_results"), 2);
+    assert_eq!(call_i32(src, "recursion_mid_build"), 237);
+    assert_eq!(call_i32(src, "recursion_over_range"), 15);
+
+    // A dict literal's first pair used to be evaluated twice, once to learn its
+    // types, so `{c.bump(): c.bump()}` bumped four times.
+    let side_effects = "class C:\n\
+                        \x20   def __init__(self):\n\
+                        \x20       self.n = 0\n\
+                        \x20   def bump(self) -> int:\n\
+                        \x20       self.n += 1\n\
+                        \x20       return self.n\n\
+                        \n\
+                        def f() -> int:\n\
+                        \x20   c = C()\n\
+                        \x20   d = {c.bump(): c.bump()}\n\
+                        \x20   return c.n\n";
+    assert_eq!(call_i32(side_effects, "f"), 2);
+}
+
+/// `for row in board` over a list of lists binds each row as a list, so
+/// `sum(row)` walks it. The loop variable used to be typed only for string
+/// elements, and `sum()` of an untyped value answered the value itself, which
+/// here was the row's pointer. Anything `sum()` cannot walk is refused now.
+#[test]
+fn a_list_of_lists_binds_typed_rows_and_sum_refuses_what_it_cannot_walk() {
+    let src = "from typing import List\n\
+               \n\
+               def population(board: List[List[int]]) -> int:\n\
+               \x20   total = 0\n\
+               \x20   for row in board:\n\
+               \x20       total += sum(row)\n\
+               \x20   return total\n\
+               \n\
+               def f() -> int:\n\
+               \x20   return population([[1, 0, 1], [1, 1, 0]])\n";
+    assert_eq!(call_i32(src, "f"), 4);
+
+    let set_sum = "from typing import Set\n\
+                   \n\
+                   def f() -> int:\n\
+                   \x20   s: Set[int] = {1, 2}\n\
+                   \x20   return sum(s)\n";
+    let err = try_compile(set_sum).expect_err("sum() of a set must be refused");
+    assert!(err.contains("sum() of a value of type"), "got: {err}");
+}
+
+/// `a or b or c` is one operation over three operands in Python's AST, and only
+/// two used to be accepted. It folds left, which keeps both the value and the
+/// short-circuit order.
+#[test]
+fn boolean_chains_of_any_length() {
+    let src = "def f(a: int, b: int, c: int) -> int:\n\
+               \x20   if a or b or c:\n\
+               \x20       x = 1\n\
+               \x20   else:\n\
+               \x20       x = 0\n\
+               \x20   if a and b and c:\n\
+               \x20       y = 1\n\
+               \x20   else:\n\
+               \x20       y = 0\n\
+               \x20   return x * 10 + y\n";
+    let three = |a, b, c| {
+        harness::call_untyped_i32(
+            src,
+            "f",
+            &[
+                wasmi::Value::I32(a),
+                wasmi::Value::I32(b),
+                wasmi::Value::I32(c),
+            ],
+        )
+    };
+    assert_eq!(three(0, 0, 1), 10);
+    assert_eq!(three(0, 0, 0), 0);
+    assert_eq!(three(1, 1, 1), 11);
+    assert_eq!(three(1, 1, 0), 10);
+}
+
+/// Operators that are TypeErrors in CPython pushed a 0 over their operands and
+/// reported success.
+#[test]
+fn operators_cpython_rejects_are_refused() {
+    let float_bits = "def f() -> float:\n\
+                      \x20   a = 1.5\n\
+                      \x20   return a | 2.0\n";
+    let err = try_compile(float_bits).expect_err("'|' on a float must be refused");
+    assert!(
+        err.contains("unsupported operand type(s) for |"),
+        "got: {err}"
+    );
+
+    let matmul = "def f() -> int:\n\
+                  \x20   a = 2\n\
+                  \x20   return a @ 3\n";
+    let err = try_compile(matmul).expect_err("'@' on ints must be refused");
+    assert!(err.contains("for @"), "got: {err}");
+}
+
+// ---------------------------------------------------------------------------
+// Values compare by what they hold (collections, strings, dict keys)
+// ---------------------------------------------------------------------------
+
+/// Tuples and lists compare by value with `==`, `!=`, and the orderings, as
+/// CPython's do: element by element, stopping at the first difference, with a
+/// shorter sequence ordering first when one is a prefix of the other. Every
+/// operator compared the two pointers, so `(a, 2) == (1, 2)` was False and
+/// `(1, 2) < (1, 3)` answered by allocation order.
+#[test]
+fn tuples_and_lists_compare_by_value() {
+    // (expression, CPython's answer)
+    let cases: [(&str, i32); 16] = [
+        ("(a, 2) == (1, 2)", 1),
+        ("(a, 2) != (1, 3)", 1),
+        ("(s, 1) == (\"x\", 1)", 1),
+        ("(1.5, 2.0) == (1.5, 2.0)", 1),
+        ("((1, 2), (3, 4)) == ((1, 2), (3, 4))", 1),
+        ("[1, 2] == [1, 2]", 1),
+        ("[1, 2] == [1, 2, 3]", 0),
+        ("[s, \"r\"] == [\"x\", \"r\"]", 1),
+        ("[1, 2] == (1, 2)", 0),
+        ("(1, 2) < (1, 3)", 1),
+        ("(2, 0) > (1, 9)", 1),
+        ("(1, 2) <= (1, 2)", 1),
+        ("(\"a\", 2) < (\"b\", 1)", 1),
+        ("[1, 2] < [1, 2, 0]", 1),
+        ("[3] > [2, 9]", 1),
+        ("[1, 2] >= [1, 3]", 0),
+    ];
+    for (expr, expected) in cases {
+        let src = format!(
+            "def f() -> int:\n\
+             \x20   a = 1\n\
+             \x20   s = \"x\"\n\
+             \x20   if {expr}:\n\
+             \x20       return 1\n\
+             \x20   return 0\n"
+        );
+        assert_eq!(call_i32(&src, "f"), expected, "{expr}");
+    }
+}
+
+/// Strings order byte-wise, which for UTF-8 is code-point order, CPython's
+/// order for `str`. Every ordering, and `is`, answered False whatever the
+/// strings were.
+#[test]
+fn strings_order_and_compare_identity() {
+    let cases: [(&str, i32); 6] = [
+        ("a < b", 1),
+        ("a > b", 0),
+        ("a <= a", 1),
+        ("b >= a", 1),
+        ("\"ab\" < \"abc\"", 1),
+        ("a is a", 1),
+    ];
+    for (expr, expected) in cases {
+        let src = format!(
+            "def f() -> int:\n\
+             \x20   a = \"apple\"\n\
+             \x20   b = \"banana\"\n\
+             \x20   if {expr}:\n\
+             \x20       return 1\n\
+             \x20   return 0\n"
+        );
+        assert_eq!(call_i32(&src, "f"), expected, "{expr}");
+    }
+}
+
+/// Everything built on `==` follows it: `in` over a list, `index`, `count`,
+/// set membership and de-duplication, and dict keys. A set hashes a string by
+/// its bytes and a tuple by its members, so equal values land in the same
+/// bucket; a string used to hash by its offset, so one built at runtime missed
+/// an equal member already in the set.
+#[test]
+fn containers_find_equal_values() {
+    let src = "from typing import Dict, List, Set, Tuple\n\
+               \n\
+               def tuple_in_set() -> int:\n\
+               \x20   s: Set[Tuple[int, int]] = {(1, 2)}\n\
+               \x20   a = 1\n\
+               \x20   return int((a, 2) in s)\n\
+               \n\
+               def tuple_set_dedup() -> int:\n\
+               \x20   s: Set[Tuple[int, int]] = set()\n\
+               \x20   s.add((1, 2))\n\
+               \x20   s.add((1, 2))\n\
+               \x20   s.add((2, 1))\n\
+               \x20   return len(s)\n\
+               \n\
+               def tuple_in_list() -> int:\n\
+               \x20   xs: List[Tuple[int, int]] = [(1, 2), (3, 4)]\n\
+               \x20   return int((3, 4) in xs) * 100 + xs.index((3, 4)) * 10 + xs.count((1, 2))\n\
+               \n\
+               def tuple_dict_key() -> int:\n\
+               \x20   d: Dict[Tuple[int, int], int] = {}\n\
+               \x20   d[(1, 2)] = 5\n\
+               \x20   d[(1, 2)] = 6\n\
+               \x20   a = 1\n\
+               \x20   return len(d) * 100 + d[(1, 2)] * 10 + d.get((a, 2), 0) // 6\n\
+               \n\
+               def runtime_string_in_set() -> int:\n\
+               \x20   s: Set[str] = {\"ab\", \"cd\"}\n\
+               \x20   x = \"a\" + \"b\"\n\
+               \x20   t: Set[str] = set()\n\
+               \x20   t.add(\"a\" + \"b\")\n\
+               \x20   t.add(\"ab\")\n\
+               \x20   return int(x in s) * 10 + len(t)\n";
+    assert_eq!(call_i32(src, "tuple_in_set"), 1);
+    assert_eq!(call_i32(src, "tuple_set_dedup"), 2);
+    assert_eq!(call_i32(src, "tuple_in_list"), 111);
+    assert_eq!(call_i32(src, "tuple_dict_key"), 161);
+    assert_eq!(call_i32(src, "runtime_string_in_set"), 11);
+
+    // A list cannot be a set member or a dict key: unhashable in CPython.
+    let unhashable = "from typing import Dict, List\n\
+                      \n\
+                      def f() -> int:\n\
+                      \x20   d: Dict[List[int], int] = {}\n\
+                      \x20   d[[1]] = 2\n\
+                      \x20   return len(d)\n";
+    let err = try_compile(unhashable).expect_err("a list dict key must be refused");
+    assert!(err.contains("unhashable type: 'list'"), "got: {err}");
+}
+
+/// A tuple subscript is an index whose value is a tuple. It was taken for a
+/// slice, so `d[(1, 2)]` sliced the dict and answered its pointer, and
+/// `xs[(1, 2)]` on a list returned `xs[1:2]`.
+#[test]
+fn a_tuple_subscript_is_an_index_not_a_slice() {
+    let src = "from typing import Dict, Tuple\n\
+               \n\
+               def f() -> int:\n\
+               \x20   d: Dict[Tuple[int, int], int] = {(1, 2): 5}\n\
+               \x20   return d[(1, 2)] + d[1, 2]\n";
+    assert_eq!(call_i32(src, "f"), 10);
+}
+
+/// `"b" in d.keys()` held the searched value in a scratch local while the
+/// container was emitted, and the method call overwrote it.
+#[test]
+fn an_in_test_survives_a_container_that_does_work() {
+    let src = "from typing import Dict, List\n\
+               \n\
+               def f() -> int:\n\
+               \x20   d: Dict[str, int] = {\"a\": 1, \"b\": 2}\n\
+               \x20   rows: List[List[int]] = [[1, 2], [3, 4]]\n\
+               \x20   x = 3\n\
+               \x20   return int(\"b\" in d.keys()) * 10 + int(x in rows[1])\n";
+    assert_eq!(call_i32(src, "f"), 11);
+}
+
+// ---------------------------------------------------------------------------
+// Tuple unpacking
+// ---------------------------------------------------------------------------
+
+/// Unpacked targets take their members' types. They were untyped, so a float
+/// member bound as its low 32 bits, and a target could not be compared or
+/// used as what it was. A value of the wrong length raises ValueError, which
+/// it silently ignored before.
+#[test]
+fn unpacking_types_its_targets_and_checks_the_length() {
+    let src = "from typing import List, Tuple\n\
+               \n\
+               def floats() -> float:\n\
+               \x20   a, b = (1.5, 2.5)\n\
+               \x20   return a + b\n\
+               \n\
+               def from_a_queue() -> int:\n\
+               \x20   q: List[Tuple[int, int]] = [(1, 2)]\n\
+               \x20   r, c = q.pop(0)\n\
+               \x20   return int((r, c) == (1, 2))\n\
+               \n\
+               def too_many() -> int:\n\
+               \x20   xs: List[int] = [1, 2, 3]\n\
+               \x20   try:\n\
+               \x20       x, y = xs\n\
+               \x20       return 0\n\
+               \x20   except ValueError:\n\
+               \x20       return 1\n\
+               \n\
+               def too_few_around_a_star() -> int:\n\
+               \x20   xs: List[int] = [1]\n\
+               \x20   try:\n\
+               \x20       a, *b, c = xs\n\
+               \x20       return 0\n\
+               \x20   except ValueError:\n\
+               \x20       return 1\n";
+    assert_eq!(call_f64(src, "floats"), 4.0);
+    assert_eq!(call_i32(src, "from_a_queue"), 1);
+    assert_eq!(call_i32(src, "too_many"), 1);
+    assert_eq!(call_i32(src, "too_few_around_a_star"), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Module and class definitions are one object each
+// ---------------------------------------------------------------------------
+
+/// A module-level definition that is not a plain constant is evaluated once,
+/// at instantiation, and every function shares it. Every read used to inline
+/// the initializer, so each read was a new object: a mutation was lost the
+/// moment it was made, an instance was new wherever it was named, and an
+/// initializer ran once per mention.
+#[test]
+fn module_definitions_are_evaluated_once_and_shared() {
+    let src = "from typing import Dict, List\n\
+               \n\
+               class Counter:\n\
+               \x20   def __init__(self):\n\
+               \x20       self.n = 0\n\
+               \x20   def tick(self) -> int:\n\
+               \x20       self.n += 1\n\
+               \x20       return self.n\n\
+               \n\
+               G = [1]\n\
+               D: Dict[int, int] = {}\n\
+               C = Counter()\n\
+               TRACK = Counter()\n\
+               \n\
+               def make() -> List[int]:\n\
+               \x20   TRACK.tick()\n\
+               \x20   return [1, 2, 3]\n\
+               \n\
+               DATA = make()\n\
+               B = len(G)\n\
+               \n\
+               def grow(xs: List[int]):\n\
+               \x20   xs.append(5)\n\
+               \n\
+               def mutated() -> int:\n\
+               \x20   G.append(2)\n\
+               \x20   grow(G)\n\
+               \x20   G[0] = 9\n\
+               \x20   return len(G) * 100 + G[0] * 10 + G[2]\n\
+               \n\
+               def dict_shared() -> int:\n\
+               \x20   D[1] = 10\n\
+               \x20   D[2] = 20\n\
+               \x20   return len(D) * 100 + D[2]\n\
+               \n\
+               def instance_shared() -> int:\n\
+               \x20   C.tick()\n\
+               \x20   C.tick()\n\
+               \x20   return C.tick()\n\
+               \n\
+               def initializer_ran_once() -> int:\n\
+               \x20   return len(DATA) + len(DATA) + TRACK.n\n\
+               \n\
+               def evaluated_in_order() -> int:\n\
+               \x20   return B\n";
+    assert_eq!(call_i32(src, "mutated"), 395);
+    assert_eq!(call_i32(src, "dict_shared"), 220);
+    assert_eq!(call_i32(src, "instance_shared"), 3);
+    assert_eq!(call_i32(src, "initializer_ran_once"), 7);
+    // B = len(G) is taken at import, before `mutated()` could append.
+    assert_eq!(call_i32(src, "evaluated_in_order"), 1);
+
+    let forward = "B = len(A)\n\
+                   A = [1, 2]\n\
+                   \n\
+                   def f() -> int:\n\
+                   \x20   return B\n";
+    let err = try_compile(forward).expect_err("a forward reference must be refused");
+    assert!(
+        err.contains("'A' is used before it is defined"),
+        "got: {err}"
+    );
+}
+
+/// A class-level variable is shared by the class the same way.
+#[test]
+fn class_variables_are_one_object() {
+    let src = "class C:\n\
+               \x20   items = []\n\
+               \x20   LIMIT = 10\n\
+               \x20   def add(self, v: int):\n\
+               \x20       C.items.append(v)\n\
+               \n\
+               def f() -> int:\n\
+               \x20   a = C()\n\
+               \x20   b = C()\n\
+               \x20   a.add(1)\n\
+               \x20   b.add(2)\n\
+               \x20   return len(C.items) * 100 + C.LIMIT\n";
+    assert_eq!(call_i32(src, "f"), 210);
+}
+
+// ---------------------------------------------------------------------------
+// Program six: annotated fields, augmented assignment through anything,
+// round() and abs()
+// ---------------------------------------------------------------------------
+
+/// `self.items: Dict[str, Item] = {}` declares the field's type, which wins
+/// over anything inferred from its values. It was refused ("Only variable
+/// assignment supported"), which is how typed Python annotates a collection
+/// field.
+#[test]
+fn annotated_fields_take_their_annotation() {
+    let src = "from typing import Dict, List\n\
+               \n\
+               class Item:\n\
+               \x20   def __init__(self, qty: int):\n\
+               \x20       self.qty = qty\n\
+               \n\
+               class Store:\n\
+               \x20   def __init__(self):\n\
+               \x20       self.items: Dict[str, Item] = {}\n\
+               \x20       self.log: List[str] = []\n\
+               \x20   def put(self, sku: str, qty: int):\n\
+               \x20       self.items[sku] = Item(qty)\n\
+               \x20       self.log.append(sku)\n\
+               \n\
+               def f() -> int:\n\
+               \x20   s = Store()\n\
+               \x20   s.put(\"a\", 3)\n\
+               \x20   s.put(\"b\", 4)\n\
+               \x20   return s.items[\"b\"].qty * 100 + len(s.log) * 10 + len(s.log[1])\n";
+    assert_eq!(call_i32(src, "f"), 421);
+}
+
+/// Augmented assignment through a subscript (`counts[w] += 1`) was refused
+/// outright, and through a computed object (`self.items[k].qty += n`) it
+/// would have evaluated the object twice. Each target is evaluated once now,
+/// as in Python.
+#[test]
+fn augmented_assignment_through_subscripts_and_computed_objects() {
+    let src = "from typing import Dict, List\n\
+               \n\
+               class It:\n\
+               \x20   def __init__(self):\n\
+               \x20       self.qty = 3\n\
+               \n\
+               def f() -> int:\n\
+               \x20   c: Dict[str, int] = {\"a\": 1}\n\
+               \x20   c[\"a\"] += 1\n\
+               \x20   c[\"b\"] = 5\n\
+               \x20   c[\"b\"] -= 2\n\
+               \x20   xs: List[int] = [1, 2, 3]\n\
+               \x20   i = 0\n\
+               \x20   xs[i + 1] *= 10\n\
+               \x20   d: Dict[str, It] = {\"k\": It()}\n\
+               \x20   d[\"k\"].qty += 4\n\
+               \x20   return c[\"a\"] * 1000 + c[\"b\"] * 100 + xs[1] + d[\"k\"].qty\n";
+    assert_eq!(call_i32(src, "f"), 2327);
+
+    // The object is evaluated once: a call in the target runs one time.
+    let once = "class Box:\n\
+                \x20   def __init__(self):\n\
+                \x20       self.v = 0\n\
+                \n\
+                class Maker:\n\
+                \x20   def __init__(self):\n\
+                \x20       self.calls = 0\n\
+                \x20       self.box = Box()\n\
+                \x20   def get(self) -> Box:\n\
+                \x20       self.calls += 1\n\
+                \x20       return self.box\n\
+                \n\
+                def f() -> int:\n\
+                \x20   m = Maker()\n\
+                \x20   m.get().v += 5\n\
+                \x20   return m.calls * 10 + m.box.v\n";
+    assert_eq!(call_i32(once, "f"), 15);
+}
+
+/// `round()` rounds the exact binary value of a float, halves to even, as
+/// CPython does. The shortcut `floor(x * 10**n + 0.5) / 10**n` disagrees
+/// wherever the product is inexact, which is why 2.675 and 1.005 are here.
+#[test]
+fn round_matches_cpython_exactly() {
+    // (x, ndigits, CPython's round(x, ndigits))
+    let cases: [(&str, i32, f64); 14] = [
+        ("2.675", 2, 2.67),
+        ("1.005", 2, 1.0),
+        ("0.125", 2, 0.12),
+        ("0.375", 2, 0.38),
+        ("2.5", 0, 2.0),
+        ("3.5", 0, 4.0),
+        ("-2.5", 0, -2.0),
+        ("-0.4", 0, -0.0),
+        ("99.99 * 0.95", 2, 94.99),
+        ("1234.5678", 3, 1234.568),
+        ("0.1 + 0.2", 1, 0.3),
+        ("1e20", 2, 1e20),
+        ("-7.25", 1, -7.2),
+        ("123456789.123456789", 5, 123456789.12346),
+    ];
+    for (x, n, expected) in cases {
+        let src = format!(
+            "def f() -> float:\n\
+             \x20   x = {x}\n\
+             \x20   return round(x, {n})\n"
+        );
+        let got = call_f64(&src, "f");
+        assert_eq!(
+            got.to_bits(),
+            expected.to_bits(),
+            "round({x}, {n}) gave {got}"
+        );
+    }
+    for (x, expected) in [
+        ("2.5", 2),
+        ("3.5", 4),
+        ("-2.5", -2),
+        ("2.6", 3),
+        ("-0.4", 0),
+    ] {
+        let src = format!(
+            "def f() -> int:\n\
+             \x20   x = {x}\n\
+             \x20   return round(x)\n"
+        );
+        assert_eq!(call_i32(&src, "f"), expected, "round({x})");
+    }
+    let abs_src = "def f() -> float:\n\
+                   \x20   a = -7\n\
+                   \x20   b = -2.5\n\
+                   \x20   return abs(a) + abs(b)\n";
+    assert_eq!(call_f64(abs_src, "f"), 9.5);
 }

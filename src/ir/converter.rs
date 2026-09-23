@@ -817,6 +817,35 @@ fn synthesize_total_ordering(class_name: &str, methods: &mut Vec<IRFunction>) ->
     Ok(())
 }
 
+/// Leave `expr` as it is when evaluating it twice is harmless (a name, a
+/// constant, or attributes off a name); otherwise bind it to a fresh
+/// temporary and hand back a read of that, so an augmented assignment's read
+/// and write see one evaluation.
+fn bind_once(
+    expr: IRExpr,
+    statements: &mut Vec<IRStatement>,
+    memory_layout: &mut MemoryLayout,
+) -> IRExpr {
+    fn plain(expr: &IRExpr) -> bool {
+        match expr {
+            IRExpr::Variable(_) | IRExpr::Param(_) | IRExpr::Const(_) => true,
+            IRExpr::Attribute { object, .. } => plain(object),
+            _ => false,
+        }
+    }
+    if plain(&expr) {
+        return expr;
+    }
+    memory_layout.comp_var_counter += 1;
+    let name = format!("__aug_{}", memory_layout.comp_var_counter);
+    statements.push(IRStatement::Assign {
+        target: name.clone(),
+        value: expr,
+        var_type: None,
+    });
+    IRExpr::Variable(name)
+}
+
 /// One `name: type [= default]` field of a `@dataclass` body, in source order.
 struct DataclassField {
     name: String,
@@ -968,6 +997,7 @@ fn synthesize_dataclass_methods(
                 object: IRExpr::Variable("self".to_string()),
                 attribute: field.name.clone(),
                 value: IRExpr::Variable(field.name.clone()),
+                annotation: Some(field.ty.clone()),
             });
         }
         methods.push(IRFunction {
@@ -1466,6 +1496,7 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                             object,
                             attribute,
                             value,
+                            annotation: None,
                         });
                     }
                     Expr::Subscript(subscript) => {
@@ -1488,10 +1519,31 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                 }
             }
             Stmt::AnnAssign(ann_assign) => {
+                // `self.items: Dict[str, Item] = {}` annotates a field. The
+                // annotation is exactly the element type the compiler would
+                // otherwise have to infer from what the class puts into the
+                // field, so it is carried along. A bare `self.x: int` with no
+                // value is only an annotation, and does nothing at runtime.
+                if let Expr::Attribute(attr) = &*ann_assign.target {
+                    let annotation = type_annotation_to_ir_type(&ann_assign.annotation)?;
+                    if let Some(value) = &ann_assign.value {
+                        ir_statements.push(IRStatement::AttributeAssign {
+                            object: lower_expr(&attr.value, memory_layout)?,
+                            attribute: attr.attr.to_string(),
+                            value: lower_expr(value, memory_layout)?,
+                            annotation: Some(annotation),
+                        });
+                    }
+                    continue;
+                }
                 // Handle typed assignment like "x: int = 5"
                 let target = match &*ann_assign.target {
                     Expr::Name(name) => name.id.to_string(),
-                    _ => return Err(anyhow!("Only variable assignment supported")),
+                    _ => {
+                        return Err(anyhow!(
+                            "an annotated assignment must target a name or an attribute"
+                        ))
+                    }
                 };
 
                 let var_type = type_annotation_to_ir_type(&ann_assign.annotation)?;
@@ -1545,8 +1597,14 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
 
                         ir_statements.push(IRStatement::AugAssign { target, value, op });
                     }
+                    // `obj.attr op= v` and `c[k] op= v` evaluate `obj`, `c`, and
+                    // `k` once, as Python does. Anything that is not a plain name
+                    // or constant is bound to a fresh temporary first, so the
+                    // read and the write below go through the same object:
+                    // `self.items[sku].qty += n` looks the item up once.
                     Expr::Attribute(attr) => {
                         let object = lower_expr(&attr.value, memory_layout)?;
+                        let object = bind_once(object, &mut ir_statements, memory_layout);
                         let attribute = attr.attr.to_string();
                         let value = lower_expr(&aug_assign.value, memory_layout)?;
 
@@ -1557,7 +1615,32 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                             op,
                         });
                     }
-                    _ => return Err(anyhow!("Unsupported augmented assignment target")),
+                    // `counts[w] += 1` was refused outright.
+                    Expr::Subscript(subscript) if !matches!(&*subscript.slice, Expr::Slice(_)) => {
+                        let container = lower_expr(&subscript.value, memory_layout)?;
+                        let container = bind_once(container, &mut ir_statements, memory_layout);
+                        let index = lower_expr(&subscript.slice, memory_layout)?;
+                        let index = bind_once(index, &mut ir_statements, memory_layout);
+                        let value = lower_expr(&aug_assign.value, memory_layout)?;
+                        ir_statements.push(IRStatement::IndexAssign {
+                            container: container.clone(),
+                            index: index.clone(),
+                            value: IRExpr::BinaryOp {
+                                left: Box::new(IRExpr::Indexing {
+                                    container: Box::new(container),
+                                    index: Box::new(index),
+                                }),
+                                right: Box::new(value),
+                                op,
+                            },
+                        });
+                    }
+                    _ => {
+                        return Err(anyhow!(
+                            "augmented assignment to this target is not supported; it must be a \
+                             name, an attribute, or a subscript"
+                        ))
+                    }
                 }
             }
             Stmt::If(if_stmt) => {
@@ -2523,20 +2606,28 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
             })
         }
         Expr::BoolOp(boolop) => {
-            if boolop.values.len() != 2 {
-                return Err(anyhow!("Only binary boolean operations supported"));
-            }
-
+            // Python parses `a or b or c` as one operation over a list of
+            // operands. It folds left, `(a or b) or c`, which returns the same
+            // value and evaluates the operands in the same order with the same
+            // short-circuiting, so a chain of any length lowers to nested
+            // binary operations. Only two operands used to be accepted.
             let op = match boolop.op {
                 rustpython_parser::ast::BoolOp::And => IRBoolOp::And,
                 rustpython_parser::ast::BoolOp::Or => IRBoolOp::Or,
             };
-
-            Ok(IRExpr::BoolOp {
-                left: Box::new(lower_expr(&boolop.values[0], memory_layout)?),
-                right: Box::new(lower_expr(&boolop.values[1], memory_layout)?),
-                op,
-            })
+            let mut values = boolop.values.iter();
+            let Some(first) = values.next() else {
+                return Err(anyhow!("a boolean operation needs at least one operand"));
+            };
+            let mut folded = lower_expr(first, memory_layout)?;
+            for value in values {
+                folded = IRExpr::BoolOp {
+                    left: Box::new(folded),
+                    right: Box::new(lower_expr(value, memory_layout)?),
+                    op,
+                };
+            }
+            Ok(folded)
         }
         Expr::Constant(c) => {
             match &c.value {
@@ -3165,46 +3256,11 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                 });
             }
 
-            // Check if this is a slice expression (start:end:step)
-            // In rustpython, slices are represented as Tuple expressions with None for missing bounds
-            if let Expr::Tuple(tuple_expr) = &*subscript.slice {
-                if tuple_expr.elts.len() >= 2 {
-                    // This looks like a slice (start:end) or (start:end:step)
-                    let start = if matches!(&tuple_expr.elts[0], Expr::Constant(c) if matches!(c.value, rustpython_parser::ast::Constant::None))
-                    {
-                        None
-                    } else {
-                        Some(Box::new(lower_expr(&tuple_expr.elts[0], memory_layout)?))
-                    };
-
-                    let end = if matches!(&tuple_expr.elts[1], Expr::Constant(c) if matches!(c.value, rustpython_parser::ast::Constant::None))
-                    {
-                        None
-                    } else {
-                        Some(Box::new(lower_expr(&tuple_expr.elts[1], memory_layout)?))
-                    };
-
-                    let step = if tuple_expr.elts.len() >= 3 {
-                        if matches!(&tuple_expr.elts[2], Expr::Constant(c) if matches!(c.value, rustpython_parser::ast::Constant::None))
-                        {
-                            None
-                        } else {
-                            Some(Box::new(lower_expr(&tuple_expr.elts[2], memory_layout)?))
-                        }
-                    } else {
-                        None
-                    };
-
-                    return Ok(IRExpr::Slicing {
-                        container: Box::new(lower_expr(&subscript.value, memory_layout)?),
-                        start,
-                        end,
-                        step,
-                    });
-                }
-            }
-
-            // Otherwise, it's a regular indexing operation
+            // A tuple subscript (`d[(1, 2)]`, or `d[1, 2]`) is an index whose
+            // value is a tuple. It used to be taken for a slice, on the belief
+            // that rustpython spelled `a:b` as a tuple; it does not (that is the
+            // `Expr::Slice` above), so `d[(1, 2)]` sliced the dict and answered
+            // its pointer, and `xs[(1, 2)]` on a list returned `xs[1:2]`.
             Ok(IRExpr::Indexing {
                 container: Box::new(lower_expr(&subscript.value, memory_layout)?),
                 index: Box::new(lower_expr(&subscript.slice, memory_layout)?),

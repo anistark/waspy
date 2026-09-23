@@ -1,5 +1,5 @@
 /// Intermediate Representation (IR) for a module containing multiple functions
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct IRModule {
     pub functions: Vec<IRFunction>,
     pub variables: Vec<IRVariable>, // Module-level variables
@@ -93,6 +93,9 @@ pub enum IRStatement {
         object: IRExpr,
         attribute: String,
         value: IRExpr,
+        /// The annotation of `self.x: T = v`, which fixes the field's type
+        /// ahead of anything inferred from its values.
+        annotation: Option<IRType>,
     },
     AugAssign {
         target: String,
@@ -153,7 +156,7 @@ pub struct IRExceptHandler {
 }
 
 /// Module-level variable
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct IRVariable {
     pub name: String,
     pub value: IRExpr,
@@ -175,7 +178,7 @@ pub struct IRImport {
 }
 
 /// Class definition
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct IRClass {
     pub name: String,
     pub bases: Vec<String>,

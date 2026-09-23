@@ -6,6 +6,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [Unreleased]
+
+Three more end-to-end programs, written as ordinary Python and compiled unchanged, found what follows. Most of it was silent: the compiler reported success and the program answered something CPython does not. The sixth program found no silent defect, which is what the correctness rule is now re-signed on.
+
+### Added
+- `examples/expression_evaluator.py`, the fourth end-to-end program: a tokenizer, a recursive-descent parser, and an AST class hierarchy with `evaluate()` and `show()` overridden per node type. Asserted against CPython input by input, and part of `just verify-runtime` under Node and `wasmtime`
+- `int()` parses a string or bytes value the way CPython does: surrounding whitespace, one sign, digits with single underscores between them. Anything else raises a catchable `ValueError`. A byte at or above 0x80 traps rather than raising, since CPython accepts every Unicode decimal digit
+- `for ch in s` iterates a string, binding each character as a one-character string
+- `a or b or c` and `a and b and c` with any number of operands. Only two used to be accepted
+- `examples/grid_algorithms.py` and `examples/order_ledger.py`, the fifth and sixth end-to-end programs (a Game of Life step applied to its own output with a BFS maze solver over tuple coordinates, and an order ledger with dataclasses in a dict, an exception hierarchy, and rounded money). Both are asserted against CPython and run in `just verify-runtime` under Node and `wasmtime`
+- **Collections compare by value.** `==` and `!=` on two tuples or two lists compare element by element, and `<`, `<=`, `>`, `>=` order them as CPython does (the first unequal element decides; a prefix orders first). `in`, `list.index`, `list.count`, set membership and de-duplication, and dict keys all follow: a tuple works as a set member and as a dict key. Every one of these compared the two pointers, so `(a, 2) == (1, 2)` was False, a set of tuples never found or de-duplicated its members, and a breadth-first search over coordinates never terminated. A list, dict, or set as a set member or dict key is refused, as it is unhashable in CPython; comparing collections whose element types differ, or whose element types are not known, is refused rather than guessed
+- **Strings order**: `<`, `<=`, `>`, `>=` compare byte-wise, which for UTF-8 is code-point order, CPython's order for `str`, and `is` compares identity. All of these answered False whatever the strings were
+- **A module-level definition that is not a plain constant is evaluated once**, in source order, by a start function the module runs at instantiation, and read through a WASM global. Every read used to inline its initializer, so each read was a new object: `G.append(2); len(G)` answered 1, `G[0] = 9` was lost, `C = Counter()` was a new instance wherever it was mentioned, and `X = f()` ran `f` at every mention. Plain constants (`N = 5`, `NAME = "x"`, arithmetic over them) are still inlined. A definition that reads one defined after it is refused, as it is a `NameError` at import in CPython. Class-level variables (`class C: items = []`) are shared the same way
+- **Tuple unpacking types its targets from the value**, so a float member binds as a float (it bound as its low 32 bits), and a string or tuple member can be used as one. A value of the wrong length raises `ValueError`, as it does in CPython; it was ignored, so the targets read past the end
+- `self.items: Dict[str, Item] = {}`, an annotated field, declares the field's type ahead of anything inferred from its values. It was refused
+- Augmented assignment through a subscript (`counts[w] += 1`) and through a computed object (`self.items[sku].qty += n`), each target evaluated once. The subscript form was refused outright
+- `round(x)` and `round(x, ndigits)`, rounding the exact binary value of the float half-to-even as CPython does, so `round(2.675, 2)` is 2.67 and `round(1.005, 2)` is 1.0 rather than the 2.68 and 1.01 the usual `floor(x * 10**n + 0.5)` shortcut gives. The product is computed exactly with Dekker's two-product and the error term consulted only at a tie. `abs()` of an int or a float
+
+### Fixed
+- **Every evaluation of a collection literal is a new object.** A literal was built into one compile-time region per source site, and only one evaluated inside a loop was copied out. A function body runs once per call, so a function called twice returned the same list, dict, set, or tuple both times, and the second call reset the first call's result: `a = make(1); b = make(2); b.append(3)` left `len(a)` at 2 and `a[0]` at 2. A literal whose element called back into its own function had its earlier elements overwritten by the inner call, and a recursive function looping over `range()` shared one range object between activations (`walk(4)` answered 1 where CPython answers 15). Each literal and range is now built straight into its own `__alloc` block
+- **A dict literal evaluates each key and value once.** The first pair was evaluated a second time to learn its types, so `{f(): g()}` called both functions twice
+- **`//` and `%` on integers floor, as Python's do.** They truncated toward zero, which agrees with Python only when the operands share a sign: `-7 // 2` answered -3 (CPython: -4) and `-7 % 3` answered -1 (CPython: 2). Float `//` and `%` were already right
+- **`x op= v` gives the same answer as `x = x op v`.** Augmented assignment carried its own copy of the arithmetic, wrong in several ways: string `+=` added a length to an offset and left `len()` at 0, `/=` divided as integers (3.0 for 7 / 2), float `%=` subtracted the wrong way round, and `%=` and `//=` truncated. It now lowers to the plain form. A list `+=` extends in place, so another name for the same list sees the change
+- **`obj.attr op= v` likewise**, and it no longer holds the object pointer in a scratch local that the value's own code could overwrite, or silently does nothing for a field the class does not have
+- **A single character of a string (`s[i]`) is a real string wherever it goes.** It was a pointer into the middle of the source string, whose length every consumer that received it as one word recovered from the four bytes before it, which were the preceding characters. Passed to a function, stored in a field or a list, or returned, it answered garbage: `len()` of it was 1627389952 in one case, and `len(first("hello"))` was 5
+- **`int("12")` is 12.** A string argument was treated as an int: the call answered the string's length and left its offset on the stack, which shifted every later argument of an enclosing call by one
+- **An item assignment whose key or value does any work stores where it should.** The container pointer and key were held in scratch locals that the key and value expressions also use, so `xs[1] = ys[2]` and `d[s[i]] = 1` wrote through whatever the nested expression left behind
+- **A string field set from a literal keeps its type.** `self.s = ""` was typed as nothing in particular, so every later read of the field lost its length: `c.s = "abc"; len(c.s)` answered 6513249, which is "abc" read as an integer
+- **A tuple subscript is an index.** `d[(1, 2)]` and `d[1, 2]` were taken for a slice, on the belief that the parser spells `a:b` as a tuple, so they sliced the dict and answered its pointer, and `xs[(1, 2)]` on a list returned `xs[1:2]`
+- **An `in` test survives a container that does work.** The searched value was held in a scratch local while the container was emitted, so `"b" in d.keys()` had it overwritten by the method call
+- **A set hashes a string by its contents.** It hashed by offset, so a string built at runtime missed an equal member already in the set
+- **`for row in board` over a list of lists binds each row as a list.** The loop variable was typed only for string elements, so `sum(row)` answered the row's pointer
+
+### Changed
+- **`sum()` of a value it cannot walk as a list or tuple is a compile error.** It used to answer the argument itself, so `sum()` of a set, or of a list whose element type had been lost, returned a pointer as the total
+- **`float()` of a string is a compile error.** It converted the string's length. Producing the double CPython would needs correctly rounded parsing, which a digit loop does not give, so it is refused rather than approximated
+- **`int()` of a collection, instance, or `None` is a compile error**, as it is a `TypeError` in CPython. It passed the pointer through as a number
+- **`x /= y` on an int local or field is a compile error.** Python makes `x` a float, and a local's width is fixed for the whole function, so the result would be truncated back into an integer slot
+- **Assigning a field the class never declares is a compile error.** The write was dropped with nothing said; reading such a field was already refused
+- **`@`, and the bitwise operators on a float, are compile errors**, as they are `TypeError`s in CPython. They pushed a 0 over their operands
+- **A dynamic import is a compile error.** It evaluated the module name and answered 0 as if a module had been loaded
+
 ## [0.17.0](https://github.com/anistark/waspy/releases/tag/v0.17.0) - 2026-09-22
 
 ### Added
