@@ -149,7 +149,9 @@
                     { name: "/ is true division and yields a float, // is floor division (Python 3 semantics)", status: "done", version: "0.16.0" },
                     { name: "Type coercion (int/float)", status: "done", version: "0.1.0" },
                     { name: "Bitwise operations (&, |, ^, <<, >>, ~)", status: "done", version: "0.1.0" },
-                    { name: "Unary operations (-, +, not)", status: "done", version: "0.1.0" }
+                    { name: "Unary operations (-, +, not)", status: "done", version: "0.1.0" },
+                    { name: "Integer // and % floor as Python does (they truncated for mixed-sign operands)", status: "done", version: "upcoming" },
+                    { name: "Augmented assignment shares the plain operators (string +=, /=, float %=, floored %= and //=)", status: "done", version: "upcoming" }
                 ]
             },
             controlFlow: {
@@ -198,7 +200,12 @@
                     { name: "Variable declarations and assignments", status: "done", version: "0.1.0" },
                     { name: "Augmented assignment (+=, -=, *=, etc.)", status: "done", version: "0.1.0" },
                     { name: "Attribute assignment (obj.attr = value)", status: "done", version: "0.1.0" },
-                    { name: "Type inference from usage", status: "done", version: "0.1.0" }
+                    { name: "Type inference from usage", status: "done", version: "0.1.0" },
+                    { name: "Module-level definitions evaluated once at instantiation and shared (start function + globals)", status: "done", version: "upcoming" },
+                    { name: "Class-level variables shared by the class", status: "done", version: "upcoming" },
+                    { name: "Tuple unpacking types its targets; a wrong-length value raises ValueError", status: "done", version: "upcoming" },
+                    { name: "Augmented assignment through subscripts and computed objects, each target evaluated once", status: "done", version: "upcoming" },
+                    { name: "Annotated fields: self.items: Dict[str, Item] = {}", status: "done", version: "upcoming" }
                 ]
             },
             decorators: {
@@ -263,7 +270,10 @@
                     { name: "sub in text searches the string", status: "done", version: "0.16.0" },
                     { name: "F-strings - constant placeholders folded into the literal", status: "done", version: "0.3.0" },
                     { name: "F-strings - dynamic interpolation (every placeholder rendered and concatenated)", status: "done", version: "0.15.0" },
-                    { name: "F-string fixed-point specifier f\"{value:.2f}\" (every other specifier still refused)", status: "done", version: "0.16.0" }
+                    { name: "F-string fixed-point specifier f\"{value:.2f}\" (every other specifier still refused)", status: "done", version: "0.16.0" },
+                    { name: "String ordering (<, <=, >, >=) and identity (is)", status: "done", version: "upcoming" },
+                    { name: "s[i] is a real one-character string wherever it goes", status: "done", version: "upcoming" },
+                    { name: "for ch in s iterates characters", status: "done", version: "upcoming" }
                 ]
             },
             collections: {
@@ -287,7 +297,11 @@
                     { name: "Dict methods .get(key[, default]), .keys(), .values(), .items() - .items() as a value, not only a for iterable", status: "done", version: "0.16.0" },
                     { name: "in searches dicts and tuples as well as lists and sets; anything unsearchable is a compile error", status: "done", version: "0.16.0" },
                     { name: "Truthiness follows Python: an empty list, dict, set, or tuple is False", status: "done", version: "0.16.0" },
-                    { name: "A method the compiler does not implement is a compile error rather than a silent no-op", status: "done", version: "0.16.0" }
+                    { name: "A method the compiler does not implement is a compile error rather than a silent no-op", status: "done", version: "0.16.0" },
+                    { name: "Value equality and ordering for tuples and lists (==, !=, <, <=, >, >=)", status: "done", version: "upcoming" },
+                    { name: "Tuples as set members and dict keys; sets hash strings by content", status: "done", version: "upcoming" },
+                    { name: "Every evaluation of a collection literal is a new object", status: "done", version: "upcoming" },
+                    { name: "A tuple subscript (d[(1, 2)]) is an index, not a slice", status: "done", version: "upcoming" }
                 ]
             },
             classes: {
@@ -324,7 +338,10 @@
                     { name: "print() - argument handling implemented", status: "done", version: "0.7.0" },
                     { name: "min() & max() - multiple arguments (single-iterable form rejected with a hint)", status: "done", version: "0.7.0" },
                     { name: "sum() over lists/tuples with optional start value - real element loop", status: "done", version: "0.14.0" },
-                    { name: "sorted(iterable[, key][, reverse]) - stable, over ints, floats, strings, and tuples (a sequence or key whose type cannot be determined is refused, not guessed)", status: "done", version: "0.16.0" }
+                    { name: "sorted(iterable[, key][, reverse]) - stable, over ints, floats, strings, and tuples (a sequence or key whose type cannot be determined is refused, not guessed)", status: "done", version: "0.16.0" },
+                    { name: "int() parses a string, raising ValueError on bad input", status: "done", version: "upcoming" },
+                    { name: "round(x[, ndigits]) exact, half-to-even, matching CPython", status: "done", version: "upcoming" },
+                    { name: "abs()", status: "done", version: "upcoming" }
                 ]
             },
             runtimeFeatures: {

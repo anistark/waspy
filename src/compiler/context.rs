@@ -18,18 +18,35 @@ pub const CALL_DEPTH_GLOBAL: u32 = 3;
 /// offset emitted anywhere in the compiler.
 pub const SCRATCH_LOCALS: u32 = 48;
 
-/// Locals reserved per function to hold the receiver of a virtual method call
-/// while its arguments are emitted, one per nesting level. Argument emission
-/// runs arbitrary codegen (which uses the scratch run above), so the receiver
-/// cannot live there; and a nested virtual call in an argument must not reuse
-/// the outer call's slot, hence one per level rather than one per function.
-/// A call nested deeper than this is a compile error, not a wrong answer.
-pub const VCALL_LOCALS: u32 = 8;
+/// Locals reserved per function for a value that has to survive the emission of
+/// nested expressions: the receiver of a virtual call while its arguments are
+/// emitted, and the block a collection literal is being built into while its
+/// elements are. Nested emission is arbitrary codegen over the scratch run, so
+/// such a value cannot live there; and a nested user (a literal inside a
+/// literal, a virtual call in an argument) must not reuse the outer one's slot,
+/// hence one per nesting level. Being locals, they are private to each
+/// activation, which is what keeps a recursive call from overwriting them.
+/// Nesting deeper than this is a compile error, not a wrong answer.
+pub const HELD_LOCALS: u32 = 64;
 
-/// Base address of the collection heap. Sits above the string (from 0) and
-/// bytes (from 32768) regions so collection literals never overlap them. (The
-/// 65536..131072 range was once a fixed object-instance region; instances are
-/// now heap-allocated via `__alloc`, so it is simply unused static space.)
+/// The f64 counterpart of [`HELD_LOCALS`], for a float that must survive the
+/// emission of nested expressions (the value an `in` test searches for).
+pub const HELD_F64_LOCALS: u32 = 16;
+
+/// The synthesized function that evaluates module-level definitions once, in
+/// source order, into their globals. See `compile_ir_module`.
+pub const MODULE_INIT_FN: &str = "__module_init";
+
+/// Index of the first WASM global holding a module-level definition; the
+/// globals below it are the runtime's own (allocator, StopIteration, the
+/// pending exception, call depth).
+pub const FIRST_MODULE_GLOBAL: u32 = 4;
+
+/// Where the runtime heap starts: every collection, instance, and runtime
+/// string is an `__alloc` block from here up. Sits above the string (from 0)
+/// and bytes (from 32768) regions so nothing allocated overlaps them. (The
+/// 65536..131072 range was once a fixed object-instance region and later held
+/// compile-time collection templates; both are gone, so it is unused space.)
 pub const COLLECTION_HEAP_BASE: u32 = 131072;
 
 /// Bytes reserved at the start of every collection region for its header: the
@@ -206,11 +223,20 @@ pub struct CompilationContext {
     /// The vtable's own entries (function indices), row-major, so a call site
     /// can ask what a column can reach without the table section.
     pub vtable_entries: Vec<u32>,
-    /// Base index of this function's run of [`VCALL_LOCALS`] receiver slots.
-    pub vcall_local_base: u32,
-    /// How many virtual calls are mid-emission, which picks the receiver slot.
-    /// A `Cell` because expression codegen holds `&CompilationContext`.
-    pub vcall_depth: Cell<u32>,
+    /// Locals an item assignment (`c[k] = v`) holds its container and key in
+    /// while the key and the value are emitted. See `IRStatement::IndexAssign`.
+    pub assign_container_local: u32,
+    pub assign_key_local: u32,
+    pub assign_key_f64_local: u32,
+    /// Base index of this function's run of [`HELD_LOCALS`] slots.
+    pub held_local_base: u32,
+    /// How many held slots are in use, which picks the next one. A `Cell`
+    /// because expression codegen holds `&CompilationContext`.
+    pub held_depth: Cell<u32>,
+    /// Indices of this function's [`HELD_F64_LOCALS`] f64 held slots, and how
+    /// many are in use.
+    pub held_f64_locals: Vec<u32>,
+    pub held_f64_depth: Cell<u32>,
     /// `@functools.singledispatch` tables, keyed by the base function's name:
     /// (registered type, implementation function name) in registration
     /// order. Call codegen picks the arm matching the first argument's static
@@ -219,6 +245,17 @@ pub struct CompilationContext {
     /// File-I/O host import indices; `Some` only when the module uses file
     /// operations (an `open()` call somewhere in its IR).
     pub file_io: Option<FileIoImports>,
+    /// Module-level definitions that live in a WASM global rather than being
+    /// inlined at every read: name -> global index. Every definition that is
+    /// not a plain constant is one, because inlining it made each read a new
+    /// object (`G.append(2); len(G)` answered 1) and re-ran its initializer.
+    pub module_global_index: HashMap<String, u32>,
+    /// The type each module global's initializer produced, recorded while
+    /// `__module_init` is compiled, which happens before any other function.
+    pub module_global_types: HashMap<String, IRType>,
+    /// True while `__module_init` is being compiled: an assignment to a module
+    /// global there stores the global instead of creating a local.
+    pub in_module_init: bool,
     /// Module-level variables, by name -> (declared type, initializer). Read
     /// references to these are inlined by emitting the initializer expression.
     pub module_vars: HashMap<String, (Option<IRType>, IRExpr)>,
@@ -255,11 +292,6 @@ pub struct CompilationContext {
     /// template is rebuilt per iteration. A `Cell` because expression codegen
     /// holds `&CompilationContext`. Reset per function.
     pub comp_depth: Cell<u32>,
-    /// Running high-water mark of the collection heap, in bytes past
-    /// `COLLECTION_HEAP_BASE`. Each literal reserves a fresh region here, so it
-    /// grows monotonically across the whole module. A `Cell` because codegen
-    /// holds `&CompilationContext` while allocating.
-    pub collection_alloc_offset: Cell<u32>,
     /// WASM function index of the runtime bump allocator `__alloc(size) -> ptr`.
     /// Emitted after all user functions/methods, so callers (e.g. string/bytes
     /// concatenation) reference it by this index. Set during module assembly.
@@ -349,11 +381,19 @@ impl CompilationContext {
             vtable_base: 0,
             vtable_stride: 0,
             vtable_entries: Vec::new(),
-            vcall_local_base: 0,
-            vcall_depth: Cell::new(0),
+            assign_container_local: 0,
+            assign_key_local: 0,
+            assign_key_f64_local: 0,
+            held_local_base: 0,
+            held_depth: Cell::new(0),
+            held_f64_locals: Vec::new(),
+            held_f64_depth: Cell::new(0),
             dispatch_tables: HashMap::new(),
             file_io: None,
             module_vars: HashMap::new(),
+            module_global_index: HashMap::new(),
+            module_global_types: HashMap::new(),
+            in_module_init: false,
             temp_local: 0,
             temp_local_f64: 0,
             temp_local_f64_2: 0,
@@ -361,7 +401,6 @@ impl CompilationContext {
             block_depth: 0,
             loop_stack: Vec::new(),
             comp_depth: Cell::new(0),
-            collection_alloc_offset: Cell::new(0),
             alloc_func_index: 0,
             alloc_obj_func_index: 0,
             i32_to_str_func_index: 0,
@@ -470,24 +509,36 @@ impl CompilationContext {
             .copied()
     }
 
-    /// The local holding the receiver of the virtual call currently being
-    /// emitted. `None` once calls nest deeper than [`VCALL_LOCALS`], which the
-    /// caller reports rather than emitting a call that would read the wrong
-    /// receiver.
-    pub fn vcall_local(&self) -> Option<u32> {
-        let depth = self.vcall_depth.get();
-        (depth < VCALL_LOCALS).then(|| self.vcall_local_base + depth)
+    /// Take the next held slot, for a value that must survive nested emission.
+    /// `None` past [`HELD_LOCALS`], which the caller reports. Every `Some` must
+    /// be paired with [`release_held`](Self::release_held) once the nested
+    /// emission is done; the slot's contents stay readable after release, until
+    /// something takes it again.
+    pub fn hold(&self) -> Option<u32> {
+        let depth = self.held_depth.get();
+        if depth >= HELD_LOCALS {
+            return None;
+        }
+        self.held_depth.set(depth + 1);
+        Some(self.held_local_base + depth)
     }
 
-    /// Reserve a fresh, uniquely addressed region of `size` bytes for a
-    /// collection literal and return its compile-time base pointer. Distinct
-    /// (and nested) literals get distinct regions, so they never alias. Sizes
-    /// are rounded up to 8 bytes to keep f64/dict-entry slots aligned.
-    pub fn alloc_collection(&self, size: u32) -> u32 {
-        let aligned = (size + 7) & !7;
-        let offset = self.collection_alloc_offset.get();
-        self.collection_alloc_offset.set(offset + aligned);
-        COLLECTION_HEAP_BASE + offset
+    /// Give back the slot the matching [`hold`](Self::hold) took.
+    pub fn release_held(&self) {
+        self.held_depth.set(self.held_depth.get() - 1);
+    }
+
+    /// [`hold`](Self::hold) for an f64. Pair with
+    /// [`release_held_f64`](Self::release_held_f64).
+    pub fn hold_f64(&self) -> Option<u32> {
+        let depth = self.held_f64_depth.get();
+        let slot = self.held_f64_locals.get(depth as usize).copied()?;
+        self.held_f64_depth.set(depth + 1);
+        Some(slot)
+    }
+
+    pub fn release_held_f64(&self) {
+        self.held_f64_depth.set(self.held_f64_depth.get() - 1);
     }
 
     /// Add a local variable to the context

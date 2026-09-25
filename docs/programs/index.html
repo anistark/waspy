@@ -343,7 +343,7 @@ def checkout() -&gt; float:
                         <span class="tag tag-loud">refused</span>
                         <span class="tag tag-workaround">workaround</span>
                     </div>
-                    <p class="shape-note">A loop, <code>if</code>, <code>try</code>, bare call, augmented assignment, or write through a subscript at module level. A WebAssembly module has no top-level run step, so the statement would be compiled away. <code>X = 1</code>, <code>X = helper()</code>, <code>X = ClassName()</code>, <code>def</code>, <code>class</code>, and imports do work. Move the rest into a function.</p>
+                    <p class="shape-note">A loop, <code>if</code>, <code>try</code>, bare call, augmented assignment, or write through a subscript at module level. A WebAssembly module has no top-level run step, so the statement would be compiled away. <code>X = 1</code>, <code>X = helper()</code>, <code>X = ClassName()</code>, <code>def</code>, <code>class</code>, and imports do work, and a definition that is not a plain constant is evaluated once, at instantiation, so every function shares the same list or instance. Move the rest into a function.</p>
                 </li>
 
                 <li>
@@ -403,6 +403,15 @@ def checkout() -&gt; float:
                         <span class="tag tag-workaround">workaround</span>
                     </div>
                     <p class="shape-note">Decorators are an allowlist: the method kinds, <code>@dataclass</code>, <code>@abstractmethod</code>, <code>@functools.total_ordering</code>, <code>@functools.singledispatch</code> with <code>@f.register</code>, and the caching decorators (accepted, no effect). A user-written decorator, <code>@cached_property</code>, or <code>@singledispatchmethod</code> is refused, since applying it would run code the compiler cannot model. <code>functools.partial</code>, <code>reduce</code>, and <code>cmp_to_key</code> are refused when called. Write the wrapper's work inline, or use <code>@property</code> for a cached one.</p>
+                </li>
+
+                <li>
+                    <div class="shape-head">
+                        <strong>Comparing collections whose element types differ or are unknown</strong>
+                        <span class="tag tag-loud">refused</span>
+                        <span class="tag tag-workaround">workaround</span>
+                    </div>
+                    <p class="shape-note">Tuples and lists compare by value, and a tuple works as a set member or a dict key. Comparing two with different element types (<code>(1, 2) == (1.0, 2)</code>, True in CPython) or with element types the compiler cannot see is refused rather than read at the wrong width, and so is equality between dicts or sets. Annotate the collections (<code>List[Tuple[int, int]]</code>) so both sides are known.</p>
                 </li>
 
                 <li>
