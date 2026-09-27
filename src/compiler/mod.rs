@@ -1,4 +1,5 @@
 mod context;
+mod equality;
 mod expression;
 mod function;
 mod module;

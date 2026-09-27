@@ -701,3 +701,102 @@ fn library_project_strings_match_cpython() {
         "Solaris by Lem: 3 of 4"
     );
 }
+
+// ---------------------------------------------------------------------------
+// examples/expression_evaluator.py
+// ---------------------------------------------------------------------------
+
+/// The fourth end-to-end program: assignments into a dict of variables, a
+/// parse that respects precedence, and integer division, all against the
+/// values CPython prints for the same source.
+#[test]
+fn expression_evaluator_matches_cpython() {
+    let src = read_example("expression_evaluator.py");
+    // x = 6; y = x * 7 = 42; (42 - 2) / 5 + 6 = 14.
+    assert_eq!(call_i32(&src, "program"), 14);
+    // 2 + 12 - 5 = 9, with `/` as floor division on the evaluator's ints.
+    assert_eq!(call_i32(&src, "precedence"), 9);
+    assert_eq!(call_i32(&src, "token_count"), 9);
+    assert_eq!(call_str(&src, "shown"), "(1 + (2 * (x - 3)))");
+}
+
+/// Every malformed input raises the program's own exception, which crosses
+/// several calls and a virtual `evaluate()` before it is caught, and a valid
+/// one does not. Checked input by input: the total alone answered 5 while the
+/// program was broken, because every input raised for the wrong reason.
+#[test]
+fn expression_evaluator_raises_where_cpython_does() {
+    let src = read_example("expression_evaluator.py");
+    assert_eq!(call_i32(&src, "errors"), 5);
+    // (input, CPython's answer, or None for CalcError)
+    let cases: [(&str, Option<i32>); 8] = [
+        ("1 / 0", None),
+        ("q + 1", None),
+        ("(1 + 2", None),
+        ("3 $ 4", None),
+        ("4 +", None),
+        ("1 + 1", Some(2)),
+        ("x = 2", Some(2)),
+        ("10 / 3", Some(3)),
+    ];
+    for (input, expected) in cases {
+        let probe = format!(
+            "{src}\n\n\
+             def one_input() -> int:\n\
+             \x20   try:\n\
+             \x20       return run([\"{input}\"])\n\
+             \x20   except CalcError:\n\
+             \x20       return -999\n"
+        );
+        assert_eq!(
+            call_i32(&probe, "one_input"),
+            expected.unwrap_or(-999),
+            "run([{input:?}])"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// examples/grid_algorithms.py
+// ---------------------------------------------------------------------------
+
+/// The fifth end-to-end program: a Game of Life step applied to its own
+/// output, and a breadth-first search over tuple coordinates. Every value is
+/// what CPython prints for the same source.
+#[test]
+fn grid_algorithms_game_of_life_matches_cpython() {
+    let src = read_example("grid_algorithms.py");
+    assert_eq!(call_i32_1(&src, "glider_population_after", 0), 5);
+    assert_eq!(call_i32_1(&src, "glider_population_after", 4), 5);
+    assert_eq!(
+        call_str(&src, "glider_after_four"),
+        "....../..#.../...#../.###../....../......"
+    );
+    assert_eq!(call_i32(&src, "blinker_period"), 2);
+}
+
+/// The search terminates only if a tuple coordinate equals the goal and is
+/// found in the visited set, both of which compared pointers before.
+#[test]
+fn grid_algorithms_maze_matches_cpython() {
+    let src = read_example("grid_algorithms.py");
+    assert_eq!(call_i32(&src, "maze_distance"), 15);
+    assert_eq!(call_i32(&src, "blocked_maze"), -1);
+}
+
+// ---------------------------------------------------------------------------
+// examples/order_ledger.py
+// ---------------------------------------------------------------------------
+
+/// The sixth end-to-end program, the one the correctness rule was re-signed
+/// on: every value is what CPython prints for the same source.
+#[test]
+fn order_ledger_matches_cpython() {
+    let src = read_example("order_ledger.py");
+    assert_eq!(
+        call_str(&src, "scenario"),
+        "ann: 2 lines, 30.60; bob: 3 lines, 61.99; failed 10 1; stock 25.65"
+    );
+    assert_eq!(call_i32(&src, "remaining_apples"), 30);
+    assert_eq!(call_i32(&src, "loyal_threshold"), 949909000);
+}

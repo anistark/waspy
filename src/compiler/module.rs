@@ -1,5 +1,8 @@
 use crate::compiler::context::FileIoImports;
-use crate::compiler::context::{ClassInfo, CompilationContext, COLLECTION_HEAP_BASE};
+use crate::compiler::context::{
+    ClassInfo, CompilationContext, COLLECTION_HEAP_BASE, EXC_TYPE_GLOBAL, FIRST_MODULE_GLOBAL,
+    MODULE_INIT_FN,
+};
 use crate::compiler::function::{compile_function, resolve_return_type};
 use crate::core::errors::ChakraError;
 use crate::ir::{
@@ -10,8 +13,8 @@ use std::collections::{HashMap, HashSet};
 use wasm_encoder::{
     BlockType, CodeSection, ConstExpr, CustomSection, DataSection, ElementSection, Elements,
     EntityType, ExportSection, Function, FunctionSection, GlobalSection, GlobalType, ImportSection,
-    Instruction, MemorySection, MemoryType, Module, RefType, TableSection, TableType, TypeSection,
-    ValType,
+    Instruction, MemorySection, MemoryType, Module, RefType, StartSection, TableSection, TableType,
+    TypeSection, ValType,
 };
 
 /// Name of the custom section carrying the Python comments of the compiled
@@ -69,6 +72,27 @@ fn infer_field_value_type(
         IRExpr::Const(IRConstant::Float(_)) => IRType::Float,
         IRExpr::Const(IRConstant::Int(_)) => IRType::Int,
         IRExpr::Const(IRConstant::Bool(_)) => IRType::Bool,
+        // A string field started from a literal (`self.name = ""`) was typed
+        // Unknown, so every read of it lost the string's length: `len()` of an
+        // untyped value loads its first word as a collection count, and
+        // `c.s = "abc"; len(c.s)` answered 6513249, which is "abc" read as an
+        // integer. Only fields set from an annotated parameter were right.
+        IRExpr::Const(IRConstant::String(_)) => IRType::String,
+        IRExpr::Const(IRConstant::Bytes(_)) => IRType::Bytes,
+        // Builtins whose result type does not depend on their argument.
+        IRExpr::FunctionCall { function_name, .. }
+            if matches!(
+                function_name.as_str(),
+                "str" | "int" | "len" | "float" | "bool"
+            ) =>
+        {
+            match function_name.as_str() {
+                "str" => IRType::String,
+                "float" => IRType::Float,
+                "bool" => IRType::Bool,
+                _ => IRType::Int,
+            }
+        }
         IRExpr::Variable(name) | IRExpr::Param(name) => {
             params.get(name).cloned().unwrap_or(IRType::Unknown)
         }
@@ -299,6 +323,25 @@ fn scan_raise_and_calls(body: &IRBody, raises: &mut bool, calls: &mut HashSet<St
             // IndexError, exactly as a read does.
             *raises = true;
         }
+        // Unpacking a value of the wrong length raises ValueError, unless the
+        // value is a literal whose length is visibly right.
+        if let IRStatement::TupleUnpack {
+            targets,
+            value,
+            starred,
+        } = stmt
+        {
+            let visibly_right = match value {
+                IRExpr::TupleLiteral(items) | IRExpr::ListLiteral(items) => match starred {
+                    None => items.len() == targets.len(),
+                    Some(_) => items.len() + 1 >= targets.len(),
+                },
+                _ => false,
+            };
+            if !visibly_right {
+                *raises = true;
+            }
+        }
         for expr in statement_exprs(stmt) {
             scan_expr_calls(expr, raises, calls);
         }
@@ -319,6 +362,24 @@ fn scan_expr_calls(expr: &IRExpr, raises: &mut bool, calls: &mut HashSet<String>
             arguments,
         } => {
             calls.insert(function_name.clone());
+            // `int(s)` raises ValueError when `s` is a string that does not
+            // spell an integer. Types are not known yet here, so anything but a
+            // plainly numeric argument counts: an extra check after a call costs
+            // a load and a branch, and a missing one strands the exception.
+            if function_name == "int" {
+                let plainly_numeric = matches!(
+                    arguments.first(),
+                    Some(
+                        IRExpr::Const(
+                            IRConstant::Int(_) | IRConstant::Float(_) | IRConstant::Bool(_)
+                        ) | IRExpr::BinaryOp { .. }
+                            | IRExpr::UnaryOp { .. }
+                    )
+                );
+                if !plainly_numeric {
+                    *raises = true;
+                }
+            }
             for arg in arguments {
                 scan_expr_calls(arg, raises, calls);
             }
@@ -475,6 +536,27 @@ fn nested_bodies(stmt: &IRStatement) -> Vec<&IRBody> {
     }
 }
 
+/// Every `self.x: T = v` in a method body, recursing into nested blocks, with
+/// its annotated type.
+fn collect_annotated_self_fields(body: &IRBody, out: &mut Vec<(String, IRType)>) {
+    for stmt in &body.statements {
+        if let IRStatement::AttributeAssign {
+            object,
+            attribute,
+            annotation: Some(ty),
+            ..
+        } = stmt
+        {
+            if is_self_ref(object) {
+                out.push((attribute.clone(), ty.clone()));
+            }
+        }
+        for nested in nested_bodies(stmt) {
+            collect_annotated_self_fields(nested, out);
+        }
+    }
+}
+
 /// Collect `self.<field> = value` assignments (including augmented ones) from a
 /// method body, recursing into nested blocks, with each field's inferred type.
 fn collect_self_fields(
@@ -489,10 +571,13 @@ fn collect_self_fields(
                 object,
                 attribute,
                 value,
+                annotation,
             } if is_self_ref(object) => {
                 out.push((
                     attribute.clone(),
-                    infer_field_value_type(value, params, classes),
+                    annotation
+                        .clone()
+                        .unwrap_or_else(|| infer_field_value_type(value, params, classes)),
                 ));
             }
             IRStatement::AttributeAugAssign {
@@ -873,10 +958,109 @@ fn module_uses_file_io(ir_module: &IRModule) -> bool {
         || ir_module.variables.iter().any(|v| expr_uses_open(&v.value))
 }
 
-/// Compile an IR module into WebAssembly binary format
+/// Is `expr` a value that is the same every time it is evaluated and cannot
+/// be mutated: a number, bool, string, bytes, or `None` constant, or
+/// arithmetic over those and over other such module definitions? Those are
+/// inlined at each read, as before. Anything else is evaluated once.
+fn is_pure_constant(
+    expr: &IRExpr,
+    vars: &std::collections::HashMap<&str, &IRExpr>,
+    depth: u32,
+) -> bool {
+    if depth > 16 {
+        return false;
+    }
+    match expr {
+        IRExpr::Const(c) => matches!(
+            c,
+            IRConstant::Int(_)
+                | IRConstant::Float(_)
+                | IRConstant::Bool(_)
+                | IRConstant::String(_)
+                | IRConstant::Bytes(_)
+                | IRConstant::None
+        ),
+        IRExpr::UnaryOp { operand, .. } => is_pure_constant(operand, vars, depth + 1),
+        IRExpr::BinaryOp { left, right, .. } => {
+            is_pure_constant(left, vars, depth + 1) && is_pure_constant(right, vars, depth + 1)
+        }
+        IRExpr::Variable(name) => vars
+            .get(name.as_str())
+            .is_some_and(|init| is_pure_constant(init, vars, depth + 1)),
+        _ => false,
+    }
+}
+
+/// Compile an IR module into WebAssembly binary format.
+///
+/// A module-level definition that is not a plain constant (a collection, an
+/// instance, a call, a comprehension) is evaluated once, in source order, by a
+/// synthesized `__module_init` that the module's start function runs, and read
+/// through a WASM global. Every definition used to be inlined at each read,
+/// which made each read a new object: `G.append(2); len(G)` answered 1,
+/// `G[0] = 9; G[0]` answered G's first element, and `C = Counter()` was a fresh
+/// instance wherever it was mentioned. Arbitrary module-level statements stay
+/// refused; this covers definitions, which is what Python runs at import.
 pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, ChakraError> {
+    let vars: std::collections::HashMap<&str, &IRExpr> = ir_module
+        .variables
+        .iter()
+        .map(|v| (v.name.as_str(), &v.value))
+        .collect();
+    // Class variables the same way, under `Class.var`: `class C: items = []`
+    // then `C.items.append(1)` read back an empty list, since every mention of
+    // `C.items` rebuilt it. They come first, because a module definition such
+    // as `C = Counter()` runs class code that may read them.
+    let mut globals: Vec<crate::ir::IRVariable> = Vec::new();
+    for cls in &ir_module.classes {
+        for var in &cls.class_vars {
+            if !is_pure_constant(&var.value, &vars, 0) {
+                globals.push(crate::ir::IRVariable {
+                    name: format!("{}.{}", cls.name, var.name),
+                    value: var.value.clone(),
+                    var_type: var.var_type.clone(),
+                });
+            }
+        }
+    }
+    globals.extend(
+        ir_module
+            .variables
+            .iter()
+            .filter(|v| !is_pure_constant(&v.value, &vars, 0))
+            .cloned(),
+    );
+    if globals.is_empty() {
+        return compile_module(ir_module, &[]);
+    }
+    let names: Vec<String> = globals.iter().map(|v| v.name.clone()).collect();
+    let mut with_init = ir_module.clone();
+    with_init.functions.push(crate::ir::IRFunction {
+        name: MODULE_INIT_FN.to_string(),
+        params: Vec::new(),
+        body: crate::ir::IRBody {
+            statements: globals
+                .iter()
+                .map(|v| IRStatement::Assign {
+                    target: v.name.clone(),
+                    value: v.value.clone(),
+                    var_type: v.var_type.clone(),
+                })
+                .collect(),
+        },
+        return_type: IRType::None,
+        decorators: Vec::new(),
+    });
+    compile_module(&with_init, &names)
+}
+
+fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec<u8>, ChakraError> {
     let mut module = Module::new();
     let mut ctx = CompilationContext::new();
+    for (i, name) in module_globals.iter().enumerate() {
+        ctx.module_global_index
+            .insert(name.clone(), FIRST_MODULE_GLOBAL + i as u32);
+    }
     // String/bytes offsets are resolved during lowering and carried on the IR
     // module; the compiler reuses that layout to emit loads and the data section.
     let memory_layout = ir_module.memory_layout.clone();
@@ -1068,6 +1252,16 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, ChakraError> {
         host_imports.import("waspy_host", "close", EntityType::Function(host1_type));
     }
 
+    // The start function's `() -> ()` type, after every other type so the
+    // existing "defined function i has type i" mapping is untouched.
+    let start_type_index = if module_globals.is_empty() {
+        None
+    } else {
+        let index = types.len();
+        types.ty().function([], []);
+        Some(index)
+    };
+
     module.section(&types);
     // The import section must sit between the type and function sections.
     if uses_file_io {
@@ -1083,6 +1277,9 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, ChakraError> {
     functions.function(total_function_count as u32); // __alloc
     functions.function(total_function_count as u32 + 1); // __alloc_obj
     functions.function(total_function_count as u32 + 2); // __i32_to_str
+    if let Some(start_type) = start_type_index {
+        functions.function(start_type); // the start wrapper
+    }
     module.section(&functions);
 
     // Export section - export both functions and memory
@@ -1099,7 +1296,7 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, ChakraError> {
 
         // Export the function. Lifted lambdas are internal — they are only
         // reachable through the funcref table.
-        if !func.name.starts_with("__lambda_") {
+        if !func.name.starts_with("__lambda_") && func.name != MODULE_INIT_FN {
             exports.export(&func.name, wasm_encoder::ExportKind::Func, func_idx);
         }
         func_idx += 1;
@@ -1210,6 +1407,18 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, ChakraError> {
             )
             .collect();
         let mut field_elements: Vec<(String, IRType)> = Vec::new();
+        // An annotated field (`self.items: Dict[str, Item] = {}`) takes its
+        // annotation, whichever method assigns it first: `add_field` keeps the
+        // first concrete type it sees, and `{}` is already one.
+        for method in &cls.methods {
+            let mut annotated = Vec::new();
+            collect_annotated_self_fields(&method.body, &mut annotated);
+            for (name, ty) in annotated {
+                if !property_names.contains(&name) {
+                    add_field(&mut class_info, &name, ty, &mut current_offset);
+                }
+            }
+        }
         for method in &cls.methods {
             let params: HashMap<String, IRType> = method
                 .params
@@ -1508,7 +1717,28 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, ChakraError> {
     // Code section
     let mut codes = CodeSection::new();
 
+    // `__module_init` is compiled first, whatever its position: it is where
+    // each module global's type is learned, and every other function reads
+    // those globals.
+    let compiled_init = ir_module
+        .functions
+        .iter()
+        .find(|f| f.name == MODULE_INIT_FN)
+        .map(|init| {
+            ctx.in_module_init = true;
+            let return_type = module_return(init);
+            let compiled = compile_function(init, &mut ctx, &memory_layout, &return_type, None);
+            ctx.in_module_init = false;
+            compiled
+        });
+
     for func_ir in &ir_module.functions {
+        if func_ir.name == MODULE_INIT_FN {
+            if let Some(compiled) = &compiled_init {
+                codes.function(compiled);
+            }
+            continue;
+        }
         let return_type = module_return(func_ir);
         let compiled_func = compile_function(func_ir, &mut ctx, &memory_layout, &return_type, None);
         codes.function(&compiled_func);
@@ -1535,13 +1765,31 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, ChakraError> {
     codes.function(&build_alloc_obj_function(ctx.alloc_func_index));
     codes.function(&build_i32_to_str_function(ctx.alloc_func_index));
 
-    // Memory must hold the static data (strings/bytes/object instances) plus
-    // every collection region handed out during codegen. The collection heap
-    // grows from COLLECTION_HEAP_BASE, so size memory to cover its high-water
-    // mark (at least the base region). The runtime bump allocator starts just
-    // past that mark and grows memory on demand.
-    let heap_end = COLLECTION_HEAP_BASE + ctx.collection_alloc_offset.get();
-    let runtime_heap_base = (heap_end + 7) & !7;
+    // The start function: run `__module_init`, and trap if it left an
+    // exception pending, as any exception nothing catches does.
+    let start_function_index = start_type_index.map(|_| {
+        let init_index = ctx
+            .get_function_info(MODULE_INIT_FN)
+            .map(|f| f.index)
+            .unwrap_or_default();
+        let mut start = Function::new([]);
+        start.instruction(&Instruction::Call(init_index));
+        start.instruction(&Instruction::Drop);
+        start.instruction(&Instruction::GlobalGet(EXC_TYPE_GLOBAL));
+        start.instruction(&Instruction::If(BlockType::Empty));
+        start.instruction(&Instruction::Unreachable);
+        start.instruction(&Instruction::End);
+        start.instruction(&Instruction::End);
+        codes.function(&start);
+        import_count + total_function_count as u32 + 3
+    });
+
+    // Memory holds the static data (strings and bytes) below
+    // COLLECTION_HEAP_BASE, and the runtime bump allocator starts there and
+    // grows memory on demand. Collection literals used to be carved out of a
+    // static region above the base at compile time; every one is a runtime
+    // allocation now, so nothing sits between the data and the heap.
+    let runtime_heap_base = COLLECTION_HEAP_BASE;
     let min_pages = (((runtime_heap_base as u64) + 65535) / 65536).max(2);
     let mut memories = MemorySection::new();
     memories.memory(MemoryType {
@@ -1604,6 +1852,28 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, ChakraError> {
         &ConstExpr::i32_const(0),
     );
 
+    // One global per module definition that is evaluated once, in index
+    // order, typed by what its initializer produced in `__module_init` (an f64
+    // for a float, one word for everything else, a string by its offset).
+    for name in module_globals {
+        let val_type = match ctx.module_global_types.get(name) {
+            Some(IRType::Float) => ValType::F64,
+            _ => ValType::I32,
+        };
+        let init = match val_type {
+            ValType::F64 => ConstExpr::f64_const(0.0.into()),
+            _ => ConstExpr::i32_const(0),
+        };
+        globals.global(
+            GlobalType {
+                val_type,
+                mutable: true,
+                shared: false,
+            },
+            &init,
+        );
+    }
+
     // One funcref table carries both indirect-call mechanisms: the closure
     // slots first (slot i holds lifted lambda i), then the vtable rows, so
     // `call_indirect` always names table 0 and a module needing either gets
@@ -1645,6 +1915,10 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, ChakraError> {
     module.section(&memories);
     module.section(&globals);
     module.section(&exports);
+    // Start (8) sits between Export (7) and Element (9).
+    if let Some(function_index) = start_function_index {
+        module.section(&StartSection { function_index });
+    }
     if !table_entries.is_empty() {
         module.section(&elements);
     }

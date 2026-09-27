@@ -22,16 +22,18 @@ Waspy is a **single linear compiler pipeline**. Every public entry point in `src
 
 ```
 [Python source code]
-        ↓   core/parser.rs        — rustpython-parser → Python AST
+        ↓   core/parser.rs        : rustpython-parser → Python AST
 [Python AST]
-        ↓   ir/converter.rs       — lower_ast_to_ir() → IRModule
+        ↓   ir/converter.rs       : lower_ast_to_ir() → IRModule
 [IR Module]
-        ↓   ir/decorators.rs      — DecoratorRegistry::apply_decorators()
-        ↓   ir/entry_points.rs    — detect_entry_points() / add_entry_point_to_module()
+        ↓   ir/decorators.rs      : DecoratorRegistry::apply_decorators()
+        ↓   ir/entry_points.rs    : detect_entry_points() / add_entry_point_to_module()
 [IR Module + entry points]
-        ↓   compiler/module.rs     — compile_ir_module() → wasm-encoder → raw WASM
+        ↓   compiler/module.rs     : compile_ir_module(): appends __module_init for
+        ↓                            non-constant module/class definitions, then
+        ↓                            wasm-encoder → raw WASM (start section runs the init)
 [Raw WASM binary]
-        ↓   optimize/wasm.rs       — optimize_wasm() (Binaryen), only if options.optimize
+        ↓   optimize/wasm.rs       : optimize_wasm() (Binaryen), only if options.optimize
 [Optimized WASM binary]
 ```
 
@@ -53,7 +55,7 @@ Waspy is a **single linear compiler pipeline**. Every public entry point in `src
 
 3. **Memory layout is computed in the IR, consumed in codegen.** `MemoryLayout` (on `IRModule`) holds string/bytes offsets and the object heap layout. When merging modules (multi-file compilation), layouts are merged via `memory_layout.merge_from()`. Don't hardcode memory offsets in codegen — read them from the layout.
 
-4. **Codegen must emit valid WASM.** The compiler reserves `SCRATCH_LOCALS` (`src/compiler/context.rs`) temporary locals per function for bookkeeping. If you emit instructions that use scratch locals beyond that budget, raise the constant. All memory access must be bounds-aware and use the layout offsets.
+4. **Codegen must emit valid WASM, and scratch locals do not survive nested emission.** The compiler reserves `SCRATCH_LOCALS` (`src/compiler/context.rs`) temporary locals per function for straight-line bookkeeping. Anything that must stay alive while another expression is emitted (a container pointer while its key and value are emitted, a search value while its container is, a literal's block while its elements are, a virtual call's receiver while its arguments are) goes in a **held slot** from `ctx.hold()` / `ctx.release_held()` (or `hold_f64()` for floats), never in `temp_local + N`. Nested emission runs arbitrary codegen over the scratch run, and most of the silent miscompiles found in 0.18.0 were a value parked there and overwritten. Held slots are locals, so they are also private to each activation, which is what keeps recursion from overwriting them. All memory access must be bounds-aware and use the layout offsets.
 
 5. **Optimization is optional and last.** `optimize_wasm()` (Binaryen) runs only when `CompilerOptions::optimize` is set. Never make correctness depend on the optimizer — the unoptimized binary must already be valid and correct.
 
@@ -134,6 +136,7 @@ src/
 │   ├── module.rs           #   compile_ir_module() — top-level codegen entry
 │   ├── function.rs         #   Per-function codegen
 │   ├── expression.rs       #   Expression codegen
+│   ├── equality.rs         #   Value equality, ordering, and hashing (==, <, in, sets, dict keys)
 │   └── context.rs          #   CompilationContext, SCRATCH_LOCALS, LocalInfo/FunctionInfo/ClassInfo
 ├── optimize/               # [Stage 5] WASM optimization
 │   └── wasm.rs             #   optimize_wasm() — Binaryen
@@ -285,7 +288,7 @@ type_to_string(ir_type: &IRType) -> String
 - The public API returns `anyhow::Result` with `.context("...")`. Structured compiler errors use `ChakraError` (`thiserror`) in `src/core/errors.rs` — add new variants there, include `ErrorLocation` where possible.
 - Use the logging macros (`log_debug!`, `log_verbose!`, `log_info!`, `log_warn!`) for diagnostic output — never bare `println!` in library code (the metadata path is the only existing exception).
 - Keep `#[allow(dead_code)]` annotated with a `// TODO:` comment explaining the plan (see `src/compiler/context.rs`).
-- All memory operations in codegen must use offsets from `MemoryLayout` and stay within the scratch-local budget (`SCRATCH_LOCALS`).
+- All memory operations in codegen must use offsets from `MemoryLayout` and stay within the scratch-local budget (`SCRATCH_LOCALS`). A value that must outlive a nested `emit_expr` goes in a held slot (critical rule 4).
 
 ### Commit Messages
 
@@ -378,6 +381,13 @@ test: description          # Adding/fixing tests
 4. Keep the stack balanced on the refusal path: drop each argument (twice for a string/bytes pair) and push a placeholder of the right shape before calling `ctx.report`, so the module still validates and one run reports every offending call.
 5. Add a regression test asserting the *runtime result* against CPython's answer for the same source, in `tests/unit/miscompiles.rs`, plus an example if it is user-facing.
 
+### Adding a construct that compares, hashes, or stores values
+
+1. Equality or ordering between values: call `crate::compiler::equality::{eq_unsupported, order_unsupported}` and refuse on `Some`, then `emit_values_eq` / `emit_values_order` with the values in held slots.
+2. A new container that searches or hashes: go through `emit_slot_eq_needle` and `emit_set_hash`, and check `hash_unsupported` for keys and members.
+3. A new literal or runtime-built object: allocate with `__alloc` per evaluation (see `emit_literal_block`), never at a compile-time address.
+4. Test with recursion and with a second call of the same function, not just one call, since sharing across calls and activations is the failure mode.
+
 ### Adding a compiler option
 
 1. Add the field to `CompilerOptions` in `src/core/options.rs` (and update `Default`).
@@ -407,7 +417,10 @@ test: description          # Adding/fixing tests
 - **`type_to_string()` is an exhaustive match.** Adding an `IRType` variant without updating `src/lib.rs` is a compile error — fix it there too.
 - **Binaryen is a native dependency.** The `binaryen` crate needs a C/C++ toolchain to build. Optimization failures may stem from the build environment, not your code.
 - **Optimization is opt-in and must not affect correctness.** If a binary is only valid after `optimize_wasm()`, the codegen has a bug.
-- **`SCRATCH_LOCALS` is a hard budget.** Codegen that overruns the reserved temporary locals will alias real variables and silently corrupt output. Raise the constant in `src/compiler/context.rs` if you need more.
+- **`SCRATCH_LOCALS` is a hard budget.** Codegen that overruns the reserved temporary locals will alias real variables and silently corrupt output. Raise the constant in `src/compiler/context.rs` if you need more. `HELD_LOCALS` / `HELD_F64_LOCALS` are the budget for held slots; exceeding them is reported, not miscompiled.
+- **Every evaluation of a collection literal is a fresh `__alloc` block.** There is no static template region any more. A literal builds straight into its own block, whose pointer lives in a held slot while the elements are emitted. Don't reintroduce a compile-time address for anything a function can build, since a function body runs once per call: a static region was one object shared by every call, and a recursive call overwrote it mid-build.
+- **Module-level and class-level definitions that are not plain constants live in WASM globals.** `compile_ir_module` appends a synthesized `__module_init` (`MODULE_INIT_FN`) that assigns each one in source order (class variables first, as `Class.var`), compiles it before every other function so each global's type is known, and runs it from the start section through a `() -> ()` wrapper that traps on a pending exception. A read is `global.get` (`ctx.module_global_index`, `ctx.module_global_types`); plain constants are still inlined. Globals start at `FIRST_MODULE_GLOBAL`; the ones below it are the runtime's. Don't inline a non-constant module definition at a read site: that made every read a new object.
+- **Compare values through `src/compiler/equality.rs`, never by word.** `emit_values_eq` / `emit_values_order` / `emit_value_hash` (with the `*_unsupported` checks first) are the one implementation of `==`, ordering, and hashing; `emit_slot_eq_needle` and `emit_set_hash` route through them, so `in`, `index`, `count`, sets, and dict keys agree. Comparing two collection pointers or two string offsets with `i32.eq` is identity, which is a wrong answer for `==`. A user `__eq__` that can raise is refused inside these sequences, because the unwind check after a call assumes no extra blocks are open.
 - **Multi-file compilation shares one flat namespace.** Two files defining the same function name is a hard error naming both files (it used to keep the first and warn, which reported success and answered with the wrong function). Memory layouts are merged via `merge_from()`, so don't assume single-file offset assumptions hold. Anything else that merges per file (`IRModule::dispatch_tables`, variables, imports, classes) has to be extended in the merge loop in `src/lib.rs` too.
 - **Decorators are an allowlist, and so are called names.** `src/ir/converter.rs` classifies every decorator on a function (`classify_function_decorator`) and class, and `ir::decorators::method_kind` classifies every one on a method; anything not on the list is a compile error. Supported: the method kinds (`@staticmethod`/`@classmethod`/`@property`/`@<name>.setter`), `@abstractmethod`, `@dataclass`, `@functools.total_ordering`, `@functools.singledispatch` with `@f.register`, and the caching decorators (`@lru_cache`/`@cache`/`@wraps`, accepted because they change nothing a compiled module can observe). Likewise, a call to a name that is neither a compiled function nor a builtin codegen implements is refused, not compiled to 0. Adding a decorator or builtin means adding it to the allowlist *and* implementing it, never just the former.
 - **`@singledispatch` dispatch is static.** `IRModule::dispatch_tables` (`IRDispatch` in `src/ir/types.rs`) carries each base function's registered arms; the converter fills it, `compile_ir_module` copies it onto `CompilationContext`, and the `FunctionCall` arm in `src/compiler/expression.rs` picks the arm from the *static* IR type of the first argument. There is no runtime type tag on scalars, so an argument whose type is `Unknown` is refused rather than guessed.

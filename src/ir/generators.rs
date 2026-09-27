@@ -94,6 +94,7 @@ fn set_pc(block: i32) -> IRStatement {
         object: self_var(),
         attribute: GEN_PC_FIELD.to_string(),
         value: int_const(block),
+        annotation: None,
     }
 }
 
@@ -734,6 +735,7 @@ fn build_state_class(
         object: self_var(),
         attribute: GEN_SENT_FIELD.to_string(),
         value,
+        annotation: None,
     };
     // The sent-value slot shares the element type so a float `send()` stores
     // at the right width (the first concrete assignment fixes a field's type).
@@ -748,6 +750,7 @@ fn build_state_class(
             object: self_var(),
             attribute: param.name.clone(),
             value: IRExpr::Variable(param.name.clone()),
+            annotation: None,
         });
     }
     let mut init_params = vec![self_param()];
@@ -1108,6 +1111,7 @@ fn lift_stmt(stmt: &mut IRStatement, lift: &HashSet<String>) {
                 object: self_var(),
                 attribute: target.clone(),
                 value: value.clone(),
+                annotation: None,
             };
             *stmt = replacement;
         }
