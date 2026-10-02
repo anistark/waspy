@@ -60,7 +60,9 @@ lint:
 # Build the docs-site playground: waspy compiled to wasm32 (without the
 # Binaryen feature) plus its wasm-bindgen glue, into docs/playground/compiler/.
 # Needs `rustup target add wasm32-unknown-unknown` and the wasm-bindgen CLI at
-# the version pinned in playground/Cargo.toml.
+# the version pinned in playground/Cargo.toml. Not `--locked`: the lock file
+# records waspy's own version and dependencies, so a release bump or a new
+# dependency must update it rather than fail the build.
 playground:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -71,7 +73,7 @@ playground:
       echo "Install it with: cargo install wasm-bindgen-cli --version $want --locked"
       exit 1
     fi
-    cargo build --release --locked --target wasm32-unknown-unknown --manifest-path playground/Cargo.toml
+    cargo build --release --target wasm32-unknown-unknown --manifest-path playground/Cargo.toml
     rm -rf docs/playground/compiler
     wasm-bindgen --target web --no-typescript --out-dir docs/playground/compiler --out-name waspy \
         playground/target/wasm32-unknown-unknown/release/waspy_playground.wasm
@@ -89,7 +91,7 @@ playground-verify:
 # Lint the playground crate (it builds for wasm32 only)
 playground-lint:
     cargo fmt --manifest-path playground/Cargo.toml -- --check
-    cargo clippy --locked --target wasm32-unknown-unknown --manifest-path playground/Cargo.toml -- -D warnings
+    cargo clippy --target wasm32-unknown-unknown --manifest-path playground/Cargo.toml -- -D warnings
 
 # Fix lint issues automatically where possible
 lint-fix:

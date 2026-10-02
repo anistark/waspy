@@ -175,13 +175,15 @@ function scheduleCompile() {
     if ($('autoToggle').checked) state.timer = setTimeout(compile, 450);
 }
 
+// Mirrors `optimize_wasm()`: Binaryen's default pipeline at the levels of
+// binaryen-rs's `CodegenConfig::default()`, which are both 0.
 function optimize(binaryen, bytes) {
     const mod = binaryen.readBinary(bytes);
     try {
         const F = binaryen.Features;
         mod.setFeatures(mod.getFeatures() | F.BulkMemory | (F.BulkMemoryOpt || 0));
-        binaryen.setOptimizeLevel(2);
-        binaryen.setShrinkLevel(1);
+        binaryen.setOptimizeLevel(0);
+        binaryen.setShrinkLevel(0);
         mod.optimize();
         return mod.emitBinary();
     } finally {
