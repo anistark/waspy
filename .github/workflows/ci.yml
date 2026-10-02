@@ -28,6 +28,11 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      # Without the default `optimize` feature there is no Binaryen, which is
+      # how the playground builds waspy for wasm32.
+      - name: Run clippy without default features
+        run: cargo clippy --all-targets --no-default-features -- -D warnings
+
   format:
     name: Format
     runs-on: ubuntu-latest

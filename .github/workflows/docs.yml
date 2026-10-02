@@ -5,9 +5,13 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
 
 jobs:
   docs:
@@ -28,3 +32,83 @@ jobs:
         run: cargo doc --all-features --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+
+  # The docs site in docs/, plus the playground's compiler: waspy built to
+  # wasm32 by playground/ and placed in docs/playground/compiler/. Built on
+  # every PR so a change that breaks the in-browser build fails here.
+  site:
+    name: Build Docs Site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.97
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97
+          targets: wasm32-unknown-unknown
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: playground -> target
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: extractions/setup-just@v2
+
+      # Pinned to a released asset with a checksum, and to the version
+      # playground/Cargo.toml pins the wasm-bindgen crate to: the CLI and the
+      # crate must match exactly. Bump the version, the hash, and the crate
+      # together.
+      - name: Install wasm-bindgen
+        env:
+          WASM_BINDGEN_VERSION: 0.2.127
+          WASM_BINDGEN_SHA256: 61d4a7dc85acfa0d2354ccc0b8361928c7e52a746d17f28ebaa795ed3dc1614a
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          dir="wasm-bindgen-${WASM_BINDGEN_VERSION}-x86_64-unknown-linux-musl"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "${dir}.tar.gz" \
+            "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${WASM_BINDGEN_VERSION}/${dir}.tar.gz"
+          echo "${WASM_BINDGEN_SHA256}  ${dir}.tar.gz" | sha256sum --check --strict
+          tar -xzf "${dir}.tar.gz"
+          mkdir -p "$HOME/.wasm-bindgen/bin"
+          mv "${dir}/wasm-bindgen" "$HOME/.wasm-bindgen/bin/"
+          echo "$HOME/.wasm-bindgen/bin" >> "$GITHUB_PATH"
+
+      - name: Lint the playground crate
+        run: just playground-lint
+
+      - name: Build the playground compiler
+        run: just playground
+
+      - name: Check the playground examples against CPython
+        run: just playground-verify
+
+      - name: Upload the site
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: docs
+
+  deploy:
+    name: Deploy Docs Site
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: [docs, site]
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

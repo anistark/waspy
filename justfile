@@ -57,6 +57,40 @@ format-check:
 lint:
     cargo clippy --all-targets --all-features -- -D warnings
 
+# Build the docs-site playground: waspy compiled to wasm32 (without the
+# Binaryen feature) plus its wasm-bindgen glue, into docs/playground/compiler/.
+# Needs `rustup target add wasm32-unknown-unknown` and the wasm-bindgen CLI at
+# the version pinned in playground/Cargo.toml.
+playground:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    want=$(sed -nE 's/^wasm-bindgen = "=([0-9.]+)"/\1/p' playground/Cargo.toml)
+    have=$(wasm-bindgen --version 2>/dev/null | cut -d ' ' -f 2 || true)
+    if [ "$have" != "$want" ]; then
+      echo "wasm-bindgen CLI $want is required (found: ${have:-none})."
+      echo "Install it with: cargo install wasm-bindgen-cli --version $want --locked"
+      exit 1
+    fi
+    cargo build --release --locked --target wasm32-unknown-unknown --manifest-path playground/Cargo.toml
+    rm -rf docs/playground/compiler
+    wasm-bindgen --target web --no-typescript --out-dir docs/playground/compiler --out-name waspy \
+        playground/target/wasm32-unknown-unknown/release/waspy_playground.wasm
+    ls -lh docs/playground/compiler
+
+# Build the playground and serve the docs site at http://localhost:8000/playground/
+playground-serve port="8000": playground
+    python3 -m http.server {{port}} --directory docs
+
+# Compile every playground example with the built bundle and check the
+# answers against CPython
+playground-verify:
+    node scripts/verify_playground.mjs
+
+# Lint the playground crate (it builds for wasm32 only)
+playground-lint:
+    cargo fmt --manifest-path playground/Cargo.toml -- --check
+    cargo clippy --locked --target wasm32-unknown-unknown --manifest-path playground/Cargo.toml -- -D warnings
+
 # Fix lint issues automatically where possible
 lint-fix:
     cargo clippy --all-targets --all-features --fix -- -D warnings

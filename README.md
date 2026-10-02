@@ -160,6 +160,15 @@ Or add it to your `Cargo.toml`:
 waspy = "0.17.0"
 ```
 
+The Binaryen optimization pass is the default `optimize` feature. Binaryen is a native C++ library, so turn the feature off to build waspy for a target without a C++ toolchain, such as `wasm32-unknown-unknown`. `CompilerOptions::optimize` then has no effect, and the output is the unoptimized module, which is already valid and correct:
+
+```toml
+[dependencies]
+waspy = { version = "0.17.0", default-features = false }
+```
+
+To try it without installing anything, the [playground](https://anistark.github.io/waspy/playground/) runs waspy itself, built this way, in the browser.
+
 ## Quick Start
 
 ### Using the Library
@@ -417,6 +426,14 @@ just compile examples/typed_demo.py     # compile one file (reports sizes)
 just verify-examples                    # compile every bundled example
 just benchmark                          # time compilation (release build)
 just examples                           # run the full driver suite
+```
+
+The docs-site playground (`docs/playground/`) is built from `playground/`, a small wasm-bindgen wrapper crate. It needs the `wasm32-unknown-unknown` target and the wasm-bindgen CLI at the version `playground/Cargo.toml` pins:
+
+```sh
+just playground          # build docs/playground/compiler/
+just playground-verify   # compile every playground example, check against CPython
+just playground-serve    # build, then serve the site at localhost:8000/playground/
 ```
 
 ## Contributing

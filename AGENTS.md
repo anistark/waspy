@@ -34,6 +34,7 @@ Waspy is a **single linear compiler pipeline**. Every public entry point in `src
         ↓                            wasm-encoder → raw WASM (start section runs the init)
 [Raw WASM binary]
         ↓   optimize/wasm.rs       : optimize_wasm() (Binaryen), only if options.optimize
+        ↓                            and the default `optimize` feature is on
 [Optimized WASM binary]
 ```
 
@@ -87,7 +88,7 @@ Do not consider a change complete until these pass cleanly.
 
 - **Update `CHANGELOG.md`** for any user-facing change (new feature, fix, breaking change).
 - **Update `README.md`** when supported features, limitations, or the public API change — the README's "Current Features" / "Limitations" lists are user-facing.
-- **Update `docs/` on every major change or feature update.** The `docs/` directory is the user-facing static HTML site (`index.html` landing page, `modules/index.html` development board, `changelog/index.html`, plus `assets/`). Whenever you add or change a feature, supported type, stdlib module, or any user-visible behaviour, reflect it in the relevant `docs/` page — keep the modules board in sync with what the compiler actually supports (the changelog page renders `CHANGELOG.md` from `main` automatically). Don't let the published docs drift behind the code.
+- **Update `docs/` on every major change or feature update.** The `docs/` directory is the user-facing static HTML site (`index.html` landing page, `modules/index.html` development board, `changelog/index.html`, `playground/` (the in-browser playground), plus `assets/`). Whenever you add or change a feature, supported type, stdlib module, or any user-visible behaviour, reflect it in the relevant `docs/` page — keep the modules board in sync with what the compiler actually supports (the changelog page renders `CHANGELOG.md` from `main` automatically). Don't let the published docs drift behind the code.
 - **Version tags on the modules board name published releases only.** On `docs/modules/index.html`, a feature's `version` field is the release that shipped it. Work that is merged but not yet released is tagged `"upcoming"`, never a future or internal/planned version number. When a release ships, replace the `upcoming` tags of the features it contains with the actual release version.
 - **Prefer `just` commands** over raw `cargo` commands. The justfile handles sequencing, examples, and release steps correctly.
 - **Prompt the user if `AGENTS.md` needs updating.** If your changes alter the pipeline, module layout, public API, supported types/stdlib modules, or conventions, tell the user: *"This change may require an update to AGENTS.md — would you like me to update it?"*
@@ -111,7 +112,8 @@ Waspy is a single Rust library crate (`crate-type = ["cdylib", "rlib"]`) with a 
 | **Compiler library** | Rust | `src/` | Parser, IR, codegen, optimizer, stdlib shims |
 | **Wasmrun plugin** | Rust | `src/wasmrun.rs` | Optional `wasm-plugin` feature — integrates Waspy into wasmrun |
 | **Examples** | Rust + Python | `examples/` | Runnable compiler drivers (`.rs`) + Python test inputs (`.py`) |
-| **Documentation** | Static HTML | `docs/` | Landing page + module/changelog pages (GitHub Pages) |
+| **Documentation** | Static HTML | `docs/` | Landing page + module/changelog/playground pages (GitHub Pages) |
+| **Playground compiler** | Rust | `playground/` | wasm-bindgen wrapper exposing `compile`/`signatures` to the docs playground; builds waspy for wasm32 without Binaryen |
 
 ### Source Layout (`src/`)
 
@@ -160,6 +162,7 @@ src/
 - **Single IR, two compile paths.** `compile_python_to_wasm*` compiles one source string; `compile_multiple_python_files*` / `compile_python_project*` merge several files into one `IRModule` (de-duplicating function names, merging memory layouts) before codegen.
 - **Verbosity-gated logging.** Use the `log_debug!`, `log_verbose!`, `log_info!`, `log_warn!` macros (from `src/utils/logging.rs`), initialized via `utils::logging::init(verbosity)`. Output is gated by `Verbosity` (`Quiet`/`Normal`/`Verbose`/`Debug`).
 - **Error handling is two-tier.** The public API returns `anyhow::Result` with `.context(...)`. The custom `thiserror` enum `ChakraError` (in `src/core/errors.rs`) carries structured, located compiler errors. The plugin path uses its own `CompilationError`/`CompilationResult` in `src/wasmrun.rs`.
+- **Binaryen is a default feature.** `optimize` (on by default) gates the `binaryen` dependency and the real `optimize_wasm()`. Without it, `optimize_wasm()` returns its input unchanged, which is how `playground/` builds waspy for `wasm32-unknown-unknown`. Code in `src/` must compile with `--no-default-features` (CI lints it that way).
 - **Optional plugin via feature flag.** `wasmrun.rs` is gated behind `#[cfg(feature = "wasm-plugin")]`. Plugin metadata lives under `[package.metadata.wasm_plugin]` in `Cargo.toml`. The `wasmrun_plugin_create()` FFI symbol is the entry point wasmrun loads.
 
 ---
@@ -173,7 +176,8 @@ src/
 | **Just** | Task runner | `justfile` — run `just` for available commands |
 | **rustpython-parser** | Python parsing | Produces the Python AST (Stage 1) |
 | **wasm-encoder** | WASM codegen | Emits the binary (Stage 4) |
-| **binaryen** | WASM optimization | Native dependency; needs a C/C++ toolchain to build |
+| **binaryen** | WASM optimization | Native dependency; needs a C/C++ toolchain to build. Behind the default `optimize` feature |
+| **wasm-bindgen** | Playground JS glue | Only in `playground/`, pinned exactly (`=0.2.x`) to match the CLI in CI |
 | **anyhow** | Error context | Public API return type |
 | **thiserror** | Structured errors | `ChakraError` in `src/core/errors.rs`, `CompilationError` in plugin |
 | **chrono** | Date/time | Backs the `datetime` stdlib shim |
@@ -201,6 +205,10 @@ just ci              # format-check → lint → test (mirrors GitHub Actions)
 just dev             # format → format-check → lint → build → test
 just docs            # cargo doc --all-features --no-deps --open
 just docs-check      # rustdoc with -D warnings
+just playground      # build waspy to wasm32 into docs/playground/compiler/ (needs wasm32 target + pinned wasm-bindgen CLI)
+just playground-verify  # compile every playground example with that build, check against CPython
+just playground-serve   # build, then serve docs/ at localhost:8000
+just playground-lint    # fmt + clippy for the playground crate (wasm32)
 just clean           # cargo clean + remove examples/output
 ```
 
@@ -275,6 +283,7 @@ type_to_string(ir_type: &IRType) -> String
 - **Unit tests may also live inline** as `#[cfg(test)]` modules alongside source (`src/stdlib/re.rs`, `src/utils/logging.rs`) when they cover something with no Python-level surface.
 - **Examples double as functional tests.** `just verify-examples` compiles every bundled example, and depends on `just verify-runtime`, which runs the end-to-end programs under Node and the `wasmtime` CLI (both optimization levels) against checker suffixes in `tests/fixtures/runtime/`.
 - Always run `cargo test --all-features` before committing.
+- **The playground examples are checked too.** `docs/playground/examples.js` holds the examples the page ships; `just playground-verify` (`scripts/verify_playground.mjs`) compiles each with the wasm32 build, calls the functions listed in the script, and requires CPython's answer. Adding an example means adding its calls there, and an example must avoid constructs the compiler refuses (except the one meant to show a refusal).
 - CI runs tests on `stable` and enforces zero clippy warnings on Rust 1.88: `cargo clippy --all-targets --all-features -- -D warnings`. There are two named gates: the test binaries, and the runtime verification above.
 
 ---
@@ -415,7 +424,8 @@ test: description          # Adding/fixing tests
 - **There is no CLI binary.** Waspy is a library; "running" it means calling the API or invoking an example via `just`. Don't add ad-hoc `main`-style code to `src/`.
 - **`ChakraError` is a legacy name.** The custom error enum kept its old name from when the project was called "Chakra." It is the current error type — don't be confused by the name, and don't rename it casually (it's part of the public surface via `core::errors`).
 - **`type_to_string()` is an exhaustive match.** Adding an `IRType` variant without updating `src/lib.rs` is a compile error — fix it there too.
-- **Binaryen is a native dependency.** The `binaryen` crate needs a C/C++ toolchain to build. Optimization failures may stem from the build environment, not your code.
+- **Binaryen is a native dependency.** The `binaryen` crate needs a C/C++ toolchain to build. Optimization failures may stem from the build environment, not your code. It is behind the default `optimize` feature, so don't use it outside `src/optimize/wasm.rs`.
+- **The docs site is deployed by CI, not served from the branch.** `.github/workflows/docs.yml` builds `playground/`, runs `just playground-verify`, and uploads `docs/` to GitHub Pages on every push to `main`. `docs/playground/compiler/` is a build output and gitignored; never commit it. The `wasm-bindgen` crate pin in `playground/Cargo.toml` and the CLI version and checksum in the workflow move together.
 - **Optimization is opt-in and must not affect correctness.** If a binary is only valid after `optimize_wasm()`, the codegen has a bug.
 - **`SCRATCH_LOCALS` is a hard budget.** Codegen that overruns the reserved temporary locals will alias real variables and silently corrupt output. Raise the constant in `src/compiler/context.rs` if you need more. `HELD_LOCALS` / `HELD_F64_LOCALS` are the budget for held slots; exceeding them is reported, not miscompiled.
 - **Every evaluation of a collection literal is a fresh `__alloc` block.** There is no static template region any more. A literal builds straight into its own block, whose pointer lives in a held slot while the elements are emitted. Don't reintroduce a compile-time address for anything a function can build, since a function body runs once per call: a static region was one object shared by every call, and a recursive call overwrote it mid-build.
