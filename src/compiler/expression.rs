@@ -78,6 +78,13 @@ fn emit_class_level_method_call(
     };
     for (i, arg) in arguments.iter().enumerate() {
         let t = emit_expr(arg, func, ctx, memory_layout, param_types.get(i + arg_base));
+        check_class_arg(
+            ctx,
+            &t,
+            param_types.get(i + arg_base),
+            i,
+            &format!("{class_name}.{method_name}"),
+        );
         // Narrow a string/bytes argument to its offset word, matching the
         // calling convention used at instantiation sites.
         if matches!(t, IRType::String | IRType::Bytes) {
@@ -657,6 +664,9 @@ pub(crate) fn emit_collection_element(
         _ => None,
     };
     let actual = emit_expr(value, func, ctx, memory_layout, hint);
+    if let Some(slot) = declared {
+        ctx.check_class_store(&actual, slot, what);
+    }
 
     match (declared, &actual) {
         // An int or bool into a float slot widens, which is what the slot is
@@ -3521,6 +3531,7 @@ fn emit_virtual_call(
 
     for (i, arg) in arguments.iter().enumerate() {
         let t = emit_expr(arg, func, ctx, memory_layout, param_types.get(i + 1));
+        check_class_arg(ctx, &t, param_types.get(i + 1), i, method_name);
         if matches!(t, IRType::String | IRType::Bytes) {
             func.instruction(&Instruction::Drop);
         }
@@ -3795,6 +3806,57 @@ fn check_uniform_slot_width(ctx: &CompilationContext, what: &str, types: &[IRTyp
              Hint: make the elements one type, for example write 1.0 instead of 1"
         ));
     }
+}
+
+/// Refuse an argument that is an instance of a class unrelated to its
+/// parameter's (see [`CompilationContext::check_class_store`]). `position` is
+/// zero-based; `callee` names the function or method being called.
+fn check_class_arg(
+    ctx: &CompilationContext,
+    arg: &IRType,
+    param: Option<&IRType>,
+    position: usize,
+    callee: &str,
+) {
+    if let Some(param) = param {
+        ctx.check_class_store(
+            arg,
+            param,
+            &format!("argument {} of {callee}()", position + 1),
+        );
+    }
+}
+
+/// The element type of a collection literal, from the types of its elements.
+///
+/// Instances of different classes take their nearest common base class, so a
+/// method called on an element dispatches on the element's own class. The
+/// first element's class used to stand for all of them, which ran its methods
+/// on the others (#128). Classes with no common base, or instances mixed with
+/// other values, have no one type to read the elements at, so the element type
+/// is unknown and a method call on one is refused. Any other literal keeps its
+/// first element's type, as before.
+fn literal_element_type(ctx: &CompilationContext, types: &[IRType]) -> IRType {
+    let Some(first) = types.first() else {
+        return IRType::Unknown;
+    };
+    if !types.iter().any(|t| matches!(t, IRType::Class(_))) {
+        return first.clone();
+    }
+    let mut base: Option<String> = None;
+    for ty in types {
+        let IRType::Class(name) = ty else {
+            return IRType::Unknown;
+        };
+        base = match base {
+            None => Some(name.clone()),
+            Some(so_far) => match ctx.common_base(&so_far, name) {
+                Some(common) => Some(common),
+                None => return IRType::Unknown,
+            },
+        };
+    }
+    base.map_or(IRType::Unknown, IRType::Class)
 }
 
 /// Emit a list/set/dict comprehension. See the module comment above for the
@@ -5406,6 +5468,7 @@ pub fn emit_expr(
                     func.instruction(&Instruction::Call(ctx.alloc_obj_func_index));
                     for (i, arg) in arguments.iter().enumerate() {
                         let t = emit_expr(arg, func, ctx, memory_layout, param_types.get(i + 1));
+                        check_class_arg(ctx, &t, param_types.get(i + 1), i, &class_target);
                         // A string/bytes argument is an (offset, length) pair
                         // but each parameter is one i32 slot; narrow it to the
                         // offset word (the callee recovers the length from the
@@ -5603,6 +5666,7 @@ pub fn emit_expr(
                 );
                 for (i, arg) in arguments.iter().enumerate().skip(1) {
                     let t = emit_expr(arg, func, ctx, memory_layout, param_types.get(i));
+                    check_class_arg(ctx, &t, param_types.get(i), i, function_name);
                     if matches!(t, IRType::String | IRType::Bytes) {
                         func.instruction(&Instruction::Drop);
                     }
@@ -5634,6 +5698,15 @@ pub fn emit_expr(
 
             // Look up the function index if it exists in our context
             if let Some(func_info) = ctx.get_function_info(function_name.as_str()) {
+                for (i, arg_type) in arg_types.iter().enumerate() {
+                    check_class_arg(
+                        ctx,
+                        arg_type,
+                        func_info.param_types.get(i),
+                        i,
+                        function_name,
+                    );
+                }
                 let return_type = func_info.return_type.clone();
                 emit_user_call(func, ctx, func_info.index);
                 // A function returns a single word; a string/bytes result is
@@ -6577,7 +6650,6 @@ pub fn emit_expr(
             emit_literal_block(func, ctx, blk, list_size);
             emit_literal_header(func, blk, elements.len() as u32);
 
-            let mut elem_type = IRType::Unknown;
             let mut element_types = Vec::with_capacity(elements.len());
             for (i, elem) in elements.iter().enumerate() {
                 // A store pops the value, then the address, so the block pointer
@@ -6586,15 +6658,12 @@ pub fn emit_expr(
                 let ty = emit_expr(elem, func, ctx, memory_layout, None);
                 narrow_element_to_word(func, &ty);
                 store_collection_word_at(func, &ty, COLLECTION_HEADER + i as u32 * COLLECTION_SLOT);
-                if i == 0 {
-                    elem_type = ty.clone();
-                }
                 element_types.push(ty);
             }
             ctx.release_held();
             check_uniform_slot_width(ctx, "list literal", &element_types);
             func.instruction(&Instruction::LocalGet(blk));
-            IRType::List(Box::new(elem_type))
+            IRType::List(Box::new(literal_element_type(ctx, &element_types)))
         }
         IRExpr::SetLiteral(elements) => {
             // Build the set as an open-addressing hash table (see the SET_*
@@ -6626,15 +6695,11 @@ pub fn emit_expr(
             let idx = ctx.temp_local + 2;
             let bucket = ctx.temp_local + 3;
 
-            let mut elem_type = IRType::Unknown;
             let mut member_types = Vec::with_capacity(elements.len());
-            for (i, elem) in elements.iter().enumerate() {
+            for elem in elements {
                 // Evaluate the element, stash it as a needle (f64 for floats), and
                 // compute its home bucket: idx = hash(elem) & (cap - 1).
                 let ty = emit_expr(elem, func, ctx, memory_layout, None);
-                if i == 0 {
-                    elem_type = ty.clone();
-                }
                 member_types.push(ty.clone());
                 stash_search_needle(func, ctx, &ty, ctx.temp_local + 1);
                 emit_set_hash(func, ctx, &ty, ctx.temp_local + 1);
@@ -6707,7 +6772,7 @@ pub fn emit_expr(
             ctx.release_held();
             check_uniform_slot_width(ctx, "set literal", &member_types);
             func.instruction(&Instruction::LocalGet(blk));
-            IRType::Set(Box::new(elem_type))
+            IRType::Set(Box::new(literal_element_type(ctx, &member_types)))
         }
         IRExpr::TupleLiteral(elements) => {
             // Tuple layout in memory: [length:i32][elem0][elem1]... One
@@ -6784,8 +6849,8 @@ pub fn emit_expr(
             check_uniform_slot_width(ctx, "dict literal's keys", &key_types);
             check_uniform_slot_width(ctx, "dict literal's values", &value_types);
 
-            let key_type = key_types.first().cloned().unwrap_or(IRType::Unknown);
-            let value_type = value_types.first().cloned().unwrap_or(IRType::Unknown);
+            let key_type = literal_element_type(ctx, &key_types);
+            let value_type = literal_element_type(ctx, &value_types);
             func.instruction(&Instruction::LocalGet(blk));
             IRType::Dict(Box::new(key_type), Box::new(value_type))
         }
@@ -7727,6 +7792,7 @@ pub fn emit_expr(
                         for (i, arg) in arguments.iter().enumerate() {
                             let t =
                                 emit_expr(arg, func, ctx, memory_layout, param_types.get(i + 1));
+                            check_class_arg(ctx, &t, param_types.get(i + 1), i, method_name);
                             // Narrow a string/bytes argument to its offset
                             // word, matching the calling convention used at
                             // instantiation sites.
@@ -9926,6 +9992,13 @@ pub fn emit_expr(
                                 ctx,
                                 memory_layout,
                                 param_types.get(i + arg_base),
+                            );
+                            check_class_arg(
+                                ctx,
+                                &t,
+                                param_types.get(i + arg_base),
+                                i,
+                                &format!("{class_name}.{method_name}"),
                             );
                             // Narrow a string/bytes argument to its offset
                             // word, matching the calling convention used at

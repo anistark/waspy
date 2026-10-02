@@ -906,6 +906,63 @@ fn scan_stmt_exprs(stmt: &IRStatement, ctx: &mut CompilationContext) {
     }
 }
 
+/// A local reassigned to an instance of another class holds either one, so it
+/// is typed as their nearest common base and a method call on it dispatches on
+/// the instance's own class. It kept the first class, which ran that class's
+/// method on the second (#128). Classes with no common base leave it untyped,
+/// so a method call on it is refused. Only class-to-class reassignments change
+/// anything; the local's slot width never does.
+fn widen_class_local(target: &str, assigned: &IRType, ctx: &mut CompilationContext) {
+    let IRType::Class(new) = assigned else {
+        return;
+    };
+    let Some(IRType::Class(old)) = ctx.get_local_info(target).map(|info| info.var_type.clone())
+    else {
+        return;
+    };
+    if old == *new {
+        return;
+    }
+    let widened = ctx
+        .common_base(&old, new)
+        .map_or(IRType::Unknown, IRType::Class);
+    if let Some(info) = ctx.locals_map.get_mut(target) {
+        info.var_type = widened;
+    }
+}
+
+/// The element-class counterpart of [`widen_class_local`]: a list, set, or
+/// dict-value local of instances that is given an instance of another class
+/// (`xs.append(Rect(...))` on `[Circle(...)]`) holds either, so its elements
+/// are typed as the nearest common base.
+fn widen_class_element(target: &str, assigned: &IRType, ctx: &mut CompilationContext) {
+    let IRType::Class(new) = assigned else {
+        return;
+    };
+    let Some(info) = ctx.get_local_info(target) else {
+        return;
+    };
+    let element = match &info.var_type {
+        IRType::List(e) | IRType::Set(e) | IRType::Dict(_, e) => e.as_ref(),
+        _ => return,
+    };
+    let IRType::Class(old) = element else {
+        return;
+    };
+    if old == new {
+        return;
+    }
+    let widened = ctx
+        .common_base(old, new)
+        .map_or(IRType::Unknown, IRType::Class);
+    if let Some(info) = ctx.locals_map.get_mut(target) {
+        match &mut info.var_type {
+            IRType::List(e) | IRType::Set(e) | IRType::Dict(_, e) => **e = widened,
+            _ => {}
+        }
+    }
+}
+
 /// Scan the function body for variable declarations and allocate local variables
 pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
     for stmt in &body.statements {
@@ -938,6 +995,8 @@ pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
                     if needs_companion {
                         ctx.add_local(&strlen_local_name(target), IRType::Int);
                     }
+                } else {
+                    widen_class_local(target, &infer_value_type(value, ctx), ctx);
                 }
             }
             IRStatement::TupleUnpack {
@@ -1054,6 +1113,26 @@ pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
                     scan_and_allocate_locals(finally_body, ctx);
                 }
             }
+            // Storing an instance into a collection local widens its element
+            // class the way reassigning a local does.
+            IRStatement::Expression(IRExpr::MethodCall {
+                object,
+                method_name,
+                arguments,
+            }) if matches!(method_name.as_str(), "append" | "insert" | "add") => {
+                if let (IRExpr::Variable(name), Some(value)) = (object.as_ref(), arguments.last()) {
+                    let assigned = infer_value_type(value, ctx);
+                    widen_class_element(name, &assigned, ctx);
+                }
+            }
+            IRStatement::IndexAssign {
+                container: IRExpr::Variable(name),
+                value,
+                ..
+            } => {
+                let assigned = infer_value_type(value, ctx);
+                widen_class_element(name, &assigned, ctx);
+            }
             // No `IRStatement::With` arm: `ir::context_managers` rewrites every
             // `with` into `__enter__`/`__exit__` calls over ordinary
             // assignments before the compiler sees the body.
@@ -1100,6 +1179,7 @@ pub fn compile_body(
                     // validate.
                     let ret_ty = ctx.current_return_type.clone();
                     let ty = emit_expr(expr, func, ctx, memory_layout, Some(&ret_ty));
+                    ctx.check_class_store(&ty, &ret_ty, "a return value");
                     match (&ret_ty, &ty) {
                         (IRType::Int | IRType::Bool, IRType::Float) => {
                             func.instruction(&Instruction::I32TruncF64S);
@@ -1161,6 +1241,13 @@ pub fn compile_body(
 
                 // Emit code for the value
                 let value_type = emit_expr(value, func, ctx, memory_layout, expected_type.as_ref());
+                if let Some(expected) = &expected_type {
+                    ctx.check_class_store(
+                        &value_type,
+                        expected,
+                        &format!("assigning to '{target}'"),
+                    );
+                }
 
                 // An unannotated local is allocated as Unknown (an i32 slot).
                 // Recover the element/entry types of collections so later
@@ -1649,6 +1736,13 @@ pub fn compile_body(
                             .map(|f| f.param_types.clone())
                             .unwrap_or_default();
                         let t = emit_expr(value, func, ctx, memory_layout, param_types.get(1));
+                        if let Some(param) = param_types.get(1) {
+                            ctx.check_class_store(
+                                &t,
+                                param,
+                                &format!("assigning to '.{attribute}'"),
+                            );
+                        }
                         if matches!(t, IRType::String | IRType::Bytes) {
                             func.instruction(&Instruction::Drop);
                         }
@@ -1672,6 +1766,11 @@ pub fn compile_body(
                     // drop the length and store the offset (reads rebuild the
                     // pair from the blob prefix).
                     let value_ty = emit_expr(value, func, ctx, memory_layout, Some(&field_ty));
+                    ctx.check_class_store(
+                        &value_ty,
+                        &field_ty,
+                        &format!("assigning to '.{attribute}'"),
+                    );
                     if matches!(value_ty, IRType::String | IRType::Bytes) {
                         func.instruction(&Instruction::Drop);
                     }

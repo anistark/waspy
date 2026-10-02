@@ -92,6 +92,30 @@ pub const DICT_ENTRY: u32 = COLLECTION_SLOT * 2;
 /// A string/bytes value is an `(offset, length)` pair but a WASM local holds a
 /// single word, so the offset lives in the named local and the length in this
 /// companion. See the string/bytes handling in assignment and variable reads.
+/// The nearest class that both `a` and `b` are or inherit from, walking the
+/// single-inheritance chain `base_of` describes. `None` when the chains share
+/// no class.
+pub fn common_class_base(
+    a: &str,
+    b: &str,
+    base_of: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let mut ancestors = Vec::new();
+    let mut current = Some(a.to_string());
+    while let Some(name) = current {
+        current = base_of(&name);
+        ancestors.push(name);
+    }
+    let mut current = Some(b.to_string());
+    while let Some(name) = current {
+        if ancestors.contains(&name) {
+            return Some(name);
+        }
+        current = base_of(&name);
+    }
+    None
+}
+
 pub fn strlen_local_name(name: &str) -> String {
     format!("__strlen_{name}")
 }
@@ -461,6 +485,57 @@ impl CompilationContext {
             current = self.class_map.get(&name).and_then(|info| info.base.clone());
         }
         false
+    }
+
+    /// The nearest class that both `a` and `b` are or inherit from, or `None`
+    /// when they share nothing but `object`.
+    pub fn common_base(&self, a: &str, b: &str) -> Option<String> {
+        common_class_base(a, b, |name| {
+            self.class_map.get(name).and_then(|info| info.base.clone())
+        })
+    }
+
+    /// The two class names when `value` holds an instance of a class that is
+    /// neither `slot`'s class nor a subclass of it, looking through collection
+    /// and optional types. A call on the slot dispatches from its static class,
+    /// so such a value would run another class's method on itself (#128).
+    pub fn class_mismatch(&self, value: &IRType, slot: &IRType) -> Option<(String, String)> {
+        match (value, slot) {
+            (IRType::Class(v), IRType::Class(s)) => (self.class_map.contains_key(v)
+                && self.class_map.contains_key(s)
+                && !self.is_class_or_subclass(v, s))
+            .then(|| (v.clone(), s.clone())),
+            (IRType::List(v), IRType::List(s))
+            | (IRType::Set(v), IRType::Set(s))
+            | (IRType::Optional(v), IRType::Optional(s)) => self.class_mismatch(v, s),
+            (v, IRType::Optional(s)) => self.class_mismatch(v, s),
+            (IRType::Dict(vk, vv), IRType::Dict(sk, sv)) => self
+                .class_mismatch(vk, sk)
+                .or_else(|| self.class_mismatch(vv, sv)),
+            (IRType::Tuple(v), IRType::Tuple(s)) if v.len() == s.len() => {
+                v.iter().zip(s).find_map(|(v, s)| self.class_mismatch(v, s))
+            }
+            _ => None,
+        }
+    }
+
+    /// Refuse storing `value` where `slot` is expected when it is an instance
+    /// of an unrelated class (see [`class_mismatch`](Self::class_mismatch)).
+    /// `what` names the store for the message, e.g. "list.append()".
+    pub fn check_class_store(&self, value: &IRType, slot: &IRType, what: &str) {
+        let Some((v, s)) = self.class_mismatch(value, slot) else {
+            return;
+        };
+        let hint = match self.common_base(&v, &s) {
+            Some(base) => {
+                format!("declare it with a class both inherit from, for example '{base}'")
+            }
+            None => "give the classes a common base class and declare it with that".to_string(),
+        };
+        self.report(format!(
+            "a {v} is used where a {s} is expected ({what}). {v} is not a subclass of {s}, \
+             so a method called on it would run {s}'s method. Hint: {hint}"
+        ));
     }
 
     /// Class ids of `target` and every known subclass of it — the id set an

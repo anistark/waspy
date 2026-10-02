@@ -1,7 +1,7 @@
 use crate::compiler::context::FileIoImports;
 use crate::compiler::context::{
-    ClassInfo, CompilationContext, COLLECTION_HEAP_BASE, EXC_TYPE_GLOBAL, FIRST_MODULE_GLOBAL,
-    MODULE_INIT_FN,
+    common_class_base, ClassInfo, CompilationContext, COLLECTION_HEAP_BASE, EXC_TYPE_GLOBAL,
+    FIRST_MODULE_GLOBAL, MODULE_INIT_FN,
 };
 use crate::compiler::function::{compile_function, resolve_return_type};
 use crate::core::errors::ChakraError;
@@ -1296,7 +1296,10 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
 
         // Export the function. Lifted lambdas are internal — they are only
         // reachable through the funcref table.
-        if !func.name.starts_with("__lambda_") && func.name != MODULE_INIT_FN {
+        if !func.name.starts_with("__lambda_")
+            && !func.name.starts_with(crate::ir::DRAIN_FN_PREFIX)
+            && func.name != MODULE_INIT_FN
+        {
             exports.export(&func.name, wasm_encoder::ExportKind::Func, func_idx);
         }
         func_idx += 1;
@@ -1309,6 +1312,16 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
     // Every class name in the module, so a field initialized or filled with
     // instances records the element's class instead of a bare pointer.
     let class_names: HashSet<String> = ir_module.classes.iter().map(|c| c.name.clone()).collect();
+    // Each class's base, for widening a field assigned instances of different
+    // classes before every class is registered.
+    let class_bases: HashMap<String, String> = ir_module
+        .classes
+        .iter()
+        .filter_map(|c| {
+            let base = c.bases.iter().find(|b| class_names.contains(b.as_str()))?;
+            Some((c.name.clone(), base.clone()))
+        })
+        .collect();
 
     for (class_id, cls) in (1i32..).zip(ir_module.classes.iter()) {
         // Single inheritance: resolve the (at most one, enforced during IR
@@ -1366,8 +1379,16 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
                 .field_types
                 .entry(name.to_string())
                 .or_insert(IRType::Unknown);
-            if matches!(entry, IRType::Unknown) {
-                *entry = ty;
+            match (&*entry, &ty) {
+                (IRType::Unknown, _) => *entry = ty,
+                // Instances of two classes: the field holds either, so it takes
+                // their nearest common base (or no type, without one) rather
+                // than the first, whose methods would run on the other (#128).
+                (IRType::Class(old), IRType::Class(new)) if old != new => {
+                    *entry = common_class_base(old, new, |c| class_bases.get(c).cloned())
+                        .map_or(IRType::Unknown, IRType::Class);
+                }
+                _ => {}
             }
         };
 

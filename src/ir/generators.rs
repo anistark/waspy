@@ -38,16 +38,21 @@
 //! a `yield`.
 
 use crate::ir::{
-    IRBody, IRBoolOp, IRClass, IRCompareOp, IRConstant, IRExpr, IRFunction, IRModule, IROp,
-    IRParam, IRStatement, IRType, IRUnaryOp,
+    IRBody, IRBoolOp, IRClass, IRCompareOp, IRConstant, IRExpr, IRFunction, IRGenerator, IRModule,
+    IROp, IRParam, IRStatement, IRType, IRUnaryOp,
 };
 use anyhow::{anyhow, Result};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Codegen intrinsic recognized by name in expression codegen: leaves the
 /// current value of the StopIteration flag (global 1) on the stack and clears
 /// the flag.
 pub const STOP_CHECK_FN: &str = "__waspy_stop_check";
+
+/// Prefix of the synthesized helpers that drain an iterator into a list for a
+/// comprehension (see [`drain_function`]). They are internal: not exported, and
+/// left out of function metadata.
+pub const DRAIN_FN_PREFIX: &str = "__drain_";
 
 /// State-class field holding the sent value; `x = yield v` resumes by reading
 /// this name, and the converter lowers the assignment through it.
@@ -247,22 +252,32 @@ pub fn transform_generators(module: &mut IRModule) -> Result<()> {
     // Desugar iteration and iterator method calls in every body (generator
     // bodies included, so a generator can consume another generator).
     let mut counter = 0u32;
+    let mut drains = BTreeSet::new();
+    let mut errors = Vec::new();
     {
         let mut desugarer = Desugarer {
             gen_fns: &gen_classes,
             facts: &iter_facts,
             counter: &mut counter,
+            drains: &mut drains,
+            errors: &mut errors,
+            current: String::new(),
         };
         for func in &mut module.functions {
+            desugarer.current = func.name.clone();
             let mut vars = desugarer.seed_params(&func.params);
             desugarer.rewrite_body(&mut func.body, &mut vars);
         }
         for class in &mut module.classes {
             for method in &mut class.methods {
+                desugarer.current = format!("{}.{}", class.name, method.name);
                 let mut vars = desugarer.seed_params(&method.params);
                 desugarer.rewrite_body(&mut method.body, &mut vars);
             }
         }
+    }
+    if !errors.is_empty() {
+        return Err(anyhow!(errors.join("\n")));
     }
 
     // Rewrite each generator function into a constructor plus a state class.
@@ -288,7 +303,71 @@ pub fn transform_generators(module: &mut IRModule) -> Result<()> {
     }
     module.classes.extend(state_classes);
 
+    // A drain helper's list holds what the iterator's `__next__` returns, which
+    // for a generator is only known once its state class is built.
+    for class in drains {
+        let element = module
+            .classes
+            .iter()
+            .find(|c| c.name == class)
+            .and_then(|c| c.methods.iter().find(|m| m.name == "__next__"))
+            .map_or(IRType::Unknown, |m| m.return_type.clone());
+        module.functions.push(drain_function(&class, element));
+    }
+
     Ok(())
+}
+
+fn drain_fn_name(class: &str) -> String {
+    format!("{DRAIN_FN_PREFIX}{class}")
+}
+
+/// `def __drain_<C>(it) -> List[T]`: every value an iterator of class `C`
+/// yields, collected into a fresh list for a comprehension to iterate.
+fn drain_function(class: &str, element: IRType) -> IRFunction {
+    let var = |name: &str| IRExpr::Variable(name.to_string());
+    let list = IRType::List(Box::new(element));
+    IRFunction {
+        name: drain_fn_name(class),
+        params: vec![IRParam {
+            name: "it".to_string(),
+            param_type: IRType::Class(class.to_string()),
+            default_value: None,
+        }],
+        body: IRBody {
+            statements: vec![
+                IRStatement::Assign {
+                    target: "items".to_string(),
+                    value: IRExpr::ListLiteral(Vec::new()),
+                    var_type: Some(list.clone()),
+                },
+                while_true(vec![
+                    IRStatement::Expression(stop_check()),
+                    IRStatement::Assign {
+                        target: "item".to_string(),
+                        value: IRExpr::FunctionCall {
+                            function_name: format!("{class}::__next__"),
+                            arguments: vec![var("it")],
+                        },
+                        var_type: None,
+                    },
+                    IRStatement::If {
+                        condition: stop_check(),
+                        then_body: body_of(vec![IRStatement::Break]),
+                        else_body: None,
+                    },
+                    IRStatement::Expression(IRExpr::MethodCall {
+                        object: Box::new(var("items")),
+                        method_name: "append".to_string(),
+                        arguments: vec![var("item")],
+                    }),
+                ]),
+                IRStatement::Return(Some(var("items"))),
+            ],
+        },
+        return_type: list,
+        decorators: Vec::new(),
+    }
 }
 
 /// Rewrites iterator-protocol consumption: `for` over a generator or user
@@ -302,6 +381,11 @@ struct Desugarer<'a> {
     gen_fns: &'a HashMap<String, String>,
     facts: &'a HashMap<String, IterFacts>,
     counter: &'a mut u32,
+    /// Iterator classes a comprehension drains, each needing a helper.
+    drains: &'a mut BTreeSet<String>,
+    errors: &'a mut Vec<String>,
+    /// The function or method being rewritten, for error messages.
+    current: String,
 }
 
 impl Desugarer<'_> {
@@ -342,6 +426,65 @@ impl Desugarer<'_> {
         }
     }
 
+    /// What iterating `iterable`, an iterator of class `class`, drives, and its
+    /// class. Python calls `__iter__` first; a synthesized generator's is the
+    /// identity, and a `__next__`-only class iterates itself.
+    fn iteration_source(&self, iterable: IRExpr, class: String) -> (IRExpr, String) {
+        let facts = &self.facts[&class];
+        if facts.synthetic || !facts.has_iter {
+            return (iterable, class);
+        }
+        let returns = facts.iter_returns.clone().unwrap_or_else(|| class.clone());
+        let call = IRExpr::FunctionCall {
+            function_name: format!("{class}::__iter__"),
+            arguments: vec![iterable],
+        };
+        (call, returns)
+    }
+
+    /// A comprehension sizes its result from its iterables before filling it,
+    /// so an iterator there (a generator, or a class with `__next__`) is first
+    /// drained into a list by a synthesized helper. The comprehension used to
+    /// read the iterator object itself as a list (#129). Only the first `for`
+    /// may iterate one: an inner iterable is evaluated once to size the result
+    /// and again to fill it, which would drain an iterator twice.
+    fn drain_comprehension_iterables(
+        &mut self,
+        generators: &mut [IRGenerator],
+        vars: &HashMap<String, String>,
+    ) {
+        let mut scope = vars.clone();
+        for (g, generator) in generators.iter_mut().enumerate() {
+            if let Some(class) = self.iterator_class(&generator.iterable, &scope) {
+                if g > 0 {
+                    self.errors.push(format!(
+                        "a comprehension in '{}' iterates a generator or iterator in its \
+                         'for' clause {}, but only the first 'for' of a comprehension can. \
+                         Hint: collect it into a list first, or write the loops out",
+                        self.current,
+                        g + 1
+                    ));
+                } else {
+                    let iterable =
+                        std::mem::replace(&mut generator.iterable, IRExpr::Const(IRConstant::None));
+                    let (it_expr, it_class) = self.iteration_source(iterable, class);
+                    generator.iterable = if self.facts.get(&it_class).is_some_and(|f| f.has_next) {
+                        self.drains.insert(it_class.clone());
+                        IRExpr::FunctionCall {
+                            function_name: drain_fn_name(&it_class),
+                            arguments: vec![it_expr],
+                        }
+                    } else {
+                        it_expr
+                    };
+                }
+            }
+            for target in &generator.targets {
+                scope.remove(target);
+            }
+        }
+    }
+
     fn rewrite_body(&mut self, body: &mut IRBody, vars: &mut HashMap<String, String>) {
         let stmts = std::mem::take(&mut body.statements);
         let mut out = Vec::with_capacity(stmts.len());
@@ -365,22 +508,7 @@ impl Desugarer<'_> {
                         });
                         continue;
                     };
-                    // Python calls `__iter__` first; a synthesized generator's
-                    // is the identity, and a `__next__`-only class iterates
-                    // itself.
-                    let facts = &self.facts[&class];
-                    let (it_expr, it_class) = if facts.synthetic || !facts.has_iter {
-                        (iterable, class.clone())
-                    } else {
-                        let returns = facts.iter_returns.clone().unwrap_or_else(|| class.clone());
-                        (
-                            IRExpr::FunctionCall {
-                                function_name: format!("{class}::__iter__"),
-                                arguments: vec![iterable],
-                            },
-                            returns,
-                        )
-                    };
+                    let (it_expr, it_class) = self.iteration_source(iterable, class);
                     if !self.facts.get(&it_class).is_some_and(|f| f.has_next) {
                         vars.remove(&target);
                         self.rewrite_body(&mut for_body, vars);
@@ -541,6 +669,11 @@ impl Desugarer<'_> {
 
     fn rewrite_expr(&mut self, expr: &mut IRExpr, vars: &HashMap<String, String>) {
         for_each_child(expr, &mut |child| self.rewrite_expr(child, vars));
+
+        if let IRExpr::Comprehension { generators, .. } = expr {
+            self.drain_comprehension_iterables(generators, vars);
+            return;
+        }
 
         let IRExpr::MethodCall {
             object,
@@ -1223,6 +1356,9 @@ fn yielded_type(body: &IRBody, params: &[IRParam]) -> IRType {
         match expr {
             IRExpr::Const(IRConstant::Float(_)) => true,
             IRExpr::Variable(name) | IRExpr::Param(name) => float_params.contains(name.as_str()),
+            // True division is a float whatever its operands are; `yield i / 2`
+            // was inferred as an int and truncated every value.
+            IRExpr::BinaryOp { op: IROp::Div, .. } => true,
             IRExpr::BinaryOp { left, right, .. } => {
                 expr_has_float(left, float_params) || expr_has_float(right, float_params)
             }

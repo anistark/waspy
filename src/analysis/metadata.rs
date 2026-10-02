@@ -41,6 +41,9 @@ pub fn get_python_file_metadata(source: &str) -> Result<Vec<FunctionSignature>> 
     // Extract function signatures
     let mut signatures = Vec::new();
     for func in &ir_module.functions {
+        if func.name.starts_with(ir::DRAIN_FN_PREFIX) {
+            continue;
+        }
         let param_types: Vec<String> = func
             .params
             .iter()
