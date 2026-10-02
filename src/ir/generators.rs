@@ -50,7 +50,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 pub const STOP_CHECK_FN: &str = "__waspy_stop_check";
 
 /// Prefix of the synthesized helpers that drain an iterator into a list for a
-/// comprehension (see [`drain_function`]). They are internal: not exported, and
+/// comprehension (see `drain_function`). They are internal: not exported, and
 /// left out of function metadata.
 pub const DRAIN_FN_PREFIX: &str = "__drain_";
 
