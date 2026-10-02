@@ -225,6 +225,7 @@
                     { name: "Collection writes convert the value to the element type, or are refused (append, insert, item assignment, dict values, set.add)", status: "done", version: "0.17.0" },
                     { name: "Rich comparisons on instances: <, <=, >, >= call __lt__/__le__/__gt__/__ge__, with reflection", status: "done", version: "0.17.0" },
                     { name: "Virtual dispatch: a base method calling self.method() reaches the subclass override (methods, @property getters, __eq__)", status: "done", version: "0.17.0" },
+                    { name: "Instances of sibling classes in one list, dict, local, or field dispatch on their own class (typed as the nearest common base)", status: "done", version: "upcoming" },
                     { name: "Unimplemented decorators are refused (functions, methods, and classes) instead of being silently dropped", status: "done", version: "0.17.0" },
                     { name: "A call to an undefined function, or an attribute read through an untyped value, is a compile error instead of answering 0", status: "done", version: "0.17.0" }
                 ]
@@ -415,7 +416,8 @@
                     { name: "Dict comprehensions ({k: v for k, v in items})", status: "done", version: "0.14.0" },
                     { name: "Set comprehensions ({x for x in list}) with dedup at construction", status: "done", version: "0.14.0" },
                     { name: "Multiple generators & nesting ([x for row in m for x in row])", status: "done", version: "0.14.0" },
-                    { name: "Generator expressions (x for x in list), materialized eagerly as lists", status: "done", version: "0.14.0" }
+                    { name: "Generator expressions (x for x in list), materialized eagerly as lists", status: "done", version: "0.14.0" },
+                    { name: "Comprehensions over generators and iterator classes (in the first for clause)", status: "done", version: "upcoming" }
                 ]
             },
             functional: {

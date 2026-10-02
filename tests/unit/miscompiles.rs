@@ -2697,3 +2697,302 @@ fn round_matches_cpython_exactly() {
                    \x20   return abs(a) + abs(b)\n";
     assert_eq!(call_f64(abs_src, "f"), 9.5);
 }
+
+// ---------------------------------------------------------------------------
+// Instances of sibling classes in one place (#128)
+// ---------------------------------------------------------------------------
+
+const SIBLING_SHAPES: &str = "from typing import Dict, List\n\
+    \n\
+    \n\
+    class Shape:\n\
+    \x20   def area(self) -> float:\n\
+    \x20       return 0.0\n\
+    \n\
+    \n\
+    class Circle(Shape):\n\
+    \x20   def __init__(self, r: float):\n\
+    \x20       self.r = r\n\
+    \n\
+    \x20   def area(self) -> float:\n\
+    \x20       return 3.0 * self.r * self.r\n\
+    \n\
+    \n\
+    class Rect(Shape):\n\
+    \x20   def __init__(self, w: float, h: float):\n\
+    \x20       self.w = w\n\
+    \x20       self.h = h\n\
+    \n\
+    \x20   def area(self) -> float:\n\
+    \x20       return self.w * self.h\n\
+    \n\
+    \n\
+    class Holder:\n\
+    \x20   def __init__(self):\n\
+    \x20       self.shape = Circle(1.0)\n\
+    \n\
+    \x20   def swap(self) -> float:\n\
+    \x20       self.shape = Rect(2.0, 3.0)\n\
+    \x20       return self.shape.area()\n\
+    \n\
+    \n\
+    def literal_loop() -> float:\n\
+    \x20   shapes = [Circle(1.0), Rect(2.0, 3.0)]\n\
+    \x20   total = 0.0\n\
+    \x20   for s in shapes:\n\
+    \x20       total += s.area()\n\
+    \x20   return total\n\
+    \n\
+    \n\
+    def literal_index() -> float:\n\
+    \x20   shapes = [Rect(2.0, 3.0), Circle(1.0)]\n\
+    \x20   return shapes[1].area()\n\
+    \n\
+    \n\
+    def appended() -> float:\n\
+    \x20   shapes = [Circle(1.0)]\n\
+    \x20   shapes.append(Rect(2.0, 3.0))\n\
+    \x20   return shapes[1].area()\n\
+    \n\
+    \n\
+    def item_assigned() -> float:\n\
+    \x20   shapes = [Circle(1.0), Circle(2.0)]\n\
+    \x20   shapes[0] = Rect(2.0, 3.0)\n\
+    \x20   return shapes[0].area()\n\
+    \n\
+    \n\
+    def dict_values() -> float:\n\
+    \x20   d = {\"c\": Circle(1.0), \"r\": Rect(2.0, 3.0)}\n\
+    \x20   return d[\"r\"].area()\n\
+    \n\
+    \n\
+    def reassigned_in_loop() -> float:\n\
+    \x20   s = Circle(1.0)\n\
+    \x20   total = 0.0\n\
+    \x20   i = 0\n\
+    \x20   while i < 2:\n\
+    \x20       total += s.area()\n\
+    \x20       s = Rect(2.0, 3.0)\n\
+    \x20       i += 1\n\
+    \x20   return total\n\
+    \n\
+    \n\
+    def field_reassigned() -> float:\n\
+    \x20   return Holder().swap()\n";
+
+/// A list literal took its element class from its first element, and a local,
+/// field, list element, or dict value kept the class of the first instance
+/// stored in it. A method called through any of them was compiled as a direct
+/// call to that class's method, so a `Rect` ran `Circle.area()` and read its
+/// `w` as `r`. Each place now takes the nearest common base of everything
+/// stored in it, so the call dispatches on the instance's own class.
+#[test]
+fn sibling_instances_dispatch_on_their_own_class() {
+    for (func, expected) in [
+        ("literal_loop", 9.0),
+        ("literal_index", 3.0),
+        ("appended", 6.0),
+        ("item_assigned", 6.0),
+        ("dict_values", 6.0),
+        ("reassigned_in_loop", 9.0),
+        ("field_reassigned", 6.0),
+    ] {
+        assert_eq!(call_f64(SIBLING_SHAPES, func), expected, "{func}()");
+    }
+}
+
+/// An annotation the compiler trusts for dispatch and the program contradicts
+/// (a `Rect` passed to a `Circle` parameter, or returned from `-> Circle`) has
+/// no single class to dispatch from, so it is refused rather than running
+/// `Circle`'s methods on a `Rect`. So is a method call on instances of classes
+/// with no common base.
+#[test]
+fn an_instance_of_an_unrelated_class_is_refused() {
+    let argument = format!(
+        "{SIBLING_SHAPES}\n\
+         def takes_circle(c: Circle) -> float:\n\
+         \x20   return c.area()\n\
+         \n\
+         def f() -> float:\n\
+         \x20   return takes_circle(Rect(2.0, 3.0))\n"
+    );
+    let err = try_compile(&argument).expect_err("a Rect passed as a Circle must be refused");
+    assert!(
+        err.contains("a Rect is used where a Circle is expected (argument 1 of takes_circle())")
+            && err.contains("'Shape'"),
+        "expected the classes, the argument, and the common base, got: {err}"
+    );
+
+    let returned = format!(
+        "{SIBLING_SHAPES}\n\
+         def make() -> Circle:\n\
+         \x20   return Rect(2.0, 3.0)\n"
+    );
+    let err = try_compile(&returned).expect_err("a Rect returned as a Circle must be refused");
+    assert!(
+        err.contains("a Rect is used where a Circle is expected (a return value)"),
+        "expected the return to be named, got: {err}"
+    );
+
+    let unrelated = format!(
+        "{SIBLING_SHAPES}\n\
+         def f() -> float:\n\
+         \x20   xs = [Circle(1.0), Holder()]\n\
+         \x20   return xs[0].area()\n"
+    );
+    assert!(
+        try_compile(&unrelated).is_err(),
+        "a method call on instances with no common base must be refused"
+    );
+    let measured = format!(
+        "{SIBLING_SHAPES}\n\
+         def f() -> int:\n\
+         \x20   xs = [Circle(1.0), Holder()]\n\
+         \x20   return len(xs)\n"
+    );
+    assert_eq!(call_i32(&measured, "f"), 2);
+}
+
+// ---------------------------------------------------------------------------
+// Comprehensions over generators and iterators (#129)
+// ---------------------------------------------------------------------------
+
+const GENERATOR_COMPREHENSIONS: &str = "def evens(limit: int):\n\
+    \x20   for i in range(limit):\n\
+    \x20       if i % 2 == 0:\n\
+    \x20           yield i\n\
+    \n\
+    \n\
+    def halves(n: int):\n\
+    \x20   i = 0\n\
+    \x20   while i < n:\n\
+    \x20       yield i / 2\n\
+    \x20       i += 1\n\
+    \n\
+    \n\
+    class Countdown:\n\
+    \x20   def __init__(self, start: int):\n\
+    \x20       self.n = start\n\
+    \n\
+    \x20   def __iter__(self) -> \"Countdown\":\n\
+    \x20       return self\n\
+    \n\
+    \x20   def __next__(self) -> int:\n\
+    \x20       if self.n <= 0:\n\
+    \x20           raise StopIteration\n\
+    \x20       self.n -= 1\n\
+    \x20       return self.n + 1\n\
+    \n\
+    \n\
+    def list_sum() -> int:\n\
+    \x20   return sum([x for x in evens(10)])\n\
+    \n\
+    \n\
+    def list_len() -> int:\n\
+    \x20   return len([x for x in evens(10)])\n\
+    \n\
+    \n\
+    def generator_expression() -> int:\n\
+    \x20   return sum(x for x in evens(10))\n\
+    \n\
+    \n\
+    def set_size() -> int:\n\
+    \x20   return len({x % 4 for x in evens(10)})\n\
+    \n\
+    \n\
+    def dict_size() -> int:\n\
+    \x20   return len({x: x * x for x in evens(10)})\n\
+    \n\
+    \n\
+    def filtered() -> int:\n\
+    \x20   return len([x for x in evens(20) if x % 3 == 0])\n\
+    \n\
+    \n\
+    def held_twice() -> int:\n\
+    \x20   g = evens(6)\n\
+    \x20   first = [x for x in g]\n\
+    \x20   second = [x for x in g]\n\
+    \x20   return len(first) * 10 + len(second)\n\
+    \n\
+    \n\
+    def nested() -> int:\n\
+    \x20   return sum([sum([y for y in evens(x)]) for x in [4, 6, 8]])\n\
+    \n\
+    \n\
+    def user_iterator() -> int:\n\
+    \x20   return sum([x * 10 for x in Countdown(4)])\n\
+    \n\
+    \n\
+    def inside_try() -> int:\n\
+    \x20   try:\n\
+    \x20       return sum([x for x in evens(10)])\n\
+    \x20   except ValueError:\n\
+    \x20       return -1\n\
+    \n\
+    \n\
+    def float_comprehension() -> float:\n\
+    \x20   return sum([x for x in halves(5)])\n\
+    \n\
+    \n\
+    def float_loop() -> float:\n\
+    \x20   total = 0.0\n\
+    \x20   for x in halves(5):\n\
+    \x20       total += x\n\
+    \x20   return total\n";
+
+/// A comprehension sizes its result from its iterable before filling it, and
+/// read a generator object as if it were a list: its first word became the
+/// length and the words after it the elements, so `sum([x for x in evens(10)])`
+/// answered 0. An iterator in a comprehension's first `for` is now drained into
+/// a list first, for every comprehension kind, a generator held in a variable,
+/// and a user class implementing `__iter__`/`__next__`.
+#[test]
+fn a_comprehension_drives_a_generator() {
+    for (func, expected) in [
+        ("list_sum", 20),
+        ("list_len", 5),
+        ("generator_expression", 20),
+        ("set_size", 2),
+        ("dict_size", 5),
+        ("filtered", 4),
+        ("held_twice", 30),
+        ("nested", 20),
+        ("user_iterator", 100),
+        ("inside_try", 20),
+    ] {
+        assert_eq!(
+            call_i32(GENERATOR_COMPREHENSIONS, func),
+            expected,
+            "{func}()"
+        );
+    }
+}
+
+/// `yield i / 2` was inferred as an int-yielding generator, since only float
+/// literals, float parameters, and `float()` counted, so every value was
+/// truncated, through a `for` loop and a comprehension alike.
+#[test]
+fn a_generator_of_true_division_yields_floats() {
+    assert_eq!(call_f64(GENERATOR_COMPREHENSIONS, "float_loop"), 5.0);
+    assert_eq!(
+        call_f64(GENERATOR_COMPREHENSIONS, "float_comprehension"),
+        5.0
+    );
+}
+
+/// An inner `for` clause is evaluated once to size the result and again to
+/// fill it, which would drain an iterator twice, so iterating one there is
+/// refused with a hint.
+#[test]
+fn a_generator_in_an_inner_for_clause_is_refused() {
+    let src = format!(
+        "{GENERATOR_COMPREHENSIONS}\n\
+         def f() -> int:\n\
+         \x20   return sum([y for x in [1, 2] for y in evens(x * 4)])\n"
+    );
+    let err = try_compile(&src).expect_err("a generator in an inner for clause must be refused");
+    assert!(
+        err.contains("only the first 'for' of a comprehension"),
+        "expected the inner clause to be named, got: {err}"
+    );
+}
