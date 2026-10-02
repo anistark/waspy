@@ -76,7 +76,8 @@ impl Verbosity {
 pub struct CompilerOptions {
     /// Run the Binaryen optimization pass over the generated WebAssembly
     /// (defaults to `true`). The unoptimized binary is already valid and
-    /// correct; optimization only shrinks and speeds it up.
+    /// correct; optimization only shrinks and speeds it up. Has no effect
+    /// when waspy is built without its `optimize` feature.
     pub optimize: bool,
 
     /// How much diagnostic output the compiler emits while running

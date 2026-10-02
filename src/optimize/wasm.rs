@@ -1,8 +1,11 @@
 use anyhow::Result;
+#[cfg(feature = "optimize")]
 use binaryen::{ffi, CodegenConfig, Module};
+#[cfg(feature = "optimize")]
 use std::os::raw::c_char;
 
 /// Optimize WebAssembly binary using Binaryen
+#[cfg(feature = "optimize")]
 pub fn optimize_wasm(wasm_binary: &[u8]) -> Result<Vec<u8>> {
     if wasm_binary.len() < 8 {
         return Ok(wasm_binary.to_vec());
@@ -37,4 +40,12 @@ pub fn optimize_wasm(wasm_binary: &[u8]) -> Result<Vec<u8>> {
             Ok(optimized_binary)
         }
     }
+}
+
+/// Without the `optimize` feature there is no Binaryen to run, so the binary
+/// is returned unchanged. It is already valid and correct; the pass only
+/// shrinks it.
+#[cfg(not(feature = "optimize"))]
+pub fn optimize_wasm(wasm_binary: &[u8]) -> Result<Vec<u8>> {
+    Ok(wasm_binary.to_vec())
 }

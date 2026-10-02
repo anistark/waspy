@@ -15,3 +15,6 @@ examples/*.html
 .claude
 .pi
 plan
+
+# Playground compiler build (just playground; built and deployed by CI)
+docs/playground/compiler

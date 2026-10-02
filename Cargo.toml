@@ -20,7 +20,10 @@ include = [
 ]
 
 [features]
-default = []
+default = ["optimize"]
+# The Binaryen optimization pass. Binaryen is a native C++ library, so turn
+# this off (`default-features = false`) to build waspy itself for wasm32.
+optimize = ["dep:binaryen"]
 wasm-plugin = ["serde"]
 
 [dependencies]
@@ -28,7 +31,7 @@ rustpython-parser = "0.4.0"
 wasm-encoder = "0.243.0"
 wasmparser = "0.243.0"
 anyhow = "1.0.100"
-binaryen = "0.13.0"
+binaryen = { version = "0.13.0", optional = true }
 thiserror = "1.0"
 log = "0.4.29"
 serde = { version = "1.0.228", features = ["derive"], optional = true }

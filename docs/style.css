@@ -205,7 +205,9 @@ body::after {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 0.8rem 0;
+    gap: 1rem;
+    padding-top: 0.8rem;
+    padding-bottom: 0.8rem;
 }
 
 .logo-container {
@@ -266,6 +268,33 @@ body::after {
 .nav-links a.active {
     color: var(--amber);
     background: color-mix(in srgb, var(--amber) 12%, transparent);
+}
+
+.nav-github {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 34px;
+    margin-right: -0.75rem;
+    border-radius: 8px;
+    color: var(--text-1);
+    transition: color 0.25s ease, background 0.25s ease;
+}
+
+.nav-github:hover {
+    color: var(--text-0);
+    background: color-mix(in srgb, var(--amber) 10%, transparent);
+}
+
+.nav-github:focus-visible {
+    outline: 2px solid var(--amber);
+    outline-offset: 2px;
+}
+
+.nav-github svg {
+    width: 19px;
+    height: 19px;
 }
 
 /* Theme toggle — sliding pill */
@@ -647,6 +676,15 @@ body::after {
     margin-top: 1.1rem;
     color: var(--text-2);
     font-size: 0.9rem;
+}
+
+.hero-terminal-note a {
+    color: var(--amber);
+    text-decoration: none;
+}
+
+.hero-terminal-note a:hover {
+    text-decoration: underline;
 }
 
 /* Explanation under each code panel */
@@ -2350,6 +2388,17 @@ a.footer-link:hover {
     .column-done .column-content,
     .column-todo .column-content {
         grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    }
+}
+
+@media (max-width: 1000px) {
+    .nav-right {
+        gap: 1rem;
+    }
+
+    .nav-links a {
+        padding: 0.4rem 0.55rem;
+        font-size: 0.86rem;
     }
 }
 

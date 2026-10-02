@@ -23,6 +23,8 @@ Three more end-to-end programs, written as ordinary Python and compiled unchange
 - `self.items: Dict[str, Item] = {}`, an annotated field, declares the field's type ahead of anything inferred from its values. It was refused
 - Augmented assignment through a subscript (`counts[w] += 1`) and through a computed object (`self.items[sku].qty += n`), each target evaluated once. The subscript form was refused outright
 - `round(x)` and `round(x, ndigits)`, rounding the exact binary value of the float half-to-even as CPython does, so `round(2.675, 2)` is 2.67 and `round(1.005, 2)` is 1.0 rather than the 2.68 and 1.01 the usual `floor(x * 10**n + 0.5)` shortcut gives. The product is computed exactly with Dekker's two-product and the error term consulted only at a tie. `abs()` of an int or a float
+- A playground page on the docs site (`docs/playground/`): Python in an editor on the left, the generated WebAssembly on the right as text (WAT) or an annotated hex dump, with a Run tab that calls the exported functions in the browser. The compiler is waspy itself built to wasm32, so everything runs locally. Examples, an optional Binaryen pass (binaryen.js), shareable links, and located compile errors marked in the editor
+- An `optimize` cargo feature, on by default, gating the Binaryen dependency. With `default-features = false` waspy builds for `wasm32-unknown-unknown`, and `CompilerOptions::optimize` has no effect
 
 ### Fixed
 - **Every evaluation of a collection literal is a new object.** A literal was built into one compile-time region per source site, and only one evaluated inside a loop was copied out. A function body runs once per call, so a function called twice returned the same list, dict, set, or tuple both times, and the second call reset the first call's result: `a = make(1); b = make(2); b.append(3)` left `len(a)` at 2 and `a[0]` at 2. A literal whose element called back into its own function had its earlier elements overwritten by the inner call, and a recursive function looping over `range()` shared one range object between activations (`walk(4)` answered 1 where CPython answers 15). Each literal and range is now built straight into its own `__alloc` block
@@ -47,6 +49,7 @@ Three more end-to-end programs, written as ordinary Python and compiled unchange
 - **Assigning a field the class never declares is a compile error.** The write was dropped with nothing said; reading such a field was already refused
 - **`@`, and the bitwise operators on a float, are compile errors**, as they are `TypeError`s in CPython. They pushed a 0 over their operands
 - **A dynamic import is a compile error.** It evaluated the module name and answered 0 as if a module had been loaded
+- The docs site is built and deployed by the Documentation workflow (GitHub Pages from Actions) instead of being served from `docs/` on `main`, so the playground's compiler is built fresh on every deploy rather than committed. Every page's nav gains the playground, shows GitHub as an icon, and keeps its side padding below 1200px
 
 ## [0.17.0](https://github.com/anistark/waspy/releases/tag/v0.17.0) - 2026-09-22
 
