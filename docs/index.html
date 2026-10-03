@@ -546,6 +546,77 @@ console.log(instance.exports.factorial(5));
             </div>
         </section>
 
+        <section class="section" id="talks">
+            <div class="container">
+                <div class="section-header reveal">
+                    <span class="kicker">On stage</span>
+                    <h2>Talks</h2>
+                    <p class="section-subtitle">Where Waspy has been presented, with recordings and slides where they exist.</p>
+                </div>
+
+                <div class="talks-grid">
+                    <article class="talk-card reveal" data-accent="ember" style="--d: 0;">
+                        <div class="talk-media">
+                            <span class="talk-event">IICT 2026</span>
+                        </div>
+                        <div class="talk-body">
+                            <div class="talk-meta">
+                                <span class="feature-tag">talk</span>
+                                <time datetime="2026-10-03">3 Oct 2026</time>
+                            </div>
+                            <h3>Direct Ahead-of-Time Compilation of Typed Python to Compact WebAssembly</h3>
+                            <p class="talk-speakers">Kumar Anirudha, Farhaan Bukhsh</p>
+                            <p>Innovations in Compiler Technology, IISc Bengaluru. How Waspy maps typed Python onto WebAssembly's static types and linear memory with no embedded interpreter, producing modules of a few kilobytes.</p>
+                            <div class="talk-links">
+                                <a href="https://anistark.github.io/talks/waspy-iict.pdf" class="btn btn-secondary" target="_blank" rel="noopener">Slides</a>
+                                <a href="paper/" class="btn btn-secondary">Paper</a>
+                                <a href="https://compilertech.org/" class="btn btn-secondary" target="_blank" rel="noopener">Event page</a>
+                            </div>
+                        </div>
+                    </article>
+
+                    <article class="talk-card reveal" data-accent="amber" style="--d: 1;">
+                        <div class="talk-media">
+                            <span class="talk-event">PyCon India 2025</span>
+                        </div>
+                        <div class="talk-body">
+                            <div class="talk-meta">
+                                <span class="feature-tag">talk</span>
+                                <time datetime="2025-09-13">13 Sep 2025</time>
+                            </div>
+                            <h3>Compiling Python to WASM</h3>
+                            <p class="talk-speakers">Kumar Anirudha, Farhaan Bukhsh</p>
+                            <p>Why Python still lags behind in the browser, what Pyodide, PyScript, and RustPython trade away to get there, and how a native ahead-of-time compiler like Waspy closes the gap.</p>
+                            <div class="talk-links">
+                                <a href="https://drive.google.com/drive/folders/1e10UWWDN_6TVN3EgzbfvkcS6iDOnLNBV?usp=sharing" class="btn btn-secondary" target="_blank" rel="noopener">Slides</a>
+                                <a href="https://cfp.in.pycon.org/2025/talk/T3QYZX/" class="btn btn-secondary" target="_blank" rel="noopener">Event page</a>
+                            </div>
+                        </div>
+                    </article>
+
+                    <article class="talk-card reveal" data-accent="teal" style="--d: 2;">
+                        <a class="talk-media" href="https://www.youtube.com/watch?v=qes-hzyVIGU" target="_blank" rel="noopener" aria-label="Watch WASM and Python: The Future of Serverless Computing on YouTube">
+                            <img src="https://img.youtube.com/vi/qes-hzyVIGU/maxresdefault.jpg" alt="" loading="lazy">
+                        </a>
+                        <div class="talk-body">
+                            <div class="talk-meta">
+                                <span class="feature-tag">talk</span>
+                                <time datetime="2025-07-16">16 Jul 2025</time>
+                            </div>
+                            <h3>WASM and Python: The Future of Serverless Computing</h3>
+                            <p class="talk-speakers">Kumar Anirudha, Farhaan Bukhsh</p>
+                            <p>EuroPython 2025, Prague. WebAssembly against containers for serverless workloads, what makes Python hard to run in WASM, and a FastAPI function deployed in a WASM runtime and benchmarked against a traditional server.</p>
+                            <div class="talk-links">
+                                <a href="https://www.youtube.com/watch?v=qes-hzyVIGU" class="btn btn-primary" target="_blank" rel="noopener">Watch</a>
+                                <a href="https://ep2025.europython.eu/session/wasm-and-python-the-future-of-serverless-computing/" class="btn btn-secondary" target="_blank" rel="noopener">Event page</a>
+                            </div>
+                        </div>
+                    </article>
+                </div>
+
+                <p class="talks-cta reveal">Spoke about Waspy somewhere? <a href="https://github.com/anistark/waspy/edit/main/docs/index.html">Add your talk</a> to this page.</p>
+            </div>
+        </section>
 
         <section class="section" id="contributors">
             <div class="container">
@@ -609,6 +680,7 @@ console.log(instance.exports.factorial(5));
                     <a href="https://github.com/anistark/waspy/tree/main/examples" class="footer-link">Examples</a>
                     <a href="modules/" class="footer-link">Module Reference</a>
                     <a href="paper/" class="footer-link">Paper</a>
+                    <a href="#talks" class="footer-link">Talks</a>
                     <a href="https://github.com/anistark/waspy/blob/main/CONTRIBUTING.md" class="footer-link">Contributing</a>
                 </div>
 

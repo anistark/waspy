@@ -24,6 +24,7 @@ Three more end-to-end programs, written as ordinary Python and compiled unchange
 - Augmented assignment through a subscript (`counts[w] += 1`) and through a computed object (`self.items[sku].qty += n`), each target evaluated once. The subscript form was refused outright
 - `round(x)` and `round(x, ndigits)`, rounding the exact binary value of the float half-to-even as CPython does, so `round(2.675, 2)` is 2.67 and `round(1.005, 2)` is 1.0 rather than the 2.68 and 1.01 the usual `floor(x * 10**n + 0.5)` shortcut gives. The product is computed exactly with Dekker's two-product and the error term consulted only at a tie. `abs()` of an int or a float
 - A playground page on the docs site (`docs/playground/`): Python in an editor on the left, the generated WebAssembly on the right as text (WAT) or an annotated hex dump, with a Run tab that calls the exported functions in the browser. The compiler is waspy itself built to wasm32, so everything runs locally. Examples, an optional Binaryen pass (binaryen.js), shareable links, and located compile errors marked in the editor
+- A Talks section on the docs home page: a card per talk on Waspy with its event, date, speakers, and links to the recording, slides, and event page, starting with talks at IICT 2026 (IISc Bengaluru), PyCon India 2025, and EuroPython 2025
 - An `optimize` cargo feature, on by default, gating the Binaryen dependency. With `default-features = false` waspy builds for `wasm32-unknown-unknown`, and `CompilerOptions::optimize` has no effect
 
 ### Fixed
