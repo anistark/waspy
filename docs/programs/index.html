@@ -289,7 +289,7 @@ def checkout() -&gt; float:
 
             <dl class="minute">
                 <dt>Annotations</dt>
-                <dd>Parameter and return annotations pick the WebAssembly value types. A collection whose elements you compare, sort, or use as dict keys needs the parameterised form: <code>List[str]</code>, not a bare <code>list</code>.</dd>
+                <dd>Parameter and return annotations pick the WebAssembly value types. A collection whose elements you use needs the parameterised form, <code>List[str]</code> rather than a bare <code>list</code>: the parameterised form is what gives the compiler an element type.</dd>
 
                 <dt>Entry points</dt>
                 <dd>Every module-level <code>def</code> is exported. There is no top-level run step, so module level holds definitions only; put the code that runs in a function, or under <code>if __name__ == "__main__":</code>.</dd>
@@ -439,9 +439,10 @@ def checkout() -&gt; float:
                 <li>
                     <div class="shape-head">
                         <strong>A bare <code>list</code> or <code>dict</code> annotation</strong>
+                        <span class="tag tag-quiet">differs</span>
                         <span class="tag tag-workaround">workaround</span>
                     </div>
-                    <p class="shape-note">The parameterised form is what carries an element type. Write <code>List[str]</code> and <code>Dict[str, int]</code> for any collection whose elements are compared, sorted, or used as dict keys.</p>
+                    <p class="shape-note">The parameterised form is what carries an element type; a bare <code>list</code> or <code>dict</code> compiles with its elements untyped. Some uses are then refused (a string method on an element, <code>sorted()</code>), but two answer wrong: strings returned through <code>-&gt; list</code> and used as dict keys compare as words rather than by content, so <code>"a b a".split(" ")</code> fills a dict with 3 keys where CPython has 2, and <code>len(xs[0])</code> on an <code>xs: list</code> of strings answers a meaningless number. Write <code>List[str]</code> and <code>Dict[str, int]</code> for any collection whose elements you use.</p>
                 </li>
 
                 <li>

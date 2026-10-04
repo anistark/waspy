@@ -562,8 +562,11 @@ fn lambdas_that_do_not_need_their_parameter_type_still_work() {
 
 /// #116 records a bare `list` or `dict` annotation losing its element type, so
 /// that string keys from such a collection stop deduplicating. Both spellings
-/// answer Python's 2 here, so whatever reaches the reported symptom is
-/// narrower than the annotation alone. Kept as a differential test on both
+/// answer Python's 2 here only because the keys are literals: equal literals
+/// are interned at one offset, so comparing them as untyped words still finds
+/// the match. Strings built at run time (`"a b a".split(" ")` returned through
+/// `-> list`) have different offsets, and that shape answers 3 where CPython
+/// answers 2; #116 stays open for it. Kept as a differential test on both
 /// forms: if either starts answering 3, the deduplication has regressed.
 #[test]
 fn keys_from_a_bare_and_a_parameterised_annotation_both_deduplicate() {
