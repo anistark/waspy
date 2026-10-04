@@ -32,7 +32,7 @@ Generate & Optimize
 - Compiles multiple files into a single module
 - Handles control flow with if/else, while and for loops, including `break` and `continue`
 - Processes variable declarations and assignments
-- Supports type annotations for function parameters and return values
+- Supports type annotations for function parameters and return values. For a collection, the parameterised form (`List[str]`, `Dict[str, int]`, `Tuple[int, str]`) is what gives the compiler its element type; a bare `list` or `dict` compiles with the element type unknown (see [Limitations](#limitations))
 - Enables function calls between compiled functions
 - Includes an expanded type system: integers (32-bit, see [Numbers](#numbers)), floats, booleans, strings
 - String operations: slicing, concatenation, 20+ methods, and formatting (f-strings, `.format()` with automatic or positional fields, `%` on constants). Repetition (`s * n`) and `%` on runtime values are not done yet; see [Known wrong answers](#known-wrong-answers)
@@ -128,7 +128,7 @@ Float division by zero and integer division or modulo by zero raise
 - A lambda's parameters carry no type, so indexing one, calling `len()` on one, or calling a method on one inside the lambda body is a compile error rather than a wrong answer ([#115](https://github.com/anistark/waspy/issues/115)). Arithmetic and comparison are fine, because an untyped word already behaves as the `int` they assume, so `sorted(xs, key=lambda v: 0 - v)` works. For anything that needs the parameter's type, use a named `def`, whose parameters can be annotated: that is why sorting an explicit list of `(-count, word)` tuples is the working shape and `key=lambda kv: (-kv[1], kv[0])` is not
 - Comparing two collections needs both to have the same, known element types: `(1, 2) == (1.0, 2)` (True in CPython) and a comparison with an untyped list are refused rather than read at the wrong width. Dict and set equality, and a list, dict, or set as a set member or dict key (unhashable in CPython), are refused. A class that defines `__eq__` cannot be a set member or dict key, since calling a user `__hash__` is not supported
 - `float()` of a string is refused, since a digit loop cannot produce the correctly rounded double CPython does; `round(x, n)` needs `0 <= n <= 22`
-- A bare `list` or `dict` annotation carries no element type, so a function returning `-> list` loses it and the values inside compare as untyped words. Use the parameterised form (`List[str]`, `Dict[str, int]`) wherever a collection's elements are compared, used as dict keys, or sorted
+- A bare `list` or `dict` annotation carries no element type, so the elements of such a collection are read as untyped words. Some uses are refused (calling a string method on an element, `sorted()`, comparing the collection), but two still answer wrong: strings from a `-> list` function used as dict keys compare as words rather than by content, so `"a b a".split(" ")` returned through `-> list` fills a dict with 3 keys where CPython has 2, and `len(xs[0])` on an `xs: list` parameter holding strings answers a large meaningless number. Write the parameterised form (`List[str]`, `Dict[str, int]`) for any collection whose elements you use ([#116](https://github.com/anistark/waspy/issues/116))
 - A variable, field, or collection that holds instances of more than one class is typed as their nearest common base for the whole function, so a method call on it dispatches on each instance's own class. Types are not tracked per program point, so reading a field that only one of the subclasses has through it is refused, and so is a method call on instances with no common base. Storing an instance where an annotation names an unrelated class (a `Rect` passed to a `Circle` parameter, or returned from `-> Circle`) is refused rather than dispatched as the annotated class
 - No garbage collection or reference counting: the bump allocator never frees
 
@@ -138,6 +138,7 @@ Each of these compiles and then answers something CPython does not. They break t
 
 - Repetition: `"ab" * 3` answers `""`, and `[0] * 5` and `(a,) * n` trap
 - `tuple.index(v)` answers -1 (`list.index` and `tuple.count` are correct)
+- A bare `list` annotation: string elements used as dict keys do not deduplicate, and `len()` of a string element answers garbage. Use `List[str]` (see [Limitations](#limitations))
 - The set operators: `{1, 2} | {2, 3}`, `&`, and `^` answer wrong sets, and `-` traps. Dict `|` answers a wrong dict
 - `str(e)` and `isinstance(e, E)` on the name bound by `except E as e`
 - `print()` and every `logging` call write nothing
