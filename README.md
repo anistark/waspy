@@ -9,7 +9,7 @@ A Python to WebAssembly compiler written in Rust.
 
 ## Overview
 
-Waspy compiles a typed subset of Python ahead of time into a standalone WebAssembly module — no interpreter or VM in the output. This README's [Supported Python subset](#supported-python-subset) and [Limitations](#limitations) sections are the authoritative statement of what compiles and runs today.
+Waspy compiles a typed subset of Python ahead of time into a standalone WebAssembly module, with no interpreter or VM in the output. This README's [Supported Python subset](#supported-python-subset) and [Limitations](#limitations) sections are the authoritative statement of what compiles and runs today.
 
 ### Compilation Pipeline
 
@@ -35,12 +35,12 @@ Generate & Optimize
 - Supports type annotations for function parameters and return values
 - Enables function calls between compiled functions
 - Includes an expanded type system: integers (32-bit, see [Numbers](#numbers)), floats, booleans, strings
-- Complete string operations support (slicing, concatenation, 20+ methods, formatting)
+- String operations: slicing, concatenation, 20+ methods, and formatting (f-strings, `.format()` with automatic or positional fields, `%` on constants). Repetition (`s * n`) and `%` on runtime values are not done yet; see [Known wrong answers](#known-wrong-answers)
 - F-strings interpolate every placeholder: `f"{count} items"` renders each value with `str()` and concatenates the pieces, so an f-string is the `+` chain you would write by hand. Constant placeholders fold into the literal at compile time
 - Supports arithmetic operations (`+`, `-`, `*`, `/`, `%`, `//`, `**`)
 - Processes comparison operators (`==`, `!=`, `<`, `<=`, `>`, `>=`)
 - Handles boolean operators (`and`, `or`) and bitwise operators (`&`, `|`, `^`, `<<`, `>>`)
-- Built-in functions: `int()` (including parsing a string, with a catchable `ValueError` on bad input), `float()`, `str()`, `bool()`, `len()`, `print()`, `abs()`, `round(x[, ndigits])` (rounding the exact binary value half-to-even, as CPython does), `min()`/`max()` (multiple arguments), `sum()` over lists/tuples (with optional start value)
+- Built-in functions: `int()` (including parsing a string, with a catchable `ValueError` on bad input), `float()`, `str()`, `bool()`, `len()`, `abs()`, `round(x[, ndigits])` (rounding the exact binary value half-to-even, as CPython does), `min()`/`max()` (multiple arguments), `sum()` over lists/tuples (with optional start value). `print()` compiles, but a module has no output channel yet, so it writes nothing
 - Rejects unsupported Python syntax up front with located errors and hints, instead of failing deep in code generation
 - Performs automatic WebAssembly optimization using Binaryen
 - Detects and handles project structure and dependencies
@@ -57,12 +57,12 @@ Generate & Optimize
 - Comprehensions: list, set, and dict comprehensions with filters, multiple generators, nesting, and `{k: v for k, v in pairs}` unpacking
 - Generators with real state preservation: `yield` suspends and resumes, `yield from` delegates, and `next()`/`send()`/`close()` work; user classes implementing `__iter__`/`__next__` iterate in `for` loops with `StopIteration` ending the loop
 - Tuple targets in `for` loops (`for a, b in pairs`, star targets included) and the iterator-shaped builtins: `enumerate(xs[, start])`, `zip(...)`, and `dict.items()`/`.keys()`/`.values()`
-- Closures with full variable capture: lambdas compile to real functions dispatched through a `call_indirect` table, capture enclosing variables (by value), and work as first-class values — returned, passed as arguments, and stored in collections
+- Closures with full variable capture: lambdas compile to real functions dispatched through a `call_indirect` table, capture enclosing variables by reference (see [Limitations](#limitations)), and work as first-class values: returned, passed as arguments, and stored in collections
 - Extended unpacking: `a, *b, c = xs` binds the starred target to the middle slice as a real list
 - User-written module imports: `import mod`, `import mod as m`, and `from mod import f [as g]` resolve sibling `.py` files (and `pkg/mod.py` packages) and statically link them into the single output WASM module, with each module compiled exactly once however many import paths reach it
 - File I/O through a documented host interface: `open()`, `read([n])`, `write(s)`, `close()`, and `with open(...) as f:` compile to four imported `waspy_host` functions the embedder provides (browser, Node, or any WASM runtime); modules that never call `open()` import nothing. The embedder owns confinement: see [File I/O and the host interface](#file-io-and-the-host-interface)
 - Context managers: `with obj as name:` over a user class implementing `__enter__`/`__exit__`, including nested blocks, inherited protocols, and `__exit__` running before an early `return`
-- Bundled standard library runtime: `sys`, `os` (incl. `os.path`), `math`, `random`, `json`, `re`, `datetime`, `logging`, `collections`, `itertools`, `functools`
+- Standard library, a small part so far: the module constants (`math.pi`/`e`/`tau`/`inf`/`nan`, `os.sep` and friends, `sys.maxsize`, the `logging` levels, `datetime.MINYEAR`/`MAXYEAR`), `re.sub` and `re.escape` over constant arguments (folded at compile time), and the `functools` decorators above. Most functions in `sys`, `os`, `os.path`, `math`, `random`, `json`, `re`, `datetime`, `logging`, `collections`, `itertools`, and `functools` are refused at compile time, and some still compile and answer wrong: see [Known wrong answers](#known-wrong-answers). The [development board](https://anistark.github.io/waspy/modules/) tracks each module
 
 ## Numbers
 
@@ -105,7 +105,7 @@ Float division by zero and integer division or modulo by zero raise
 
 ## Limitations
 
-- Object instances are never reclaimed — the bump allocator has no `free`, so every instance lives until the module is torn down and `__del__` is not invoked
+- Object instances are never reclaimed: the bump allocator has no `free`, so every instance lives until the module is torn down and `__del__` is not invoked
 - Lists, dicts, and sets grow at runtime (`append`/`extend`/`insert`, `dict[key] = value` for a new key, and `set.add` reallocate when full). A collection's elements live in a block its header points at, so growing one never moves the collection: a list grown inside a function it was passed to, or reached by indexing another collection, is grown for every other name for it too
 - Generators cover the common shapes; `yield` inside `try`/`with` and generator methods (`yield` in a class method) are rejected at compile time, and `close()` skips `GeneratorExit`/`finally` semantics. A comprehension can iterate a generator or iterator only in its first `for` clause: an inner clause is evaluated twice (once to size the result, once to fill it), so an iterator there is refused rather than drained twice
 - Closures capture the variable, not a snapshot of it: a captured variable reassigned after the closure is made changes what the closure sees, and closures created in a loop share the loop variable. Capturing a float is not supported yet
@@ -119,33 +119,50 @@ Float division by zero and integer division or modulo by zero raise
 - Where Python raises over a value a collection does not hold, the compiled module traps, since it has no exception object to carry: `list.index(v)` and `set.remove(v)` of a missing value, and `list.pop(i)` with a position the list does not have. `list.count(v)` answers 0 and `set.discard(v)` ignores the miss, both as Python's do
 - A method called with the wrong number of arguments is a compile error, not a silently ignored one: `xs.append(3, 4)` and `xs.clear(9)` are refused. The optional forms Python accepts compile, so `pop()`, `pop(i)`, `sort()`, and `sort(reverse=True)` all work
 - A collection reads every slot at one width, so a value written into one is converted to its element type: an int into a `List[float]` widens. Where it cannot be converted the write is refused rather than stored wrong: a float into a collection of ints (it would truncate), a float into a collection with no element type, a value whose type is unknown into a collection of floats, and `list.extend()` between lists of different widths
-- `int` is 32-bit and wraps on overflow rather than growing like CPython's, which is the one place waspy answers differently without saying so. See [Numbers](#numbers)
+- `int` is 32-bit and wraps on overflow rather than growing like CPython's, which is the one place waspy answers differently without saying so by design. See [Numbers](#numbers), and [Known wrong answers](#known-wrong-answers) for the defects that do the same by accident
 - Decorators are an allowlist: `@staticmethod`, `@classmethod`, `@property`/`@x.setter`, `@abstractmethod`, `@dataclass`, `@total_ordering`, `@singledispatch`/`@f.register`, and the caching decorators. A user-written decorator, `@cached_property`, `@singledispatchmethod`, or any other name is refused, since applying it would run code the compiler cannot model. `functools.partial`, `reduce`, and `cmp_to_key` are refused when called, like any other name the program does not define and the compiler does not implement (`divmod()` and `hash()`, for example)
 - A `@singledispatch` call needs a first argument whose type the compiler knows (a literal, an annotated parameter, an instance); dispatching on an untyped value is refused rather than sent to the base implementation
 - Reading an attribute through a value whose type is not known, most often an unannotated parameter, is a compile error with a hint to annotate it. The rich comparison methods are the exception: an unannotated `other` in `__eq__`/`__lt__`/... is typed as the class. A field the class does not have is refused too
-- Exceptions carry a type, not an object: `raise ValueError("message")` records the type and drops the message, and `except ValueError as e` binds the type's code rather than an exception instance. Matching is by exact type name (plus `Exception`/`BaseException`, which catch anything), so a user-defined exception's own base classes are not consulted. Runtime faults the compiler cannot turn into a raise, an out-of-range index or a division by zero, trap rather than raising, so `except ZeroDivisionError:` will not catch `1 // 0`
+- Exceptions carry a type, not an object: `raise ValueError("message")` records the type and drops the message, and `except ValueError as e` binds the type's code rather than an exception instance, so `str(e)` and `isinstance(e, ValueError)` answer wrong (see [Known wrong answers](#known-wrong-answers)). Matching is by exact type name (plus `Exception`/`BaseException`, which catch anything), so a user-defined exception's own base classes are not consulted. Runtime faults do raise: an out-of-range index raises a catchable `IndexError`, a missing key `KeyError`, and a division by zero `ZeroDivisionError`
 - F-string placeholders render through `str()`, so whatever `str()` cannot render cannot be interpolated: a bare float, a bool, or a collection in a placeholder is a compile error naming the type. The one specifier that works is fixed-point, `f"{x:.2f}"`, which is how a float gets printed; every other specifier (widths, alignment, separators) and the `!r`/`!a` conversions are rejected rather than being dropped
 - A lambda's parameters carry no type, so indexing one, calling `len()` on one, or calling a method on one inside the lambda body is a compile error rather than a wrong answer ([#115](https://github.com/anistark/waspy/issues/115)). Arithmetic and comparison are fine, because an untyped word already behaves as the `int` they assume, so `sorted(xs, key=lambda v: 0 - v)` works. For anything that needs the parameter's type, use a named `def`, whose parameters can be annotated: that is why sorting an explicit list of `(-count, word)` tuples is the working shape and `key=lambda kv: (-kv[1], kv[0])` is not
 - Comparing two collections needs both to have the same, known element types: `(1, 2) == (1.0, 2)` (True in CPython) and a comparison with an untyped list are refused rather than read at the wrong width. Dict and set equality, and a list, dict, or set as a set member or dict key (unhashable in CPython), are refused. A class that defines `__eq__` cannot be a set member or dict key, since calling a user `__hash__` is not supported
 - `float()` of a string is refused, since a digit loop cannot produce the correctly rounded double CPython does; `round(x, n)` needs `0 <= n <= 22`
 - A bare `list` or `dict` annotation carries no element type, so a function returning `-> list` loses it and the values inside compare as untyped words. Use the parameterised form (`List[str]`, `Dict[str, int]`) wherever a collection's elements are compared, used as dict keys, or sorted
 - A variable, field, or collection that holds instances of more than one class is typed as their nearest common base for the whole function, so a method call on it dispatches on each instance's own class. Types are not tracked per program point, so reading a field that only one of the subclasses has through it is refused, and so is a method call on instances with no common base. Storing an instance where an annotation names an unrelated class (a `Rect` passed to a `Circle` parameter, or returned from `-> Circle`) is refused rather than dispatched as the annotated class
-- No garbage collection or reference counting — the bump allocator never frees
+- No garbage collection or reference counting: the bump allocator never frees
+
+### Known wrong answers
+
+Each of these compiles and then answers something CPython does not. They break the rule above (Python's answer or a loud failure) and are open defects, not part of the subset's definition: the next release either fixes each one or turns it into a compile error. Until then, avoid them.
+
+- Repetition: `"ab" * 3` answers `""`, and `[0] * 5` and `(a,) * n` trap
+- `tuple.index(v)` answers -1 (`list.index` and `tuple.count` are correct)
+- The set operators: `{1, 2} | {2, 3}`, `&`, and `^` answer wrong sets, and `-` traps. Dict `|` answers a wrong dict
+- `str(e)` and `isinstance(e, E)` on the name bound by `except E as e`
+- `print()` and every `logging` call write nothing
+- Decorators CPython does not define (`@memoize`, `@timer`, `@debug`, `@pure`, `@type_check`, `@default_value`, `@wasm_export`) compile, where CPython raises `NameError`
+- `json.dumps(x)` answers `"{}"` whatever `x` is, and `json.loads(s)` answers a null pointer
+- `re`: a no-match from `re.search`/`re.match` still tests as a match, `re.findall` answers garbage, and any `re` call on a string built at runtime answers a no-match or an empty result
+- `os.path.join` and `os.path.basename` answer wrong strings, even on literals; `os.getenv` always answers `None`, `os.getcwd()` `"/"`, `os.getpid()` 1, and `os.urandom(n)` empty bytes
+- `sys.argv` is empty and `sys.version` is not CPython's
+- `datetime.datetime.now()` and `today()` answer the moment the module was *compiled*; `fromtimestamp(ts)` ignores `ts`; `fromisoformat` and `strptime` answer an all-zero datetime
+- Runtime `%` formatting (`"%d" % n`) fails WebAssembly validation, which is loud but reports itself as a code generation bug
 
 ### Explicitly unsupported (rejected at compile time)
 
 The compiler validates syntax up front and rejects these with a located error and a hint, rather than miscompiling them:
 
-- `async def` / `await` / `async for` / `async with` (planned after 1.0)
+- `async def` / `await` / `async for` / `async with` (planned for 1.0)
 - `match` statements, `global`, `nonlocal`, `del`, `assert`, `type` aliases, `except*`
 - `from module import *`
 - `*args`, `**kwargs`, and keyword-only parameters
-- Metaclasses and other class keywords, multiple inheritance
+- Metaclasses and other class keywords, multiple inheritance (both planned for 1.0)
 - Loop `else:` clauses (`for`/`while ... else`)
 - `min()`/`max()` over a single iterable argument (pass the values separately)
 - Module-level statements other than definitions. A WebAssembly module has no top-level run step, so only definitions run: `X = 1`, `X: int = 1`, `X = helper()`, `X = ClassName()`, `def`, `class`, and imports (a `try`/`except ImportError` guarded import included). Definitions that are not plain constants are evaluated once, in source order, when the module is instantiated; one that reads a definition appearing after it is refused, as it is a `NameError` in CPython. A module-level loop, `if`, `try`, bare call statement, augmented assignment, tuple unpacking, or write through a subscript or attribute is rejected, because it would otherwise be compiled away and later reads would silently see the value from before it. Put the code in a function and call it, or drive it from `if __name__ == "__main__":`, which is recognized as the entry point
 
-Set methods beyond `add`, `remove`, and `discard` (`union`, `intersection`, and friends) are not implemented. Receiver types are only known during code generation, so they are rejected there rather than by the parser's syntax pass, but it is still a compile error naming the method, the receiver's type, and the function it appears in. `remove` of a value the set does not hold traps at runtime, since there is no `KeyError` to raise; `discard` ignores the miss like Python's.
+Set methods beyond `add`, `remove`, and `discard` (`union`, `intersection`, and friends) are not implemented, and the set operators `|`, `&`, `^`, and `-` are not either, though they still compile (see [Known wrong answers](#known-wrong-answers)). Receiver types are only known during code generation, so they are rejected there rather than by the parser's syntax pass, but it is still a compile error naming the method, the receiver's type, and the function it appears in. `remove` of a value the set does not hold traps at runtime, since there is no `KeyError` to raise; `discard` ignores the miss like Python's.
 
 ## Installation
 

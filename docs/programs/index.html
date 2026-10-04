@@ -498,7 +498,7 @@ def checkout() -&gt; float:
                         <strong>Third-party packages</strong>
                         <span class="tag tag-loud">refused</span>
                     </div>
-                    <p class="shape-note">No PyPI. The bundled standard-library support is <code>sys</code>, <code>os</code> (including <code>os.path</code>), <code>math</code>, <code>random</code>, <code>json</code>, <code>re</code>, <code>datetime</code>, <code>logging</code>, <code>collections</code>, <code>itertools</code>, and <code>functools</code>.</p>
+                    <p class="shape-note">No PyPI. Standard-library support is small so far: the module constants (<code>math.pi</code>, <code>os.sep</code>, ...), <code>re.sub</code> and <code>re.escape</code> on constant arguments, and the <code>functools</code> decorators. The rest of <code>sys</code>, <code>os</code>, <code>math</code>, <code>random</code>, <code>json</code>, <code>re</code>, <code>datetime</code>, <code>logging</code>, <code>collections</code>, and <code>itertools</code> is tracked on the <a href="../modules/">development board</a>.</p>
                 </li>
             </ul>
         </section>
