@@ -154,11 +154,12 @@ fn division_by_zero_raises() {
     let cases: &[&str] = &[
         "def f() -> int:\n    n = 0\n    try:\n        return 10 // n\n    except ZeroDivisionError:\n        return 5\n",
         "def f() -> int:\n    n = 0\n    try:\n        return 10 % n\n    except ZeroDivisionError:\n        return 5\n",
-        "def f() -> int:\n    n = 0\n    try:\n        return 10 / n\n    except ZeroDivisionError:\n        return 5\n",
     ];
     for src in cases {
         assert_eq!(call_i32(src, "f"), 5, "in: {src}");
     }
+    let true_div = "def f() -> float:\n    n = 0\n    try:\n        return 10 / n\n    except ZeroDivisionError:\n        return 5.0\n";
+    assert_eq!(call_f64(true_div, "f"), 5.0);
 
     let float_div = "def f() -> float:\n\
                      \x20   d = 0.0\n\

@@ -439,11 +439,11 @@ fn removing_a_missing_member_traps_but_discarding_does_not() {
 fn unsupported_set_methods_are_a_compile_error() {
     let src = "def f() -> int:\n\
                \x20   s = {1}\n\
-               \x20   s.union({2})\n\
+               \x20   s.update({2})\n\
                \x20   return len(s)\n";
-    let err = try_compile(src).expect_err("union() is not implemented");
+    let err = try_compile(src).expect_err("update() is not implemented");
     assert!(
-        err.contains("'union' is not supported"),
+        err.contains("'update' is not supported"),
         "unexpected: {err}"
     );
     assert!(

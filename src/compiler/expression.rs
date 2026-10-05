@@ -11,6 +11,576 @@ use crate::ir::{
 };
 use wasm_encoder::{BlockType, Function, Instruction, MemArg, ValType};
 
+/// Refuse a float value headed for a place this compiler holds as an int: a
+/// variable or field typed int, an int parameter, an index. Python would keep
+/// the float (or raise, for an index); converting it would truncate silently.
+pub(crate) fn report_float_where_int(ctx: &CompilationContext) {
+    ctx.report(
+        "a float value is stored where this program holds an int, which would truncate it. \
+         Python keeps the float: hold it in a float variable or field (start it as 0.0, or \
+         annotate it ': float'), or convert explicitly with int() or use '//'",
+    );
+}
+
+/// `a is b` / `a is not b` with both one-word values on the stack. Identity
+/// is the word: an instance's pointer, None's 0. These dropped both operands
+/// and answered False, so `x is None` was never true and a `while node is
+/// not None` walk never ran.
+///
+/// None is the word 0, which an int, a bool, or an untyped value can also be,
+/// so `x is None` on one of those cannot be told apart from `x == 0`. A value
+/// whose type can never be None answers a constant; one that can be both is
+/// refused.
+fn emit_identity(
+    func: &mut Function,
+    ctx: &CompilationContext,
+    op: &IRCompareOp,
+    left: &IRType,
+    right: &IRType,
+) {
+    let is = matches!(op, IRCompareOp::Is);
+    let numeric = |t: &IRType| matches!(t, IRType::Int | IRType::Bool | IRType::Float);
+    let zero_or_none = |t: &IRType| match t {
+        IRType::Optional(inner) => {
+            numeric(inner) || matches!(**inner, IRType::Unknown | IRType::Any)
+        }
+        IRType::Unknown | IRType::Any => true,
+        _ => false,
+    };
+    let other = match (left, right) {
+        (IRType::None, other) | (other, IRType::None) => Some(other),
+        _ => None,
+    };
+    let constant = |func: &mut Function, answer: bool| {
+        func.instruction(&Instruction::Drop);
+        func.instruction(&Instruction::Drop);
+        func.instruction(&Instruction::I32Const(answer as i32));
+    };
+    match other {
+        // `None is None`.
+        Some(IRType::None) => constant(func, is),
+        // An int or a bool is never None.
+        Some(t) if numeric(t) => constant(func, !is),
+        Some(t) if zero_or_none(t) => {
+            ctx.report(format!(
+                "'is None' on a value of type '{}' cannot tell None from 0 here, since both \
+                 are the same word. Hint: use a class or a str for the optional value, or a \
+                 separate flag",
+                crate::type_to_string(t)
+            ));
+            constant(func, false);
+        }
+        Some(_) => {
+            func.instruction(&if is {
+                Instruction::I32Eq
+            } else {
+                Instruction::I32Ne
+            });
+        }
+        None if numeric(left) || numeric(right) => {
+            ctx.report("'is' between two numbers is not supported: use '=='");
+            constant(func, false);
+        }
+        None => {
+            func.instruction(&if is {
+                Instruction::I32Eq
+            } else {
+                Instruction::I32Ne
+            });
+        }
+    }
+}
+
+/// The answer of `isinstance(v, target)` for a builtin type `target`, from
+/// `v`'s static type, or `None` when `target` is not a builtin type.
+fn builtin_isinstance(ty: &IRType, target: &str) -> Option<bool> {
+    let answer = match target {
+        // bool is a subclass of int.
+        "int" => matches!(ty, IRType::Int | IRType::Bool),
+        "bool" => matches!(ty, IRType::Bool),
+        "float" => matches!(ty, IRType::Float),
+        "str" => matches!(ty, IRType::String),
+        "bytes" => matches!(ty, IRType::Bytes),
+        "list" => matches!(ty, IRType::List(_)),
+        "tuple" => matches!(ty, IRType::Tuple(_)),
+        "dict" => matches!(ty, IRType::Dict(_, _)),
+        "set" => matches!(ty, IRType::Set(_)),
+        "range" => matches!(ty, IRType::Range),
+        "object" => true,
+        _ => return None,
+    };
+    Some(answer)
+}
+
+/// `isinstance` with the object's value on the stack, for each name in
+/// `targets` (a user class or a builtin type), or'd together.
+fn emit_isinstance(
+    func: &mut Function,
+    ctx: &CompilationContext,
+    obj_type: &IRType,
+    targets: &[&str],
+) -> IRType {
+    let drop_obj = |func: &mut Function| {
+        func.instruction(&Instruction::Drop);
+        if matches!(obj_type, IRType::String | IRType::Bytes) {
+            func.instruction(&Instruction::Drop);
+        }
+    };
+    if matches!(
+        obj_type,
+        IRType::Unknown | IRType::Any | IRType::Union(_) | IRType::Optional(_)
+    ) {
+        ctx.report(format!(
+            "isinstance() of a value of type '{}' cannot be answered here, since its type is \
+             only known at run time. Hint: annotate the value it comes from",
+            crate::type_to_string(obj_type)
+        ));
+        drop_obj(func);
+        func.instruction(&Instruction::I32Const(0));
+        return IRType::Bool;
+    }
+    let mut constant = false;
+    let mut class_ids = Vec::new();
+    for target in targets {
+        if ctx.get_class_info(target).is_some() {
+            if matches!(obj_type, IRType::Class(_)) {
+                class_ids.extend(ctx.assignable_class_ids(target));
+            }
+        } else if let Some(answer) = builtin_isinstance(obj_type, target) {
+            constant |= answer;
+        } else {
+            ctx.report(format!(
+                "isinstance() against '{target}' is not supported: it is not a class this \
+                 program defines or a builtin type"
+            ));
+        }
+    }
+    if constant || class_ids.is_empty() {
+        drop_obj(func);
+        func.instruction(&Instruction::I32Const(constant as i32));
+        return IRType::Bool;
+    }
+    // tag = *(obj + 0); fold `tag == id` over the assignable ids with `or`.
+    func.instruction(&Instruction::I32Load(slot_arg()));
+    func.instruction(&Instruction::LocalSet(ctx.temp_local));
+    func.instruction(&Instruction::I32Const(0));
+    class_ids.sort_unstable();
+    class_ids.dedup();
+    for id in class_ids {
+        func.instruction(&Instruction::LocalGet(ctx.temp_local));
+        func.instruction(&Instruction::I32Const(id));
+        func.instruction(&Instruction::I32Eq);
+        func.instruction(&Instruction::I32Or);
+    }
+    IRType::Bool
+}
+
+/// `text[start:end:step]` for a str or bytes on the stack as `(offset, len)`
+/// and a step other than 1, as CPython's `slice.indices` computes it: a
+/// negative step starts from the end and stops before the start. The bytes
+/// picked are copied into a fresh blob. A zero step traps, as CPython raises
+/// ValueError.
+fn emit_stepped_text_slice(
+    func: &mut Function,
+    ctx: &CompilationContext,
+    memory_layout: &MemoryLayout,
+    start: Option<&IRExpr>,
+    end: Option<&IRExpr>,
+    step: &IRExpr,
+    is_string: bool,
+) {
+    let held: Vec<u32> = (0..5)
+        .map(|_| crate::compiler::equality::hold(ctx))
+        .collect();
+    let (off, len, lo, hi, st) = (held[0], held[1], held[2], held[3], held[4]);
+    func.instruction(&Instruction::LocalSet(len));
+    func.instruction(&Instruction::LocalSet(off));
+    emit_expr(step, func, ctx, memory_layout, Some(&IRType::Int));
+    func.instruction(&Instruction::LocalTee(st));
+    func.instruction(&Instruction::I32Eqz);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    func.instruction(&Instruction::Unreachable);
+    func.instruction(&Instruction::End);
+
+    // Each bound: given, normalized (a negative one counts from the end) and
+    // clamped to [0, len] for a positive step or [-1, len - 1] for a negative
+    // one; absent, the end the step starts from or runs to.
+    for (bound, local, is_start) in [(start, lo, true), (end, hi, false)] {
+        match bound {
+            Some(expr) => {
+                emit_expr(expr, func, ctx, memory_layout, Some(&IRType::Int));
+                func.instruction(&Instruction::LocalSet(local));
+                // if v < 0: v += len
+                func.instruction(&Instruction::LocalGet(local));
+                func.instruction(&Instruction::LocalGet(len));
+                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::LocalGet(local));
+                func.instruction(&Instruction::LocalGet(local));
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32LtS);
+                func.instruction(&Instruction::Select);
+                func.instruction(&Instruction::LocalSet(local));
+                // lower = step < 0 ? -1 : 0; upper = step < 0 ? len - 1 : len
+                let push_bounds = |func: &mut Function| {
+                    func.instruction(&Instruction::LocalGet(st));
+                    func.instruction(&Instruction::I32Const(0));
+                    func.instruction(&Instruction::I32LtS);
+                };
+                // v = max(v, lower), lower = -(step < 0)
+                func.instruction(&Instruction::I32Const(0));
+                push_bounds(func);
+                func.instruction(&Instruction::I32Sub);
+                func.instruction(&Instruction::LocalTee(ctx.temp_local + 9));
+                func.instruction(&Instruction::LocalGet(local));
+                func.instruction(&Instruction::LocalGet(local));
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 9));
+                func.instruction(&Instruction::I32LtS);
+                func.instruction(&Instruction::Select);
+                func.instruction(&Instruction::LocalSet(local));
+                // v = min(v, upper)
+                func.instruction(&Instruction::LocalGet(len));
+                push_bounds(func);
+                func.instruction(&Instruction::I32Sub);
+                func.instruction(&Instruction::LocalTee(ctx.temp_local + 9));
+                func.instruction(&Instruction::LocalGet(local));
+                func.instruction(&Instruction::LocalGet(local));
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 9));
+                func.instruction(&Instruction::I32GtS);
+                func.instruction(&Instruction::Select);
+                func.instruction(&Instruction::LocalSet(local));
+            }
+            None => {
+                // start: 0 forwards, len - 1 backwards; end: len forwards, -1
+                // backwards.
+                if is_start {
+                    func.instruction(&Instruction::LocalGet(len));
+                    func.instruction(&Instruction::I32Const(-1));
+                    func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::I32Const(0));
+                } else {
+                    func.instruction(&Instruction::I32Const(-1));
+                    func.instruction(&Instruction::LocalGet(len));
+                }
+                func.instruction(&Instruction::LocalGet(st));
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32LtS);
+                func.instruction(&Instruction::Select);
+                func.instruction(&Instruction::LocalSet(local));
+            }
+        }
+    }
+
+    // count = max(0, ceil((hi - lo) / step)), computed over magnitudes.
+    let count = ctx.temp_local + 10;
+    let mag = ctx.temp_local + 11;
+    func.instruction(&Instruction::LocalGet(hi));
+    func.instruction(&Instruction::LocalGet(lo));
+    func.instruction(&Instruction::I32Sub);
+    func.instruction(&Instruction::LocalSet(count));
+    func.instruction(&Instruction::LocalGet(st));
+    func.instruction(&Instruction::LocalSet(mag));
+    func.instruction(&Instruction::LocalGet(st));
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::I32LtS);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    for local in [count, mag] {
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::LocalGet(local));
+        func.instruction(&Instruction::I32Sub);
+        func.instruction(&Instruction::LocalSet(local));
+    }
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::LocalGet(count));
+    func.instruction(&Instruction::LocalGet(mag));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::I32Const(1));
+    func.instruction(&Instruction::I32Sub);
+    func.instruction(&Instruction::LocalGet(mag));
+    func.instruction(&Instruction::I32DivS);
+    func.instruction(&Instruction::LocalTee(count));
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::LocalGet(count));
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::I32GtS);
+    func.instruction(&Instruction::Select);
+    func.instruction(&Instruction::LocalSet(count));
+
+    // A fresh blob: the length prefix, the picked bytes, and a NUL for a str.
+    let data = ctx.temp_local + 12;
+    let i = ctx.temp_local + 13;
+    func.instruction(&Instruction::LocalGet(count));
+    func.instruction(&Instruction::I32Const(
+        STRING_LEN_PREFIX as i32 + i32::from(is_string),
+    ));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::Call(ctx.alloc_func_index));
+    func.instruction(&Instruction::LocalTee(data));
+    func.instruction(&Instruction::LocalGet(count));
+    func.instruction(&Instruction::I32Store(slot_arg()));
+    func.instruction(&Instruction::LocalGet(data));
+    func.instruction(&Instruction::I32Const(STRING_LEN_PREFIX as i32));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::LocalSet(data));
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::LocalSet(i));
+    func.instruction(&Instruction::Block(BlockType::Empty));
+    func.instruction(&Instruction::Loop(BlockType::Empty));
+    func.instruction(&Instruction::LocalGet(i));
+    func.instruction(&Instruction::LocalGet(count));
+    func.instruction(&Instruction::I32GeS);
+    func.instruction(&Instruction::BrIf(1));
+    // data[i] = text[lo + i * step]
+    func.instruction(&Instruction::LocalGet(data));
+    func.instruction(&Instruction::LocalGet(i));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::LocalGet(off));
+    func.instruction(&Instruction::LocalGet(lo));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::LocalGet(i));
+    func.instruction(&Instruction::LocalGet(st));
+    func.instruction(&Instruction::I32Mul);
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::I32Load8U(byte_arg()));
+    func.instruction(&Instruction::I32Store8(byte_arg()));
+    func.instruction(&Instruction::LocalGet(i));
+    func.instruction(&Instruction::I32Const(1));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::LocalSet(i));
+    func.instruction(&Instruction::Br(0));
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::End);
+    if is_string {
+        func.instruction(&Instruction::LocalGet(data));
+        func.instruction(&Instruction::LocalGet(count));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::I32Store8(byte_arg()));
+    }
+    func.instruction(&Instruction::LocalGet(data));
+    func.instruction(&Instruction::LocalGet(count));
+    crate::compiler::equality::release(ctx, 5);
+}
+
+/// A local (or the generator field it was lifted into) that the loop lowering
+/// in `ir::converter` parks a collection in: a `for ... in d.items()` dict or
+/// a later `zip()` argument.
+fn is_compiler_name(expr: &IRExpr) -> bool {
+    let made =
+        |name: &str| name.starts_with("__dict_") || name.starts_with(crate::ir::ZIP_SEQ_PREFIX);
+    match expr {
+        IRExpr::Variable(name) | IRExpr::Param(name) => made(name),
+        IRExpr::Attribute { attribute, .. } => made(attribute),
+        _ => false,
+    }
+}
+
+/// `len(r)` for the range block on top of the stack, as CPython computes it:
+/// `max(0, ceil((stop - start) / step))`, rounding away from zero for a
+/// negative step.
+fn emit_range_len(func: &mut Function, ctx: &CompilationContext) {
+    let r = ctx.temp_local;
+    let span = ctx.temp_local + 1;
+    let step = ctx.temp_local + 2;
+    func.instruction(&Instruction::LocalTee(r));
+    func.instruction(&Instruction::I32Load(mem_off(8)));
+    func.instruction(&Instruction::LocalSet(step));
+    // span = stop - start, and the step's magnitude, both made positive for a
+    // negative step: (start - stop) over -step.
+    func.instruction(&Instruction::LocalGet(r));
+    func.instruction(&Instruction::I32Load(mem_off(4)));
+    func.instruction(&Instruction::LocalGet(r));
+    func.instruction(&Instruction::I32Load(mem_off(0)));
+    func.instruction(&Instruction::I32Sub);
+    func.instruction(&Instruction::LocalSet(span));
+    func.instruction(&Instruction::LocalGet(step));
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::I32LtS);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    for local in [span, step] {
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::LocalGet(local));
+        func.instruction(&Instruction::I32Sub);
+        func.instruction(&Instruction::LocalSet(local));
+    }
+    func.instruction(&Instruction::End);
+    // max(0, (span + step - 1) / step); a zero step traps, as CPython's
+    // range() raises for one.
+    func.instruction(&Instruction::LocalGet(span));
+    func.instruction(&Instruction::LocalGet(step));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::I32Const(1));
+    func.instruction(&Instruction::I32Sub);
+    func.instruction(&Instruction::LocalGet(step));
+    func.instruction(&Instruction::I32DivS);
+    func.instruction(&Instruction::LocalTee(span));
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::LocalGet(span));
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::I32GtS);
+    func.instruction(&Instruction::Select);
+}
+
+/// Most `min()`/`max()` arguments the fold parks in scratch locals.
+const MIN_MAX_MAX_ARGS: usize = 12;
+
+/// `min(a, b, ...)` / `max(a, b, ...)` with every argument already on the
+/// stack. CPython keeps the first argument and replaces it only with one that
+/// is strictly smaller (larger), which is what decides ties and NaN, and is
+/// the order this folds in. Arguments must all be ints, all floats, or all
+/// strings: the result of a mix would carry whichever type won at run time.
+fn emit_min_max(
+    func: &mut Function,
+    ctx: &CompilationContext,
+    is_min: bool,
+    arg_types: &[IRType],
+) -> IRType {
+    let name = if is_min { "min" } else { "max" };
+    let int_like = |t: &IRType| matches!(t, IRType::Int | IRType::Unknown);
+    let kind = match arg_types.first() {
+        _ if arg_types.len() == 1 => Err(format!(
+            "{name}() over a single iterable is not supported yet (planned for 0.19.0, #118). \
+             Hint: pass the values as separate arguments, or loop over the collection"
+        )),
+        None => Err(format!("{name}() expects at least 1 argument, got 0")),
+        _ if arg_types.len() > MIN_MAX_MAX_ARGS => Err(format!(
+            "{name}() with more than {MIN_MAX_MAX_ARGS} arguments is not supported"
+        )),
+        Some(t) if int_like(t) && arg_types.iter().all(int_like) => Ok(IRType::Int),
+        Some(IRType::Bool) if arg_types.iter().all(|t| *t == IRType::Bool) => Ok(IRType::Bool),
+        Some(IRType::Float) if arg_types.iter().all(|t| *t == IRType::Float) => Ok(IRType::Float),
+        Some(IRType::String) if arg_types.iter().all(|t| *t == IRType::String) => {
+            Ok(IRType::String)
+        }
+        _ => Err(format!(
+            "{name}() of {} values is not supported: the arguments must all be ints, all \
+             floats, or all strings",
+            arg_types
+                .iter()
+                .map(crate::compiler::operators::python_type_name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    };
+    let result_type = match kind {
+        Ok(t) => t,
+        Err(message) => {
+            ctx.report(message);
+            for t in arg_types.iter().rev() {
+                func.instruction(&Instruction::Drop);
+                if matches!(t, IRType::String | IRType::Bytes) {
+                    func.instruction(&Instruction::Drop);
+                }
+            }
+            func.instruction(&Instruction::I32Const(0));
+            return IRType::Unknown;
+        }
+    };
+
+    let is_float = result_type == IRType::Float;
+    let slot = |i: usize| ctx.temp_local + 20 + i as u32;
+    // Park the arguments, last (top of the stack) first; a string keeps only
+    // its offset, since its length is in the blob's prefix.
+    for i in (0..arg_types.len()).rev() {
+        if result_type == IRType::String {
+            func.instruction(&Instruction::Drop);
+        }
+        if is_float {
+            func.instruction(&Instruction::LocalSet(ctx.temp_local_f64));
+            func.instruction(&Instruction::LocalGet(ctx.temp_local_f64));
+            func.instruction(&Instruction::I64ReinterpretF64);
+            func.instruction(&Instruction::I32WrapI64);
+            func.instruction(&Instruction::LocalSet(slot(2 * i)));
+            func.instruction(&Instruction::LocalGet(ctx.temp_local_f64));
+            func.instruction(&Instruction::I64ReinterpretF64);
+            func.instruction(&Instruction::I64Const(32));
+            func.instruction(&Instruction::I64ShrU);
+            func.instruction(&Instruction::I32WrapI64);
+            func.instruction(&Instruction::LocalSet(slot(2 * i + 1)));
+        } else {
+            func.instruction(&Instruction::LocalSet(slot(i)));
+        }
+    }
+    let load_f64 = |func: &mut Function, i: usize| {
+        func.instruction(&Instruction::LocalGet(slot(2 * i)));
+        func.instruction(&Instruction::I64ExtendI32U);
+        func.instruction(&Instruction::LocalGet(slot(2 * i + 1)));
+        func.instruction(&Instruction::I64ExtendI32U);
+        func.instruction(&Instruction::I64Const(32));
+        func.instruction(&Instruction::I64Shl);
+        func.instruction(&Instruction::I64Or);
+        func.instruction(&Instruction::F64ReinterpretI64);
+    };
+
+    // best = arg0; for each later x: if x < best (x > best for max): best = x
+    let best = ctx.temp_local + 19;
+    if is_float {
+        load_f64(func, 0);
+        func.instruction(&Instruction::LocalSet(ctx.temp_local_f64_2));
+    } else {
+        func.instruction(&Instruction::LocalGet(slot(0)));
+        func.instruction(&Instruction::LocalSet(best));
+    }
+    for i in 1..arg_types.len() {
+        if is_float {
+            load_f64(func, i);
+            func.instruction(&Instruction::LocalTee(ctx.temp_local_f64));
+            func.instruction(&Instruction::LocalGet(ctx.temp_local_f64_2));
+            func.instruction(&if is_min {
+                Instruction::F64Lt
+            } else {
+                Instruction::F64Gt
+            });
+            func.instruction(&Instruction::If(BlockType::Empty));
+            func.instruction(&Instruction::LocalGet(ctx.temp_local_f64));
+            func.instruction(&Instruction::LocalSet(ctx.temp_local_f64_2));
+            func.instruction(&Instruction::End);
+            continue;
+        }
+        if result_type == IRType::String {
+            crate::compiler::equality::emit_str_cmp(func, ctx, slot(i), best);
+            func.instruction(&Instruction::I32Const(0));
+        } else {
+            func.instruction(&Instruction::LocalGet(slot(i)));
+            func.instruction(&Instruction::LocalGet(best));
+        }
+        func.instruction(&if is_min {
+            Instruction::I32LtS
+        } else {
+            Instruction::I32GtS
+        });
+        func.instruction(&Instruction::If(BlockType::Empty));
+        func.instruction(&Instruction::LocalGet(slot(i)));
+        func.instruction(&Instruction::LocalSet(best));
+        func.instruction(&Instruction::End);
+    }
+    if is_float {
+        func.instruction(&Instruction::LocalGet(ctx.temp_local_f64_2));
+    } else {
+        func.instruction(&Instruction::LocalGet(best));
+        if result_type == IRType::String {
+            recover_str_pair(func, ctx);
+        }
+    }
+    result_type
+}
+
+/// The dotted name of a standard-library module or submodule a method is
+/// called on (`json`, `os.path`, `datetime.datetime`), unless a local of that
+/// name shadows the module.
+fn stdlib_call_name(ctx: &CompilationContext, object: &IRExpr) -> Option<String> {
+    match object {
+        IRExpr::Variable(module)
+            if crate::stdlib::is_stdlib_module(module) && ctx.get_local_info(module).is_none() =>
+        {
+            Some(module.clone())
+        }
+        IRExpr::Attribute { object, attribute } => {
+            stdlib_call_name(ctx, object).map(|parent| format!("{parent}.{attribute}"))
+        }
+        _ => None,
+    }
+}
+
 /// Resolve a bare name used as a call/attribute receiver to a class, when it
 /// statically denotes one: either a class's own name (`Counter.create()`), or
 /// `cls` inside a classmethod, whose parameter is typed as the defining class
@@ -93,9 +663,7 @@ fn emit_class_level_method_call(
     }
     emit_user_call(func, ctx, method_idx);
     // A call result is a single word; rebuild the string/bytes pair.
-    if matches!(ret, IRType::String | IRType::Bytes) {
-        recover_str_pair(func, ctx);
-    }
+    finish_user_call(func, ctx, &ret);
     ret
 }
 
@@ -471,7 +1039,7 @@ fn emit_string_trim(
 /// header is 4 bytes and slots are 8), so `align: 2` is the honest hint for both
 /// i32 and f64 accesses; WASM treats alignment as advisory only, so an f64 here
 /// is valid despite not being 8-byte aligned.
-fn slot_arg() -> MemArg {
+pub(crate) fn slot_arg() -> MemArg {
     MemArg {
         offset: 0,
         align: 2,
@@ -481,7 +1049,7 @@ fn slot_arg() -> MemArg {
 
 /// Point a runtime-built region's data pointer at the block right after its
 /// header, the layout every collection starts life in.
-fn store_runtime_data_ptr(func: &mut Function, ptr_local: u32) {
+pub(crate) fn store_runtime_data_ptr(func: &mut Function, ptr_local: u32) {
     func.instruction(&Instruction::LocalGet(ptr_local));
     func.instruction(&Instruction::LocalGet(ptr_local));
     func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
@@ -491,7 +1059,7 @@ fn store_runtime_data_ptr(func: &mut Function, ptr_local: u32) {
 
 /// Replace a collection pointer on top of the stack with the address of its
 /// first element.
-fn emit_data_base(func: &mut Function) {
+pub(crate) fn emit_data_base(func: &mut Function) {
     func.instruction(&Instruction::I32Load(mem_off(COLLECTION_DATA as u64)));
 }
 
@@ -641,6 +1209,43 @@ fn load_collection_word(func: &mut Function, elem_type: &IRType, scratch: u32) {
     }
 }
 
+/// Emit `expr` where its value is used. A call that returns None pushes
+/// nothing (a statement drops nothing after it), so where the value is wanted
+/// None is pushed as its word, 0.
+pub(crate) fn emit_value(
+    expr: &IRExpr,
+    func: &mut Function,
+    ctx: &CompilationContext,
+    memory_layout: &MemoryLayout,
+    expected_type: Option<&IRType>,
+) -> IRType {
+    let ty = emit_expr(expr, func, ctx, memory_layout, expected_type);
+    if ty == IRType::None
+        && matches!(
+            expr,
+            IRExpr::FunctionCall { .. } | IRExpr::MethodCall { .. }
+        )
+    {
+        func.instruction(&Instruction::I32Const(0));
+    }
+    ty
+}
+
+/// Shape the word a user function or method returns into the value its
+/// declared type reads as: a string's `(offset, length)` pair, or nothing for
+/// a function declared `-> None`, whose call is a statement like any other
+/// None-valued call. Its word used to be left behind, so calling one inside a
+/// loop failed validation.
+fn finish_user_call(func: &mut Function, ctx: &CompilationContext, ret: &IRType) {
+    match ret {
+        IRType::String | IRType::Bytes => recover_str_pair(func, ctx),
+        IRType::None => {
+            func.instruction(&Instruction::Drop);
+        }
+        _ => {}
+    }
+}
+
 /// Rebuild the `(offset, length)` pair from a bare string/bytes offset on top
 /// of the stack, loading the length from the blob's prefix
 /// (`load(offset - STRING_LEN_PREFIX)`). Used wherever a single offset word
@@ -704,6 +1309,9 @@ pub(crate) fn emit_collection_element(
     let actual = emit_expr(value, func, ctx, memory_layout, hint);
     if let Some(slot) = declared {
         ctx.check_class_store(&actual, slot, what);
+    }
+    if let Some(slot @ IRType::Any) = element_type {
+        ctx.check_untyped_store(&actual, slot, what);
     }
 
     match (declared, &actual) {
@@ -937,34 +1545,34 @@ fn store_stashed_needle(
 /// slot is. The buckets sit behind a pointer for the same reason a list's
 /// elements do: rehashing swaps the block without moving the set, so every name
 /// for it keeps seeing the members.
-const SET_HEADER: u32 = 16;
+pub(crate) const SET_HEADER: u32 = 16;
 /// Byte offset of the table capacity within the header.
-const SET_CAP: u32 = 4;
+pub(crate) const SET_CAP: u32 = 4;
 /// Byte offset of the bucket-block pointer within the set header.
 const SET_DATA: u32 = 12;
 /// Byte offset of `used` within the header: occupied buckets plus tombstones.
 /// Growth is decided on this rather than on the member count, because a
 /// tombstone still costs a probe step, and an insert probe only stops at an
 /// empty bucket. Rehashing drops the tombstones and resets it to the count.
-const SET_USED: u32 = 8;
+pub(crate) const SET_USED: u32 = 8;
 /// Bucket states. A removed member leaves a tombstone rather than an empty
 /// bucket, so members that probed past it are still reachable.
 const SET_EMPTY: i32 = 0;
-const SET_LIVE: i32 = 1;
+pub(crate) const SET_LIVE: i32 = 1;
 const SET_DEAD: i32 = 2;
 /// Bytes per bucket: `state` (i32) + padding + an 8-byte value.
-const SET_BUCKET: u32 = 16;
+pub(crate) const SET_BUCKET: u32 = 16;
 /// Byte offset of the value within a bucket (past the state word + padding).
-const SET_BUCKET_VALUE: u32 = 8;
+pub(crate) const SET_BUCKET_VALUE: u32 = 8;
 
 /// Replace a set pointer on top of the stack with the address of its first
 /// bucket.
-fn emit_set_base(func: &mut Function) {
+pub(crate) fn emit_set_base(func: &mut Function) {
     func.instruction(&Instruction::I32Load(mem_off(SET_DATA as u64)));
 }
 
 /// Point a set's bucket pointer at the block right after its header.
-fn store_set_data_ptr(func: &mut Function, ptr_local: u32) {
+pub(crate) fn store_set_data_ptr(func: &mut Function, ptr_local: u32) {
     func.instruction(&Instruction::LocalGet(ptr_local));
     func.instruction(&Instruction::LocalGet(ptr_local));
     func.instruction(&Instruction::I32Const(SET_HEADER as i32));
@@ -987,7 +1595,7 @@ fn set_capacity(n: usize) -> u32 {
 /// the f64 bit pattern's two halves are folded together (small floats like 1.5 /
 /// 2.5 share their low 32 bits, so hashing only the low word would collide every
 /// one). The caller masks the result with `cap - 1`.
-fn emit_set_hash(
+pub(crate) fn emit_set_hash(
     func: &mut Function,
     ctx: &CompilationContext,
     elem_type: &IRType,
@@ -2413,7 +3021,7 @@ enum PadMode {
 /// A string already at least `width` long is returned as a copy, matching
 /// Python, which never truncates here. The fill is always a space; a custom
 /// fill character is rejected by the caller.
-fn emit_string_pad(func: &mut Function, ctx: &CompilationContext, mode: PadMode) {
+fn emit_string_pad(func: &mut Function, ctx: &CompilationContext, mode: PadMode, has_fill: bool) {
     let off = ctx.temp_local;
     let len = ctx.temp_local + 1;
     let width = ctx.temp_local + 2;
@@ -2421,7 +3029,21 @@ fn emit_string_pad(func: &mut Function, ctx: &CompilationContext, mode: PadMode)
     let blk = ctx.temp_local + 4;
     let lead = ctx.temp_local + 5;
     let i = ctx.temp_local + 6;
+    let fill = ctx.temp_local + 7;
 
+    // The fill character: one character, as CPython requires (it raises
+    // TypeError for any other length), else a space.
+    if has_fill {
+        func.instruction(&Instruction::I32Const(1));
+        func.instruction(&Instruction::I32Ne);
+        func.instruction(&Instruction::If(BlockType::Empty));
+        func.instruction(&Instruction::Unreachable);
+        func.instruction(&Instruction::End);
+        func.instruction(&Instruction::I32Load8U(byte_arg()));
+    } else {
+        func.instruction(&Instruction::I32Const(b' ' as i32));
+    }
+    func.instruction(&Instruction::LocalSet(fill));
     func.instruction(&Instruction::LocalSet(width));
     func.instruction(&Instruction::LocalSet(len));
     func.instruction(&Instruction::LocalSet(off));
@@ -2439,7 +3061,7 @@ fn emit_string_pad(func: &mut Function, ctx: &CompilationContext, mode: PadMode)
 
     emit_alloc_string(func, ctx, newlen, blk);
 
-    // Fill the whole block with spaces, then drop the text at its offset.
+    // Fill the whole block, then drop the text at its offset.
     func.instruction(&Instruction::I32Const(0));
     func.instruction(&Instruction::LocalSet(i));
     func.instruction(&Instruction::Block(BlockType::Empty));
@@ -2451,7 +3073,7 @@ fn emit_string_pad(func: &mut Function, ctx: &CompilationContext, mode: PadMode)
     func.instruction(&Instruction::LocalGet(blk));
     func.instruction(&Instruction::LocalGet(i));
     func.instruction(&Instruction::I32Add);
-    func.instruction(&Instruction::I32Const(b' ' as i32));
+    func.instruction(&Instruction::LocalGet(fill));
     func.instruction(&Instruction::I32Store8(byte_arg()));
     func.instruction(&Instruction::LocalGet(i));
     func.instruction(&Instruction::I32Const(1));
@@ -2471,12 +3093,21 @@ fn emit_string_pad(func: &mut Function, ctx: &CompilationContext, mode: PadMode)
             func.instruction(&Instruction::I32Sub);
         }
         PadMode::Center => {
-            // Python's center() puts the odd space on the right.
+            // CPython's left margin is marg // 2 + (marg & width & 1), so an
+            // odd margin puts its extra space on the left when the width is
+            // odd and on the right when it is even. This always put it right.
             func.instruction(&Instruction::LocalGet(newlen));
             func.instruction(&Instruction::LocalGet(len));
             func.instruction(&Instruction::I32Sub);
+            func.instruction(&Instruction::LocalTee(lead));
             func.instruction(&Instruction::I32Const(2));
             func.instruction(&Instruction::I32DivU);
+            func.instruction(&Instruction::LocalGet(lead));
+            func.instruction(&Instruction::LocalGet(width));
+            func.instruction(&Instruction::I32And);
+            func.instruction(&Instruction::I32Const(1));
+            func.instruction(&Instruction::I32And);
+            func.instruction(&Instruction::I32Add);
         }
     }
     func.instruction(&Instruction::LocalSet(lead));
@@ -3105,7 +3736,7 @@ fn emit_format_fixed(func: &mut Function, ctx: &CompilationContext, precision: u
 
 /// MemArg for a single-byte access. A byte's natural alignment is 1, so the
 /// alignment hint must be 0; anything larger is rejected by the validator.
-fn byte_arg() -> MemArg {
+pub(crate) fn byte_arg() -> MemArg {
     MemArg {
         offset: 0,
         align: 0,
@@ -3113,7 +3744,7 @@ fn byte_arg() -> MemArg {
     }
 }
 
-fn mem_off(offset: u64) -> MemArg {
+pub(crate) fn mem_off(offset: u64) -> MemArg {
     MemArg {
         offset,
         align: 2,
@@ -3441,7 +4072,7 @@ fn emit_runtime_set_insert(
 /// already stashed the needle (`s.add(v)`, which must survive a rehash, and the
 /// rehash itself, which re-inserts values read straight out of the old
 /// buckets rather than off the stack).
-fn emit_stashed_set_insert(
+pub(crate) fn emit_stashed_set_insert(
     func: &mut Function,
     ctx: &CompilationContext,
     elem_ty: &IRType,
@@ -3608,9 +4239,7 @@ fn emit_virtual_call(
         emit_post_call_check(func, ctx);
     }
 
-    if matches!(ret, IRType::String | IRType::Bytes) {
-        recover_str_pair(func, ctx);
-    }
+    finish_user_call(func, ctx, &ret);
     ret
 }
 
@@ -3857,11 +4486,9 @@ fn check_class_arg(
     callee: &str,
 ) {
     if let Some(param) = param {
-        ctx.check_class_store(
-            arg,
-            param,
-            &format!("argument {} of {callee}()", position + 1),
-        );
+        let what = format!("argument {} of {callee}()", position + 1);
+        ctx.check_class_store(arg, param, &what);
+        ctx.check_untyped_store(arg, param, &what);
     }
 }
 
@@ -4148,8 +4775,10 @@ pub fn emit_expr(
                 IRConstant::Float(f) => {
                     func.instruction(&Instruction::F64Const(f64_const(*f)));
 
-                    // Cast to i32 if an integer is expected
+                    // An int is expected, but Python never truncates a float
+                    // on its way into a variable, field, or argument.
                     if let Some(IRType::Int) = expected_type {
+                        report_float_where_int(ctx);
                         func.instruction(&Instruction::I32TruncF64S);
                         IRType::Int
                     } else {
@@ -4175,20 +4804,15 @@ pub fn emit_expr(
                     func.instruction(&Instruction::I32Const(0));
                     IRType::None
                 }
-                IRConstant::List(_) => {
-                    // Temporary implementation - return a default list
+                // Lowering builds collections as literals; a collection
+                // constant reaching here has no layout to answer with.
+                IRConstant::List(_)
+                | IRConstant::Dict(_)
+                | IRConstant::Tuple(_)
+                | IRConstant::Set(_) => {
+                    ctx.report("a constant collection value is not supported here");
                     func.instruction(&Instruction::I32Const(0));
-                    IRType::List(Box::new(IRType::Unknown))
-                }
-                IRConstant::Dict(_) => {
-                    // Temporary implementation - return a default dict
-                    func.instruction(&Instruction::I32Const(0));
-                    IRType::Dict(Box::new(IRType::Unknown), Box::new(IRType::Unknown))
-                }
-                IRConstant::Tuple(_) => {
-                    // Temporary implementation - return a default value
-                    func.instruction(&Instruction::I32Const(0));
-                    IRType::Tuple(vec![IRType::Unknown])
+                    IRType::Unknown
                 }
                 IRConstant::Bytes(b) => {
                     // Get the bytes' offset in memory
@@ -4199,12 +4823,6 @@ pub fn emit_expr(
                     func.instruction(&Instruction::I32Const(b.len() as i32));
 
                     IRType::Bytes
-                }
-                IRConstant::Set(_) => {
-                    // Set stored as identifier (set_id)
-                    // TODO: Proper set implementation with element storage
-                    func.instruction(&Instruction::I32Const(0));
-                    IRType::Set(Box::new(IRType::Unknown))
                 }
             }
         }
@@ -4270,9 +4888,24 @@ pub fn emit_expr(
                 let value = value.clone();
                 let emitted = emit_expr(&value, func, ctx, memory_layout, None);
                 declared.unwrap_or(emitted)
+            } else if let Some((module, attribute)) = ctx.stdlib_imports.get(name).cloned() {
+                // `from math import pi`: read through the module, which folds
+                // a constant and refuses anything else.
+                emit_expr(
+                    &IRExpr::Attribute {
+                        object: Box::new(IRExpr::Variable(module)),
+                        attribute,
+                    },
+                    func,
+                    ctx,
+                    memory_layout,
+                    expected_type,
+                )
             } else {
-                // Unknown variable
-                func.instruction(&Instruction::I32Const(-999));
+                // Nothing binds the name: a NameError in Python. This pushed
+                // -999 and reported success.
+                ctx.report(format!("name '{name}' is not defined"));
+                func.instruction(&Instruction::I32Const(0));
                 IRType::Unknown
             }
         }
@@ -4377,143 +5010,38 @@ pub fn emit_expr(
                             return left_type.clone();
                         }
                     }
-                    IROp::Mod
-                        if right_type == IRType::String
-                            || right_type == IRType::Int
-                            || right_type == IRType::Float =>
-                    {
-                        // String formatting: "format %s" % (value,) or "format %s" % value
-                        // TODO: Implement string formatting with placeholders
-                        // For now, drop the right value and return the format string
-                        func.instruction(&Instruction::Drop);
-                        func.instruction(&Instruction::Drop);
+                    // A constant format is folded during lowering; one that
+                    // reaches codegen has a runtime operand. This dropped the
+                    // operand and answered the format string unchanged, or
+                    // failed validation when the operand was one word wide.
+                    IROp::Mod if left_type == IRType::String => {
+                        ctx.report(
+                            "'%' formatting of a value known only at run time is implemented \
+                             in 0.19.0. Hint: use an f-string, for example f\"{n}!\"",
+                        );
+                        for _ in
+                            0..2 + matches!(right_type, IRType::String | IRType::Bytes) as usize
+                        {
+                            func.instruction(&Instruction::Drop);
+                        }
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::I32Const(0));
                         return IRType::String;
                     }
                     _ => {}
                 }
             }
 
-            // Handle datetime arithmetic operations
-            // datetime + timedelta -> datetime
-            // datetime - timedelta -> datetime
-            // datetime - datetime -> timedelta
-            // date + timedelta -> date
-            // date - timedelta -> date
-            // date - date -> timedelta (days only)
-            if left_type == IRType::Datetime
-                || left_type == IRType::Date
-                || left_type == IRType::Timedelta
-            {
-                match op {
-                    IROp::Add => {
-                        // datetime/date + timedelta
-                        if left_type == IRType::Datetime && right_type == IRType::Timedelta {
-                            // Stack: [dt: 7 i32s][td: 3 i32s]
-                            // For compile-time simplicity, just keep the datetime unchanged
-                            // Drop the timedelta values
-                            func.instruction(&Instruction::Drop); // microseconds
-                            func.instruction(&Instruction::Drop); // seconds
-                            func.instruction(&Instruction::Drop); // days
-                            return IRType::Datetime;
-                        }
-                        if left_type == IRType::Date && right_type == IRType::Timedelta {
-                            // Stack: [date: 3 i32s][td: 3 i32s]
-                            // Drop the timedelta values
-                            func.instruction(&Instruction::Drop); // microseconds
-                            func.instruction(&Instruction::Drop); // seconds
-                            func.instruction(&Instruction::Drop); // days
-                            return IRType::Date;
-                        }
-                        if left_type == IRType::Timedelta && right_type == IRType::Timedelta {
-                            // timedelta + timedelta -> timedelta
-                            // Stack: [td1: days, seconds, microseconds][td2: days, seconds, microseconds]
-                            // Save td2
-                            func.instruction(&Instruction::LocalSet(ctx.temp_local + 2)); // td2.microseconds
-                            func.instruction(&Instruction::LocalSet(ctx.temp_local + 1)); // td2.seconds
-                            func.instruction(&Instruction::LocalSet(ctx.temp_local)); // td2.days
-                                                                                      // Save td1
-                            func.instruction(&Instruction::LocalSet(ctx.temp_local + 5)); // td1.microseconds
-                            func.instruction(&Instruction::LocalSet(ctx.temp_local + 4)); // td1.seconds
-                            func.instruction(&Instruction::LocalSet(ctx.temp_local + 3)); // td1.days
-                                                                                          // Add: days
-                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
-                            func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                            func.instruction(&Instruction::I32Add);
-                            // Add: seconds
-                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
-                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
-                            func.instruction(&Instruction::I32Add);
-                            // Add: microseconds
-                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 5));
-                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
-                            func.instruction(&Instruction::I32Add);
-                            return IRType::Timedelta;
-                        }
-                    }
-                    IROp::Sub => {
-                        // datetime - timedelta -> datetime
-                        if left_type == IRType::Datetime && right_type == IRType::Timedelta {
-                            func.instruction(&Instruction::Drop); // microseconds
-                            func.instruction(&Instruction::Drop); // seconds
-                            func.instruction(&Instruction::Drop); // days
-                            return IRType::Datetime;
-                        }
-                        // datetime - datetime -> timedelta
-                        if left_type == IRType::Datetime && right_type == IRType::Datetime {
-                            // Drop both datetimes and return a zero timedelta
-                            for _ in 0..14 {
-                                func.instruction(&Instruction::Drop);
-                            }
-                            func.instruction(&Instruction::I32Const(0)); // days
-                            func.instruction(&Instruction::I32Const(0)); // seconds
-                            func.instruction(&Instruction::I32Const(0)); // microseconds
-                            return IRType::Timedelta;
-                        }
-                        // date - timedelta -> date
-                        if left_type == IRType::Date && right_type == IRType::Timedelta {
-                            func.instruction(&Instruction::Drop); // microseconds
-                            func.instruction(&Instruction::Drop); // seconds
-                            func.instruction(&Instruction::Drop); // days
-                            return IRType::Date;
-                        }
-                        // date - date -> timedelta
-                        if left_type == IRType::Date && right_type == IRType::Date {
-                            // Drop both dates and return a zero timedelta
-                            for _ in 0..6 {
-                                func.instruction(&Instruction::Drop);
-                            }
-                            func.instruction(&Instruction::I32Const(0)); // days
-                            func.instruction(&Instruction::I32Const(0)); // seconds
-                            func.instruction(&Instruction::I32Const(0)); // microseconds
-                            return IRType::Timedelta;
-                        }
-                        // timedelta - timedelta -> timedelta
-                        if left_type == IRType::Timedelta && right_type == IRType::Timedelta {
-                            // Save td2
-                            func.instruction(&Instruction::LocalSet(ctx.temp_local + 2)); // td2.microseconds
-                            func.instruction(&Instruction::LocalSet(ctx.temp_local + 1)); // td2.seconds
-                            func.instruction(&Instruction::LocalSet(ctx.temp_local)); // td2.days
-                                                                                      // Save td1
-                            func.instruction(&Instruction::LocalSet(ctx.temp_local + 5)); // td1.microseconds
-                            func.instruction(&Instruction::LocalSet(ctx.temp_local + 4)); // td1.seconds
-                            func.instruction(&Instruction::LocalSet(ctx.temp_local + 3)); // td1.days
-                                                                                          // Sub: days
-                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
-                            func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                            func.instruction(&Instruction::I32Sub);
-                            // Sub: seconds
-                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
-                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
-                            func.instruction(&Instruction::I32Sub);
-                            // Sub: microseconds
-                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 5));
-                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
-                            func.instruction(&Instruction::I32Sub);
-                            return IRType::Timedelta;
-                        }
-                    }
-                    _ => {}
-                }
+            if let Some(result) = crate::compiler::operators::emit_non_numeric_binop(
+                func,
+                ctx,
+                op,
+                left,
+                right,
+                &left_type,
+                &right_type,
+            ) {
+                return result;
             }
 
             // int/bool/unknown values are all i32-represented; widen the i32
@@ -4666,9 +5194,12 @@ pub fn emit_expr(
                 }
             };
 
-            // Cast the result to expected type if needed
+            // Widen an int result where a float is expected. The reverse used
+            // to truncate, so `self.v = a / b` into an int field answered 1
+            // for 3 / 2 (#132); Python keeps the float.
             if let Some(expected) = expected_type {
                 if *expected == IRType::Int && result_type == IRType::Float {
+                    report_float_where_int(ctx);
                     func.instruction(&Instruction::I32TruncF64S);
                     return IRType::Int;
                 } else if *expected == IRType::Float && result_type == IRType::Int {
@@ -4691,15 +5222,13 @@ pub fn emit_expr(
                             func.instruction(&Instruction::F64Mul);
                         }
                         IRUnaryOp::Not => {
-                            // Logical not for float: convert to bool first
+                            // `x == 0.0` is already `not x`. This used to
+                            // invert it as well, so `not 0.0` was False.
                             func.instruction(&Instruction::F64Const(f64_const(0.0)));
                             func.instruction(&Instruction::F64Eq);
-                            // Invert (1->0, 0->1)
-                            func.instruction(&Instruction::I32Const(1));
-                            func.instruction(&Instruction::I32Xor);
                         }
                         IRUnaryOp::Invert => {
-                            // Not meaningful for floats
+                            ctx.report("bad operand type for unary ~: 'float'");
                             func.instruction(&Instruction::Drop);
                             func.instruction(&Instruction::F64Const(f64_const(0.0)));
                         }
@@ -4712,6 +5241,29 @@ pub fn emit_expr(
                     } else {
                         IRType::Float
                     }
+                }
+                ref other
+                    if !matches!(op, IRUnaryOp::Not)
+                        && !matches!(
+                            other,
+                            IRType::Int | IRType::Bool | IRType::Unknown | IRType::Any
+                        ) =>
+                {
+                    let symbol = match op {
+                        IRUnaryOp::Neg => "-",
+                        IRUnaryOp::UAdd => "+",
+                        _ => "~",
+                    };
+                    ctx.report(format!(
+                        "bad operand type for unary {symbol}: '{}'",
+                        crate::compiler::operators::python_type_name(other)
+                    ));
+                    func.instruction(&Instruction::Drop);
+                    if matches!(other, IRType::String | IRType::Bytes) {
+                        func.instruction(&Instruction::Drop);
+                    }
+                    func.instruction(&Instruction::I32Const(0));
+                    IRType::Int
                 }
                 _ => {
                     // Integer/Boolean operations
@@ -4991,8 +5543,12 @@ pub fn emit_expr(
                 return IRType::Bool;
             }
 
-            let left_type = emit_expr(left, func, ctx, memory_layout, None);
-            let right_type = emit_expr(right, func, ctx, memory_layout, Some(&left_type));
+            let left_type = emit_value(left, func, ctx, memory_layout, None);
+            let right_type = emit_value(right, func, ctx, memory_layout, Some(&left_type));
+
+            if let (IRType::Set(a), IRType::Set(b)) = (&left_type, &right_type) {
+                return crate::compiler::operators::emit_set_comparison(func, ctx, op, a, b);
+            }
 
             // Equality between class instances dispatches to `__eq__` when the
             // left operand's class defines or inherits one (dataclasses always
@@ -5338,9 +5894,10 @@ pub fn emit_expr(
                     IRCompareOp::GtE => {
                         func.instruction(&Instruction::F64Ge);
                     }
-                    // New operations
+                    // `in` is handled above; identity between two numbers is
+                    // not something Python defines.
                     IRCompareOp::In | IRCompareOp::NotIn | IRCompareOp::Is | IRCompareOp::IsNot => {
-                        // These comparisons aren't directly supported for floats in WebAssembly
+                        ctx.report("'is' between two numbers is not supported: use '=='");
                         func.instruction(&Instruction::Drop);
                         func.instruction(&Instruction::Drop);
                         func.instruction(&Instruction::I32Const(0));
@@ -5367,9 +5924,11 @@ pub fn emit_expr(
                     IRCompareOp::GtE => {
                         func.instruction(&Instruction::I32GeS);
                     }
-                    // New operations
-                    IRCompareOp::In | IRCompareOp::NotIn | IRCompareOp::Is | IRCompareOp::IsNot => {
-                        // These operations aren't directly supported in WebAssembly
+                    IRCompareOp::Is | IRCompareOp::IsNot => {
+                        emit_identity(func, ctx, op, &left_type, &right_type);
+                    }
+                    // `in` is handled above.
+                    IRCompareOp::In | IRCompareOp::NotIn => {
                         func.instruction(&Instruction::Drop);
                         func.instruction(&Instruction::Drop);
                         func.instruction(&Instruction::I32Const(0));
@@ -5413,6 +5972,11 @@ pub fn emit_expr(
 
             IRType::Bool
         }
+        IRExpr::Keyword { name, .. } => {
+            ctx.report(format!("keyword argument '{name}' is not supported here"));
+            func.instruction(&Instruction::I32Const(0));
+            IRType::Unknown
+        }
         IRExpr::FunctionCall {
             function_name,
             arguments,
@@ -5424,6 +5988,38 @@ pub fn emit_expr(
             let resolved_alias = ctx.resolve_import_alias(function_name).to_string();
             let function_name = &resolved_alias;
 
+            // `from json import dumps` then `dumps(x)`: a call into the module.
+            if ctx.get_function_info(function_name).is_none() {
+                if let Some((module, attribute)) = ctx.stdlib_imports.get(function_name).cloned() {
+                    return emit_expr(
+                        &IRExpr::MethodCall {
+                            object: Box::new(IRExpr::Variable(module)),
+                            method_name: attribute,
+                            arguments: arguments.clone(),
+                        },
+                        func,
+                        ctx,
+                        memory_layout,
+                        expected_type,
+                    );
+                }
+            }
+
+            // The finalize pass places keywords for this module's own functions
+            // and classes; any left are for a callee whose parameters it could
+            // not see.
+            if let Some(IRExpr::Keyword { name, .. }) = arguments
+                .iter()
+                .find(|a| matches!(a, IRExpr::Keyword { .. }))
+            {
+                ctx.report(format!(
+                    "keyword argument '{name}' is not supported in a call to \
+                     '{function_name}()'. Hint: pass it positionally"
+                ));
+                func.instruction(&Instruction::I32Const(0));
+                return IRType::Unknown;
+            }
+
             // Iterator-protocol intrinsic (see `ir::generators`): leave the
             // current StopIteration flag (global 1) on the stack and clear it.
             if function_name == crate::ir::STOP_CHECK_FN {
@@ -5433,34 +6029,36 @@ pub fn emit_expr(
                 return IRType::Bool;
             }
 
-            // Positional dict-entry access backing `for k, v in d.items()`
-            // (see `ir::converter`): entry i's key sits at
-            // HEADER + i*DICT_ENTRY, its value one slot later. Loaded as the
-            // i32 slot word (f64 values keep only their low word — the
-            // existing tuple-unpack limitation).
+            // Positional dict-entry access backing `for k, v in d.items()` and
+            // the key and value loops (see `ir::converter`): entry i's key sits
+            // at data + i*DICT_ENTRY, its value one slot later. Each loads at
+            // the dict's own key or value type. Both loaded an int word, so a
+            // string key bound as an int and a float value lost its width.
             if function_name == crate::ir::DICT_KEY_AT_FN
                 || function_name == crate::ir::DICT_VAL_AT_FN
             {
-                if let [dict, index] = arguments.as_slice() {
-                    emit_expr(dict, func, ctx, memory_layout, None);
-                    emit_expr(index, func, ctx, memory_layout, Some(&IRType::Int));
-                    func.instruction(&Instruction::I32Const(DICT_ENTRY as i32));
-                    func.instruction(&Instruction::I32Mul);
-                    func.instruction(&Instruction::I32Add);
-                    let slot = if function_name == crate::ir::DICT_VAL_AT_FN {
-                        COLLECTION_SLOT
-                    } else {
-                        0
-                    };
-                    func.instruction(&Instruction::I32Load(MemArg {
-                        offset: (COLLECTION_HEADER + slot) as u64,
-                        align: 2,
-                        memory_index: 0,
-                    }));
-                } else {
+                let [dict, index] = arguments.as_slice() else {
+                    ctx.report(format!("{function_name} takes a dict and an index"));
                     func.instruction(&Instruction::I32Const(0));
+                    return IRType::Unknown;
+                };
+                let dict_type = emit_expr(dict, func, ctx, memory_layout, None);
+                let (slot, ty) = match (&dict_type, function_name == crate::ir::DICT_VAL_AT_FN) {
+                    (IRType::Dict(k, _), false) => (0, (**k).clone()),
+                    (IRType::Dict(_, v), true) => (COLLECTION_SLOT, (**v).clone()),
+                    (_, is_value) => (if is_value { COLLECTION_SLOT } else { 0 }, IRType::Unknown),
+                };
+                emit_data_base(func);
+                emit_expr(index, func, ctx, memory_layout, Some(&IRType::Int));
+                func.instruction(&Instruction::I32Const(DICT_ENTRY as i32));
+                func.instruction(&Instruction::I32Mul);
+                func.instruction(&Instruction::I32Add);
+                if slot > 0 {
+                    func.instruction(&Instruction::I32Const(slot as i32));
+                    func.instruction(&Instruction::I32Add);
                 }
-                return IRType::Int;
+                load_collection_word(func, &ty, ctx.temp_local + 1);
+                return ty;
             }
 
             // Class instantiation: `ClassName(args)`. Handled before the generic
@@ -5537,12 +6135,10 @@ pub fn emit_expr(
 
             // `issubclass(Sub, Base)` — both arguments are bare class-name
             // tokens, so the answer folds to a compile-time constant and no
-            // argument code is emitted at all. Handled before the generic
-            // argument emission below, which would treat the class names as
-            // unknown variables.
+            // argument code is emitted at all. Anything else answered False.
             if function_name == "issubclass" {
-                if let (Some(IRExpr::Variable(sub)), Some(IRExpr::Variable(base))) =
-                    (arguments.first(), arguments.get(1))
+                if let (Some(IRExpr::Variable(sub)), Some(IRExpr::Variable(base)), 2) =
+                    (arguments.first(), arguments.get(1), arguments.len())
                 {
                     if ctx.get_class_info(sub).is_some() && ctx.get_class_info(base).is_some() {
                         let result = ctx.is_class_or_subclass(sub, base);
@@ -5550,69 +6146,36 @@ pub fn emit_expr(
                         return IRType::Bool;
                     }
                 }
+                ctx.report("issubclass() is supported between two classes this program defines");
                 func.instruction(&Instruction::I32Const(0));
                 return IRType::Bool;
             }
 
-            // `isinstance(obj, ClassName)` — the second argument is a bare
-            // class-name token (never emitted); the first is evaluated and, if
-            // it is a class instance, its tag word (class id at offset 0,
-            // stamped by `__alloc_obj`) is compared against the ids assignable
-            // to `ClassName` (itself plus every subclass). Also handled before
-            // the generic argument emission.
+            // `isinstance(obj, target)`: a class this program defines is
+            // checked against the instance's class tag; a builtin type, which
+            // this compiler's values carry statically, folds to a constant. A
+            // tuple of targets is any of them. It answered False for every
+            // target that was not a user class, `isinstance(3, int)` included.
             if function_name == "isinstance" {
-                if let (Some(obj), Some(IRExpr::Variable(target))) =
-                    (arguments.first(), arguments.get(1))
-                {
-                    if ctx.get_class_info(target).is_some() {
-                        let obj_type = emit_expr(obj, func, ctx, memory_layout, None);
-                        return match obj_type {
-                            IRType::Class(_) => {
-                                // tag = *(obj + 0); fold `tag == id` over the
-                                // assignable ids with `or`. The tag sits in a
-                                // scratch local only while the flat comparison
-                                // chain is emitted (no nested emit_expr).
-                                let ids = ctx.assignable_class_ids(target);
-                                func.instruction(&Instruction::I32Load(MemArg {
-                                    offset: 0,
-                                    align: 2,
-                                    memory_index: 0,
-                                }));
-                                func.instruction(&Instruction::LocalSet(ctx.temp_local));
-                                func.instruction(&Instruction::I32Const(0));
-                                for id in ids {
-                                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                                    func.instruction(&Instruction::I32Const(id));
-                                    func.instruction(&Instruction::I32Eq);
-                                    func.instruction(&Instruction::I32Or);
-                                }
-                                IRType::Bool
-                            }
-                            // A non-instance value is never an instance of a
-                            // user class: discard it and answer False.
-                            IRType::String | IRType::Bytes => {
-                                func.instruction(&Instruction::Drop);
-                                func.instruction(&Instruction::Drop);
-                                func.instruction(&Instruction::I32Const(0));
-                                IRType::Bool
-                            }
-                            IRType::Float => {
-                                func.instruction(&Instruction::Drop);
-                                func.instruction(&Instruction::I32Const(0));
-                                IRType::Bool
-                            }
-                            _ => {
-                                func.instruction(&Instruction::Drop);
-                                func.instruction(&Instruction::I32Const(0));
-                                IRType::Bool
-                            }
-                        };
-                    }
-                }
-                // Unknown target (e.g. `isinstance(x, int)`): not supported
-                // yet; answer False without emitting the arguments.
-                func.instruction(&Instruction::I32Const(0));
-                return IRType::Bool;
+                let targets: Option<Vec<&str>> = match arguments.get(1) {
+                    Some(IRExpr::Variable(t)) => Some(vec![t.as_str()]),
+                    Some(IRExpr::TupleLiteral(items)) => items
+                        .iter()
+                        .map(|i| match i {
+                            IRExpr::Variable(t) => Some(t.as_str()),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => None,
+                };
+                let (Some(obj), Some(targets), 2) = (arguments.first(), targets, arguments.len())
+                else {
+                    ctx.report("isinstance() takes a value and a class, a builtin type, or a tuple of them");
+                    func.instruction(&Instruction::I32Const(0));
+                    return IRType::Bool;
+                };
+                let obj_type = emit_expr(obj, func, ctx, memory_layout, None);
+                return emit_isinstance(func, ctx, &obj_type, &targets);
             }
 
             // Calling a closure-valued name (#43): the callee is a local (or a
@@ -5637,6 +6200,11 @@ pub fn emit_expr(
                                         func.instruction(&Instruction::Drop);
                                     }
                                     IRType::Float => {
+                                        ctx.report(format!(
+                                            "passing a float to '{function_name}', a lambda or \
+                                             closure, is not supported: its parameters are held \
+                                             as ints. Hint: use a 'def' with annotated parameters"
+                                        ));
                                         func.instruction(&Instruction::I32TruncF64S);
                                     }
                                     _ => {}
@@ -5710,9 +6278,7 @@ pub fn emit_expr(
                     }
                 }
                 emit_user_call(func, ctx, index);
-                if matches!(return_type, IRType::String | IRType::Bytes) {
-                    recover_str_pair(func, ctx);
-                }
+                finish_user_call(func, ctx, &return_type);
                 return return_type;
             }
 
@@ -5727,7 +6293,7 @@ pub fn emit_expr(
             let is_user_fn = ctx.get_function_info(function_name.as_str()).is_some();
             let mut arg_types = Vec::new();
             for arg in arguments {
-                let arg_type = emit_expr(arg, func, ctx, memory_layout, None);
+                let arg_type = emit_value(arg, func, ctx, memory_layout, None);
                 if is_user_fn && matches!(arg_type, IRType::String | IRType::Bytes) {
                     func.instruction(&Instruction::Drop);
                 }
@@ -5750,16 +6316,25 @@ pub fn emit_expr(
                 // A function returns a single word; a string/bytes result is
                 // its offset, so rebuild the (offset, length) pair consumers
                 // expect from the blob prefix.
-                if matches!(return_type, IRType::String | IRType::Bytes) {
-                    recover_str_pair(func, ctx);
-                }
+                finish_user_call(func, ctx, &return_type);
                 return_type
             } else {
                 // Built-in functions
                 match function_name.as_str() {
                     "len" => {
                         if arg_types.len() != 1 {
-                            return IRType::Unknown;
+                            ctx.report(format!(
+                                "len() takes exactly one argument ({} given)",
+                                arg_types.len()
+                            ));
+                            for t in arg_types.iter().rev() {
+                                func.instruction(&Instruction::Drop);
+                                if matches!(t, IRType::String | IRType::Bytes) {
+                                    func.instruction(&Instruction::Drop);
+                                }
+                            }
+                            func.instruction(&Instruction::I32Const(0));
+                            return IRType::Int;
                         }
                         match &arg_types[0] {
                             IRType::String | IRType::Bytes => {
@@ -5768,30 +6343,43 @@ pub fn emit_expr(
                                 func.instruction(&Instruction::LocalSet(ctx.temp_local));
                                 func.instruction(&Instruction::Drop);
                                 func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                                IRType::Int
                             }
-                            IRType::Float => {
-                                // len() of a scalar is invalid Python; consume
-                                // the value and answer 0.
+                            // Lists, dicts, sets and tuples store their
+                            // element/entry count in their first word.
+                            IRType::List(_)
+                            | IRType::Tuple(_)
+                            | IRType::Dict(_, _)
+                            | IRType::Set(_) => {
+                                func.instruction(&Instruction::I32Load(slot_arg()));
+                            }
+                            // A range block is [start][stop][step]; its length
+                            // is what CPython computes. This read the start
+                            // as a count, so len(range(5)) answered 0.
+                            IRType::Range => emit_range_len(func, ctx),
+                            // The compiler's own loop lowering measures the
+                            // collections it parks in `__`-named locals and
+                            // generator fields, which are always collections.
+                            IRType::Unknown if is_compiler_name(&arguments[0]) => {
+                                func.instruction(&Instruction::I32Load(slot_arg()));
+                            }
+                            // Anything else has no length in Python (a
+                            // TypeError), and an untyped value is a word here:
+                            // reading it as a count answered garbage.
+                            other => {
+                                let hint = if matches!(other, IRType::Unknown | IRType::Any) {
+                                    ". Hint: annotate the value it comes from"
+                                } else {
+                                    ""
+                                };
+                                ctx.report(format!(
+                                    "object of type '{}' has no len(){hint}",
+                                    crate::compiler::operators::python_type_name(other)
+                                ));
                                 func.instruction(&Instruction::Drop);
                                 func.instruction(&Instruction::I32Const(0));
-                                IRType::Int
-                            }
-                            // Lists, dicts, sets and tuples are all pointers
-                            // that store their element/entry count in the
-                            // first 4 bytes. An Unknown value (e.g. a
-                            // collection read back out of an instance field)
-                            // is a single i32 word, so treating it as such a
-                            // pointer is the correct default.
-                            _ => {
-                                func.instruction(&Instruction::I32Load(MemArg {
-                                    offset: 0,
-                                    align: 2,
-                                    memory_index: 0,
-                                }));
-                                IRType::Int
                             }
                         }
+                        IRType::Int
                     }
                     "open" => {
                         // open(path[, mode]) -> file (#25). The path's
@@ -5856,62 +6444,7 @@ pub fn emit_expr(
                         }
                         IRType::None
                     }
-                    "min" => {
-                        if arg_types.is_empty() {
-                            return IRType::Unknown;
-                        }
-                        if arg_types.len() == 1 {
-                            // min(iterable) - not yet supported, requires iteration
-                            // For now, just pop the argument and return 0
-                            func.instruction(&Instruction::Drop);
-                            return IRType::Int;
-                        }
-                        // min(a, b, ...) - fold the args (top of stack down) into
-                        // a running minimum. Each step replaces the top two with
-                        // their minimum via a result-typed if.
-                        let result_type = arg_types[0].clone();
-                        for _ in 1..arg_types.len() {
-                            // Stack: ..., running, next
-                            func.instruction(&Instruction::LocalSet(ctx.temp_local + 1)); // next
-                            func.instruction(&Instruction::LocalSet(ctx.temp_local)); // running
-                            func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
-                            func.instruction(&Instruction::I32LtS); // running < next
-                            func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
-                            func.instruction(&Instruction::LocalGet(ctx.temp_local)); // keep running
-                            func.instruction(&Instruction::Else);
-                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 1)); // keep next
-                            func.instruction(&Instruction::End);
-                        }
-                        result_type
-                    }
-                    "max" => {
-                        if arg_types.is_empty() {
-                            return IRType::Unknown;
-                        }
-                        if arg_types.len() == 1 {
-                            // max(iterable) - not yet supported, requires iteration
-                            // For now, just pop the argument and return 0
-                            func.instruction(&Instruction::Drop);
-                            return IRType::Int;
-                        }
-                        // max(a, b, ...) - fold the args into a running maximum.
-                        let result_type = arg_types[0].clone();
-                        for _ in 1..arg_types.len() {
-                            // Stack: ..., running, next
-                            func.instruction(&Instruction::LocalSet(ctx.temp_local + 1)); // next
-                            func.instruction(&Instruction::LocalSet(ctx.temp_local)); // running
-                            func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
-                            func.instruction(&Instruction::I32GtS); // running > next
-                            func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
-                            func.instruction(&Instruction::LocalGet(ctx.temp_local)); // keep running
-                            func.instruction(&Instruction::Else);
-                            func.instruction(&Instruction::LocalGet(ctx.temp_local + 1)); // keep next
-                            func.instruction(&Instruction::End);
-                        }
-                        result_type
-                    }
+                    "min" | "max" => emit_min_max(func, ctx, function_name == "min", &arg_types),
                     "int" => {
                         // int(x): truncate a float, parse a string, pass an int
                         // through. A string used to be treated as an int: the
@@ -6628,25 +7161,6 @@ pub fn emit_expr(
                             IRType::Int
                         }
                     }
-                    "namedtuple" => {
-                        // namedtuple(typename, field_names) -> class
-                        // Returns a callable that creates namedtuple instances
-                        // For now, just drop arguments and return a pointer
-                        for arg_type in &arg_types {
-                            match arg_type {
-                                IRType::String => {
-                                    func.instruction(&Instruction::Drop);
-                                    func.instruction(&Instruction::Drop);
-                                }
-                                _ => {
-                                    func.instruction(&Instruction::Drop);
-                                }
-                            }
-                        }
-                        // Return a callable reference (just use 0 as placeholder)
-                        func.instruction(&Instruction::I32Const(0));
-                        IRType::Unknown
-                    }
                     _ => {
                         // A name that is neither a compiled function nor a
                         // builtin the compiler implements. This used to push
@@ -7261,6 +7775,26 @@ pub fn emit_expr(
         } => {
             let container_type = emit_expr(container, func, ctx, memory_layout, None);
 
+            let unit_step = match step.as_deref() {
+                None => true,
+                Some(IRExpr::Const(IRConstant::Int(1))) => true,
+                Some(_) => false,
+            };
+            if !unit_step && matches!(container_type, IRType::String | IRType::Bytes) {
+                // `s[::-1]` and every other step: the step was ignored, so
+                // reversing a string answered the string unchanged.
+                emit_stepped_text_slice(
+                    func,
+                    ctx,
+                    memory_layout,
+                    start.as_deref(),
+                    end.as_deref(),
+                    step.as_deref().expect("a non-unit step is present"),
+                    container_type == IRType::String,
+                );
+                return container_type;
+            }
+
             match container_type {
                 IRType::String | IRType::Bytes => {
                     // String/Bytes slicing: str[start:end] / bytes[start:end].
@@ -7541,7 +8075,12 @@ pub fn emit_expr(
                             expected_type,
                         );
                     }
-                    // Unknown attribute on a user module: yield 0.
+                    // A function or class read as a value, or a name the
+                    // module does not define. This answered 0.
+                    ctx.report(format!(
+                        "cannot read '{name}.{attribute}' as a value: only a user module's \
+                         variables can be read through it, and its functions and classes called"
+                    ));
                     func.instruction(&Instruction::I32Const(0));
                     return IRType::Unknown;
                 }
@@ -7565,6 +8104,16 @@ pub fn emit_expr(
                 _ => None,
             };
 
+            if stdlib_value.is_none() {
+                if let Some(qualified) = stdlib_call_name(ctx, object) {
+                    ctx.report(format!(
+                        "'{qualified}.{attribute}' is not available yet: only the standard \
+                         library's constants compile today, and the rest is planned for 0.20.0"
+                    ));
+                    func.instruction(&Instruction::I32Const(0));
+                    return IRType::Unknown;
+                }
+            }
             if let Some(value) = stdlib_value {
                 return match value {
                     crate::stdlib::StdlibValue::Int(i) => {
@@ -7580,18 +8129,6 @@ pub fn emit_expr(
                     crate::stdlib::StdlibValue::Float(f) => {
                         func.instruction(&Instruction::F64Const(f.into()));
                         IRType::Float
-                    }
-                    crate::stdlib::StdlibValue::List(_) => {
-                        func.instruction(&Instruction::I32Const(10000));
-                        IRType::List(Box::new(IRType::String))
-                    }
-                    crate::stdlib::StdlibValue::Dict(_) => {
-                        func.instruction(&Instruction::I32Const(10000));
-                        IRType::Dict(Box::new(IRType::String), Box::new(IRType::String))
-                    }
-                    crate::stdlib::StdlibValue::None => {
-                        func.instruction(&Instruction::I32Const(0));
-                        IRType::None
                     }
                     crate::stdlib::StdlibValue::Module(module_name) => {
                         // Module doesn't need to push anything to the stack
@@ -7789,12 +8326,15 @@ pub fn emit_expr(
                         emit_user_call(func, ctx, method_idx);
                         // A call result is a single word; rebuild the
                         // string/bytes pair.
-                        if matches!(ret, IRType::String | IRType::Bytes) {
-                            recover_str_pair(func, ctx);
-                        }
+                        finish_user_call(func, ctx, &ret);
                         return ret;
                     }
-                    // No base or unknown method: evaluate nothing, yield 0.
+                    // No base class, or none that defines the method: an
+                    // AttributeError in Python. This answered 0.
+                    ctx.report(format!(
+                        "'super' object has no attribute '{method_name}': no base class of \
+                         this class defines it"
+                    ));
                     func.instruction(&Instruction::I32Const(0));
                     return IRType::Unknown;
                 }
@@ -7821,1409 +8361,25 @@ pub fn emit_expr(
                 }
             }
 
-            // Check if this is a stdlib module method call (e.g., os.getcwd())
-            if let IRExpr::Variable(module_name) = &**object {
-                if crate::stdlib::is_stdlib_module(module_name) {
-                    // Handle os module functions
-                    if module_name == "os" {
-                        if let Some(os_func) = crate::stdlib::os::get_function(method_name) {
-                            return match os_func {
-                                crate::stdlib::os::OsFunction::Getcwd => {
-                                    // getcwd() returns current working directory as string
-                                    // For WASM, return "/" as default
-                                    let cwd = "/".to_string();
-                                    let offset = memory_layout
-                                        .string_offsets
-                                        .get(&cwd)
-                                        .copied()
-                                        .unwrap_or(0);
-                                    func.instruction(&Instruction::I32Const(offset as i32));
-                                    func.instruction(&Instruction::I32Const(cwd.len() as i32));
-                                    IRType::String
-                                }
-                                crate::stdlib::os::OsFunction::Getenv => {
-                                    // getenv(key) returns environment variable value or None
-                                    // For now, drop arguments and return None
-                                    for arg in arguments {
-                                        emit_expr(arg, func, ctx, memory_layout, None);
-                                        func.instruction(&Instruction::Drop);
-                                        func.instruction(&Instruction::Drop); // Drop string (offset, length)
-                                    }
-                                    func.instruction(&Instruction::I32Const(0));
-                                    IRType::None
-                                }
-                                crate::stdlib::os::OsFunction::Getpid => {
-                                    // getpid() returns process ID
-                                    // For WASM, return fixed PID
-                                    func.instruction(&Instruction::I32Const(1));
-                                    IRType::Int
-                                }
-                                crate::stdlib::os::OsFunction::Urandom => {
-                                    // urandom(n) returns n random bytes
-                                    // For now, return empty bytes
-                                    for arg in arguments {
-                                        emit_expr(arg, func, ctx, memory_layout, None);
-                                        func.instruction(&Instruction::Drop);
-                                    }
-                                    func.instruction(&Instruction::I32Const(0)); // offset
-                                    func.instruction(&Instruction::I32Const(0)); // length
-                                    IRType::Bytes
-                                }
-                            };
-                        }
-                    }
-
-                    // Handle json module functions
-                    if module_name == "json" {
-                        if let Some(json_func) = crate::stdlib::json::get_function(method_name) {
-                            return match json_func {
-                                crate::stdlib::json::JsonFunction::Dumps => {
-                                    // json.dumps(obj) - serialize Python object to JSON string
-                                    // For now, we'll handle basic types and return a JSON string
-                                    // TODO: Implement full serialization for all types
-                                    if arguments.is_empty() {
-                                        // Return empty JSON object string
-                                        let json_str = "{}".to_string();
-                                        let offset = memory_layout
-                                            .string_offsets
-                                            .get(&json_str)
-                                            .copied()
-                                            .unwrap_or(0);
-                                        func.instruction(&Instruction::I32Const(offset as i32));
-                                        func.instruction(&Instruction::I32Const(
-                                            json_str.len() as i32
-                                        ));
-                                    } else {
-                                        // Emit the argument and for now return a placeholder JSON string
-                                        // In a full implementation, this would serialize the value
-                                        emit_expr(&arguments[0], func, ctx, memory_layout, None);
-
-                                        // Drop the emitted value and return placeholder
-                                        // NOTE: This is a simplified implementation
-                                        func.instruction(&Instruction::Drop);
-
-                                        let json_str = "{}".to_string();
-                                        let offset = memory_layout
-                                            .string_offsets
-                                            .get(&json_str)
-                                            .copied()
-                                            .unwrap_or(0);
-                                        func.instruction(&Instruction::I32Const(offset as i32));
-                                        func.instruction(&Instruction::I32Const(
-                                            json_str.len() as i32
-                                        ));
-                                    }
-                                    IRType::String
-                                }
-                                crate::stdlib::json::JsonFunction::Loads => {
-                                    // json.loads(s) - parse JSON string to Python object
-                                    // For now, return an empty dict as placeholder
-                                    // TODO: Implement full JSON parsing at runtime
-                                    if !arguments.is_empty() {
-                                        // Emit and drop the string argument
-                                        emit_expr(&arguments[0], func, ctx, memory_layout, None);
-                                        func.instruction(&Instruction::Drop);
-                                        func.instruction(&Instruction::Drop);
-                                    }
-
-                                    // Return empty dict placeholder
-                                    func.instruction(&Instruction::I32Const(0));
-                                    IRType::Dict(
-                                        Box::new(IRType::String),
-                                        Box::new(IRType::Unknown),
-                                    )
-                                }
-                                crate::stdlib::json::JsonFunction::Load => {
-                                    // json.load(fp) - load JSON from file object
-                                    // Drop file argument and return empty dict
-                                    for arg in arguments {
-                                        emit_expr(arg, func, ctx, memory_layout, None);
-                                        func.instruction(&Instruction::Drop);
-                                    }
-                                    func.instruction(&Instruction::I32Const(0));
-                                    IRType::Dict(
-                                        Box::new(IRType::String),
-                                        Box::new(IRType::Unknown),
-                                    )
-                                }
-                                crate::stdlib::json::JsonFunction::Dump => {
-                                    // json.dump(obj, fp) - serialize object to file
-                                    // Drop all arguments and return None
-                                    for arg in arguments {
-                                        emit_expr(arg, func, ctx, memory_layout, None);
-                                        func.instruction(&Instruction::Drop);
-                                    }
-                                    func.instruction(&Instruction::I32Const(0));
-                                    IRType::None
-                                }
-                                crate::stdlib::json::JsonFunction::JSONEncoder => {
-                                    // JSONEncoder class - return placeholder
-                                    for arg in arguments {
-                                        emit_expr(arg, func, ctx, memory_layout, None);
-                                        func.instruction(&Instruction::Drop);
-                                    }
-                                    func.instruction(&Instruction::I32Const(0));
-                                    IRType::Unknown
-                                }
-                                crate::stdlib::json::JsonFunction::JSONDecoder => {
-                                    // JSONDecoder class - return placeholder
-                                    for arg in arguments {
-                                        emit_expr(arg, func, ctx, memory_layout, None);
-                                        func.instruction(&Instruction::Drop);
-                                    }
-                                    func.instruction(&Instruction::I32Const(0));
-                                    IRType::Unknown
-                                }
-                            };
-                        }
-                    }
-
-                    // Handle logging module functions
-                    if module_name == "logging" {
-                        if let Some(log_func) = crate::stdlib::logging::get_function(method_name) {
-                            // Emit and drop all arguments
-                            for arg in arguments {
-                                let arg_type = emit_expr(arg, func, ctx, memory_layout, None);
-                                match arg_type {
-                                    IRType::String => {
-                                        // Strings are (offset, length)
-                                        func.instruction(&Instruction::Drop);
-                                        func.instruction(&Instruction::Drop);
-                                    }
-                                    _ => {
-                                        func.instruction(&Instruction::Drop);
-                                    }
-                                }
-                            }
-
-                            return match log_func {
-                                crate::stdlib::logging::LoggingFunction::Debug
-                                | crate::stdlib::logging::LoggingFunction::Info
-                                | crate::stdlib::logging::LoggingFunction::Warning
-                                | crate::stdlib::logging::LoggingFunction::Error
-                                | crate::stdlib::logging::LoggingFunction::Critical
-                                | crate::stdlib::logging::LoggingFunction::Exception
-                                | crate::stdlib::logging::LoggingFunction::Log
-                                | crate::stdlib::logging::LoggingFunction::BasicConfig
-                                | crate::stdlib::logging::LoggingFunction::SetLevel
-                                | crate::stdlib::logging::LoggingFunction::Disable
-                                | crate::stdlib::logging::LoggingFunction::AddHandler
-                                | crate::stdlib::logging::LoggingFunction::RemoveHandler => {
-                                    func.instruction(&Instruction::I32Const(0));
-                                    IRType::None
-                                }
-                                crate::stdlib::logging::LoggingFunction::GetLogger
-                                | crate::stdlib::logging::LoggingFunction::Logger
-                                | crate::stdlib::logging::LoggingFunction::Handler
-                                | crate::stdlib::logging::LoggingFunction::StreamHandler
-                                | crate::stdlib::logging::LoggingFunction::FileHandler
-                                | crate::stdlib::logging::LoggingFunction::Formatter
-                                | crate::stdlib::logging::LoggingFunction::Filter
-                                | crate::stdlib::logging::LoggingFunction::LogRecord => {
-                                    func.instruction(&Instruction::I32Const(0));
-                                    IRType::Unknown
-                                }
-                            };
-                        }
-                    }
-
-                    // Handle re module functions
-                    if module_name == "re" {
-                        if let Some(re_func) = crate::stdlib::re::get_function(method_name) {
-                            return match re_func {
-                                crate::stdlib::re::ReFunction::Compile => {
-                                    // re.compile(pattern, flags=0) - compile pattern for reuse
-                                    // For compile-time constant patterns, we can pre-validate
-                                    if !arguments.is_empty() {
-                                        if let IRExpr::Const(IRConstant::String(pattern)) =
-                                            &arguments[0]
-                                        {
-                                            // Validate pattern at compile time
-                                            let flags = if arguments.len() > 1 {
-                                                if let IRExpr::Const(IRConstant::Int(f)) =
-                                                    &arguments[1]
-                                                {
-                                                    *f
-                                                } else {
-                                                    0
-                                                }
-                                            } else {
-                                                0
-                                            };
-                                            // Store pattern in memory (lookup existing or use 0)
-                                            let offset = memory_layout
-                                                .string_offsets
-                                                .get(pattern)
-                                                .copied()
-                                                .unwrap_or(0);
-                                            func.instruction(&Instruction::I32Const(offset as i32));
-                                            func.instruction(&Instruction::I32Const(
-                                                pattern.len() as i32
-                                            ));
-                                            func.instruction(&Instruction::I32Const(flags));
-                                            return IRType::Unknown; // Pattern object
-                                        }
-                                    }
-                                    // Drop all arguments for non-constant patterns
-                                    for arg in arguments {
-                                        let arg_type =
-                                            emit_expr(arg, func, ctx, memory_layout, None);
-                                        if arg_type == IRType::String {
-                                            func.instruction(&Instruction::Drop);
-                                            func.instruction(&Instruction::Drop);
-                                        } else {
-                                            func.instruction(&Instruction::Drop);
-                                        }
-                                    }
-                                    func.instruction(&Instruction::I32Const(0));
-                                    func.instruction(&Instruction::I32Const(0));
-                                    func.instruction(&Instruction::I32Const(0));
-                                    IRType::Unknown
-                                }
-                                crate::stdlib::re::ReFunction::Search => {
-                                    // re.search(pattern, string, flags=0) - search for pattern
-                                    // Returns Match object or None
-                                    if arguments.len() >= 2 {
-                                        if let (
-                                            IRExpr::Const(IRConstant::String(pattern)),
-                                            IRExpr::Const(IRConstant::String(text)),
-                                        ) = (&arguments[0], &arguments[1])
-                                        {
-                                            let flags = if arguments.len() > 2 {
-                                                if let IRExpr::Const(IRConstant::Int(f)) =
-                                                    &arguments[2]
-                                                {
-                                                    *f
-                                                } else {
-                                                    0
-                                                }
-                                            } else {
-                                                0
-                                            };
-                                            // Execute search at compile time
-                                            if let Some(result) =
-                                                crate::stdlib::re::search(pattern, text, flags)
-                                            {
-                                                // Return match info (using text offset if available)
-                                                let offset = memory_layout
-                                                    .string_offsets
-                                                    .get(&result.group)
-                                                    .copied()
-                                                    .unwrap_or(0);
-                                                func.instruction(&Instruction::I32Const(
-                                                    offset as i32,
-                                                ));
-                                                func.instruction(&Instruction::I32Const(
-                                                    result.group.len() as i32,
-                                                ));
-                                                func.instruction(&Instruction::I32Const(
-                                                    result.start as i32,
-                                                ));
-                                                func.instruction(&Instruction::I32Const(
-                                                    result.end as i32,
-                                                ));
-                                                return IRType::Unknown; // Match object
-                                            } else {
-                                                // No match - return None indicator
-                                                func.instruction(&Instruction::I32Const(0));
-                                                func.instruction(&Instruction::I32Const(0));
-                                                func.instruction(&Instruction::I32Const(-1));
-                                                func.instruction(&Instruction::I32Const(-1));
-                                                return IRType::None;
-                                            }
-                                        }
-                                    }
-                                    // Runtime search - drop args and return placeholder
-                                    for arg in arguments {
-                                        let arg_type =
-                                            emit_expr(arg, func, ctx, memory_layout, None);
-                                        if arg_type == IRType::String {
-                                            func.instruction(&Instruction::Drop);
-                                            func.instruction(&Instruction::Drop);
-                                        } else {
-                                            func.instruction(&Instruction::Drop);
-                                        }
-                                    }
-                                    func.instruction(&Instruction::I32Const(0));
-                                    func.instruction(&Instruction::I32Const(0));
-                                    func.instruction(&Instruction::I32Const(-1));
-                                    func.instruction(&Instruction::I32Const(-1));
-                                    IRType::None
-                                }
-                                crate::stdlib::re::ReFunction::Match => {
-                                    // re.match(pattern, string, flags=0) - match at beginning
-                                    if arguments.len() >= 2 {
-                                        if let (
-                                            IRExpr::Const(IRConstant::String(pattern)),
-                                            IRExpr::Const(IRConstant::String(text)),
-                                        ) = (&arguments[0], &arguments[1])
-                                        {
-                                            let flags = if arguments.len() > 2 {
-                                                if let IRExpr::Const(IRConstant::Int(f)) =
-                                                    &arguments[2]
-                                                {
-                                                    *f
-                                                } else {
-                                                    0
-                                                }
-                                            } else {
-                                                0
-                                            };
-                                            if let Some(result) =
-                                                crate::stdlib::re::match_start(pattern, text, flags)
-                                            {
-                                                let offset = memory_layout
-                                                    .string_offsets
-                                                    .get(&result.group)
-                                                    .copied()
-                                                    .unwrap_or(0);
-                                                func.instruction(&Instruction::I32Const(
-                                                    offset as i32,
-                                                ));
-                                                func.instruction(&Instruction::I32Const(
-                                                    result.group.len() as i32,
-                                                ));
-                                                func.instruction(&Instruction::I32Const(
-                                                    result.start as i32,
-                                                ));
-                                                func.instruction(&Instruction::I32Const(
-                                                    result.end as i32,
-                                                ));
-                                                return IRType::Unknown;
-                                            } else {
-                                                func.instruction(&Instruction::I32Const(0));
-                                                func.instruction(&Instruction::I32Const(0));
-                                                func.instruction(&Instruction::I32Const(-1));
-                                                func.instruction(&Instruction::I32Const(-1));
-                                                return IRType::None;
-                                            }
-                                        }
-                                    }
-                                    for arg in arguments {
-                                        let arg_type =
-                                            emit_expr(arg, func, ctx, memory_layout, None);
-                                        if arg_type == IRType::String {
-                                            func.instruction(&Instruction::Drop);
-                                            func.instruction(&Instruction::Drop);
-                                        } else {
-                                            func.instruction(&Instruction::Drop);
-                                        }
-                                    }
-                                    func.instruction(&Instruction::I32Const(0));
-                                    func.instruction(&Instruction::I32Const(0));
-                                    func.instruction(&Instruction::I32Const(-1));
-                                    func.instruction(&Instruction::I32Const(-1));
-                                    IRType::None
-                                }
-                                crate::stdlib::re::ReFunction::Fullmatch => {
-                                    // re.fullmatch(pattern, string, flags=0) - full string match
-                                    if arguments.len() >= 2 {
-                                        if let (
-                                            IRExpr::Const(IRConstant::String(pattern)),
-                                            IRExpr::Const(IRConstant::String(text)),
-                                        ) = (&arguments[0], &arguments[1])
-                                        {
-                                            let flags = if arguments.len() > 2 {
-                                                if let IRExpr::Const(IRConstant::Int(f)) =
-                                                    &arguments[2]
-                                                {
-                                                    *f
-                                                } else {
-                                                    0
-                                                }
-                                            } else {
-                                                0
-                                            };
-                                            if let Some(result) =
-                                                crate::stdlib::re::fullmatch(pattern, text, flags)
-                                            {
-                                                let offset = memory_layout
-                                                    .string_offsets
-                                                    .get(&result.group)
-                                                    .copied()
-                                                    .unwrap_or(0);
-                                                func.instruction(&Instruction::I32Const(
-                                                    offset as i32,
-                                                ));
-                                                func.instruction(&Instruction::I32Const(
-                                                    result.group.len() as i32,
-                                                ));
-                                                func.instruction(&Instruction::I32Const(
-                                                    result.start as i32,
-                                                ));
-                                                func.instruction(&Instruction::I32Const(
-                                                    result.end as i32,
-                                                ));
-                                                return IRType::Unknown;
-                                            } else {
-                                                func.instruction(&Instruction::I32Const(0));
-                                                func.instruction(&Instruction::I32Const(0));
-                                                func.instruction(&Instruction::I32Const(-1));
-                                                func.instruction(&Instruction::I32Const(-1));
-                                                return IRType::None;
-                                            }
-                                        }
-                                    }
-                                    for arg in arguments {
-                                        let arg_type =
-                                            emit_expr(arg, func, ctx, memory_layout, None);
-                                        if arg_type == IRType::String {
-                                            func.instruction(&Instruction::Drop);
-                                            func.instruction(&Instruction::Drop);
-                                        } else {
-                                            func.instruction(&Instruction::Drop);
-                                        }
-                                    }
-                                    func.instruction(&Instruction::I32Const(0));
-                                    func.instruction(&Instruction::I32Const(0));
-                                    func.instruction(&Instruction::I32Const(-1));
-                                    func.instruction(&Instruction::I32Const(-1));
-                                    IRType::None
-                                }
-                                crate::stdlib::re::ReFunction::Findall => {
-                                    // re.findall(pattern, string, flags=0) - find all matches
-                                    if arguments.len() >= 2 {
-                                        if let (
-                                            IRExpr::Const(IRConstant::String(pattern)),
-                                            IRExpr::Const(IRConstant::String(text)),
-                                        ) = (&arguments[0], &arguments[1])
-                                        {
-                                            let flags = if arguments.len() > 2 {
-                                                if let IRExpr::Const(IRConstant::Int(f)) =
-                                                    &arguments[2]
-                                                {
-                                                    *f
-                                                } else {
-                                                    0
-                                                }
-                                            } else {
-                                                0
-                                            };
-                                            let results =
-                                                crate::stdlib::re::findall(pattern, text, flags);
-                                            // Return list pointer and count (placeholder)
-                                            func.instruction(&Instruction::I32Const(0));
-                                            func.instruction(&Instruction::I32Const(
-                                                results.len() as i32
-                                            ));
-                                            return IRType::List(Box::new(IRType::String));
-                                        }
-                                    }
-                                    for arg in arguments {
-                                        let arg_type =
-                                            emit_expr(arg, func, ctx, memory_layout, None);
-                                        if arg_type == IRType::String {
-                                            func.instruction(&Instruction::Drop);
-                                            func.instruction(&Instruction::Drop);
-                                        } else {
-                                            func.instruction(&Instruction::Drop);
-                                        }
-                                    }
-                                    func.instruction(&Instruction::I32Const(0));
-                                    func.instruction(&Instruction::I32Const(0));
-                                    IRType::List(Box::new(IRType::String))
-                                }
-                                crate::stdlib::re::ReFunction::Finditer => {
-                                    // re.finditer(pattern, string, flags=0) - iterator of matches
-                                    for arg in arguments {
-                                        let arg_type =
-                                            emit_expr(arg, func, ctx, memory_layout, None);
-                                        if arg_type == IRType::String {
-                                            func.instruction(&Instruction::Drop);
-                                            func.instruction(&Instruction::Drop);
-                                        } else {
-                                            func.instruction(&Instruction::Drop);
-                                        }
-                                    }
-                                    func.instruction(&Instruction::I32Const(0));
-                                    IRType::Unknown // Iterator
-                                }
-                                crate::stdlib::re::ReFunction::Split => {
-                                    // re.split(pattern, string, maxsplit=0, flags=0)
-                                    if arguments.len() >= 2 {
-                                        if let (
-                                            IRExpr::Const(IRConstant::String(pattern)),
-                                            IRExpr::Const(IRConstant::String(text)),
-                                        ) = (&arguments[0], &arguments[1])
-                                        {
-                                            let maxsplit = if arguments.len() > 2 {
-                                                if let IRExpr::Const(IRConstant::Int(m)) =
-                                                    &arguments[2]
-                                                {
-                                                    if *m > 0 {
-                                                        Some(*m as usize)
-                                                    } else {
-                                                        None
-                                                    }
-                                                } else {
-                                                    None
-                                                }
-                                            } else {
-                                                None
-                                            };
-                                            let flags = if arguments.len() > 3 {
-                                                if let IRExpr::Const(IRConstant::Int(f)) =
-                                                    &arguments[3]
-                                                {
-                                                    *f
-                                                } else {
-                                                    0
-                                                }
-                                            } else {
-                                                0
-                                            };
-                                            let results = crate::stdlib::re::split(
-                                                pattern, text, maxsplit, flags,
-                                            );
-                                            // Return list pointer and count (placeholder)
-                                            func.instruction(&Instruction::I32Const(0));
-                                            func.instruction(&Instruction::I32Const(
-                                                results.len() as i32
-                                            ));
-                                            return IRType::List(Box::new(IRType::String));
-                                        }
-                                    }
-                                    for arg in arguments {
-                                        let arg_type =
-                                            emit_expr(arg, func, ctx, memory_layout, None);
-                                        if arg_type == IRType::String {
-                                            func.instruction(&Instruction::Drop);
-                                            func.instruction(&Instruction::Drop);
-                                        } else {
-                                            func.instruction(&Instruction::Drop);
-                                        }
-                                    }
-                                    func.instruction(&Instruction::I32Const(0));
-                                    func.instruction(&Instruction::I32Const(0));
-                                    IRType::List(Box::new(IRType::String))
-                                }
-                                crate::stdlib::re::ReFunction::Sub => {
-                                    // re.sub(pattern, repl, string, count=0, flags=0)
-                                    if arguments.len() >= 3 {
-                                        if let (
-                                            IRExpr::Const(IRConstant::String(pattern)),
-                                            IRExpr::Const(IRConstant::String(repl)),
-                                            IRExpr::Const(IRConstant::String(text)),
-                                        ) = (&arguments[0], &arguments[1], &arguments[2])
-                                        {
-                                            let count = if arguments.len() > 3 {
-                                                if let IRExpr::Const(IRConstant::Int(c)) =
-                                                    &arguments[3]
-                                                {
-                                                    if *c > 0 {
-                                                        Some(*c as usize)
-                                                    } else {
-                                                        None
-                                                    }
-                                                } else {
-                                                    None
-                                                }
-                                            } else {
-                                                None
-                                            };
-                                            let flags = if arguments.len() > 4 {
-                                                if let IRExpr::Const(IRConstant::Int(f)) =
-                                                    &arguments[4]
-                                                {
-                                                    *f
-                                                } else {
-                                                    0
-                                                }
-                                            } else {
-                                                0
-                                            };
-                                            let result = crate::stdlib::re::sub(
-                                                pattern, repl, text, count, flags,
-                                            );
-                                            // Return string offset and length (placeholder)
-                                            let offset = memory_layout
-                                                .string_offsets
-                                                .get(&result)
-                                                .copied()
-                                                .unwrap_or(0);
-                                            func.instruction(&Instruction::I32Const(offset as i32));
-                                            func.instruction(&Instruction::I32Const(
-                                                result.len() as i32
-                                            ));
-                                            return IRType::String;
-                                        }
-                                    }
-                                    for arg in arguments {
-                                        let arg_type =
-                                            emit_expr(arg, func, ctx, memory_layout, None);
-                                        if arg_type == IRType::String {
-                                            func.instruction(&Instruction::Drop);
-                                            func.instruction(&Instruction::Drop);
-                                        } else {
-                                            func.instruction(&Instruction::Drop);
-                                        }
-                                    }
-                                    func.instruction(&Instruction::I32Const(0));
-                                    func.instruction(&Instruction::I32Const(0));
-                                    IRType::String
-                                }
-                                crate::stdlib::re::ReFunction::Subn => {
-                                    // re.subn(pattern, repl, string, count=0, flags=0)
-                                    // Returns (new_string, num_substitutions)
-                                    if arguments.len() >= 3 {
-                                        if let (
-                                            IRExpr::Const(IRConstant::String(pattern)),
-                                            IRExpr::Const(IRConstant::String(repl)),
-                                            IRExpr::Const(IRConstant::String(text)),
-                                        ) = (&arguments[0], &arguments[1], &arguments[2])
-                                        {
-                                            let count = if arguments.len() > 3 {
-                                                if let IRExpr::Const(IRConstant::Int(c)) =
-                                                    &arguments[3]
-                                                {
-                                                    if *c > 0 {
-                                                        Some(*c as usize)
-                                                    } else {
-                                                        None
-                                                    }
-                                                } else {
-                                                    None
-                                                }
-                                            } else {
-                                                None
-                                            };
-                                            let flags = if arguments.len() > 4 {
-                                                if let IRExpr::Const(IRConstant::Int(f)) =
-                                                    &arguments[4]
-                                                {
-                                                    *f
-                                                } else {
-                                                    0
-                                                }
-                                            } else {
-                                                0
-                                            };
-                                            let (result, num_subs) = crate::stdlib::re::subn(
-                                                pattern, repl, text, count, flags,
-                                            );
-                                            // Return string offset and length (placeholder)
-                                            let offset = memory_layout
-                                                .string_offsets
-                                                .get(&result)
-                                                .copied()
-                                                .unwrap_or(0);
-                                            func.instruction(&Instruction::I32Const(offset as i32));
-                                            func.instruction(&Instruction::I32Const(
-                                                result.len() as i32
-                                            ));
-                                            func.instruction(&Instruction::I32Const(
-                                                num_subs as i32,
-                                            ));
-                                            return IRType::Tuple(vec![
-                                                IRType::String,
-                                                IRType::Int,
-                                            ]);
-                                        }
-                                    }
-                                    for arg in arguments {
-                                        let arg_type =
-                                            emit_expr(arg, func, ctx, memory_layout, None);
-                                        if arg_type == IRType::String {
-                                            func.instruction(&Instruction::Drop);
-                                            func.instruction(&Instruction::Drop);
-                                        } else {
-                                            func.instruction(&Instruction::Drop);
-                                        }
-                                    }
-                                    func.instruction(&Instruction::I32Const(0));
-                                    func.instruction(&Instruction::I32Const(0));
-                                    func.instruction(&Instruction::I32Const(0));
-                                    IRType::Tuple(vec![IRType::String, IRType::Int])
-                                }
-                                crate::stdlib::re::ReFunction::Escape => {
-                                    // re.escape(pattern) - escape special characters
-                                    if !arguments.is_empty() {
-                                        if let IRExpr::Const(IRConstant::String(pattern)) =
-                                            &arguments[0]
-                                        {
-                                            let escaped = crate::stdlib::re::escape(pattern);
-                                            // Return escaped string offset and length (placeholder)
-                                            let offset = memory_layout
-                                                .string_offsets
-                                                .get(&escaped)
-                                                .copied()
-                                                .unwrap_or(0);
-                                            func.instruction(&Instruction::I32Const(offset as i32));
-                                            func.instruction(&Instruction::I32Const(
-                                                escaped.len() as i32
-                                            ));
-                                            return IRType::String;
-                                        }
-                                    }
-                                    for arg in arguments {
-                                        let arg_type =
-                                            emit_expr(arg, func, ctx, memory_layout, None);
-                                        if arg_type == IRType::String {
-                                            func.instruction(&Instruction::Drop);
-                                            func.instruction(&Instruction::Drop);
-                                        } else {
-                                            func.instruction(&Instruction::Drop);
-                                        }
-                                    }
-                                    func.instruction(&Instruction::I32Const(0));
-                                    func.instruction(&Instruction::I32Const(0));
-                                    IRType::String
-                                }
-                                crate::stdlib::re::ReFunction::Purge => {
-                                    // re.purge() - clear regex cache (no-op in our implementation)
-                                    for arg in arguments {
-                                        let arg_type =
-                                            emit_expr(arg, func, ctx, memory_layout, None);
-                                        if arg_type == IRType::String {
-                                            func.instruction(&Instruction::Drop);
-                                            func.instruction(&Instruction::Drop);
-                                        } else {
-                                            func.instruction(&Instruction::Drop);
-                                        }
-                                    }
-                                    func.instruction(&Instruction::I32Const(0));
-                                    IRType::None
-                                }
-                            };
-                        }
-                    }
-
-                    // Handle datetime module constructor functions (datetime.datetime(), datetime.date(), etc.)
-                    if module_name == "datetime" {
-                        if let Some(dt_func) = crate::stdlib::datetime::get_function(method_name) {
-                            return match dt_func {
-                                crate::stdlib::datetime::DatetimeFunction::Datetime => {
-                                    // datetime.datetime(year, month, day, hour=0, minute=0, second=0, microsecond=0)
-                                    // For now, evaluate args and return a tuple
-                                    let mut arg_values = Vec::new();
-                                    for arg in arguments {
-                                        emit_expr(
-                                            arg,
-                                            func,
-                                            ctx,
-                                            memory_layout,
-                                            Some(&IRType::Int),
-                                        );
-                                        arg_values.push(());
-                                    }
-                                    // Pad to 7 values (year, month, day, hour, minute, second, microsecond)
-                                    for _ in arg_values.len()..7 {
-                                        func.instruction(&Instruction::I32Const(0));
-                                    }
-                                    IRType::Datetime
-                                }
-                                crate::stdlib::datetime::DatetimeFunction::Date => {
-                                    // datetime.date(year, month, day)
-                                    let mut arg_count = 0;
-                                    for arg in arguments {
-                                        emit_expr(
-                                            arg,
-                                            func,
-                                            ctx,
-                                            memory_layout,
-                                            Some(&IRType::Int),
-                                        );
-                                        arg_count += 1;
-                                    }
-                                    for _ in arg_count..3 {
-                                        func.instruction(&Instruction::I32Const(0));
-                                    }
-                                    IRType::Date
-                                }
-                                crate::stdlib::datetime::DatetimeFunction::Time => {
-                                    // datetime.time(hour=0, minute=0, second=0, microsecond=0)
-                                    let mut arg_count = 0;
-                                    for arg in arguments {
-                                        emit_expr(
-                                            arg,
-                                            func,
-                                            ctx,
-                                            memory_layout,
-                                            Some(&IRType::Int),
-                                        );
-                                        arg_count += 1;
-                                    }
-                                    for _ in arg_count..4 {
-                                        func.instruction(&Instruction::I32Const(0));
-                                    }
-                                    IRType::Time
-                                }
-                                crate::stdlib::datetime::DatetimeFunction::Timedelta => {
-                                    // datetime.timedelta(days=0, seconds=0, microseconds=0, ...)
-                                    let mut arg_count = 0;
-                                    for arg in arguments {
-                                        emit_expr(
-                                            arg,
-                                            func,
-                                            ctx,
-                                            memory_layout,
-                                            Some(&IRType::Int),
-                                        );
-                                        arg_count += 1;
-                                    }
-                                    // Pad to 3 values (days, seconds, microseconds)
-                                    for _ in arg_count..3 {
-                                        func.instruction(&Instruction::I32Const(0));
-                                    }
-                                    IRType::Timedelta
-                                }
-                                crate::stdlib::datetime::DatetimeFunction::Timezone => {
-                                    // datetime.timezone(offset, name=None)
-                                    for arg in arguments {
-                                        emit_expr(arg, func, ctx, memory_layout, None);
-                                        func.instruction(&Instruction::Drop);
-                                    }
-                                    func.instruction(&Instruction::I32Const(0));
-                                    IRType::Unknown
-                                }
-                                crate::stdlib::datetime::DatetimeFunction::Tzinfo => {
-                                    // datetime.tzinfo - abstract base class
-                                    for arg in arguments {
-                                        emit_expr(arg, func, ctx, memory_layout, None);
-                                        func.instruction(&Instruction::Drop);
-                                    }
-                                    func.instruction(&Instruction::I32Const(0));
-                                    IRType::Unknown
-                                }
-                            };
-                        }
-                    }
+            // A call into the standard library: `json.dumps(x)`,
+            // `os.path.join(a, b)`, `datetime.datetime.now()`. Its calls are
+            // not implemented yet. They used to compile to placeholders:
+            // `json.dumps` answered "{}", `os.getcwd()` "/", `datetime.now()`
+            // the moment the module was compiled, and a runtime `re.match` a
+            // match whatever the input. Constant `re.sub` and `re.escape`
+            // calls are folded during lowering and never reach this.
+            if let Some(qualified) = stdlib_call_name(ctx, object) {
+                let qualified = format!("{qualified}.{method_name}");
+                if qualified == "re.purge" && arguments.is_empty() {
+                    return IRType::None;
                 }
-            }
-
-            // Check if this is an os.path method call
-            if let IRExpr::Attribute {
-                object: attr_obj,
-                attribute: attr_name,
-            } = &**object
-            {
-                if let IRExpr::Variable(module_name) = &**attr_obj {
-                    if crate::stdlib::is_stdlib_submodule(module_name, attr_name)
-                        && module_name == "os"
-                        && attr_name == "path"
-                    {
-                        if let Some(path_func) = crate::stdlib::os::path::get_function(method_name)
-                        {
-                            return match path_func {
-                                crate::stdlib::os::path::PathFunction::Join => {
-                                    // join(*paths) - joins path components
-                                    // For simplicity, just return first argument or "/"
-                                    if arguments.is_empty() {
-                                        let path = "/".to_string();
-                                        let offset = memory_layout
-                                            .string_offsets
-                                            .get(&path)
-                                            .copied()
-                                            .unwrap_or(0);
-                                        func.instruction(&Instruction::I32Const(offset as i32));
-                                        func.instruction(&Instruction::I32Const(path.len() as i32));
-                                    } else {
-                                        // Return first argument as simplified implementation
-                                        emit_expr(&arguments[0], func, ctx, memory_layout, None);
-                                        // Drop remaining arguments
-                                        for arg in arguments.iter().skip(1) {
-                                            emit_expr(arg, func, ctx, memory_layout, None);
-                                            func.instruction(&Instruction::Drop);
-                                            func.instruction(&Instruction::Drop);
-                                        }
-                                    }
-                                    IRType::String
-                                }
-                                crate::stdlib::os::path::PathFunction::Exists => {
-                                    // exists(path) - check if path exists
-                                    // For WASM, always return False
-                                    for arg in arguments {
-                                        emit_expr(arg, func, ctx, memory_layout, None);
-                                        func.instruction(&Instruction::Drop);
-                                        func.instruction(&Instruction::Drop);
-                                    }
-                                    func.instruction(&Instruction::I32Const(0));
-                                    IRType::Bool
-                                }
-                                crate::stdlib::os::path::PathFunction::Isfile => {
-                                    // isfile(path) - check if path is a file
-                                    // For WASM, always return False
-                                    for arg in arguments {
-                                        emit_expr(arg, func, ctx, memory_layout, None);
-                                        func.instruction(&Instruction::Drop);
-                                        func.instruction(&Instruction::Drop);
-                                    }
-                                    func.instruction(&Instruction::I32Const(0));
-                                    IRType::Bool
-                                }
-                                crate::stdlib::os::path::PathFunction::Isdir => {
-                                    // isdir(path) - check if path is a directory
-                                    // For WASM, always return False
-                                    for arg in arguments {
-                                        emit_expr(arg, func, ctx, memory_layout, None);
-                                        func.instruction(&Instruction::Drop);
-                                        func.instruction(&Instruction::Drop);
-                                    }
-                                    func.instruction(&Instruction::I32Const(0));
-                                    IRType::Bool
-                                }
-                                crate::stdlib::os::path::PathFunction::Basename => {
-                                    // basename(path) - get the base name
-                                    // For simplicity, return the input path
-                                    if arguments.is_empty() {
-                                        let path = "".to_string();
-                                        let offset = memory_layout
-                                            .string_offsets
-                                            .get(&path)
-                                            .copied()
-                                            .unwrap_or(0);
-                                        func.instruction(&Instruction::I32Const(offset as i32));
-                                        func.instruction(&Instruction::I32Const(path.len() as i32));
-                                    } else {
-                                        emit_expr(&arguments[0], func, ctx, memory_layout, None);
-                                    }
-                                    IRType::String
-                                }
-                                crate::stdlib::os::path::PathFunction::Dirname => {
-                                    // dirname(path) - get the directory name
-                                    // For simplicity, return "/"
-                                    for arg in arguments {
-                                        emit_expr(arg, func, ctx, memory_layout, None);
-                                        func.instruction(&Instruction::Drop);
-                                        func.instruction(&Instruction::Drop);
-                                    }
-                                    let path = "/".to_string();
-                                    let offset = memory_layout
-                                        .string_offsets
-                                        .get(&path)
-                                        .copied()
-                                        .unwrap_or(0);
-                                    func.instruction(&Instruction::I32Const(offset as i32));
-                                    func.instruction(&Instruction::I32Const(path.len() as i32));
-                                    IRType::String
-                                }
-                                crate::stdlib::os::path::PathFunction::Abspath => {
-                                    // abspath(path) - get absolute path
-                                    // For simplicity, return input path
-                                    if arguments.is_empty() {
-                                        let path = "/".to_string();
-                                        let offset = memory_layout
-                                            .string_offsets
-                                            .get(&path)
-                                            .copied()
-                                            .unwrap_or(0);
-                                        func.instruction(&Instruction::I32Const(offset as i32));
-                                        func.instruction(&Instruction::I32Const(path.len() as i32));
-                                    } else {
-                                        emit_expr(&arguments[0], func, ctx, memory_layout, None);
-                                    }
-                                    IRType::String
-                                }
-                                crate::stdlib::os::path::PathFunction::Split => {
-                                    // split(path) - split into (head, tail)
-                                    // Return tuple as simplified implementation
-                                    for arg in arguments {
-                                        emit_expr(arg, func, ctx, memory_layout, None);
-                                        func.instruction(&Instruction::Drop);
-                                        func.instruction(&Instruction::Drop);
-                                    }
-                                    func.instruction(&Instruction::I32Const(0));
-                                    IRType::Tuple(vec![IRType::String, IRType::String])
-                                }
-                                crate::stdlib::os::path::PathFunction::Splitext => {
-                                    // splitext(path) - split into (root, ext)
-                                    // Return tuple as simplified implementation
-                                    for arg in arguments {
-                                        emit_expr(arg, func, ctx, memory_layout, None);
-                                        func.instruction(&Instruction::Drop);
-                                        func.instruction(&Instruction::Drop);
-                                    }
-                                    func.instruction(&Instruction::I32Const(0));
-                                    IRType::Tuple(vec![IRType::String, IRType::String])
-                                }
-                            };
-                        }
-                    }
-                }
-            }
-
-            // Handle datetime module class method calls (datetime.datetime.now(), datetime.date.today(), etc.)
-            if let IRExpr::Attribute {
-                object: attr_obj,
-                attribute: class_name,
-            } = &**object
-            {
-                if let IRExpr::Variable(module_name) = &**attr_obj {
-                    if module_name == "datetime" {
-                        // Handle datetime.datetime.method() calls
-                        if class_name == "datetime" {
-                            if let Some(dt_method) =
-                                crate::stdlib::datetime::get_datetime_method(method_name)
-                            {
-                                return match dt_method {
-                                    crate::stdlib::datetime::DatetimeMethod::Now => {
-                                        // datetime.datetime.now() - returns current datetime
-                                        // Get current time at compile time using chrono
-                                        let timestamp =
-                                            crate::stdlib::datetime::datetime_now_local();
-                                        if let Some((year, month, day, hour, minute, second)) =
-                                            crate::stdlib::datetime::datetime_from_timestamp(
-                                                timestamp,
-                                            )
-                                        {
-                                            // Return as tuple: (year, month, day, hour, minute, second, microsecond)
-                                            func.instruction(&Instruction::I32Const(year));
-                                            func.instruction(&Instruction::I32Const(month as i32));
-                                            func.instruction(&Instruction::I32Const(day as i32));
-                                            func.instruction(&Instruction::I32Const(hour as i32));
-                                            func.instruction(&Instruction::I32Const(minute as i32));
-                                            func.instruction(&Instruction::I32Const(second as i32));
-                                            func.instruction(&Instruction::I32Const(0));
-                                        // microsecond
-                                        } else {
-                                            // Fallback to epoch
-                                            for _ in 0..7 {
-                                                func.instruction(&Instruction::I32Const(0));
-                                            }
-                                        }
-                                        IRType::Datetime
-                                    }
-                                    crate::stdlib::datetime::DatetimeMethod::Today => {
-                                        // datetime.datetime.today() - same as now() for datetime
-                                        let timestamp =
-                                            crate::stdlib::datetime::datetime_now_local();
-                                        if let Some((year, month, day, hour, minute, second)) =
-                                            crate::stdlib::datetime::datetime_from_timestamp(
-                                                timestamp,
-                                            )
-                                        {
-                                            func.instruction(&Instruction::I32Const(year));
-                                            func.instruction(&Instruction::I32Const(month as i32));
-                                            func.instruction(&Instruction::I32Const(day as i32));
-                                            func.instruction(&Instruction::I32Const(hour as i32));
-                                            func.instruction(&Instruction::I32Const(minute as i32));
-                                            func.instruction(&Instruction::I32Const(second as i32));
-                                            func.instruction(&Instruction::I32Const(0));
-                                        } else {
-                                            for _ in 0..7 {
-                                                func.instruction(&Instruction::I32Const(0));
-                                            }
-                                        }
-                                        IRType::Datetime
-                                    }
-                                    crate::stdlib::datetime::DatetimeMethod::Fromtimestamp => {
-                                        // datetime.datetime.fromtimestamp(ts) - create datetime from timestamp
-                                        if !arguments.is_empty() {
-                                            emit_expr(
-                                                &arguments[0],
-                                                func,
-                                                ctx,
-                                                memory_layout,
-                                                Some(&IRType::Int),
-                                            );
-                                            func.instruction(&Instruction::Drop);
-                                        }
-                                        // Return placeholder datetime tuple
-                                        let timestamp =
-                                            crate::stdlib::datetime::datetime_now_local();
-                                        if let Some((year, month, day, hour, minute, second)) =
-                                            crate::stdlib::datetime::datetime_from_timestamp(
-                                                timestamp,
-                                            )
-                                        {
-                                            func.instruction(&Instruction::I32Const(year));
-                                            func.instruction(&Instruction::I32Const(month as i32));
-                                            func.instruction(&Instruction::I32Const(day as i32));
-                                            func.instruction(&Instruction::I32Const(hour as i32));
-                                            func.instruction(&Instruction::I32Const(minute as i32));
-                                            func.instruction(&Instruction::I32Const(second as i32));
-                                            func.instruction(&Instruction::I32Const(0));
-                                        } else {
-                                            for _ in 0..7 {
-                                                func.instruction(&Instruction::I32Const(0));
-                                            }
-                                        }
-                                        IRType::Datetime
-                                    }
-                                    crate::stdlib::datetime::DatetimeMethod::Fromisoformat => {
-                                        // datetime.datetime.fromisoformat(date_string)
-                                        for arg in arguments {
-                                            let arg_type =
-                                                emit_expr(arg, func, ctx, memory_layout, None);
-                                            if arg_type == IRType::String {
-                                                func.instruction(&Instruction::Drop);
-                                                func.instruction(&Instruction::Drop);
-                                            } else {
-                                                func.instruction(&Instruction::Drop);
-                                            }
-                                        }
-                                        // Return placeholder datetime
-                                        for _ in 0..7 {
-                                            func.instruction(&Instruction::I32Const(0));
-                                        }
-                                        IRType::Datetime
-                                    }
-                                    crate::stdlib::datetime::DatetimeMethod::Strptime => {
-                                        // datetime.datetime.strptime(date_string, format)
-                                        for arg in arguments {
-                                            let arg_type =
-                                                emit_expr(arg, func, ctx, memory_layout, None);
-                                            if arg_type == IRType::String {
-                                                func.instruction(&Instruction::Drop);
-                                                func.instruction(&Instruction::Drop);
-                                            } else {
-                                                func.instruction(&Instruction::Drop);
-                                            }
-                                        }
-                                        for _ in 0..7 {
-                                            func.instruction(&Instruction::I32Const(0));
-                                        }
-                                        IRType::Datetime
-                                    }
-                                    crate::stdlib::datetime::DatetimeMethod::Strftime
-                                    | crate::stdlib::datetime::DatetimeMethod::Isoformat => {
-                                        // Instance methods - return empty string placeholder
-                                        for arg in arguments {
-                                            let arg_type =
-                                                emit_expr(arg, func, ctx, memory_layout, None);
-                                            if arg_type == IRType::String {
-                                                func.instruction(&Instruction::Drop);
-                                                func.instruction(&Instruction::Drop);
-                                            } else {
-                                                func.instruction(&Instruction::Drop);
-                                            }
-                                        }
-                                        let s = "".to_string();
-                                        let offset = memory_layout
-                                            .string_offsets
-                                            .get(&s)
-                                            .copied()
-                                            .unwrap_or(0);
-                                        func.instruction(&Instruction::I32Const(offset as i32));
-                                        func.instruction(&Instruction::I32Const(0));
-                                        IRType::String
-                                    }
-                                    crate::stdlib::datetime::DatetimeMethod::Replace => {
-                                        // datetime.replace(...) - returns new datetime
-                                        for arg in arguments {
-                                            emit_expr(arg, func, ctx, memory_layout, None);
-                                            func.instruction(&Instruction::Drop);
-                                        }
-                                        for _ in 0..7 {
-                                            func.instruction(&Instruction::I32Const(0));
-                                        }
-                                        IRType::Datetime
-                                    }
-                                    crate::stdlib::datetime::DatetimeMethod::Timestamp => {
-                                        // datetime.timestamp() - returns Unix timestamp as float
-                                        for arg in arguments {
-                                            emit_expr(arg, func, ctx, memory_layout, None);
-                                            func.instruction(&Instruction::Drop);
-                                        }
-                                        let timestamp =
-                                            crate::stdlib::datetime::datetime_now_local();
-                                        func.instruction(&Instruction::F64Const(
-                                            (timestamp as f64).into(),
-                                        ));
-                                        IRType::Float
-                                    }
-                                    crate::stdlib::datetime::DatetimeMethod::Weekday => {
-                                        // datetime.weekday() - returns 0-6 (Monday=0)
-                                        for arg in arguments {
-                                            emit_expr(arg, func, ctx, memory_layout, None);
-                                            func.instruction(&Instruction::Drop);
-                                        }
-                                        func.instruction(&Instruction::I32Const(0));
-                                        IRType::Int
-                                    }
-                                    crate::stdlib::datetime::DatetimeMethod::Isoweekday => {
-                                        // datetime.isoweekday() - returns 1-7 (Monday=1)
-                                        for arg in arguments {
-                                            emit_expr(arg, func, ctx, memory_layout, None);
-                                            func.instruction(&Instruction::Drop);
-                                        }
-                                        func.instruction(&Instruction::I32Const(1));
-                                        IRType::Int
-                                    }
-                                };
-                            }
-                        }
-                        // Handle datetime.date.method() calls
-                        else if class_name == "date" {
-                            if let Some(dt_method) =
-                                crate::stdlib::datetime::get_datetime_method(method_name)
-                            {
-                                return match dt_method {
-                                    crate::stdlib::datetime::DatetimeMethod::Today => {
-                                        // datetime.date.today() - returns current date
-                                        let (year, month, day) =
-                                            crate::stdlib::datetime::date_today();
-                                        func.instruction(&Instruction::I32Const(year));
-                                        func.instruction(&Instruction::I32Const(month as i32));
-                                        func.instruction(&Instruction::I32Const(day as i32));
-                                        IRType::Date
-                                    }
-                                    crate::stdlib::datetime::DatetimeMethod::Fromtimestamp => {
-                                        // datetime.date.fromtimestamp(ts)
-                                        if !arguments.is_empty() {
-                                            emit_expr(
-                                                &arguments[0],
-                                                func,
-                                                ctx,
-                                                memory_layout,
-                                                Some(&IRType::Int),
-                                            );
-                                            func.instruction(&Instruction::Drop);
-                                        }
-                                        let (year, month, day) =
-                                            crate::stdlib::datetime::date_today();
-                                        func.instruction(&Instruction::I32Const(year));
-                                        func.instruction(&Instruction::I32Const(month as i32));
-                                        func.instruction(&Instruction::I32Const(day as i32));
-                                        IRType::Date
-                                    }
-                                    crate::stdlib::datetime::DatetimeMethod::Fromisoformat => {
-                                        // datetime.date.fromisoformat(date_string)
-                                        for arg in arguments {
-                                            let arg_type =
-                                                emit_expr(arg, func, ctx, memory_layout, None);
-                                            if arg_type == IRType::String {
-                                                func.instruction(&Instruction::Drop);
-                                                func.instruction(&Instruction::Drop);
-                                            } else {
-                                                func.instruction(&Instruction::Drop);
-                                            }
-                                        }
-                                        let (year, month, day) =
-                                            crate::stdlib::datetime::date_today();
-                                        func.instruction(&Instruction::I32Const(year));
-                                        func.instruction(&Instruction::I32Const(month as i32));
-                                        func.instruction(&Instruction::I32Const(day as i32));
-                                        IRType::Date
-                                    }
-                                    crate::stdlib::datetime::DatetimeMethod::Strftime
-                                    | crate::stdlib::datetime::DatetimeMethod::Isoformat => {
-                                        for arg in arguments {
-                                            let arg_type =
-                                                emit_expr(arg, func, ctx, memory_layout, None);
-                                            if arg_type == IRType::String {
-                                                func.instruction(&Instruction::Drop);
-                                                func.instruction(&Instruction::Drop);
-                                            } else {
-                                                func.instruction(&Instruction::Drop);
-                                            }
-                                        }
-                                        let s = "".to_string();
-                                        let offset = memory_layout
-                                            .string_offsets
-                                            .get(&s)
-                                            .copied()
-                                            .unwrap_or(0);
-                                        func.instruction(&Instruction::I32Const(offset as i32));
-                                        func.instruction(&Instruction::I32Const(0));
-                                        IRType::String
-                                    }
-                                    crate::stdlib::datetime::DatetimeMethod::Replace => {
-                                        for arg in arguments {
-                                            emit_expr(arg, func, ctx, memory_layout, None);
-                                            func.instruction(&Instruction::Drop);
-                                        }
-                                        let (year, month, day) =
-                                            crate::stdlib::datetime::date_today();
-                                        func.instruction(&Instruction::I32Const(year));
-                                        func.instruction(&Instruction::I32Const(month as i32));
-                                        func.instruction(&Instruction::I32Const(day as i32));
-                                        IRType::Date
-                                    }
-                                    crate::stdlib::datetime::DatetimeMethod::Weekday => {
-                                        for arg in arguments {
-                                            emit_expr(arg, func, ctx, memory_layout, None);
-                                            func.instruction(&Instruction::Drop);
-                                        }
-                                        func.instruction(&Instruction::I32Const(0));
-                                        IRType::Int
-                                    }
-                                    crate::stdlib::datetime::DatetimeMethod::Isoweekday => {
-                                        for arg in arguments {
-                                            emit_expr(arg, func, ctx, memory_layout, None);
-                                            func.instruction(&Instruction::Drop);
-                                        }
-                                        func.instruction(&Instruction::I32Const(1));
-                                        IRType::Int
-                                    }
-                                    _ => {
-                                        // Other methods not applicable to date
-                                        for arg in arguments {
-                                            emit_expr(arg, func, ctx, memory_layout, None);
-                                            func.instruction(&Instruction::Drop);
-                                        }
-                                        func.instruction(&Instruction::I32Const(0));
-                                        IRType::None
-                                    }
-                                };
-                            }
-                        }
-                        // Handle datetime.time.method() calls
-                        else if class_name == "time" {
-                            if let Some(dt_method) =
-                                crate::stdlib::datetime::get_datetime_method(method_name)
-                            {
-                                return match dt_method {
-                                    crate::stdlib::datetime::DatetimeMethod::Strftime
-                                    | crate::stdlib::datetime::DatetimeMethod::Isoformat => {
-                                        for arg in arguments {
-                                            let arg_type =
-                                                emit_expr(arg, func, ctx, memory_layout, None);
-                                            if arg_type == IRType::String {
-                                                func.instruction(&Instruction::Drop);
-                                                func.instruction(&Instruction::Drop);
-                                            } else {
-                                                func.instruction(&Instruction::Drop);
-                                            }
-                                        }
-                                        let s = "".to_string();
-                                        let offset = memory_layout
-                                            .string_offsets
-                                            .get(&s)
-                                            .copied()
-                                            .unwrap_or(0);
-                                        func.instruction(&Instruction::I32Const(offset as i32));
-                                        func.instruction(&Instruction::I32Const(0));
-                                        IRType::String
-                                    }
-                                    crate::stdlib::datetime::DatetimeMethod::Replace => {
-                                        for arg in arguments {
-                                            emit_expr(arg, func, ctx, memory_layout, None);
-                                            func.instruction(&Instruction::Drop);
-                                        }
-                                        // Return time tuple (hour, minute, second, microsecond)
-                                        for _ in 0..4 {
-                                            func.instruction(&Instruction::I32Const(0));
-                                        }
-                                        IRType::Time
-                                    }
-                                    _ => {
-                                        for arg in arguments {
-                                            emit_expr(arg, func, ctx, memory_layout, None);
-                                            func.instruction(&Instruction::Drop);
-                                        }
-                                        func.instruction(&Instruction::I32Const(0));
-                                        IRType::None
-                                    }
-                                };
-                            }
-                        }
-                        // Handle datetime.timedelta constructor call
-                        else if class_name == "timedelta" {
-                            // timedelta(days=0, seconds=0, microseconds=0, ...)
-                            let mut arg_count = 0;
-                            for arg in arguments {
-                                emit_expr(arg, func, ctx, memory_layout, Some(&IRType::Int));
-                                arg_count += 1;
-                            }
-                            // Pad to 3 values (days, seconds, microseconds)
-                            for _ in arg_count..3 {
-                                func.instruction(&Instruction::I32Const(0));
-                            }
-                            return IRType::Timedelta;
-                        }
-                    }
-                }
+                ctx.report(format!(
+                    "'{qualified}()' is not implemented yet; the standard library's functions \
+                     are planned for 0.20.0, and only its constants (and re.sub / re.escape \
+                     over constant arguments) compile today"
+                ));
+                func.instruction(&Instruction::I32Const(0));
+                return IRType::Unknown;
             }
 
             // Class-level method call: `ClassName.method(...)` or, inside a
@@ -9764,93 +8920,52 @@ pub fn emit_expr(
                             IRType::String
                         }
 
-                        "ljust" => {
-                            // ljust(width): pad to width with spaces, never
-                            // truncating. A custom fill character is rejected
-                            // rather than ignored.
-                            if arguments.len() != 1 {
-                                ctx.report(format!(
-                                    "str.{method_name}() takes exactly one argument. \
-                                     Hint: a custom fill character is not supported"
-                                ));
+                        "ljust" | "rjust" | "center" => {
+                            // ljust / rjust / center(width[, fillchar]): pad to
+                            // width, never truncating.
+                            let refuse = |func: &mut Function, message: String| {
+                                ctx.report(message);
                                 func.instruction(&Instruction::Unreachable);
                                 func.instruction(&Instruction::I32Const(0));
                                 func.instruction(&Instruction::I32Const(0));
-                                return IRType::String;
+                                IRType::String
+                            };
+                            if arguments.is_empty() || arguments.len() > 2 {
+                                return refuse(
+                                    func,
+                                    format!("str.{method_name}() takes a width and an optional fill character"),
+                                );
                             }
                             let t = emit_expr(&arguments[0], func, ctx, memory_layout, None);
                             if !matches!(t, IRType::Int | IRType::Bool) {
-                                ctx.report(format!(
-                                    "str.{}() takes an int width, got {}",
-                                    method_name,
-                                    crate::type_to_string(&t)
-                                ));
-                                func.instruction(&Instruction::Unreachable);
-                                func.instruction(&Instruction::I32Const(0));
-                                func.instruction(&Instruction::I32Const(0));
-                                return IRType::String;
+                                return refuse(
+                                    func,
+                                    format!(
+                                        "str.{}() takes an int width, got {}",
+                                        method_name,
+                                        crate::type_to_string(&t)
+                                    ),
+                                );
                             }
-                            emit_string_pad(func, ctx, PadMode::Left);
-                            IRType::String
-                        }
-
-                        "rjust" => {
-                            // rjust(width): pad to width with spaces, never
-                            // truncating. A custom fill character is rejected
-                            // rather than ignored.
-                            if arguments.len() != 1 {
-                                ctx.report(format!(
-                                    "str.{method_name}() takes exactly one argument. \
-                                     Hint: a custom fill character is not supported"
-                                ));
-                                func.instruction(&Instruction::Unreachable);
-                                func.instruction(&Instruction::I32Const(0));
-                                func.instruction(&Instruction::I32Const(0));
-                                return IRType::String;
+                            let has_fill = arguments.len() == 2;
+                            if has_fill {
+                                let f = emit_expr(&arguments[1], func, ctx, memory_layout, None);
+                                if f != IRType::String {
+                                    return refuse(
+                                        func,
+                                        format!(
+                                            "str.{method_name}()'s fill character must be a str, got {}",
+                                            crate::type_to_string(&f)
+                                        ),
+                                    );
+                                }
                             }
-                            let t = emit_expr(&arguments[0], func, ctx, memory_layout, None);
-                            if !matches!(t, IRType::Int | IRType::Bool) {
-                                ctx.report(format!(
-                                    "str.{}() takes an int width, got {}",
-                                    method_name,
-                                    crate::type_to_string(&t)
-                                ));
-                                func.instruction(&Instruction::Unreachable);
-                                func.instruction(&Instruction::I32Const(0));
-                                func.instruction(&Instruction::I32Const(0));
-                                return IRType::String;
-                            }
-                            emit_string_pad(func, ctx, PadMode::Right);
-                            IRType::String
-                        }
-
-                        "center" => {
-                            // center(width): pad to width with spaces, never
-                            // truncating. A custom fill character is rejected
-                            // rather than ignored.
-                            if arguments.len() != 1 {
-                                ctx.report(format!(
-                                    "str.{method_name}() takes exactly one argument. \
-                                     Hint: a custom fill character is not supported"
-                                ));
-                                func.instruction(&Instruction::Unreachable);
-                                func.instruction(&Instruction::I32Const(0));
-                                func.instruction(&Instruction::I32Const(0));
-                                return IRType::String;
-                            }
-                            let t = emit_expr(&arguments[0], func, ctx, memory_layout, None);
-                            if !matches!(t, IRType::Int | IRType::Bool) {
-                                ctx.report(format!(
-                                    "str.{}() takes an int width, got {}",
-                                    method_name,
-                                    crate::type_to_string(&t)
-                                ));
-                                func.instruction(&Instruction::Unreachable);
-                                func.instruction(&Instruction::I32Const(0));
-                                func.instruction(&Instruction::I32Const(0));
-                                return IRType::String;
-                            }
-                            emit_string_pad(func, ctx, PadMode::Center);
+                            let mode = match method_name.as_str() {
+                                "ljust" => PadMode::Left,
+                                "rjust" => PadMode::Right,
+                                _ => PadMode::Center,
+                            };
+                            emit_string_pad(func, ctx, mode, has_fill);
                             IRType::String
                         }
 
@@ -9906,9 +9021,14 @@ pub fn emit_expr(
                     arguments,
                     &object_type,
                 ),
-                IRType::Tuple(_element_types) => {
-                    emit_tuple_method_call(func, ctx, memory_layout, method_name, arguments)
-                }
+                IRType::Tuple(members) => emit_tuple_method_call(
+                    func,
+                    ctx,
+                    memory_layout,
+                    method_name,
+                    arguments,
+                    members,
+                ),
                 IRType::Class(class_name) => {
                     // Custom class method call. The object pointer (`self`) is
                     // already on the stack; coerce the user arguments to the
@@ -9996,9 +9116,7 @@ pub fn emit_expr(
                         emit_user_call(func, ctx, method_idx);
                         // A call result is a single word; rebuild the
                         // string/bytes pair.
-                        if matches!(ret, IRType::String | IRType::Bytes) {
-                            recover_str_pair(func, ctx);
-                        }
+                        finish_user_call(func, ctx, &ret);
                         ret
                     } else {
                         // Method or class not found: drop the object and args.
@@ -10117,11 +9235,11 @@ pub fn emit_expr(
             body: _,
             captured_vars: _,
         } => {
-            // Unreachable in the normal pipeline: the finalize pass lifts every
-            // lambda into `ClosureMake`. Kept as a harmless placeholder for IR
-            // built without finalization.
+            // The finalize pass lifts every lambda into `ClosureMake`; one that
+            // was not lifted has no function to refer to.
             let param_types = params.iter().map(|p| p.param_type.clone()).collect();
-            func.instruction(&Instruction::I32Const(1)); // Lambda function reference
+            ctx.report("a lambda that was not lifted into a function cannot be compiled");
+            func.instruction(&Instruction::I32Const(0));
 
             IRType::Callable {
                 params: param_types,
@@ -10157,7 +9275,14 @@ pub fn emit_expr(
                     Some(info) if !matches!(info.var_type, IRType::Float) => {
                         func.instruction(&Instruction::LocalGet(info.index));
                     }
+                    // Captured floats are refused when the lambda is lifted;
+                    // anything else that is not a local here is not a value
+                    // the closure can be given. Both stored 0.
                     _ => {
+                        ctx.report(format!(
+                            "a closure captures '{name}', which is not a local variable of the \
+                             function that creates it"
+                        ));
                         func.instruction(&Instruction::I32Const(0));
                     }
                 }
@@ -10429,8 +9554,9 @@ fn emit_file_method_call(
             // the fd is still on the stack (before any scratch store), so a
             // nested expression can't clobber our locals.
             if let Some(size_arg) = arguments.first() {
-                let t = emit_expr(size_arg, func, ctx, memory_layout, Some(&IRType::Int));
+                let t = emit_expr(size_arg, func, ctx, memory_layout, None);
                 if t == IRType::Float {
+                    ctx.report("read() takes an int size, not a float");
                     func.instruction(&Instruction::I32TruncF64S);
                 }
             } else {
@@ -10742,10 +9868,22 @@ pub fn emit_set_method_call(
         _ => None,
     };
 
+    if let Some(result) = crate::compiler::operators::emit_set_method(
+        func,
+        ctx,
+        memory_layout,
+        method_name,
+        arguments,
+        set_type,
+    ) {
+        return result;
+    }
+
     if !matches!(method_name, "add" | "remove" | "discard") {
         ctx.report(format!(
-            "'{method_name}' is not supported on a set yet. \
-             Hint: 'add', 'remove', and 'discard' are the supported set methods"
+            "'{method_name}' is not supported on a set yet. Hint: the supported set methods \
+             are add, remove, discard, union, intersection, difference, \
+             symmetric_difference, issubset, issuperset, and isdisjoint"
         ));
         func.instruction(&Instruction::Drop);
         for arg in arguments {
@@ -12289,134 +11427,130 @@ fn emit_dict_method_call(
 }
 
 /// Emit WASM code for tuple method calls
+/// Whether a tuple member of type `member` is compared with a search value of
+/// type `needle`: `Some(true)` compares the slot, `Some(false)` skips a
+/// position that can never be equal (a str against an int), and `None` is a
+/// pairing whose answer this compiler cannot give, such as an int against a
+/// float (`1 == 1.0` in Python) or a member of no known type.
+fn tuple_member_compared(member: &IRType, needle: &IRType) -> Option<bool> {
+    let int_like = |t: &IRType| matches!(t, IRType::Int | IRType::Bool);
+    if member == needle || (int_like(member) && int_like(needle)) {
+        return Some(!matches!(member, IRType::Unknown | IRType::Any));
+    }
+    let numeric = |t: &IRType| int_like(t) || matches!(t, IRType::Float);
+    let opaque = |t: &IRType| {
+        matches!(
+            t,
+            IRType::Unknown
+                | IRType::Any
+                | IRType::Class(_)
+                | IRType::Union(_)
+                | IRType::Optional(_)
+        )
+    };
+    if opaque(member) || opaque(needle) || (numeric(member) && numeric(needle)) {
+        None
+    } else {
+        Some(false)
+    }
+}
+
+/// `t.index(v)` and `t.count(v)`. Entry stack: (tuple_ptr).
+///
+/// A tuple's member types are known per position, so the search is unrolled
+/// over the positions and each one is compared at its own width. A single loop
+/// compared every slot at the search value's width, so a float needle read an
+/// int member as half of an f64. `index` used to push the position it found
+/// and branch past it, answering -1 for every value the tuple held.
 fn emit_tuple_method_call(
     func: &mut Function,
     ctx: &CompilationContext,
     memory_layout: &MemoryLayout,
     method_name: &str,
     arguments: &[IRExpr],
+    members: &[IRType],
 ) -> IRType {
-    match method_name {
-        "index" => {
-            // tuple.index(value) -> int
-            // Linear search for first occurrence (same as list)
-            if !arguments.is_empty() {
-                // Emit the searched value (tuple_ptr stays on the stack below it)
-                // and stash it as a width-aware needle.
-                let value_type = emit_expr(&arguments[0], func, ctx, memory_layout, None);
-                stash_search_needle(func, ctx, &value_type, ctx.temp_local + 1);
-                func.instruction(&Instruction::LocalSet(ctx.temp_local)); // tuple_ptr
+    if !matches!(method_name, "index" | "count") {
+        ctx.report(format!(
+            "'{method_name}' is not a method of tuple. Hint: tuples support 'index' and 'count'"
+        ));
+        func.instruction(&Instruction::Drop);
+        func.instruction(&Instruction::I32Const(0));
+        return IRType::Unknown;
+    }
+    if arguments.len() != 1 {
+        ctx.report(format!(
+            "tuple.{method_name}() takes exactly one argument here, got {}",
+            arguments.len()
+        ));
+        func.instruction(&Instruction::Drop);
+        func.instruction(&Instruction::I32Const(0));
+        return IRType::Int;
+    }
 
-                func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                func.instruction(&Instruction::I32Load(slot_arg()));
-                func.instruction(&Instruction::LocalSet(ctx.temp_local + 2)); // length
+    let ptr = ctx.temp_local;
+    let needle = ctx.temp_local + 1;
+    let result = ctx.temp_local + 4;
 
+    let value_type = emit_expr(&arguments[0], func, ctx, memory_layout, None);
+    stash_search_needle(func, ctx, &value_type, needle);
+    func.instruction(&Instruction::LocalSet(ptr));
+
+    let mut positions = Vec::new();
+    for (i, member) in members.iter().enumerate() {
+        match tuple_member_compared(member, &value_type) {
+            Some(true) => positions.push((i as u32, member)),
+            Some(false) => {}
+            None => {
+                ctx.report(format!(
+                    "tuple.{method_name}() cannot compare a {} with the tuple's member {i} of \
+                     type {}",
+                    crate::type_to_string(&value_type),
+                    crate::type_to_string(member)
+                ));
                 func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::LocalSet(ctx.temp_local + 3)); // i
-
-                func.instruction(&Instruction::Block(BlockType::Empty));
-                func.instruction(&Instruction::Loop(BlockType::Empty));
-
-                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
-                func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
-                func.instruction(&Instruction::I32GeS);
-                func.instruction(&Instruction::BrIf(1));
-
-                // slot address = tuple_ptr + HEADER + i*SLOT
-                func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                emit_data_base(func);
-                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
-                func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
-                func.instruction(&Instruction::I32Mul);
-                func.instruction(&Instruction::I32Add);
-
-                emit_slot_eq_needle(func, ctx, &value_type, ctx.temp_local + 1);
-
-                func.instruction(&Instruction::If(BlockType::Empty));
-                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
-                func.instruction(&Instruction::Br(2));
-                func.instruction(&Instruction::End);
-
-                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
-                func.instruction(&Instruction::I32Const(1));
-                func.instruction(&Instruction::I32Add);
-                func.instruction(&Instruction::LocalSet(ctx.temp_local + 3));
-
-                func.instruction(&Instruction::Br(0));
-
-                func.instruction(&Instruction::End);
-                func.instruction(&Instruction::End);
-
-                func.instruction(&Instruction::I32Const(-1));
-            } else {
-                func.instruction(&Instruction::Drop);
-                func.instruction(&Instruction::I32Const(0));
+                return IRType::Int;
             }
-            IRType::Int
-        }
-        "count" => {
-            // tuple.count(value) -> int
-            // Count occurrences (same as list)
-            if !arguments.is_empty() {
-                let value_type = emit_expr(&arguments[0], func, ctx, memory_layout, None);
-                stash_search_needle(func, ctx, &value_type, ctx.temp_local + 1);
-                func.instruction(&Instruction::LocalSet(ctx.temp_local)); // tuple_ptr
-
-                func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                func.instruction(&Instruction::I32Load(slot_arg()));
-                func.instruction(&Instruction::LocalSet(ctx.temp_local + 2)); // length
-
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::LocalSet(ctx.temp_local + 3)); // i
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::LocalSet(ctx.temp_local + 4)); // count
-
-                func.instruction(&Instruction::Block(BlockType::Empty));
-                func.instruction(&Instruction::Loop(BlockType::Empty));
-
-                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
-                func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
-                func.instruction(&Instruction::I32GeS);
-                func.instruction(&Instruction::BrIf(1));
-
-                // slot address = tuple_ptr + HEADER + i*SLOT
-                func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                emit_data_base(func);
-                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
-                func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
-                func.instruction(&Instruction::I32Mul);
-                func.instruction(&Instruction::I32Add);
-
-                emit_slot_eq_needle(func, ctx, &value_type, ctx.temp_local + 1);
-
-                func.instruction(&Instruction::If(BlockType::Empty));
-                func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
-                func.instruction(&Instruction::I32Const(1));
-                func.instruction(&Instruction::I32Add);
-                func.instruction(&Instruction::LocalSet(ctx.temp_local + 4));
-                func.instruction(&Instruction::End);
-
-                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
-                func.instruction(&Instruction::I32Const(1));
-                func.instruction(&Instruction::I32Add);
-                func.instruction(&Instruction::LocalSet(ctx.temp_local + 3));
-
-                func.instruction(&Instruction::Br(0));
-
-                func.instruction(&Instruction::End);
-                func.instruction(&Instruction::End);
-
-                func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
-            } else {
-                func.instruction(&Instruction::Drop);
-                func.instruction(&Instruction::I32Const(0));
-            }
-            IRType::Int
-        }
-        _ => {
-            func.instruction(&Instruction::Drop);
-            func.instruction(&Instruction::I32Const(0));
-            IRType::Unknown
         }
     }
+
+    let is_index = method_name == "index";
+    func.instruction(&Instruction::I32Const(if is_index { -1 } else { 0 }));
+    func.instruction(&Instruction::LocalSet(result));
+    func.instruction(&Instruction::Block(BlockType::Empty));
+    for (i, member) in positions {
+        func.instruction(&Instruction::LocalGet(ptr));
+        emit_data_base(func);
+        if i > 0 {
+            func.instruction(&Instruction::I32Const((i * COLLECTION_SLOT) as i32));
+            func.instruction(&Instruction::I32Add);
+        }
+        emit_slot_eq_needle(func, ctx, member, needle);
+        func.instruction(&Instruction::If(BlockType::Empty));
+        if is_index {
+            func.instruction(&Instruction::I32Const(i as i32));
+            func.instruction(&Instruction::LocalSet(result));
+            func.instruction(&Instruction::Br(1));
+        } else {
+            func.instruction(&Instruction::LocalGet(result));
+            func.instruction(&Instruction::I32Const(1));
+            func.instruction(&Instruction::I32Add);
+            func.instruction(&Instruction::LocalSet(result));
+        }
+        func.instruction(&Instruction::End);
+    }
+    func.instruction(&Instruction::End);
+
+    if is_index {
+        // Python raises ValueError for a missing value; until exceptions carry
+        // one from here, this traps, as list.index does.
+        func.instruction(&Instruction::LocalGet(result));
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::I32LtS);
+        func.instruction(&Instruction::If(BlockType::Empty));
+        func.instruction(&Instruction::Unreachable);
+        func.instruction(&Instruction::End);
+    }
+    func.instruction(&Instruction::LocalGet(result));
+    IRType::Int
 }

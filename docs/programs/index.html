@@ -289,7 +289,7 @@ def checkout() -&gt; float:
 
             <dl class="minute">
                 <dt>Annotations</dt>
-                <dd>Parameter and return annotations pick the WebAssembly value types. A collection whose elements you use needs the parameterised form, <code>List[str]</code> rather than a bare <code>list</code>: the parameterised form is what gives the compiler an element type.</dd>
+                <dd>Parameter and return annotations pick the WebAssembly value types. A collection passed into or out of a function needs the parameterised form, <code>List[str]</code> rather than a bare <code>list</code>: the parameterised form is what gives the compiler an element type. Calls may pass arguments by keyword.</dd>
 
                 <dt>Entry points</dt>
                 <dd>Every module-level <code>def</code> is exported. There is no top-level run step, so module level holds definitions only; put the code that runs in a function, or under <code>if __name__ == "__main__":</code>.</dd>
@@ -363,7 +363,7 @@ def checkout() -&gt; float:
                         <strong><code>*args</code>, <code>**kwargs</code>, keyword-only parameters</strong>
                         <span class="tag tag-loud">refused</span>
                     </div>
-                    <p class="shape-note">A WebAssembly function has a fixed signature. Pass the arguments positionally.</p>
+                    <p class="shape-note">A WebAssembly function has a fixed signature, so a function cannot collect extra arguments. Calling a function or constructor with keyword arguments (<code>f(1, c=7)</code>) works: they are placed by name and skipped defaults filled in.</p>
                 </li>
 
                 <li>
@@ -438,19 +438,28 @@ def checkout() -&gt; float:
 
                 <li>
                     <div class="shape-head">
-                        <strong>A bare <code>list</code> or <code>dict</code> annotation</strong>
-                        <span class="tag tag-quiet">differs</span>
+                        <strong>A string, float, collection, or instance through an untyped place</strong>
+                        <span class="tag tag-loud">refused</span>
                         <span class="tag tag-workaround">workaround</span>
                     </div>
-                    <p class="shape-note">The parameterised form is what carries an element type; a bare <code>list</code> or <code>dict</code> compiles with its elements untyped. Some uses are then refused (a string method on an element, <code>sorted()</code>), but two answer wrong: strings returned through <code>-&gt; list</code> and used as dict keys compare as words rather than by content, so <code>"a b a".split(" ")</code> fills a dict with 3 keys where CPython has 2, and <code>len(xs[0])</code> on an <code>xs: list</code> of strings answers a meaningless number. Write <code>List[str]</code> and <code>Dict[str, int]</code> for any collection whose elements you use.</p>
+                    <p class="shape-note">An unannotated parameter or return, and the elements of a bare <code>list</code> or <code>dict</code> parameter or return, hold one word read back as an int. Ints, bools, and <code>None</code> pass through; anything else is refused, since a string would lose its length and a float its width. Annotate the parameter, or write <code>List[str]</code> and <code>Dict[str, int]</code>. A bare annotation on a variable is fine: its elements take the type of the value assigned.</p>
                 </li>
 
                 <li>
                     <div class="shape-head">
-                        <strong>Exception objects and their messages</strong>
-                        <span class="tag tag-quiet">differs</span>
+                        <strong><code>x is None</code> on an <code>Optional[int]</code></strong>
+                        <span class="tag tag-loud">refused</span>
+                        <span class="tag tag-workaround">workaround</span>
                     </div>
-                    <p class="shape-note"><code>raise</code>, <code>try</code>/<code>except</code>/<code>finally</code>, and propagation across calls all work. An exception carries its type, not an object: <code>raise ValueError("msg")</code> drops the message and <code>except ValueError as e</code> binds the type's code. Matching is by exact type name, plus <code>Exception</code>, which catches anything.</p>
+                    <p class="shape-note"><code>None</code> is the word 0, which an int can also be, so the test cannot be answered. It works on an <code>Optional</code> class instance or <code>str</code>; for a number, keep a separate flag.</p>
+                </li>
+
+                <li>
+                    <div class="shape-head">
+                        <strong>Using the name <code>except ... as e</code> binds</strong>
+                        <span class="tag tag-loud">refused</span>
+                    </div>
+                    <p class="shape-note"><code>raise</code>, <code>try</code>/<code>except</code>/<code>else</code>/<code>finally</code>, re-raising, and propagation across calls all work. An exception carries its type, not an object: <code>raise ValueError("msg")</code> drops the message, so <code>e</code> can only be re-raised with <code>raise e</code> until exception objects land in 0.19.0. Matching is by exact type name, plus <code>Exception</code>, which catches anything.</p>
                 </li>
 
                 <li>
@@ -488,10 +497,10 @@ def checkout() -&gt; float:
 
                 <li>
                     <div class="shape-head">
-                        <strong>Set methods beyond <code>add</code>, <code>remove</code>, and <code>discard</code></strong>
+                        <strong>Set methods that mutate in bulk, or take a non-set argument</strong>
                         <span class="tag tag-loud">refused</span>
                     </div>
-                    <p class="shape-note"><code>union</code>, <code>intersection</code>, and friends are not implemented. Membership, de-duplication, and the three mutators work.</p>
+                    <p class="shape-note"><code>update</code>, <code>pop</code>, <code>copy</code>, and the other in-place methods are not implemented. The operators <code>| &amp; ^ -</code>, the comparisons, <code>union</code>, <code>intersection</code>, <code>difference</code>, <code>symmetric_difference</code>, <code>issubset</code>, <code>issuperset</code>, and <code>isdisjoint</code> all work with a set argument, as do membership and <code>add</code>/<code>remove</code>/<code>discard</code>.</p>
                 </li>
 
                 <li>
@@ -499,7 +508,7 @@ def checkout() -&gt; float:
                         <strong>Third-party packages</strong>
                         <span class="tag tag-loud">refused</span>
                     </div>
-                    <p class="shape-note">No PyPI. Standard-library support is small so far: the module constants (<code>math.pi</code>, <code>os.sep</code>, ...), <code>re.sub</code> and <code>re.escape</code> on constant arguments, and the <code>functools</code> decorators. The rest of <code>sys</code>, <code>os</code>, <code>math</code>, <code>random</code>, <code>json</code>, <code>re</code>, <code>datetime</code>, <code>logging</code>, <code>collections</code>, and <code>itertools</code> is tracked on the <a href="../modules/">development board</a>.</p>
+                    <p class="shape-note">No PyPI. Standard-library support is small so far: the module constants (<code>math.pi</code>, <code>os.sep</code>, ...), <code>re.sub</code> and <code>re.escape</code> on constant arguments, and the <code>functools</code> decorators. The rest of <code>sys</code>, <code>os</code>, <code>math</code>, <code>random</code>, <code>json</code>, <code>re</code>, <code>datetime</code>, <code>logging</code>, <code>collections</code>, and <code>itertools</code> is refused at compile time, naming the release that implements it, and tracked on the <a href="../modules/">development board</a>.</p>
                 </li>
             </ul>
         </section>

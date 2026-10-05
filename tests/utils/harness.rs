@@ -147,6 +147,36 @@ pub fn call_i32(source: &str, func: &str) -> i32 {
         .expect("call")
 }
 
+/// Whether calling an exported zero-argument `i32` function traps, which is
+/// how a fault CPython raises for, and nothing here can catch, surfaces.
+pub fn call_i32_traps(source: &str, func: &str) -> bool {
+    let (instance, mut store) = instantiate(source);
+    instance
+        .get_typed_func::<(), i32>(&store, func)
+        .unwrap_or_else(|_| panic!("exported i32 fn `{func}`"))
+        .call(&mut store, ())
+        .is_err()
+}
+
+/// Strip the indentation every non-blank line of `source` shares, so a test
+/// can write its Python indented inside a raw string.
+pub fn dedent(source: &str) -> String {
+    let lines: Vec<&str> = source.trim_matches('\n').lines().collect();
+    let indent = lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    let mut out: String = lines
+        .iter()
+        .map(|l| l.get(indent..).unwrap_or("").trim_end())
+        .collect::<Vec<_>>()
+        .join("\n");
+    out.push('\n');
+    out
+}
+
 /// Call an exported zero-argument function returning `f64`. Used to assert that
 /// float values round-trip with full f64 precision (an f32 slot would lose the
 /// low bits and fail an exact-equality check). wasmi 0.31's typed API does not

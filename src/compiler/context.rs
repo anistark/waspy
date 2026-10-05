@@ -233,6 +233,9 @@ pub struct CompilationContext {
     /// `from mod import name as alias` bindings for user modules:
     /// alias -> real (merged) function or class name.
     pub import_aliases: HashMap<String, String>,
+    /// `from <stdlib module> import name [as alias]`: alias -> (module, name),
+    /// so the name reads and calls through the module.
+    pub stdlib_imports: HashMap<String, (String, String)>,
     /// Virtual method dispatch: the column each overridden method name takes in
     /// the vtable, and the `call_indirect` type index its implementations share.
     /// A method name is here only when some class overrides an ancestor's
@@ -306,6 +309,14 @@ pub struct CompilationContext {
     /// `break`/`continue` with an empty stack is a compile error (Python would
     /// raise `SyntaxError`). Reset per function.
     pub loop_stack: Vec<LoopContext>,
+    /// The handlers enclosing the current codegen point, innermost last: the
+    /// name `except ... as` binds (if any) and the local holding the code of
+    /// the exception it caught, which a bare `raise` (or `raise name`)
+    /// raises again.
+    pub reraise_codes: Vec<(Option<String>, u32)>,
+    /// Handler nesting depth during the local-allocation scan, which reserves
+    /// one caught-code local per depth.
+    pub except_scan_depth: u32,
     /// Comprehension nesting depth at the current codegen point. A
     /// comprehension's helper locals (`__comp_*_{d}` / `__comp_*_{d}_{g}`)
     /// are indexed by this depth, reserved during the local-allocation scan;
@@ -401,6 +412,7 @@ impl CompilationContext {
             class_map: HashMap::new(),
             user_modules: HashMap::new(),
             import_aliases: HashMap::new(),
+            stdlib_imports: HashMap::new(),
             virtual_slots: HashMap::new(),
             vtable_base: 0,
             vtable_stride: 0,
@@ -424,6 +436,8 @@ impl CompilationContext {
             for_loop_seq: 0,
             block_depth: 0,
             loop_stack: Vec::new(),
+            reraise_codes: Vec::new(),
+            except_scan_depth: 0,
             comp_depth: Cell::new(0),
             alloc_func_index: 0,
             alloc_obj_func_index: 0,
@@ -536,6 +550,57 @@ impl CompilationContext {
             "a {v} is used where a {s} is expected ({what}). {v} is not a subclass of {s}, \
              so a method called on it would run {s}'s method. Hint: {hint}"
         ));
+    }
+
+    /// Refuse storing `value` into a slot with no type: an unannotated parameter
+    /// or return value, or an element of a bare `list` / `dict` / `set`.
+    ///
+    /// Such a slot is one word, read back as an int, so only a value that is a
+    /// word with no other state survives it: an int, a bool, None, or a
+    /// function. A string lost its length, a float its width, and a
+    /// collection or instance the type its reads need, so `len(s)` of a string
+    /// passed to `def f(s)` answered its first four bytes, and strings from a
+    /// `-> list` function stopped matching as dict keys (#116).
+    pub fn check_untyped_store(&self, value: &IRType, slot: &IRType, what: &str) {
+        fn lost(value: &IRType, slot: &IRType) -> Option<IRType> {
+            let word = |t: &IRType| {
+                matches!(
+                    t,
+                    IRType::Int | IRType::Bool | IRType::None | IRType::Callable { .. }
+                )
+            };
+            match (value, slot) {
+                // An untyped parameter or return passes on another untyped
+                // value, which is held to the same rule where it came from.
+                (IRType::Unknown | IRType::Any, IRType::Unknown) => None,
+                // The elements of a bare annotation take only values known to
+                // be words: a list built by appends whose element type was
+                // never learned may hold strings.
+                (IRType::Any, IRType::Any) => None,
+                (v, IRType::Unknown | IRType::Any) if !word(v) => Some(v.clone()),
+                (IRType::List(v), IRType::List(s)) | (IRType::Set(v), IRType::Set(s)) => lost(v, s),
+                (IRType::Dict(vk, vv), IRType::Dict(sk, sv)) => {
+                    lost(vk, sk).or_else(|| lost(vv, sv))
+                }
+                _ => None,
+            }
+        }
+        if let Some(value_type) = lost(value, slot) {
+            let shown = crate::compiler::operators::python_type_name(&value_type);
+            let spelled = crate::type_to_string(&value_type);
+            let hint = if matches!(slot, IRType::Unknown) {
+                format!("annotate the parameter or return type, for example ': {spelled}'")
+            } else {
+                format!(
+                    "annotate the collection's element type, for example 'List[{spelled}]' \
+                     rather than a bare 'list'"
+                )
+            };
+            self.report(format!(
+                "a {shown} is passed through a place with no type ({what}), where it would be \
+                 held as an int and read back wrong. Hint: {hint}"
+            ));
+        }
     }
 
     /// Class ids of `target` and every known subclass of it — the id set an

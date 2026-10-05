@@ -30,7 +30,8 @@
 mod harness;
 
 use harness::{
-    call_f64, call_i32, call_i32_1, call_str, call_str_1, try_compile, try_compile_multi,
+    call_f64, call_i32, call_i32_1, call_i32_traps, call_str, call_str_1, dedent, try_compile,
+    try_compile_multi,
 };
 
 // ---------------------------------------------------------------------------
@@ -560,30 +561,53 @@ fn lambdas_that_do_not_need_their_parameter_type_still_work() {
     assert_eq!(call_i32(src, "sort_key"), 321); // descending
 }
 
-/// #116 records a bare `list` or `dict` annotation losing its element type, so
-/// that string keys from such a collection stop deduplicating. Both spellings
-/// answer Python's 2 here only because the keys are literals: equal literals
-/// are interned at one offset, so comparing them as untyped words still finds
-/// the match. Strings built at run time (`"a b a".split(" ")` returned through
-/// `-> list`) have different offsets, and that shape answers 3 where CPython
-/// answers 2; #116 stays open for it. Kept as a differential test on both
-/// forms: if either starts answering 3, the deduplication has regressed.
+/// A bare `list` or `dict` annotation says nothing about the elements, so
+/// through a parameter or return value they are held as untyped words, and a
+/// string lost its length on the way (#116): runtime strings returned through
+/// `-> list` stopped deduplicating as dict keys (3 where CPython has 2), and
+/// `len(xs[0])` read a string's bytes as an integer. Only word-shaped values
+/// (ints, bools, None) pass through a bare annotation now; anything else is
+/// refused with a hint, and the parameterised forms keep working.
 #[test]
-fn keys_from_a_bare_and_a_parameterised_annotation_both_deduplicate() {
-    let bare = "def make() -> list:\n\
-                \x20   return [\"a\", \"b\", \"a\"]\n\
+fn a_bare_collection_annotation_passes_only_words() {
+    let returned = "def words() -> list:\n\
+                    \x20   s = \"a b a\"\n\
+                    \x20   return s.split(\" \")\n\
+                    \n\
+                    def dedup() -> int:\n\
+                    \x20   d = {}\n\
+                    \x20   for w in words():\n\
+                    \x20       d[w] = 1\n\
+                    \x20   return len(d)\n";
+    let err = try_compile(returned).expect_err("strings through '-> list' must be refused");
+    assert!(
+        err.contains("List[str]"),
+        "expected an annotation hint, got: {err}"
+    );
+
+    let passed = "def first_len(xs: list) -> int:\n\
+                  \x20   return len(xs[0])\n\
+                  \n\
+                  def run() -> int:\n\
+                  \x20   return first_len([\"abc\", \"d\"])\n";
+    let err = try_compile(passed).expect_err("strings into 'xs: list' must be refused");
+    assert!(err.contains("argument 1 of first_len()"), "got: {err}");
+
+    let ints = "def total(xs: list) -> int:\n\
+                \x20   t = 0\n\
+                \x20   for x in xs:\n\
+                \x20       t += x\n\
+                \x20   return t\n\
                 \n\
-                def f() -> int:\n\
-                \x20   d = {}\n\
-                \x20   for w in make():\n\
-                \x20       d[w] = 1\n\
-                \x20   return len(d)\n";
-    assert_eq!(call_i32(bare, "f"), 2);
+                def run() -> int:\n\
+                \x20   return total([1, 2, 3])\n";
+    assert_eq!(call_i32(ints, "run"), 6);
 
     let parameterised = "from typing import Dict, List\n\
                          \n\
                          def make() -> List[str]:\n\
-                         \x20   return [\"a\", \"b\", \"a\"]\n\
+                         \x20   s = \"a b a\"\n\
+                         \x20   return s.split(\" \")\n\
                          \n\
                          def f() -> int:\n\
                          \x20   d: Dict[str, int] = {}\n\
@@ -882,15 +906,14 @@ fn division_follows_python_3() {
                \x20   return 7 / 2\n\
                \n\
                def floor_division() -> int:\n\
-               \x20   return 7 // 2\n\
-               \n\
-               def converted_on_return() -> int:\n\
-               \x20   return 7 / 2\n";
+               \x20   return 7 // 2\n";
     assert_eq!(call_f64(src, "true_division"), 3.5);
     assert_eq!(call_i32(src, "floor_division"), 3);
-    // A `return` converts to the declared type, which is what lets `-> int`
-    // accept a true-division result.
-    assert_eq!(call_i32(src, "converted_on_return"), 3);
+    // CPython returns 3.5 from `-> int` too: annotations convert nothing.
+    // This used to truncate to 3; holding the float in an int is refused.
+    let err = try_compile("def f() -> int:\n    return 7 / 2\n")
+        .expect_err("a float returned through '-> int' must not be truncated");
+    assert!(err.contains("truncate"), "got: {err}");
 }
 
 /// A string had no companion length local when it arrived as a parameter or
@@ -1292,11 +1315,15 @@ fn a_call_to_an_unknown_function_is_refused() {
          def f() -> int:\n\
          \x20   return totl(3)\n",
     ];
-    for (src, name) in cases.iter().zip(["reduce", "divmod", "totl"]) {
+    for (src, name) in
+        cases
+            .iter()
+            .zip(["'functools.reduce()'", "call to 'divmod'", "call to 'totl'"])
+    {
         let err = try_compile(src).expect_err("an unknown callee must be refused");
         assert!(
-            err.contains(&format!("call to '{name}'")),
-            "expected '{name}' to be named, got: {err}"
+            err.contains(name),
+            "expected {name} to be named, got: {err}"
         );
     }
 }
@@ -2997,5 +3024,1206 @@ fn a_generator_in_an_inner_for_clause_is_refused() {
     assert!(
         err.contains("only the first 'for' of a comprehension"),
         "expected the inner clause to be named, got: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The board audit: constructs the board advertised that answered wrong
+// ---------------------------------------------------------------------------
+
+/// The refusal for `source`, asserting it names `needle`.
+fn refused(source: &str, needle: &str) -> String {
+    let err = try_compile(&dedent(source)).expect_err("this construct must be refused");
+    assert!(err.contains(needle), "expected `{needle}` in: {err}");
+    err
+}
+
+/// `str * int` and `int * str` answered "", and list and tuple repetition
+/// trapped. Repetition copies the elements, so a nested list is shared by
+/// every copy, as in CPython.
+#[test]
+fn sequence_repetition_and_concatenation() {
+    let src = dedent(
+        r#"
+        def text() -> str:
+            n = 3
+            return "ab" * 3 + "|" + n * "c"
+
+        def negative() -> int:
+            return len("ab" * -2) + len([1] * -1)
+
+        def zeros() -> int:
+            xs = [0] * 5
+            xs[3] = 7
+            return len(xs) * 10 + xs[3]
+
+        def reversed_operands() -> int:
+            xs = 3 * [1, 2]
+            return len(xs) * 10 + xs[5]
+
+        def floats() -> float:
+            xs = [1.5] * 3
+            return xs[2] + len(xs)
+
+        def tuples() -> int:
+            t = (1, 2) * 3
+            return len(t) * 10 + t[5]
+
+        def shallow() -> int:
+            grid = [[0]] * 3
+            grid[0].append(1)
+            return len(grid[2])
+
+        def concatenated() -> int:
+            xs = [1, 2] + [3]
+            xs.append(4)
+            words = ["a", "bb"] + ["ccc"]
+            t = (1, "x") + (2.5,)
+            return len(xs) * 1000 + xs[3] * 100 + len(words[2]) * 10 + len(t)
+
+        def raw() -> int:
+            return len(b"ab" * 4)
+        "#,
+    );
+    assert_eq!(call_str(&src, "text"), "ababab|ccc");
+    assert_eq!(call_i32(&src, "negative"), 0);
+    assert_eq!(call_i32(&src, "zeros"), 57);
+    assert_eq!(call_i32(&src, "reversed_operands"), 62);
+    assert_eq!(call_f64(&src, "floats"), 4.5);
+    assert_eq!(call_i32(&src, "tuples"), 62);
+    assert_eq!(call_i32(&src, "shallow"), 2);
+    assert_eq!(call_i32(&src, "concatenated"), 4433);
+    assert_eq!(call_i32(&src, "raw"), 8);
+
+    refused(
+        "def f(n: int) -> int:\n    return len((1, 2) * n)\n",
+        "repeat count must be a constant",
+    );
+}
+
+/// `|` and `&` on two sets combined the two pointers as integers, `^` the
+/// same, and `-` trapped. Each builds a new set now, for every element type.
+#[test]
+fn set_operators_methods_and_comparisons() {
+    let src = dedent(
+        r#"
+        from typing import Set
+
+        def ints() -> int:
+            a = {1, 2, 3}
+            b = {2, 3, 4}
+            return len(a | b) * 1000 + len(a & b) * 100 + len(a ^ b) * 10 + len(a - b)
+
+        def members() -> int:
+            d = {1, 2, 3} - {2}
+            r = len(d) * 10
+            if 3 in d:
+                r += 1
+            if 2 in d:
+                r += 100
+            return r
+
+        def strings() -> int:
+            a = {"x", "y"}
+            w = "x" + ""
+            b: Set[str] = set()
+            b.add(w)
+            b.add("z")
+            return len(a & b) * 10 + len(a | b)
+
+        def floats() -> int:
+            a = {1.5, 2.5}
+            b = {2.5, 3.5}
+            return len(a ^ b) * 10 + len(a | b)
+
+        def grows() -> int:
+            c = {1, 2} | {3}
+            c.add(4)
+            c.add(5)
+            c.add(6)
+            r = len(c)
+            if 6 in c:
+                r += 10
+            return r
+
+        def methods() -> int:
+            a = {1, 2}
+            return (
+                len(a.union({2, 3, 4})) * 1000
+                + len({1, 2, 3}.intersection({2, 3, 9})) * 100
+                + len({1, 2, 3}.difference({2})) * 10
+                + len({1, 2}.symmetric_difference({2, 3}))
+            )
+
+        def comparisons() -> int:
+            a = {1, 2}
+            b = {1, 2, 3}
+            r = 0
+            if a <= b:
+                r += 1
+            if a < b:
+                r += 10
+            if b > a:
+                r += 100
+            if a >= b:
+                r += 1000
+            if a == {2, 1}:
+                r += 10000
+            if a != b:
+                r += 100000
+            if b < b:
+                r += 1000000
+            return r
+
+        def subset_methods() -> int:
+            a = {"x", "y"}
+            w = "x" + ""
+            b = {w, "y", "z"}
+            r = 0
+            if a.issubset(b):
+                r += 1
+            if b.issuperset(a):
+                r += 10
+            if a.isdisjoint({"q"}):
+                r += 100
+            if a.isdisjoint(b):
+                r += 1000
+            return r
+        "#,
+    );
+    assert_eq!(call_i32(&src, "ints"), 4221);
+    assert_eq!(call_i32(&src, "members"), 21);
+    assert_eq!(call_i32(&src, "strings"), 13);
+    assert_eq!(call_i32(&src, "floats"), 23);
+    assert_eq!(call_i32(&src, "grows"), 16);
+    assert_eq!(call_i32(&src, "methods"), 4222);
+    assert_eq!(call_i32(&src, "comparisons"), 110111);
+    assert_eq!(call_i32(&src, "subset_methods"), 111);
+}
+
+/// `{1: 2} | {3: 4}` answered a dict of one entry. The merge keeps the left
+/// dict's order, takes the right one's value for a shared key, and appends
+/// the right one's new keys in its order.
+#[test]
+fn dict_union_merges_in_cpython_order() {
+    let src = dedent(
+        r#"
+        def merged() -> int:
+            d = {1: 2, 5: 6} | {3: 4, 5: 7}
+            return len(d) * 100 + d[5] * 10 + d[3]
+
+        def ordered() -> int:
+            d = {"a": 1, "b": 2} | {"c": 3, "a": 9}
+            t = 0
+            for k in d:
+                t = t * 10 + d[k]
+            return t
+        "#,
+    );
+    assert_eq!(call_i32(&src, "merged"), 374);
+    assert_eq!(call_i32(&src, "ordered"), 923);
+}
+
+/// An operator applied to two values it is not defined for combined their
+/// pointers as integers: `[1] | [2]`, `{1: 2} & {1: 2}`, two instances
+/// added. CPython raises TypeError for each; here each is a compile error.
+#[test]
+fn operators_undefined_for_their_operands_are_refused() {
+    for (source, needle) in [
+        (
+            "def f() -> int:\n    return len([1] - [1])\n",
+            "for -: 'list' and 'list'",
+        ),
+        (
+            "def f() -> int:\n    return len([1] | [2])\n",
+            "for |: 'list' and 'list'",
+        ),
+        (
+            "def f() -> int:\n    return len({1: 2} & {1: 2})\n",
+            "for &: 'dict' and 'dict'",
+        ),
+        (
+            "class P:\n    def __init__(self, v: int):\n        self.v = v\n\n\
+             def f() -> int:\n    c = P(1) + P(2)\n    return 1\n",
+            "for +: 'P' and 'P'",
+        ),
+        (
+            "def f() -> int:\n    return len([1] + [2.5])\n",
+            "different element types",
+        ),
+        (
+            "def f() -> int:\n    return -\"a\"\n",
+            "bad operand type for unary -: 'str'",
+        ),
+        (
+            "def f() -> float:\n    return ~1.5\n",
+            "bad operand type for unary ~: 'float'",
+        ),
+    ] {
+        refused(source, needle);
+    }
+}
+
+/// `tuple.index` pushed the position it found and branched past it, so it
+/// answered -1 for every value the tuple held. Each position is compared at
+/// its own width, and a missing value traps where CPython raises ValueError.
+#[test]
+fn tuple_index_and_count() {
+    let src = dedent(
+        r#"
+        def found() -> int:
+            return (4, 5, 6).index(6) * 10 + (4, 5, 4).index(4)
+
+        def mixed() -> int:
+            return (1, "x", True, "y").index("y")
+
+        def floats() -> int:
+            return (1.5, 2.5).index(2.5)
+
+        def counted() -> int:
+            w = "a" + "b"
+            return (1, 2, 1, 1).count(1) * 10 + ("ab", "c", "ab").count(w)
+
+        def repeated() -> int:
+            return ((1, 2) * 3).count(2)
+
+        def missing() -> int:
+            return (1, 2).index(3)
+        "#,
+    );
+    assert_eq!(call_i32(&src, "found"), 20);
+    assert_eq!(call_i32(&src, "mixed"), 3);
+    assert_eq!(call_i32(&src, "floats"), 1);
+    assert_eq!(call_i32(&src, "counted"), 32);
+    assert_eq!(call_i32(&src, "repeated"), 3);
+    assert!(call_i32_traps(&src, "missing"));
+    refused(
+        "def f() -> int:\n    return (1, 2).frob(1)\n",
+        "'frob' is not a method of tuple",
+    );
+}
+
+/// Keyword arguments on a plain call were dropped: `f(1, b=5)` ran `f(1)`,
+/// `C(1, y=7)` kept `y`'s default, and `enumerate(xs, start=10)` counted
+/// from 0. They are placed by name now, and a builtin that does not take one
+/// refuses it.
+#[test]
+fn keyword_arguments_reach_their_parameters() {
+    let src = dedent(
+        r#"
+        def f(a: int, b: int = 1, c: int = 2) -> int:
+            return a * 100 + b * 10 + c
+
+        class C:
+            def __init__(self, x: int, y: int = 3):
+                self.x = x
+                self.y = y
+
+        def given() -> int:
+            return f(1, b=5)
+
+        def skipped() -> int:
+            return f(1, c=7)
+
+        def reordered() -> int:
+            return f(c=1, a=2, b=3)
+
+        def constructed() -> int:
+            c = C(1, y=7)
+            d = C(x=4)
+            return c.y * 100 + d.x * 10 + d.y
+
+        def enumerated() -> int:
+            t = 0
+            for i, x in enumerate([5, 6], start=10):
+                t += i
+            return t
+        "#,
+    );
+    assert_eq!(call_i32(&src, "given"), 152);
+    assert_eq!(call_i32(&src, "skipped"), 117);
+    assert_eq!(call_i32(&src, "reordered"), 231);
+    assert_eq!(call_i32(&src, "constructed"), 743);
+    assert_eq!(call_i32(&src, "enumerated"), 21);
+
+    refused(
+        "def f() -> int:\n    return sum([1, 2], start=10)\n",
+        "keyword argument 'start' is not supported in a call to 'sum()'",
+    );
+    refused(
+        "def f(a: int, b: int) -> int:\n    return a\n\ndef g() -> int:\n    return f(1, c=2)\n",
+        "unexpected keyword argument 'c'",
+    );
+    // Moving a computed keyword ahead of another would change the order the
+    // two are evaluated in.
+    refused(
+        "def k() -> int:\n    return 1\n\ndef f(a: int, b: int) -> int:\n    return a\n\n\
+         def g() -> int:\n    return f(b=k(), a=k())\n",
+        "evaluated in a different order",
+    );
+}
+
+/// `bool(x)` was erased to `x`, so `bool(2) + 1` was 3; `not 0.0` was False.
+#[test]
+fn bool_and_not_follow_truthiness() {
+    let src = dedent(
+        r#"
+        def converted() -> int:
+            return bool(2) + bool("") * 10 + bool([1]) * 100 + bool(0.0) * 1000
+
+        def negated() -> int:
+            r = 0
+            if not 0.0:
+                r += 1
+            if not 2.5:
+                r += 10
+            return r
+        "#,
+    );
+    assert_eq!(call_i32(&src, "converted"), 101);
+    assert_eq!(call_i32(&src, "negated"), 1);
+}
+
+/// `len()` of a generator answered its first word, and a generator after
+/// `zip()`'s first argument failed validation (#133). CPython raises
+/// TypeError for the first; the second is refused until zip drives
+/// iterators lazily. A generator first in zip() works.
+#[test]
+fn generators_have_no_len_and_lead_zip() {
+    let src = dedent(
+        r#"
+        def evens(limit: int):
+            for i in range(limit):
+                if i % 2 == 0:
+                    yield i
+
+        def first() -> int:
+            t = 0
+            for a, b in zip(evens(10), [1, 2, 3, 4, 5]):
+                t += a * b
+            return t
+        "#,
+    );
+    assert_eq!(call_i32(&src, "first"), 80);
+    let gen = "def evens(limit: int):\n    for i in range(limit):\n        yield i\n\n";
+    refused(
+        &format!("{gen}def f() -> int:\n    return len(evens(3))\n"),
+        "object of type 'generator' has no len()",
+    );
+    refused(
+        &format!(
+            "{gen}def f() -> int:\n    t = 0\n    for a, b in zip([1, 2], evens(3)):\n        \
+             t += a * b\n    return t\n"
+        ),
+        "to zip() after its first argument",
+    );
+}
+
+/// A true division is a float wherever it is stored (#132): a field set from
+/// one, a local, and a generator's lifted local were typed int, so the field
+/// truncated 1.5 to 1.0 and the others failed validation.
+#[test]
+fn true_division_is_a_float_in_fields_locals_and_generators() {
+    let src = dedent(
+        r#"
+        class Ratio:
+            def __init__(self, a: int, b: int):
+                self.v = a / b
+
+        class Mean:
+            def __init__(self):
+                self.total = 7
+                self.count = 2
+                self.avg = self.total / self.count
+
+        def ratio() -> float:
+            return Ratio(3, 2).v
+
+        def mean() -> float:
+            return Mean().avg
+
+        def local_div(a: int, b: int) -> float:
+            x = a / b
+            return x
+
+        def local() -> float:
+            return local_div(3, 2)
+
+        def quarters(n: int):
+            i = 0
+            while i < n:
+                x = i / 4
+                yield x
+                i += 1
+
+        def total() -> float:
+            t = 0.0
+            for v in quarters(5):
+                t += v
+            return t
+        "#,
+    );
+    assert_eq!(call_f64(&src, "ratio"), 1.5);
+    assert_eq!(call_f64(&src, "mean"), 3.5);
+    assert_eq!(call_f64(&src, "local"), 1.5);
+    assert_eq!(call_f64(&src, "total"), 2.5);
+    // Python never truncates a float on the way into an int-typed place.
+    refused(
+        "def f(a: int) -> int:\n    x = 1\n    x = a / 2\n    return x\n",
+        "would truncate it",
+    );
+}
+
+/// `min`/`max` compared floats as integers (failing validation), strings by
+/// offset, and over a single iterable answered nothing at all. They keep the
+/// first argument unless a later one is strictly smaller (larger), which is
+/// what decides ties and NaN in CPython.
+#[test]
+fn min_and_max_follow_cpython() {
+    let src = dedent(
+        r#"
+        def floats() -> float:
+            return min(2.5, 1.5, 3.0) * 10 + max(2.5, 1.5, 3.0)
+
+        def nan_first() -> bool:
+            n = (1e308 * 10.0) - (1e308 * 10.0)
+            x = min(n, 1.0)
+            return x != x
+
+        def nan_second() -> float:
+            n = (1e308 * 10.0) - (1e308 * 10.0)
+            return min(1.0, n)
+
+        def strings() -> str:
+            a = "b" + "c"
+            return min(a, "ba", "bd") + max("ba", a, "bd")
+
+        def ints() -> int:
+            return min(3, 1, 2) * 10 + max(-1, -5)
+        "#,
+    );
+    assert_eq!(call_f64(&src, "floats"), 18.0);
+    assert_eq!(call_i32(&src, "nan_first"), 1);
+    assert_eq!(call_f64(&src, "nan_second"), 1.0);
+    assert_eq!(call_str(&src, "strings"), "babd");
+    assert_eq!(call_i32(&src, "ints"), 9);
+    refused(
+        "def f() -> int:\n    return min([3, 1])\n",
+        "single iterable",
+    );
+    refused(
+        "def f() -> float:\n    return max(1, 2.5)\n",
+        "must all be ints",
+    );
+}
+
+/// `isinstance(x, int)` answered False for every target that was not a user
+/// class; the static type answers it. A value whose type is only known at run
+/// time is refused rather than guessed.
+#[test]
+fn isinstance_against_builtin_types_and_tuples() {
+    let src = dedent(
+        r#"
+        class A:
+            pass
+
+        class B(A):
+            pass
+
+        def builtins() -> int:
+            r = 0
+            if isinstance(3, int):
+                r += 1
+            if isinstance(True, int):
+                r += 10
+            if isinstance("a", (int, str)):
+                r += 100
+            if isinstance(1.5, int):
+                r += 1000
+            return r
+
+        def classes() -> int:
+            r = 0
+            if isinstance(B(), A):
+                r += 1
+            if isinstance(A(), (B, int)):
+                r += 10
+            if issubclass(B, A):
+                r += 100
+            return r
+        "#,
+    );
+    assert_eq!(call_i32(&src, "builtins"), 111);
+    assert_eq!(call_i32(&src, "classes"), 101);
+    refused(
+        "def f(x) -> bool:\n    return isinstance(x, int)\n",
+        "cannot be answered here",
+    );
+}
+
+/// `except E as e` binds the exception's type code, not an object, so
+/// `str(e)` answered "1" and `isinstance(e, E)` False. Until exception
+/// objects land, the name can only be re-raised; and re-raising, bare or by
+/// name, now raises the caught exception again rather than a generic one.
+#[test]
+fn except_as_names_only_re_raise_the_caught_exception() {
+    refused(
+        "def f() -> int:\n    try:\n        raise ValueError(\"boom\")\n    \
+         except ValueError as e:\n        return len(str(e))\n",
+        "can only be re-raised",
+    );
+    let src = dedent(
+        r#"
+        def bare() -> int:
+            try:
+                try:
+                    raise ValueError("a")
+                except ValueError:
+                    raise
+            except TypeError:
+                return 1
+            except ValueError:
+                return 2
+            return 0
+
+        def named() -> int:
+            try:
+                try:
+                    raise KeyError("a")
+                except (ValueError, KeyError) as e:
+                    raise e
+            except KeyError:
+                return 5
+            return 0
+
+        def nested() -> int:
+            try:
+                try:
+                    raise ValueError("a")
+                except ValueError:
+                    try:
+                        raise TypeError("b")
+                    except TypeError:
+                        pass
+                    raise
+            except ValueError:
+                return 7
+            except TypeError:
+                return 8
+            return 0
+        "#,
+    );
+    assert_eq!(call_i32(&src, "bare"), 2);
+    assert_eq!(call_i32(&src, "named"), 5);
+    assert_eq!(call_i32(&src, "nested"), 7);
+}
+
+/// The `else` of a `try`, `while`, or `for` was dropped (the loop forms were
+/// refused up front). Each runs exactly when CPython runs it now.
+#[test]
+fn else_clauses_of_try_and_loops() {
+    let src = dedent(
+        r#"
+        def try_else() -> int:
+            r = 0
+            try:
+                r = 1
+            except ValueError:
+                r = 2
+            else:
+                r = r + 10
+            return r
+
+        def try_else_raised() -> int:
+            r = 0
+            try:
+                raise ValueError("x")
+            except ValueError:
+                r = 2
+            else:
+                r = 10
+            return r
+
+        def try_else_finally() -> int:
+            r = 0
+            try:
+                r = 1
+            except ValueError:
+                r = 2
+            else:
+                r = r * 5
+            finally:
+                r = r + 100
+            return r
+
+        def while_else() -> int:
+            i = 0
+            r = 0
+            while i < 3:
+                i += 1
+            else:
+                r = 7
+            return r + i
+
+        def while_break() -> int:
+            i = 0
+            r = 0
+            while i < 3:
+                i += 1
+                if i == 2:
+                    break
+            else:
+                r = 7
+            return r + i
+
+        def for_else() -> int:
+            r = 0
+            for i in range(3):
+                r += i
+            else:
+                r += 100
+            return r
+
+        def for_break() -> int:
+            r = 0
+            for i in [1, 2, 3]:
+                if i == 2:
+                    break
+                r += i
+            else:
+                r += 100
+            return r
+
+        def nested_break() -> int:
+            r = 0
+            for j in range(3):
+                for i in range(2):
+                    if i == j:
+                        break
+                else:
+                    r += 100
+                r += 1
+            return r
+
+        def evens(n: int):
+            for i in range(n):
+                yield i
+
+        def generator_else() -> int:
+            r = 0
+            for v in evens(3):
+                r += v
+            else:
+                r += 50
+            return r
+        "#,
+    );
+    assert_eq!(call_i32(&src, "try_else"), 11);
+    assert_eq!(call_i32(&src, "try_else_raised"), 2);
+    assert_eq!(call_i32(&src, "try_else_finally"), 105);
+    assert_eq!(call_i32(&src, "while_else"), 10);
+    assert_eq!(call_i32(&src, "while_break"), 2);
+    assert_eq!(call_i32(&src, "for_else"), 103);
+    assert_eq!(call_i32(&src, "for_break"), 1);
+    assert_eq!(call_i32(&src, "nested_break"), 103);
+    assert_eq!(call_i32(&src, "generator_else"), 53);
+}
+
+/// Module-level and class-body statements other than definitions were
+/// skipped, so a top-level loop or call silently never ran.
+#[test]
+fn statements_that_would_not_run_are_refused() {
+    for (source, needle) in [
+        (
+            "xs = []\nxs.append(1)\n\ndef f() -> int:\n    return 1\n",
+            "at module level",
+        ),
+        (
+            "n = 0\nfor i in range(3):\n    n += i\n\ndef f() -> int:\n    return n\n",
+            "at module level",
+        ),
+        (
+            "n = 0\nn += 1\n\ndef f() -> int:\n    return n\n",
+            "at module level",
+        ),
+        (
+            "a = b = 0\n\ndef f() -> int:\n    return a\n",
+            "one plain name",
+        ),
+        (
+            "class C:\n    for i in range(2):\n        pass\n\ndef f() -> int:\n    return 1\n",
+            "body of class 'C'",
+        ),
+    ] {
+        refused(source, needle);
+    }
+    // The `__main__` block runs only when the file is a script; a compiled
+    // module is instantiated, as an import is.
+    let guarded = "def f() -> int:\n    return 4\n\nif __name__ == \"__main__\":\n    f()\n";
+    assert_eq!(call_i32(guarded, "f"), 4);
+}
+
+/// An unannotated parameter is one word, read back as an int, so a string
+/// passed to one lost its length: `len(s)` answered 6513249 for "abc". Only
+/// word-shaped values pass through an untyped place now.
+#[test]
+fn untyped_parameters_take_only_words() {
+    refused(
+        "def ln(s):\n    return len(s)\n\ndef f() -> int:\n    return ln(\"abc\")\n",
+        "argument 1 of ln()",
+    );
+    refused(
+        "def first(xs):\n    return xs[0]\n\ndef f() -> int:\n    return first([7, 8])\n",
+        "argument 1 of first()",
+    );
+    let ints = "def add(a, b):\n    return a + b\n\ndef f() -> int:\n    return add(2, 3)\n";
+    assert_eq!(call_i32(ints, "f"), 5);
+}
+
+/// `len(range(...))` read the range's start as a count; `len()` of a number
+/// read memory at that address.
+#[test]
+fn len_of_a_range_and_of_a_number() {
+    let src = dedent(
+        r#"
+        def ranges() -> int:
+            r = range(5)
+            return len(range(2, 10, 3)) * 1000 + len(r) * 100 + len(range(10, 2, -3)) * 10 + len(range(5, 1))
+        "#,
+    );
+    assert_eq!(call_i32(&src, "ranges"), 3530);
+    refused(
+        "def f() -> int:\n    return len(5)\n",
+        "object of type 'int' has no len()",
+    );
+}
+
+/// The standard library's calls compiled to placeholders: `json.dumps`
+/// answered "{}", `os.getcwd()` "/", `datetime.now()` the moment the module
+/// was compiled, a runtime `re.match` a match whatever the input, and every
+/// `logging` call nothing. They are refused, naming the release that
+/// implements them, as are the host values (`sys.argv` was empty).
+#[test]
+fn standard_library_placeholders_are_refused() {
+    for (source, needle) in [
+        (
+            "import json\n\ndef f() -> int:\n    return len(json.dumps([1, 2, 3]))\n",
+            "'json.dumps()'",
+        ),
+        (
+            "import os\n\ndef f() -> int:\n    return len(os.getcwd())\n",
+            "'os.getcwd()'",
+        ),
+        (
+            "import os\n\ndef f(a: str) -> int:\n    return len(os.path.join(a, \"b\"))\n",
+            "'os.path.join()'",
+        ),
+        (
+            "import sys\n\ndef f() -> int:\n    return len(sys.argv)\n",
+            "'sys.argv'",
+        ),
+        (
+            "import datetime\n\ndef f() -> int:\n    d = datetime.datetime.now()\n    return 1\n",
+            "'datetime.datetime.now()'",
+        ),
+        (
+            "import logging\n\ndef f() -> int:\n    logging.warning(\"x\")\n    return 1\n",
+            "'logging.warning()'",
+        ),
+        (
+            "import re\n\ndef f(s: str) -> int:\n    return len(re.findall(r\"\\d\", s))\n",
+            "'re.findall()'",
+        ),
+        (
+            "import re\n\ndef f() -> bool:\n    return bool(re.match(r\"z\", \"abc\"))\n",
+            "'re.match()'",
+        ),
+    ] {
+        let err = refused(source, needle);
+        assert!(err.contains("0.20.0"), "expected the release in: {err}");
+    }
+}
+
+/// `re.sub` and `re.escape` over constants fold to CPython's string. The fold
+/// used the `regex` crate's replacement syntax and resumed differently after
+/// an empty match, so it is limited to the patterns both engines read alike,
+/// and refuses the rest.
+#[test]
+fn regex_folds_match_cpython_or_refuse() {
+    let src = dedent(
+        r#"
+        import re
+
+        def removed() -> str:
+            return re.sub(r"\d", "", "a1b2c3")
+
+        def groups() -> str:
+            return re.sub(r"(\w+)@(\w+)", r"\2 at \1", "me@host")
+
+        def flagged() -> str:
+            return re.sub("A", "-", "aA", 0, re.I)
+
+        def counted() -> str:
+            return re.sub(r"\d+", "X", "a1b2c3", 2)
+
+        def dollar() -> str:
+            return re.sub("a", "$x", "aa")
+
+        def escaped() -> str:
+            return re.escape("a b.c")
+        "#,
+    );
+    assert_eq!(call_str(&src, "removed"), "abc");
+    assert_eq!(call_str(&src, "groups"), "host at me");
+    assert_eq!(call_str(&src, "flagged"), "--");
+    assert_eq!(call_str(&src, "counted"), "aXbXc3");
+    assert_eq!(call_str(&src, "dollar"), "$x$x");
+    assert_eq!(call_str(&src, "escaped"), "a\\ b\\.c");
+    refused(
+        "import re\n\ndef f() -> str:\n    return re.sub(\"x*\", \"-\", \"abxd\")\n",
+        "can match the empty string",
+    );
+    refused(
+        "import re\n\ndef f() -> str:\n    return re.sub(r\"(a)\\1\", \"\", \"aa\")\n",
+        "escape '\\1'",
+    );
+}
+
+/// The standard library's string constants were never interned, so `os.sep`
+/// read the bytes at offset 0; `os.name` was "wasm", which no CPython
+/// reports.
+#[test]
+fn standard_library_string_constants() {
+    let src = dedent(
+        r#"
+        import os
+
+        def joined() -> str:
+            return os.name + os.sep + os.pathsep + os.curdir + os.pardir + os.extsep
+        "#,
+    );
+    assert_eq!(call_str(&src, "joined"), "posix/:....");
+}
+
+/// Constant `%` formatting rendered `%5d`, `%.2f`, and `%r` as written, `%x`
+/// in decimal, `%d` of a float with its fraction, and `%s` of True as
+/// "true". A runtime operand failed validation; it is refused until 0.19.0.
+#[test]
+fn constant_percent_formatting_matches_cpython() {
+    let src = dedent(
+        r#"
+        def widths() -> str:
+            return "%5d|%.2f|%x|%r" % (42, 3.14159, 255, "a")
+
+        def flags() -> str:
+            return "%+05d|%-6.2f|%#x|%o|%X" % (42, -1.005, 255, 8, 3054)
+
+        def conversions() -> str:
+            return "%d %s %r %%" % (3.7, True, "it's")
+
+        def strings() -> str:
+            return "%.1s|%5s|%-5s|" % ("abc", "ab", "cd")
+        "#,
+    );
+    assert_eq!(call_str(&src, "widths"), "   42|3.14|ff|'a'");
+    assert_eq!(call_str(&src, "flags"), "+0042|-1.00 |0xff|10|BEE");
+    assert_eq!(call_str(&src, "conversions"), "3 True \"it's\" %");
+    assert_eq!(call_str(&src, "strings"), "a|   ab|cd   |");
+    refused("def f(n: int) -> str:\n    return \"%d!\" % n\n", "0.19.0");
+    refused(
+        "def f() -> str:\n    return \"%d %d\" % (1,)\n",
+        "not enough arguments",
+    );
+}
+
+/// Decorators CPython does not define (`@memoize`, `@timer`, ...) compiled as
+/// no-ops where CPython raises NameError.
+#[test]
+fn decorators_cpython_does_not_define_are_refused() {
+    for name in [
+        "memoize",
+        "debug",
+        "timer",
+        "default_value",
+        "type_check",
+        "pure",
+        "wasm_export",
+    ] {
+        refused(
+            &format!("@{name}\ndef f() -> int:\n    return 1\n"),
+            &format!("decorator '@{name}'"),
+        );
+    }
+}
+
+/// `print()` writes nothing until the host interface lands in 0.19.0, so a
+/// program that prints imports nothing. This pins that state: when print
+/// gains a host import, this test fails, and the README's statement that
+/// print writes nothing has to change with it.
+#[test]
+fn print_writes_nothing_and_imports_nothing_yet() {
+    let src = "def f() -> int:\n    print(\"hello\", 1)\n    return 3\n";
+    let wasm = try_compile(src).expect("print compiles");
+    let module = wasmi::Module::new(&wasmi::Engine::default(), &wasm[..]).expect("valid module");
+    assert_eq!(module.imports().count(), 0, "print gained a host import");
+    assert_eq!(call_i32(src, "f"), 3);
+}
+
+/// Placeholders the audit found in calls the board did not list: `super()`
+/// with no base method answered 0, `namedtuple()` a null pointer, and the
+/// statement form of a dynamic import stored the module's name.
+#[test]
+fn remaining_placeholders_are_refused() {
+    refused(
+        "class A:\n    def m(self) -> int:\n        return super().m()\n\ndef f() -> int:\n    return A().m()\n",
+        "'super' object has no attribute 'm'",
+    );
+    refused(
+        "from collections import namedtuple\n\ndef f() -> int:\n    P = namedtuple(\"P\", \"x y\")\n    return 1\n",
+        "namedtuple() is not supported",
+    );
+    refused(
+        "def f() -> int:\n    __import__(\"os\")\n    return 1\n",
+        "dynamic import",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Found by the board tests: a test per feature turned up these
+// ---------------------------------------------------------------------------
+
+/// `is` and `is not` dropped both operands and answered False, so `x is None`
+/// was never true and `while node is not None` never ran. Identity is the
+/// word now; where None and 0 share it (an `Optional[int]`, an untyped
+/// value) the test is refused rather than guessed.
+#[test]
+fn identity_and_is_none() {
+    let src = dedent(
+        r#"
+        from typing import Optional
+
+        class Node:
+            def __init__(self, v: int):
+                self.v = v
+                self.next: Optional["Node"] = None
+
+        def walk() -> int:
+            a = Node(1)
+            a.next = Node(2)
+            n = 0
+            cur = a
+            while cur is not None:
+                n += cur.v
+                cur = cur.next
+            return n
+
+        def label(x: Optional[str]) -> str:
+            if x is None:
+                return "none"
+            return x
+
+        def labels() -> str:
+            return label(None) + label("a")
+
+        def instances() -> int:
+            a = Node(1)
+            b = Node(1)
+            c = a
+            r = 0
+            if a is not b:
+                r += 1
+            if a is c:
+                r += 10
+            return r
+        "#,
+    );
+    assert_eq!(call_i32(&src, "walk"), 3);
+    assert_eq!(call_str(&src, "labels"), "nonea");
+    assert_eq!(call_i32(&src, "instances"), 11);
+    refused(
+        "from typing import Optional\n\ndef f(x: Optional[int]) -> int:\n    if x is None:\n        \
+         return -1\n    return x\n",
+        "cannot tell None from 0",
+    );
+}
+
+/// A generator's tuple-unpacking targets stayed WASM locals of its step
+/// function, so `a, b = b, a + b` restarted from zero on every resume and
+/// the first ten Fibonacci numbers summed to 0. A loop target read after a
+/// `yield` would lose its value the same way, and is refused.
+#[test]
+fn generator_unpacking_survives_yield() {
+    let src = dedent(
+        r#"
+        def fib():
+            a, b = 0, 1
+            while True:
+                yield a
+                a, b = b, a + b
+
+        def total() -> int:
+            t = 0
+            g = fib()
+            for i in range(10):
+                t += next(g)
+            return t
+
+        def pairs():
+            for k, v in {"a": 1, "bb": 2}.items():
+                yield len(k) * v
+
+        def weighted() -> int:
+            t = 0
+            for x in pairs():
+                t += x
+            return t
+        "#,
+    );
+    assert_eq!(call_i32(&src, "total"), 88);
+    assert_eq!(call_i32(&src, "weighted"), 5);
+    refused(
+        "def lost():\n    for i in range(3):\n        pass\n    yield 1\n    yield i\n\n\
+         def f() -> int:\n    t = 0\n    for x in lost():\n        t += x\n    return t\n",
+        "does not survive the 'yield'",
+    );
+}
+
+/// The key and value loops over a dict read every key and value as an int
+/// word, so a string key had no length and a float value was half a float.
+#[test]
+fn dict_loops_bind_keys_and_values_at_their_types() {
+    let src = dedent(
+        r#"
+        def keys() -> int:
+            d = {"a": 1, "bb": 2}
+            t = 0
+            for k in d.keys():
+                t += len(k)
+            for k, v in d.items():
+                t += len(k) * v * 100
+            return t
+
+        def floats() -> float:
+            d = {"x": 1.5, "y": 2.25}
+            t = 0.0
+            for v in d.values():
+                t += v
+            for k, v in d.items():
+                t += v
+            return t
+
+        def strings() -> str:
+            d = {1: "p", 2: "qq"}
+            out = ""
+            for v in d.values():
+                out = out + v
+            return out
+        "#,
+    );
+    assert_eq!(call_i32(&src, "keys"), 503);
+    assert_eq!(call_f64(&src, "floats"), 7.5);
+    assert_eq!(call_str(&src, "strings"), "pqq");
+}
+
+/// `from math import pi, e` read both names as undefined, which pushed -999
+/// each: `pi + e` answered -1998. A from-import reads through the module now,
+/// and a name nothing binds is a compile error.
+#[test]
+fn from_imported_constants_and_undefined_names() {
+    let src = "from math import pi, e\n\ndef f() -> float:\n    return pi + e\n";
+    assert_eq!(
+        call_f64(src, "f"),
+        std::f64::consts::PI + std::f64::consts::E
+    );
+    refused(
+        "from json import dumps\n\ndef f() -> int:\n    return len(dumps([1]))\n",
+        "'json.dumps()'",
+    );
+    refused(
+        "def f() -> int:\n    return missing + 1\n",
+        "name 'missing' is not defined",
+    );
+}
+
+/// A str or bytes slice ignored its step, so `s[::-1]` answered `s`.
+#[test]
+fn stepped_text_slices() {
+    let src = dedent(
+        r#"
+        def w() -> str:
+            return "abcdefg" + ""
+
+        def slices() -> str:
+            s = w()
+            return s[::-1] + "|" + s[1::2] + "|" + s[4:1:-1] + "|" + s[-1:-4:-1] + "|" + s[10::-3] + "|" + s[1:4:-1]
+
+        def raw() -> int:
+            b = b"abcdef"
+            return len(b[::-2]) * 1000 + b[::-2][0]
+        "#,
+    );
+    assert_eq!(call_str(&src, "slices"), "gfedcba|bdf|edc|gfe|gda|");
+    assert_eq!(call_i32(&src, "raw"), 3102);
+}
+
+/// `center()` put an odd margin's extra space on the right always, where
+/// CPython puts it on the left for an odd width; and a fill character was
+/// ignored on a literal receiver and refused on a runtime one.
+#[test]
+fn layout_margins_and_fill_characters() {
+    let src = dedent(
+        r#"
+        def w(s: str) -> str:
+            return s + ""
+
+        def runtime() -> str:
+            return w("ab").center(5) + "|" + w("abc").center(6, "*") + "|" + w("a").ljust(3, ".") + "|" + w("a").rjust(3, "-")
+
+        def literal() -> str:
+            return "ab".center(5) + "|" + "abc".center(6, "*") + "|" + "a".ljust(3, ".") + "|" + "a".rjust(3, "-")
+        "#,
+    );
+    let expected = "  ab |*abc**|a..|--a";
+    assert_eq!(call_str(&src, "runtime"), expected);
+    assert_eq!(call_str(&src, "literal"), expected);
+}
+
+/// A function declared `-> None` returned a word its call statement did not
+/// drop, so calling one inside a loop failed validation; where its value is
+/// used, the value is None.
+#[test]
+fn none_returning_calls_in_loops_and_as_values() {
+    let src = dedent(
+        r#"
+        class Q:
+            def __init__(self):
+                self.n = 0
+
+            def push(self, v: int) -> None:
+                self.n += v
+
+        def nothing() -> None:
+            pass
+
+        def f() -> int:
+            q = Q()
+            for i in range(4):
+                q.push(i)
+            r = q.n
+            if nothing() is None:
+                r += 100
+            return r
+        "#,
+    );
+    assert_eq!(call_i32(&src, "f"), 106);
+}
+
+/// `"{} {0}".format(n)` mixed automatic and numbered fields, which CPython
+/// rejects with ValueError, and compiled.
+#[test]
+fn format_refuses_mixed_field_numbering() {
+    refused(
+        "def f(n: int) -> str:\n    return \"{} {0}\".format(n)\n",
+        "cannot switch from automatic field numbering",
     );
 }

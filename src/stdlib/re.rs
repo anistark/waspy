@@ -232,47 +232,6 @@ impl CompiledPattern {
             None => self.regex.split(text).map(|s| s.to_string()).collect(),
         }
     }
-
-    pub fn sub(&self, repl: &str, text: &str, count: Option<usize>) -> String {
-        match count {
-            Some(0) => text.to_string(),
-            Some(n) => {
-                let mut result = text.to_string();
-                for _ in 0..n {
-                    if let Some(m) = self.regex.find(&result) {
-                        let expanded = expand_replacement(repl, &result, &self.regex);
-                        result =
-                            format!("{}{}{}", &result[..m.start()], expanded, &result[m.end()..]);
-                    } else {
-                        break;
-                    }
-                }
-                result
-            }
-            None => self.regex.replace_all(text, repl).to_string(),
-        }
-    }
-
-    pub fn subn(&self, repl: &str, text: &str, count: Option<usize>) -> (String, usize) {
-        let mut result = text.to_string();
-        let mut num_subs = 0;
-        let max_count = count.unwrap_or(usize::MAX);
-
-        while num_subs < max_count {
-            if let Some(m) = self.regex.find(&result) {
-                let expanded = expand_replacement(repl, &result, &self.regex);
-                result = format!("{}{}{}", &result[..m.start()], expanded, &result[m.end()..]);
-                num_subs += 1;
-            } else {
-                break;
-            }
-        }
-        (result, num_subs)
-    }
-}
-
-fn expand_replacement(repl: &str, _text: &str, _regex: &Regex) -> String {
-    repl.to_string()
 }
 
 pub fn search(pattern: &str, text: &str, flags: i32) -> Option<MatchResult> {
@@ -311,28 +270,276 @@ pub fn split(pattern: &str, text: &str, maxsplit: Option<usize>, flags: i32) -> 
     }
 }
 
-pub fn sub(pattern: &str, repl: &str, text: &str, count: Option<usize>, flags: i32) -> String {
-    match compile(pattern, flags) {
-        Ok(compiled) => compiled.sub(repl, text, count),
-        Err(_) => text.to_string(),
+/// `re.escape`, character for character: CPython 3.7+ escapes exactly these
+/// characters and no others (`regex::escape` escapes a different set, leaving
+/// space and the whitespace controls bare).
+pub fn escape(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len());
+    for c in pattern.chars() {
+        if "()[]{}?*+-|^$\\.&~# \t\n\r\x0b\x0c".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
     }
+    out
 }
 
-pub fn subn(
+/// Flags whose meaning the `regex` crate shares with CPython's `re` for the
+/// patterns [`fold_sub`] accepts: IGNORECASE, MULTILINE, DOTALL, UNICODE, and
+/// ASCII. VERBOSE strips whitespace by rules of its own and is refused.
+const FOLDABLE_FLAGS: i32 = 2 | 8 | 16 | 32 | 256;
+
+/// `re.sub(pattern, repl, text, count, flags)` over constants, folded at
+/// compile time, or the reason the fold could differ from CPython.
+///
+/// The `regex` crate is not CPython's engine, so the fold is limited to the
+/// subset where the two provably agree, and refuses everything else rather
+/// than guess:
+///
+/// - ASCII pattern, replacement, and text (the Unicode classes differ at the
+///   edges, and `\s` in Python also matches `\x1c`..`\x1f`);
+/// - escapes limited to the classes, anchors, and escaped punctuation both
+///   read the same way; no backreferences, lookaround, inline flags, nested or
+///   set-operation classes, or `{` that is not a counted repetition;
+/// - a pattern that cannot match the empty string, since the two engines
+///   resume differently after an empty match;
+/// - `$` only where the text has no newline (Python's also matches before a
+///   final one);
+/// - Python's replacement syntax, expanded here: `\1`..`\9`, `\g<n>`,
+///   `\g<name>`, and the character escapes.
+pub fn fold_sub(
     pattern: &str,
     repl: &str,
     text: &str,
-    count: Option<usize>,
+    count: i32,
     flags: i32,
-) -> (String, usize) {
-    match compile(pattern, flags) {
-        Ok(compiled) => compiled.subn(repl, text, count),
-        Err(_) => (text.to_string(), 0),
+) -> Result<String, String> {
+    if flags & !FOLDABLE_FLAGS != 0 {
+        return Err("only the IGNORECASE, MULTILINE, DOTALL, and ASCII flags are folded".into());
     }
+    if count < 0 {
+        return Err("a negative count is not folded".into());
+    }
+    for (what, s) in [("pattern", pattern), ("replacement", repl), ("text", text)] {
+        if !s.is_ascii() || s.chars().any(|c| ('\x1c'..='\x1f').contains(&c)) {
+            return Err(format!("the {what} is not plain ASCII"));
+        }
+    }
+    check_pattern(pattern)?;
+    let re_flags = ReFlags::from_int(flags);
+    if pattern.contains('$') && !re_flags.multiline && text.contains('\n') {
+        return Err("'$' over text containing a newline is not folded".into());
+    }
+    let hir = regex_syntax::ParserBuilder::new()
+        .case_insensitive(re_flags.ignorecase)
+        .multi_line(re_flags.multiline)
+        .dot_matches_new_line(re_flags.dotall)
+        .unicode(!re_flags.ascii)
+        .build()
+        .parse(pattern)
+        .map_err(|e| format!("the pattern is not one this compiler can fold: {e}"))?;
+    if hir.properties().minimum_len().unwrap_or(0) == 0 {
+        return Err("a pattern that can match the empty string is not folded".into());
+    }
+    let regex = build_regex(pattern, re_flags)?;
+    let template = parse_template(repl, &regex)?;
+
+    let mut out = String::new();
+    let mut last = 0;
+    for (n, caps) in regex.captures_iter(text).enumerate() {
+        if count > 0 && n as i32 >= count {
+            break;
+        }
+        let whole = caps.get(0).expect("group 0 always participates");
+        out.push_str(&text[last..whole.start()]);
+        for piece in &template {
+            match piece {
+                TemplatePiece::Text(t) => out.push_str(t),
+                TemplatePiece::Group(g) => {
+                    if let Some(m) = caps.get(*g) {
+                        out.push_str(m.as_str());
+                    }
+                }
+            }
+        }
+        last = whole.end();
+    }
+    out.push_str(&text[last..]);
+    Ok(out)
 }
 
-pub fn escape(pattern: &str) -> String {
-    regex::escape(pattern)
+/// Lexical check of a pattern against the subset [`fold_sub`] folds.
+fn check_pattern(pattern: &str) -> Result<(), String> {
+    let refuse = |what: &str| Err(format!("{what} in a pattern is not folded"));
+    let bytes = pattern.as_bytes();
+    let mut i = 0;
+    let mut in_class = false;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        let next = bytes.get(i + 1).map(|&b| b as char);
+        match c {
+            '\\' => {
+                let Some(e) = next else {
+                    return refuse("a trailing backslash");
+                };
+                let class_escape = "dDwWsSntrfv".contains(e);
+                let anchor_escape = !in_class && "bBA".contains(e);
+                if !(class_escape || anchor_escape || (e.is_ascii_punctuation())) {
+                    return refuse(&format!("the escape '\\{e}'"));
+                }
+                i += 2;
+                continue;
+            }
+            '[' if in_class => return refuse("a nested '['"),
+            '[' => {
+                in_class = true;
+                // A leading ']' (or '^]') is a literal in Python.
+                if next == Some('^') {
+                    i += 1;
+                }
+                if bytes.get(i + 1) == Some(&b']') {
+                    return refuse("a ']' first in a class");
+                }
+            }
+            ']' if in_class => in_class = false,
+            '&' | '-' | '~' if in_class && next == Some(c) => {
+                return refuse("a doubled set operator in a class")
+            }
+            '(' if !in_class && next == Some('?') => {
+                let rest = &pattern[i + 2..];
+                if !(rest.starts_with(':') || rest.starts_with("P<")) {
+                    return refuse("a '(?' group other than '(?:' and '(?P<name>'");
+                }
+            }
+            '{' if !in_class => {
+                let close = pattern[i..].find('}').map(|j| i + j);
+                let body = close.map(|j| &pattern[i + 1..j]).unwrap_or("");
+                let counted = !body.is_empty()
+                    && !body.starts_with(',')
+                    && body.chars().all(|ch| ch.is_ascii_digit() || ch == ',')
+                    && body.matches(',').count() <= 1;
+                if !counted {
+                    return refuse("a '{' that is not a counted repetition");
+                }
+                i = close.expect("a counted repetition is closed") + 1;
+                if bytes.get(i) == Some(&b'+') {
+                    return refuse("a possessive quantifier");
+                }
+                continue;
+            }
+            '*' | '+' | '?' if !in_class && next == Some('+') => {
+                return refuse("a possessive quantifier")
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if in_class {
+        return refuse("an unterminated class");
+    }
+    Ok(())
+}
+
+enum TemplatePiece {
+    Text(String),
+    Group(usize),
+}
+
+/// Parse a Python replacement string the way `re` does, refusing the forms
+/// CPython rejects or reads as octal.
+fn parse_template(repl: &str, regex: &Regex) -> Result<Vec<TemplatePiece>, String> {
+    let mut pieces = Vec::new();
+    let mut text = String::new();
+    let mut chars = repl.chars().peekable();
+    let group_count = regex.captures_len();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            text.push(c);
+            continue;
+        }
+        let Some(e) = chars.next() else {
+            return Err("the replacement ends in a backslash".into());
+        };
+        let group = match e {
+            '1'..='9' => {
+                if chars.peek().is_some_and(|d| d.is_ascii_digit()) {
+                    return Err(
+                        "a two-digit group reference in the replacement is not folded".into(),
+                    );
+                }
+                Some(e as usize - '0' as usize)
+            }
+            'g' => {
+                if chars.next() != Some('<') {
+                    return Err("a malformed '\\g' in the replacement".into());
+                }
+                let name: String = chars.by_ref().take_while(|&ch| ch != '>').collect();
+                let index = match name.parse::<usize>() {
+                    Ok(n) => n,
+                    Err(_) => regex
+                        .capture_names()
+                        .position(|n| n == Some(name.as_str()))
+                        .ok_or_else(|| format!("unknown group name '{name}' in the replacement"))?,
+                };
+                Some(index)
+            }
+            'a' => {
+                text.push('\x07');
+                None
+            }
+            'b' => {
+                text.push('\x08');
+                None
+            }
+            'f' => {
+                text.push('\x0c');
+                None
+            }
+            'n' => {
+                text.push('\n');
+                None
+            }
+            'r' => {
+                text.push('\r');
+                None
+            }
+            't' => {
+                text.push('\t');
+                None
+            }
+            'v' => {
+                text.push('\x0b');
+                None
+            }
+            '\\' => {
+                text.push('\\');
+                None
+            }
+            other if other.is_ascii_alphanumeric() => {
+                return Err(format!("the replacement escape '\\{other}' is not folded"));
+            }
+            other => {
+                text.push('\\');
+                text.push(other);
+                None
+            }
+        };
+        if let Some(g) = group {
+            if g >= group_count {
+                return Err(format!(
+                    "the replacement refers to group {g}, which the pattern lacks"
+                ));
+            }
+            if !text.is_empty() {
+                pieces.push(TemplatePiece::Text(std::mem::take(&mut text)));
+            }
+            pieces.push(TemplatePiece::Group(g));
+        }
+    }
+    if !text.is_empty() {
+        pieces.push(TemplatePiece::Text(text));
+    }
+    Ok(pieces)
 }
 
 #[cfg(test)]
@@ -393,29 +600,51 @@ mod tests {
         assert_eq!(results, vec!["a", "b", "c d"]);
     }
 
+    // Expected values below are CPython 3.13's for the same call.
     #[test]
-    fn test_sub() {
-        let result = sub(r"\d+", "X", "a1b2c3", None, 0);
-        assert_eq!(result, "aXbXcX");
+    fn test_fold_sub() {
+        assert_eq!(fold_sub(r"\d+", "X", "a1b2c3", 0, 0).unwrap(), "aXbXcX");
+        assert_eq!(fold_sub(r"\d+", "X", "a1b2c3", 2, 0).unwrap(), "aXbXc3");
+        assert_eq!(fold_sub(r"\d", "", "a1b2c3", 0, 0).unwrap(), "abc");
+        assert_eq!(
+            fold_sub(r"(\w+)@(\w+)", r"\2 at \1", "me@host", 0, 0).unwrap(),
+            "host at me"
+        );
+        assert_eq!(
+            fold_sub(r"(?P<w>b+)", r"[\g<w>]", "abbc", 0, 0).unwrap(),
+            "a[bb]c"
+        );
+        assert_eq!(fold_sub("a", "$x", "aa", 0, 0).unwrap(), "$x$x");
+        assert_eq!(fold_sub("A", "-", "aA", 0, 2).unwrap(), "--");
+        assert_eq!(fold_sub("x+", r"\n", "axb", 0, 0).unwrap(), "a\nb");
     }
 
     #[test]
-    fn test_sub_with_count() {
-        let result = sub(r"\d+", "X", "a1b2c3", Some(2), 0);
-        assert_eq!(result, "aXbXc3");
-    }
-
-    #[test]
-    fn test_subn() {
-        let (result, count) = subn(r"\d+", "X", "a1b2c3", None, 0);
-        assert_eq!(result, "aXbXcX");
-        assert_eq!(count, 3);
+    fn test_fold_sub_refuses_what_could_differ() {
+        for (pattern, repl, text, flags) in [
+            ("x*", "-", "abxd", 0),
+            (r"(a)\1", "", "aa", 0),
+            ("a(?=b)", "", "ab", 0),
+            ("a$", "", "a\n", 0),
+            ("[a&&b]", "", "a", 0),
+            (r"\pL", "", "a", 0),
+            ("a", r"\10", "a", 0),
+            ("a", r"\q", "a", 0),
+            ("a b", "", "ab", 64),
+            ("é", "", "é", 0),
+            ("a{,2}", "", "a", 0),
+        ] {
+            assert!(
+                fold_sub(pattern, repl, text, 0, flags).is_err(),
+                "{pattern:?} -> {repl:?} over {text:?} should not fold"
+            );
+        }
     }
 
     #[test]
     fn test_escape() {
-        let result = escape("a.b*c?");
-        assert_eq!(result, r"a\.b\*c\?");
+        assert_eq!(escape("a.b*c?"), r"a\.b\*c\?");
+        assert_eq!(escape("a b\t_c"), "a\\ b\\\t_c");
     }
 
     #[test]

@@ -96,10 +96,31 @@ fn infer_field_value_type(
         IRExpr::Variable(name) | IRExpr::Param(name) => {
             params.get(name).cloned().unwrap_or(IRType::Unknown)
         }
-        IRExpr::BinaryOp { left, right, .. } => {
+        IRExpr::Attribute { object, attribute } if is_self_ref(object) => params
+            .get(&format!("self.{attribute}"))
+            .cloned()
+            .unwrap_or(IRType::Unknown),
+        // A dict loop's key or value (see the dict loops in `ir::converter`).
+        IRExpr::FunctionCall {
+            function_name,
+            arguments,
+        } if function_name == crate::ir::DICT_KEY_AT_FN
+            || function_name == crate::ir::DICT_VAL_AT_FN =>
+        {
+            match arguments
+                .first()
+                .map(|d| infer_field_value_type(d, params, classes))
+            {
+                Some(IRType::Dict(k, _)) if function_name == crate::ir::DICT_KEY_AT_FN => *k,
+                Some(IRType::Dict(_, v)) => *v,
+                _ => IRType::Unknown,
+            }
+        }
+        IRExpr::BinaryOp { left, right, op } => {
             let lt = infer_field_value_type(left, params, classes);
             let rt = infer_field_value_type(right, params, classes);
-            if lt == IRType::Float || rt == IRType::Float {
+            // `/` is true division whatever its operands (#132).
+            if lt == IRType::Float || rt == IRType::Float || matches!(op, IROp::Div) {
                 IRType::Float
             } else {
                 lt
@@ -116,8 +137,12 @@ fn infer_field_value_type(
             IRType::Set(Box::new(shared_element_type(elems, params, classes)))
         }
         IRExpr::TupleLiteral(_) => IRType::Tuple(Vec::new()),
-        IRExpr::DictLiteral(_) => {
-            IRType::Dict(Box::new(IRType::Unknown), Box::new(IRType::Unknown))
+        IRExpr::DictLiteral(entries) => {
+            let (keys, values): (Vec<IRExpr>, Vec<IRExpr>) = entries.iter().cloned().unzip();
+            IRType::Dict(
+                Box::new(shared_element_type(&keys, params, classes)),
+                Box::new(shared_element_type(&values, params, classes)),
+            )
         }
         IRExpr::RangeCall { .. } => IRType::Range,
         _ => IRType::Unknown,
@@ -561,7 +586,7 @@ fn collect_annotated_self_fields(body: &IRBody, out: &mut Vec<(String, IRType)>)
 /// method body, recursing into nested blocks, with each field's inferred type.
 fn collect_self_fields(
     body: &IRBody,
-    params: &HashMap<String, IRType>,
+    params: &mut HashMap<String, IRType>,
     classes: &HashSet<String>,
     out: &mut Vec<(String, IRType)>,
 ) {
@@ -573,12 +598,15 @@ fn collect_self_fields(
                 value,
                 annotation,
             } if is_self_ref(object) => {
-                out.push((
-                    attribute.clone(),
-                    annotation
-                        .clone()
-                        .unwrap_or_else(|| infer_field_value_type(value, params, classes)),
-                ));
+                let ty = annotation
+                    .clone()
+                    .unwrap_or_else(|| infer_field_value_type(value, params, classes));
+                // A later field's value may read this one (`self.k =
+                // __dict_key_at(self.__dict_0, i)` in a generator).
+                params
+                    .entry(format!("self.{attribute}"))
+                    .or_insert_with(|| ty.clone());
+                out.push((attribute.clone(), ty));
             }
             IRStatement::AttributeAugAssign {
                 object,
@@ -829,7 +857,7 @@ fn build_i32_to_str_function(alloc_func_index: u32) -> Function {
 fn expr_uses_open(expr: &IRExpr) -> bool {
     match expr {
         IRExpr::EnvRead { .. } | IRExpr::CellNew | IRExpr::CellLoad { .. } => false,
-        IRExpr::CellStore { value, .. } => expr_uses_open(value),
+        IRExpr::CellStore { value, .. } | IRExpr::Keyword { value, .. } => expr_uses_open(value),
         IRExpr::FunctionCall {
             function_name,
             arguments,
@@ -1076,7 +1104,15 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
     // `mod.f(...)` resolve to the merged `f`), and `from mod import f as g`
     // aliases `g` to the merged `f`.
     for imp in &ir_module.imports {
-        if crate::stdlib::is_stdlib_module(&imp.module) || imp.is_dynamic {
+        if crate::stdlib::is_stdlib_module(&imp.module) {
+            if let (true, Some(name)) = (imp.is_from_import, &imp.name) {
+                let binding = imp.alias.clone().unwrap_or_else(|| name.clone());
+                ctx.stdlib_imports
+                    .insert(binding, (imp.module.clone(), name.clone()));
+            }
+            continue;
+        }
+        if imp.is_dynamic {
             continue;
         }
         if imp.is_from_import {
@@ -1447,7 +1483,7 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
                 .map(|p| (p.name.clone(), p.param_type.clone()))
                 .collect();
             let mut fields = Vec::new();
-            collect_self_fields(&method.body, &params, &class_names, &mut fields);
+            collect_self_fields(&method.body, &mut params.clone(), &class_names, &mut fields);
             for (name, ty) in fields {
                 if property_names.contains(&name) {
                     continue;

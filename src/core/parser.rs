@@ -335,28 +335,12 @@ fn validate_stmt(stmt: &Stmt, source: &str, function: Option<&str>) -> Result<()
             validate_body(&def.body, source, function)
         }
         Stmt::For(stmt) => {
-            if !stmt.orelse.is_empty() {
-                return Err(unsupported(
-                    "'for ... else:' clauses are not supported (the else body would be \
-                     silently skipped). Hint: track completion with a flag variable",
-                    source,
-                    stmt.range.start().into(),
-                    function,
-                ));
-            }
-            validate_body(&stmt.body, source, function)
+            validate_body(&stmt.body, source, function)?;
+            validate_body(&stmt.orelse, source, function)
         }
         Stmt::While(stmt) => {
-            if !stmt.orelse.is_empty() {
-                return Err(unsupported(
-                    "'while ... else:' clauses are not supported (the else body would be \
-                     silently skipped). Hint: track completion with a flag variable",
-                    source,
-                    stmt.range.start().into(),
-                    function,
-                ));
-            }
-            validate_body(&stmt.body, source, function)
+            validate_body(&stmt.body, source, function)?;
+            validate_body(&stmt.orelse, source, function)
         }
         Stmt::If(stmt) => {
             validate_body(&stmt.body, source, function)?;

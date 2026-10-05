@@ -92,6 +92,151 @@ pub fn finalize_module(module: &mut IRModule) -> Result<()> {
     Ok(())
 }
 
+/// Move every keyword argument of a call to a function or class of this module
+/// into its parameter's position, filling any parameter skipped in between with
+/// its default.
+///
+/// Keywords on a plain call used to be dropped, so `f(1, b=5)` ran `f(1)` with
+/// `b` at its default and `enumerate(xs, start=1)` counted from 0, each
+/// reporting success. A keyword this pass does not place (a builtin, a closure,
+/// a function from another file) stays in the call, and code generation
+/// refuses it.
+///
+/// Runs before the other module passes, which walk expressions with wildcard
+/// arms that would not descend into a keyword's value.
+pub fn resolve_keyword_arguments(module: &mut IRModule) -> Result<()> {
+    let facts = resolve_class_facts(&module.classes);
+    let mut signatures: HashMap<String, Vec<IRParam>> = module
+        .functions
+        .iter()
+        .map(|f| (f.name.clone(), f.params.clone()))
+        .collect();
+    for (name, class_facts) in &facts {
+        // Instantiation supplies `self`.
+        let params = class_facts.init_params.iter().skip(1).cloned().collect();
+        signatures.insert(name.clone(), params);
+    }
+
+    let mut rewrite = |expr: &mut IRExpr| -> Result<()> {
+        if let IRExpr::FunctionCall {
+            function_name,
+            arguments,
+        } = expr
+        {
+            if let Some(params) = signatures.get(function_name.as_str()) {
+                place_keywords(function_name, arguments, params)?;
+            }
+        }
+        Ok(())
+    };
+    for func in &mut module.functions {
+        visit_body(&mut func.body, &mut rewrite)?;
+    }
+    for class in &mut module.classes {
+        for method in &mut class.methods {
+            visit_body(&mut method.body, &mut rewrite)?;
+        }
+    }
+    for var in &mut module.variables {
+        visit_expr(&mut var.value, &mut rewrite)?;
+    }
+    Ok(())
+}
+
+/// Whether evaluating `expr` can have an effect another argument could
+/// observe, so moving it changes the program.
+fn may_have_effects(expr: &IRExpr) -> bool {
+    !matches!(
+        expr,
+        IRExpr::Const(_) | IRExpr::Variable(_) | IRExpr::Param(_) | IRExpr::Lambda { .. }
+    )
+}
+
+fn place_keywords(callee: &str, arguments: &mut Vec<IRExpr>, params: &[IRParam]) -> Result<()> {
+    let positional = arguments
+        .iter()
+        .take_while(|a| !matches!(a, IRExpr::Keyword { .. }))
+        .count();
+    if positional == arguments.len() {
+        return Ok(());
+    }
+    let type_error = |message: String| -> anyhow::Error {
+        crate::core::errors::type_error(message, None).into()
+    };
+    if positional > params.len() {
+        return Err(type_error(format!(
+            "{callee}() takes {} positional argument(s) but {positional} were given",
+            params.len()
+        )));
+    }
+
+    let keywords: Vec<(String, IRExpr)> = arguments
+        .drain(positional..)
+        .map(|a| match a {
+            IRExpr::Keyword { name, value } => Ok((name, *value)),
+            _ => Err(type_error(format!(
+                "a positional argument follows a keyword argument in a call to {callee}()"
+            ))),
+        })
+        .collect::<Result<_>>()?;
+
+    let mut slots: Vec<Option<IRExpr>> = vec![None; params.len()];
+    let mut order = Vec::new();
+    for (name, value) in keywords {
+        let Some(index) = params.iter().position(|p| p.name == name) else {
+            return Err(type_error(format!(
+                "{callee}() got an unexpected keyword argument '{name}'"
+            )));
+        };
+        if index < positional || slots[index].is_some() {
+            return Err(type_error(format!(
+                "{callee}() got multiple values for argument '{name}'"
+            )));
+        }
+        order.push((index, may_have_effects(&value)));
+        slots[index] = Some(value);
+    }
+
+    // The values are evaluated in parameter order once placed. That is the
+    // order they were written in unless the call reorders two of them, which
+    // only matters when one of those has an effect.
+    let reordered = order.windows(2).any(|w| w[0].0 > w[1].0);
+    if reordered && order.iter().any(|&(_, effects)| effects) {
+        return Err(crate::core::errors::unsupported_feature(
+            format!(
+                "keyword arguments to {callee}() written out of parameter order, where one \
+                 of them is computed, would be evaluated in a different order than Python's. \
+                 Hint: pass them in parameter order, or compute the values into variables first"
+            ),
+            None,
+        )
+        .into());
+    }
+
+    let last = slots.iter().rposition(Option::is_some).unwrap_or(0);
+    for (index, slot) in slots
+        .into_iter()
+        .enumerate()
+        .skip(positional)
+        .take(last + 1 - positional)
+    {
+        let value = match slot {
+            Some(value) => value,
+            None => match &params[index].default_value {
+                Some(default) => default.clone(),
+                None => {
+                    return Err(type_error(format!(
+                        "{callee}() missing required argument: '{}'",
+                        params[index].name
+                    )))
+                }
+            },
+        };
+        arguments.push(value);
+    }
+    Ok(())
+}
+
 /// Names that resolve as built-in calls at codegen; a reference to one inside
 /// a lambda body is never a captured variable.
 const BUILTIN_NAMES: [&str; 16] = [
@@ -630,6 +775,32 @@ fn visit_stmt_exprs(stmt: &mut IRStatement, f: &mut impl FnMut(&mut IRExpr)) {
     }
 }
 
+/// Whether `body` reads `name` anywhere other than in `raise name`.
+pub(crate) fn reads_name_beyond_reraise(body: &mut IRBody, name: &str) -> bool {
+    let mut found = false;
+    for stmt in &mut body.statements {
+        match stmt {
+            IRStatement::Raise {
+                exception: Some(IRExpr::Variable(n)),
+            } if n == name => continue,
+            IRStatement::AugAssign { target, .. } if target == name => return true,
+            _ => {}
+        }
+        visit_stmt_exprs(stmt, &mut |e| {
+            if matches!(e, IRExpr::Variable(n) | IRExpr::Param(n) if n == name) {
+                found = true;
+            }
+        });
+        for nested in nested_bodies_mut(stmt) {
+            found |= reads_name_beyond_reraise(nested, name);
+        }
+        if found {
+            return true;
+        }
+    }
+    false
+}
+
 /// Apply `f` to `expr` and, post-order, to every expression inside it.
 fn walk_expr(expr: &mut IRExpr, f: &mut impl FnMut(&mut IRExpr)) {
     let _ = visit_expr(expr, &mut |e: &mut IRExpr| {
@@ -673,6 +844,7 @@ fn collect_free_names(
             consider(cell, bound, out);
             collect_free_names(value, bound, globals, out);
         }
+        IRExpr::Keyword { value, .. } => collect_free_names(value, bound, globals, out),
         IRExpr::Const(_) => {}
         IRExpr::BinaryOp { left, right, .. }
         | IRExpr::CompareOp { left, right, .. }
@@ -995,7 +1167,7 @@ fn visit_expr(expr: &mut IRExpr, f: &mut impl FnMut(&mut IRExpr) -> Result<()>) 
         | IRExpr::EnvRead { .. }
         | IRExpr::CellNew
         | IRExpr::CellLoad { .. } => {}
-        IRExpr::CellStore { value, .. } => visit_expr(value, f)?,
+        IRExpr::CellStore { value, .. } | IRExpr::Keyword { value, .. } => visit_expr(value, f)?,
         IRExpr::BinaryOp { left, right, .. }
         | IRExpr::CompareOp { left, right, .. }
         | IRExpr::BoolOp { left, right, .. } => {

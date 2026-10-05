@@ -2,7 +2,9 @@ use crate::stdlib::StdlibValue;
 
 pub fn get_attribute(attr: &str) -> Option<StdlibValue> {
     match attr {
-        "name" => Some(StdlibValue::String("wasm".to_string())),
+        // What CPython reports on every WebAssembly host (Emscripten, WASI),
+        // and the platform the separators below belong to.
+        "name" => Some(StdlibValue::String("posix".to_string())),
         "sep" => Some(StdlibValue::String("/".to_string())),
         "pathsep" => Some(StdlibValue::String(":".to_string())),
         "linesep" => Some(StdlibValue::String("\n".to_string())),
@@ -10,11 +12,6 @@ pub fn get_attribute(attr: &str) -> Option<StdlibValue> {
         "curdir" => Some(StdlibValue::String(".".to_string())),
         "pardir" => Some(StdlibValue::String("..".to_string())),
         "extsep" => Some(StdlibValue::String(".".to_string())),
-        "environ" => Some(StdlibValue::Dict(vec![
-            ("PATH".to_string(), "/usr/bin".to_string()),
-            ("HOME".to_string(), "/".to_string()),
-            ("USER".to_string(), "wasm".to_string()),
-        ])),
         "path" => Some(StdlibValue::Module("os.path".to_string())),
         _ => None,
     }

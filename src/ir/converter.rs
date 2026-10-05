@@ -12,6 +12,9 @@ use std::collections::HashSet;
 /// codegen.
 pub const DICT_KEY_AT_FN: &str = "__dict_key_at";
 pub const DICT_VAL_AT_FN: &str = "__dict_val_at";
+/// Prefix of the locals holding zip()'s arguments after the first, which the
+/// loop reads by length and index.
+pub const ZIP_SEQ_PREFIX: &str = "__zip_";
 
 /// Lower a Python AST (Suite) into our IR.
 pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
@@ -153,11 +156,15 @@ pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
                 let imports = process_import_from(stmt, in_try_block, &conditional_fallbacks)?;
                 module.imports.extend(imports);
             }
-            Stmt::Expr(_) => {
-                // Skip module-level expressions like docstrings
-                // But check for dynamic imports
+            Stmt::Expr(expr) => {
                 if let Some(dynamic_import) = process_dynamic_import(stmt, &mut memory_layout)? {
                     module.imports.push(dynamic_import);
+                    continue;
+                }
+                // A docstring (or `...`) has no effect; any other expression
+                // statement would be dropped, since only definitions run.
+                if !matches!(&*expr.value, Expr::Constant(_)) {
+                    return Err(module_statement_not_run("an expression statement"));
                 }
                 continue;
             }
@@ -166,6 +173,26 @@ pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
                 // in_try_block = true;
 
                 // Process try-except blocks for conditional imports
+                if let Stmt::Try(try_stmt) = stmt {
+                    let handler_bodies = try_stmt.handlers.iter().flat_map(|h| {
+                        let ExceptHandler::ExceptHandler(h) = h;
+                        h.body.iter()
+                    });
+                    let only_imports = try_stmt
+                        .body
+                        .iter()
+                        .chain(handler_bodies)
+                        .chain(&try_stmt.orelse)
+                        .chain(&try_stmt.finalbody)
+                        .all(|s| {
+                            matches!(s, Stmt::Import(_) | Stmt::ImportFrom(_) | Stmt::Pass(_))
+                        });
+                    if !only_imports {
+                        return Err(module_statement_not_run(
+                            "a 'try' statement holding anything but imports",
+                        ));
+                    }
+                }
                 let (imports, fallbacks) = process_try_except_imports(stmt)?;
 
                 // Add imports from the try block
@@ -177,14 +204,27 @@ pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
                 // We're no longer in a try block after processing it
                 in_try_block = false;
             }
-            _ => {
-                // Reset try block state for other statements
+            Stmt::Pass(_) => continue,
+            // The `__main__` block runs only when the file is executed as a
+            // script; a compiled module is instantiated, as an import is.
+            Stmt::If(if_stmt) if is_main_guard(&if_stmt.test) => {
                 in_try_block = false;
                 conditional_fallbacks.clear();
-
-                // Ignore other module-level statements for now
-                // But don't error out so we can compile more files
                 continue;
+            }
+            other => {
+                // A statement here used to be skipped, so a module-level
+                // loop, call, or augmented assignment silently never ran.
+                let kind = match other {
+                    Stmt::If(_) => "an 'if' statement",
+                    Stmt::For(_) => "a 'for' loop",
+                    Stmt::While(_) => "a 'while' loop",
+                    Stmt::AugAssign(_) => "an augmented assignment",
+                    Stmt::With(_) => "a 'with' statement",
+                    Stmt::Delete(_) => "a 'del' statement",
+                    _ => "this statement",
+                };
+                return Err(module_statement_not_run(kind));
             }
         }
     }
@@ -200,11 +240,105 @@ pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
     // the later passes must still see, and rejects `yield` inside `with`),
     // then the context-manager protocol, then whole-module checks and rewrites
     // (abstract-class instantiation, call-site parameter defaults).
+    crate::ir::finalize::resolve_keyword_arguments(&mut module)?;
     crate::ir::generators::transform_generators(&mut module)?;
     crate::ir::context_managers::desugar_with_statements(&mut module)?;
     crate::ir::finalize::finalize_module(&mut module)?;
 
     Ok(module)
+}
+
+/// Fold `re.sub` and `re.escape` over constant arguments into the string
+/// CPython would produce. `None` leaves the call for code generation, which
+/// refuses it; a constant call whose answer the fold cannot guarantee is an
+/// error naming why.
+fn fold_re_call(
+    method_name: &str,
+    arguments: &[IRExpr],
+    memory_layout: &mut MemoryLayout,
+) -> Result<Option<IRExpr>> {
+    fn text(expr: &IRExpr) -> Option<&str> {
+        match expr {
+            IRExpr::Const(IRConstant::String(s)) => Some(s),
+            _ => None,
+        }
+    }
+    fn int(expr: &IRExpr) -> Option<i32> {
+        match expr {
+            IRExpr::Const(IRConstant::Int(n)) => Some(*n),
+            IRExpr::Const(IRConstant::Bool(b)) => Some(*b as i32),
+            IRExpr::Attribute { object, attribute } if matches!(&**object, IRExpr::Variable(m) if m == "re") => {
+                match crate::stdlib::re::get_attribute(attribute)? {
+                    crate::stdlib::StdlibValue::Int(n) => Some(n),
+                    _ => None,
+                }
+            }
+            IRExpr::BinaryOp {
+                left,
+                right,
+                op: IROp::BitOr,
+            } => Some(int(left)? | int(right)?),
+            _ => None,
+        }
+    }
+
+    let folded = match (method_name, arguments) {
+        ("escape", [pattern]) => match text(pattern) {
+            Some(pattern) => crate::stdlib::re::escape(pattern),
+            None => return Ok(None),
+        },
+        ("sub", [pattern, repl, string, rest @ ..]) if rest.len() <= 2 => {
+            let (Some(pattern), Some(repl), Some(string)) =
+                (text(pattern), text(repl), text(string))
+            else {
+                return Ok(None);
+            };
+            let count = rest.first().map(int);
+            let flags = rest.get(1).map(int);
+            if count == Some(None) || flags == Some(None) {
+                return Err(anyhow!(
+                    "re.sub()'s count and flags must be constants for the call to be folded"
+                ));
+            }
+            crate::stdlib::re::fold_sub(
+                pattern,
+                repl,
+                string,
+                count.flatten().unwrap_or(0),
+                flags.flatten().unwrap_or(0),
+            )
+            .map_err(|why| {
+                anyhow!(
+                    "re.sub({pattern:?}, {repl:?}, ...) is not folded at compile time: {why}, \
+                     and regular expressions at run time are planned for 0.20.0"
+                )
+            })?
+        }
+        _ => return Ok(None),
+    };
+    memory_layout.add_string(&folded);
+    Ok(Some(IRExpr::Const(IRConstant::String(folded))))
+}
+
+/// A call's keyword arguments as [`IRExpr::Keyword`]s, to follow the
+/// positional ones. `**kwargs` has no static meaning and is refused.
+fn lower_keywords(
+    call: &rustpython_parser::ast::ExprCall,
+    callee: &str,
+    memory_layout: &mut MemoryLayout,
+) -> Result<Vec<IRExpr>> {
+    call.keywords
+        .iter()
+        .map(|keyword| match &keyword.arg {
+            Some(name) => Ok(IRExpr::Keyword {
+                name: name.to_string(),
+                value: Box::new(lower_expr(&keyword.value, memory_layout)?),
+            }),
+            None => Err(anyhow!(
+                "'**kwargs' is not supported in a call to '{callee}()'"
+            )),
+        })
+        .collect()
 }
 
 /// Process a dynamic import expression (using __import__ or importlib)
@@ -581,8 +715,18 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
                         class_vars.push(var);
                     }
                 }
+                Stmt::Pass(_) => {}
+                Stmt::Expr(e) if matches!(&*e.value, Expr::Constant(_)) => {}
                 _ => {
-                    // Ignore other class body statements for now
+                    // This used to be skipped, so it silently never ran.
+                    return Err(crate::core::errors::unsupported_feature(
+                        format!(
+                            "a statement in the body of class '{name}' other than a method, a \
+                             docstring, or an assignment to a plain name is not supported"
+                        ),
+                        None,
+                    )
+                    .into());
                 }
             }
         }
@@ -688,13 +832,6 @@ fn classify_function_decorator<'a>(
         // introspection metadata a compiled module does not carry.
         "lru_cache" | "cache" | "wraps" | "update_wrapper" => FunctionDecorator::Inert(name),
         "singledispatch" if call.is_none() => FunctionDecorator::Singledispatch,
-        // The compiler's own registry names (`ir::decorators`) and the
-        // export marker some drivers use.
-        "memoize" | "debug" | "timer" | "default_value" | "type_check" | "pure" | "wasm_export"
-            if !name.starts_with("functools.") =>
-        {
-            FunctionDecorator::Inert(name)
-        }
         _ => match (name.rsplit_once('.'), call) {
             (Some((base, "register")), None) if !name.starts_with("functools.") => {
                 FunctionDecorator::Register {
@@ -1109,20 +1246,69 @@ fn synthesize_dataclass_methods(
     }
 }
 
+/// A bare `list` / `set` / `dict` annotation on a variable or field, whose
+/// value is right there: its elements take the value's type, as an
+/// unannotated variable's do. Only a parameter or return value, whose values
+/// come from elsewhere, keeps the untyped `Any` elements.
+fn elements_from_value(annotation: IRType) -> IRType {
+    let infer = |t: Box<IRType>| match *t {
+        IRType::Any => Box::new(IRType::Unknown),
+        other => Box::new(other),
+    };
+    match annotation {
+        IRType::List(e) => IRType::List(infer(e)),
+        IRType::Set(e) => IRType::Set(infer(e)),
+        IRType::Dict(k, v) => IRType::Dict(infer(k), infer(v)),
+        other => other,
+    }
+}
+
+/// The error for a module-level statement that would not run. Instantiating a
+/// module runs its definitions, assignments to plain names, and imports, in
+/// source order, and nothing else.
+fn module_statement_not_run(kind: &str) -> anyhow::Error {
+    crate::core::errors::unsupported_feature(
+        format!(
+            "{kind} at module level is not supported: a compiled module runs its \
+             definitions, assignments to plain names, and imports when it is \
+             instantiated, and nothing else. Hint: move it into a function"
+        ),
+        None,
+    )
+    .into()
+}
+
+/// `__name__ == "__main__"`, either way round.
+fn is_main_guard(test: &Expr) -> bool {
+    let Expr::Compare(cmp) = test else {
+        return false;
+    };
+    let is_name = |e: &Expr| matches!(e, Expr::Name(n) if n.id.as_str() == "__name__");
+    let is_main = |e: &Expr| {
+        matches!(e, Expr::Constant(c)
+            if matches!(&c.value, rustpython_parser::ast::Constant::Str(s) if s == "__main__"))
+    };
+    match (cmp.comparators.as_slice(), cmp.ops.as_slice()) {
+        ([right], [rustpython_parser::ast::CmpOp::Eq]) => {
+            (is_name(&cmp.left) && is_main(right)) || (is_main(&cmp.left) && is_name(right))
+        }
+        _ => false,
+    }
+}
+
 /// Process a module-level assignment
 fn process_module_level_assign(
     stmt: &Stmt,
     memory_layout: &mut MemoryLayout,
 ) -> Result<Option<IRVariable>> {
     if let Stmt::Assign(assign) = stmt {
-        // Handle only simple assignments for now (single target)
-        if assign.targets.len() != 1 {
-            return Ok(None);
-        }
-
-        let target = match &assign.targets[0] {
-            Expr::Name(name) => name.id.to_string(),
-            _ => return Ok(None), // Skip complex assignments
+        let target = match assign.targets.as_slice() {
+            [Expr::Name(name)] => name.id.to_string(),
+            _ => {
+                return Err(module_statement_not_run(
+                    "an assignment to anything but one plain name",
+                ))
+            }
         };
 
         let value = lower_expr(&assign.value, memory_layout)?;
@@ -1145,10 +1331,14 @@ fn process_module_level_ann_assign(
     if let Stmt::AnnAssign(ann_assign) = stmt {
         let target = match &*ann_assign.target {
             Expr::Name(name) => name.id.to_string(),
-            _ => return Ok(None), // Skip complex assignments
+            _ => {
+                return Err(module_statement_not_run(
+                    "an assignment to anything but one plain name",
+                ))
+            }
         };
 
-        let var_type = type_annotation_to_ir_type(&ann_assign.annotation)?;
+        let var_type = elements_from_value(type_annotation_to_ir_type(&ann_assign.annotation)?);
 
         let value = if let Some(value) = &ann_assign.value {
             lower_expr(value, memory_layout)?
@@ -1285,14 +1475,13 @@ fn type_annotation_to_ir_type(expr: &Expr) -> Result<IRType> {
             "bytes" => Ok(IRType::Bytes),
             "None" => Ok(IRType::None),
             "Any" => Ok(IRType::Any),
-            // Bare builtin collection annotations (element types unknown).
-            "list" => Ok(IRType::List(Box::new(IRType::Unknown))),
-            "set" => Ok(IRType::Set(Box::new(IRType::Unknown))),
+            // Bare builtin collection annotations say nothing about their
+            // elements, which is `Any` (where an inferred-but-not-yet-known
+            // element is `Unknown`), so only word-shaped values pass through.
+            "list" => Ok(IRType::List(Box::new(IRType::Any))),
+            "set" => Ok(IRType::Set(Box::new(IRType::Any))),
             "tuple" => Ok(IRType::Tuple(vec![])),
-            "dict" => Ok(IRType::Dict(
-                Box::new(IRType::Unknown),
-                Box::new(IRType::Unknown),
-            )),
+            "dict" => Ok(IRType::Dict(Box::new(IRType::Any), Box::new(IRType::Any))),
             _ => Ok(IRType::Class(name.id.to_string())),
         },
         Expr::Subscript(subscript) => {
@@ -1525,7 +1714,8 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                 // field, so it is carried along. A bare `self.x: int` with no
                 // value is only an annotation, and does nothing at runtime.
                 if let Expr::Attribute(attr) = &*ann_assign.target {
-                    let annotation = type_annotation_to_ir_type(&ann_assign.annotation)?;
+                    let annotation =
+                        elements_from_value(type_annotation_to_ir_type(&ann_assign.annotation)?);
                     if let Some(value) = &ann_assign.value {
                         ir_statements.push(IRStatement::AttributeAssign {
                             object: lower_expr(&attr.value, memory_layout)?,
@@ -1546,7 +1736,8 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                     }
                 };
 
-                let var_type = type_annotation_to_ir_type(&ann_assign.annotation)?;
+                let var_type =
+                    elements_from_value(type_annotation_to_ir_type(&ann_assign.annotation)?);
 
                 let value = if let Some(value) = &ann_assign.value {
                     lower_expr(value, memory_layout)?
@@ -1675,8 +1866,44 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
             Stmt::While(while_stmt) => {
                 let condition = lower_expr(&while_stmt.test, memory_layout)?;
                 let body = Box::new(lower_function_body(&while_stmt.body, memory_layout)?);
-
-                ir_statements.push(IRStatement::While { condition, body });
+                if while_stmt.orelse.is_empty() {
+                    ir_statements.push(IRStatement::While { condition, body });
+                    continue;
+                }
+                // `while c: body / else: e` runs `e` when `c` turns false and
+                // not after a `break`. It used to be dropped. The test moves
+                // into the loop so the exit it takes can be recorded, and `e`
+                // runs after the loop, where its own `break` belongs.
+                let flag = format!("__wnat_{}", memory_layout.comp_var_counter);
+                memory_layout.comp_var_counter += 1;
+                let set_flag = |value: bool| IRStatement::Assign {
+                    target: flag.clone(),
+                    value: IRExpr::Const(IRConstant::Bool(value)),
+                    var_type: None,
+                };
+                let mut loop_body = vec![IRStatement::If {
+                    condition: IRExpr::UnaryOp {
+                        operand: Box::new(condition),
+                        op: IRUnaryOp::Not,
+                    },
+                    then_body: Box::new(IRBody {
+                        statements: vec![set_flag(true), IRStatement::Break],
+                    }),
+                    else_body: None,
+                }];
+                loop_body.extend(body.statements);
+                ir_statements.push(set_flag(false));
+                ir_statements.push(IRStatement::While {
+                    condition: IRExpr::Const(IRConstant::Bool(true)),
+                    body: Box::new(IRBody {
+                        statements: loop_body,
+                    }),
+                });
+                ir_statements.push(IRStatement::If {
+                    condition: IRExpr::Variable(flag),
+                    then_body: Box::new(lower_function_body(&while_stmt.orelse, memory_layout)?),
+                    else_body: None,
+                });
             }
             Stmt::Break(_) => {
                 ir_statements.push(IRStatement::Break);
@@ -1739,24 +1966,53 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                     // and a bare `except:` none. Anything else (an expression
                     // computing the type) is treated as a bare except, which
                     // catches more rather than less.
+                    // An expression computing the type (`except errors:`,
+                    // `except mod.Error:`) used to be treated as a bare
+                    // except, catching exceptions Python lets through.
+                    let not_a_name = || {
+                        anyhow!(
+                            "an 'except' clause must name exception classes directly, \
+                             as 'except E:' or 'except (E, F):'"
+                        )
+                    };
                     let exception_types = match typ.map(|t| &**t) {
+                        None => Vec::new(),
                         Some(Expr::Name(name)) => vec![name.id.to_string()],
                         Some(Expr::Tuple(tuple)) => tuple
                             .elts
                             .iter()
-                            .filter_map(|elt| match elt {
-                                Expr::Name(name) => Some(name.id.to_string()),
-                                _ => None,
+                            .map(|elt| match elt {
+                                Expr::Name(name) => Ok(name.id.to_string()),
+                                _ => Err(not_a_name()),
                             })
-                            .collect(),
-                        _ => Vec::new(),
+                            .collect::<Result<_>>()?,
+                        Some(_) => return Err(not_a_name()),
                     };
 
                     // Extract name if present
                     let handler_name = name.as_ref().map(|n| n.to_string());
 
                     // Process the body
-                    let handler_body = lower_function_body(body, memory_layout)?;
+                    let mut handler_body = lower_function_body(body, memory_layout)?;
+
+                    // The name is bound to the exception's type code, not to
+                    // an exception object, so `str(e)` and `isinstance(e, E)`
+                    // answered wrong. Until exceptions carry objects it can
+                    // only be re-raised.
+                    if let Some(bound) = &handler_name {
+                        if crate::ir::finalize::reads_name_beyond_reraise(&mut handler_body, bound)
+                        {
+                            return Err(crate::core::errors::unsupported_feature(
+                                format!(
+                                    "'except ... as {bound}' binds no exception object yet, so \
+                                     '{bound}' can only be re-raised with 'raise {bound}' \
+                                     (exception objects are planned for 0.19.0)"
+                                ),
+                                None,
+                            )
+                            .into());
+                        }
+                    }
 
                     except_handlers.push(IRExceptHandler {
                         exception_types,
@@ -1774,11 +2030,51 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                     None
                 };
 
-                ir_statements.push(IRStatement::TryExcept {
-                    try_body,
-                    except_handlers,
-                    finally_body,
-                });
+                if try_stmt.orelse.is_empty() {
+                    ir_statements.push(IRStatement::TryExcept {
+                        try_body,
+                        except_handlers,
+                        finally_body,
+                    });
+                    continue;
+                }
+                // `else:` runs when the body completes without raising,
+                // outside the handlers' reach and inside `finally`'s. It used
+                // to be dropped. A flag set as the body's last statement says
+                // it completed; a return, break, or raise skips it, as it
+                // skips the `else`.
+                let flag = format!("__tok_{}", memory_layout.comp_var_counter);
+                memory_layout.comp_var_counter += 1;
+                let set_flag = |value: bool| IRStatement::Assign {
+                    target: flag.clone(),
+                    value: IRExpr::Const(IRConstant::Bool(value)),
+                    var_type: None,
+                };
+                let mut guarded = try_body.statements;
+                guarded.push(set_flag(true));
+                let mut inner = vec![
+                    set_flag(false),
+                    IRStatement::TryExcept {
+                        try_body: Box::new(IRBody {
+                            statements: guarded,
+                        }),
+                        except_handlers,
+                        finally_body: None,
+                    },
+                    IRStatement::If {
+                        condition: IRExpr::Variable(flag),
+                        then_body: Box::new(lower_function_body(&try_stmt.orelse, memory_layout)?),
+                        else_body: None,
+                    },
+                ];
+                match finally_body {
+                    None => ir_statements.append(&mut inner),
+                    Some(finally_body) => ir_statements.push(IRStatement::TryExcept {
+                        try_body: Box::new(IRBody { statements: inner }),
+                        except_handlers: Vec::new(),
+                        finally_body: Some(finally_body),
+                    }),
+                }
             }
             Stmt::With(with_stmt) => {
                 // Handle with statements (simple case)
@@ -1990,16 +2286,79 @@ fn lower_for_statement(
     for_stmt: &rustpython_parser::ast::StmtFor,
     memory_layout: &mut MemoryLayout,
 ) -> Result<Vec<IRStatement>> {
-    let (targets, starred) = lower_for_targets(&for_stmt.target)?;
-    let body = lower_function_body(&for_stmt.body, memory_layout)?;
-    let else_body = if !for_stmt.orelse.is_empty() {
-        Some(Box::new(lower_function_body(
-            &for_stmt.orelse,
-            memory_layout,
-        )?))
-    } else {
-        None
+    let mut body = lower_function_body(&for_stmt.body, memory_layout)?;
+    if for_stmt.orelse.is_empty() {
+        return lower_for_loop(for_stmt, body, memory_layout);
+    }
+    // `for ... else:` runs the else body unless the loop ended in a `break`.
+    // It was carried to code generation, which dropped it on several of the
+    // paths a loop can take. Each `break` of this loop records itself, and the
+    // else body runs after the loop, where its own `break` belongs.
+    let flag = format!("__fbrk_{}", memory_layout.comp_var_counter);
+    memory_layout.comp_var_counter += 1;
+    let set_flag = |value: bool| IRStatement::Assign {
+        target: flag.clone(),
+        value: IRExpr::Const(IRConstant::Bool(value)),
+        var_type: None,
     };
+    mark_breaks(&mut body, &set_flag(true));
+    let mut statements = vec![set_flag(false)];
+    statements.extend(lower_for_loop(for_stmt, body, memory_layout)?);
+    statements.push(IRStatement::If {
+        condition: IRExpr::UnaryOp {
+            operand: Box::new(IRExpr::Variable(flag)),
+            op: IRUnaryOp::Not,
+        },
+        then_body: Box::new(lower_function_body(&for_stmt.orelse, memory_layout)?),
+        else_body: None,
+    });
+    Ok(statements)
+}
+
+/// Put `mark` before every `break` that leaves the loop whose body this is,
+/// leaving the ones that belong to loops nested in it alone.
+fn mark_breaks(body: &mut IRBody, mark: &IRStatement) {
+    let statements = std::mem::take(&mut body.statements);
+    for mut stmt in statements {
+        match &mut stmt {
+            IRStatement::Break => body.statements.push(mark.clone()),
+            IRStatement::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                mark_breaks(then_body, mark);
+                if let Some(else_body) = else_body {
+                    mark_breaks(else_body, mark);
+                }
+            }
+            IRStatement::TryExcept {
+                try_body,
+                except_handlers,
+                finally_body,
+            } => {
+                mark_breaks(try_body, mark);
+                for handler in except_handlers {
+                    mark_breaks(&mut handler.body, mark);
+                }
+                if let Some(finally_body) = finally_body {
+                    mark_breaks(finally_body, mark);
+                }
+            }
+            IRStatement::With { body: inner, .. } => mark_breaks(inner, mark),
+            _ => {}
+        }
+        body.statements.push(stmt);
+    }
+}
+
+fn lower_for_loop(
+    for_stmt: &rustpython_parser::ast::StmtFor,
+    body: IRBody,
+    memory_layout: &mut MemoryLayout,
+) -> Result<Vec<IRStatement>> {
+    let (targets, starred) = lower_for_targets(&for_stmt.target)?;
+    let else_body: Option<Box<IRBody>> = None;
     let uniq = memory_layout.comp_var_counter;
     memory_layout.comp_var_counter += 1;
 
@@ -2035,11 +2394,23 @@ fn lower_for_statement(
                     "enumerate() in a for loop needs exactly two plain targets"
                 ));
             }
+            let mut start_arg = call.args.get(1);
+            for keyword in &call.keywords {
+                match keyword.arg.as_deref() {
+                    Some("start") if start_arg.is_none() => start_arg = Some(&keyword.value),
+                    Some(other) => {
+                        return Err(anyhow!(
+                            "enumerate() got an unexpected or repeated keyword argument '{other}'"
+                        ))
+                    }
+                    None => return Err(anyhow!("'**kwargs' is not supported in enumerate()")),
+                }
+            }
             if call.args.is_empty() || call.args.len() > 2 {
                 return Err(anyhow!("enumerate() takes 1 or 2 arguments"));
             }
             let counter = format!("__enum_{uniq}");
-            let start = match call.args.get(1) {
+            let start = match start_arg {
                 Some(expr) => lower_expr(expr, memory_layout)?,
                 None => int_const(0),
             };
@@ -2067,6 +2438,9 @@ fn lower_for_statement(
         // first sequence drives the loop, the rest are indexed by a shared
         // counter and the shortest one ends the iteration.
         if matches!(&*call.func, Expr::Name(n) if n.id.as_str() == "zip") {
+            if !call.keywords.is_empty() {
+                return Err(anyhow!("zip() keyword arguments are not supported"));
+            }
             if call.args.len() < 2 {
                 return Err(anyhow!("zip() in a for loop needs at least two arguments"));
             }
@@ -2079,7 +2453,7 @@ fn lower_for_statement(
             let mut stmts = Vec::new();
             let mut seq_names = Vec::new();
             for (k, arg) in call.args.iter().enumerate().skip(1) {
-                let seq = format!("__zip_{uniq}_{k}");
+                let seq = format!("{ZIP_SEQ_PREFIX}{uniq}_{k}");
                 stmts.push(assign(&seq, lower_expr(arg, memory_layout)?));
                 seq_names.push(seq);
             }
@@ -2346,6 +2720,7 @@ fn rename_vars(expr: &mut IRExpr, map: &std::collections::HashMap<String, String
         return;
     }
     match expr {
+        IRExpr::Keyword { value, .. } => rename_vars(value, map),
         IRExpr::EnvRead { env, .. } => {
             if let Some(renamed) = map.get(env) {
                 *env = renamed.clone();
@@ -2498,65 +2873,50 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                     }
                 }
             } else if op == IROp::Mod {
-                // % formatting for strings
+                // `%` formatting over constants folds to the string CPython
+                // renders. A runtime operand is left to code generation.
                 if let Expr::Constant(left_c) = &*binop.left {
                     if let rustpython_parser::ast::Constant::Str(format_str) = &left_c.value {
-                        // Try to extract arguments
-                        let mut format_args = Vec::new();
-
-                        // Handle single argument or tuple of arguments
-                        match &*binop.right {
-                            Expr::Constant(c) => {
-                                // Single constant argument
-                                match &c.value {
-                                    rustpython_parser::ast::Constant::Str(s) => {
-                                        format_args.push(s.clone())
-                                    }
-                                    rustpython_parser::ast::Constant::Int(i) => {
-                                        format_args.push(i.to_string())
-                                    }
-                                    rustpython_parser::ast::Constant::Float(f) => {
-                                        format_args.push(f.to_string())
-                                    }
-                                    rustpython_parser::ast::Constant::Bool(b) => {
-                                        format_args.push(b.to_string())
-                                    }
-                                    _ => {}
+                        fn constant(e: &Expr) -> Option<PercentArg> {
+                            if let Expr::UnaryOp(u) = e {
+                                if matches!(u.op, rustpython_parser::ast::UnaryOp::USub) {
+                                    return match constant(&u.operand)? {
+                                        PercentArg::Int(n) => Some(PercentArg::Int(-n)),
+                                        PercentArg::Float(f) => Some(PercentArg::Float(-f)),
+                                        _ => None,
+                                    };
                                 }
                             }
-                            Expr::Tuple(tuple) => {
-                                // Tuple of arguments
-                                for elt in &tuple.elts {
-                                    if let Expr::Constant(c) = elt {
-                                        match &c.value {
-                                            rustpython_parser::ast::Constant::Str(s) => {
-                                                format_args.push(s.clone())
-                                            }
-                                            rustpython_parser::ast::Constant::Int(i) => {
-                                                format_args.push(i.to_string())
-                                            }
-                                            rustpython_parser::ast::Constant::Float(f) => {
-                                                format_args.push(f.to_string())
-                                            }
-                                            rustpython_parser::ast::Constant::Bool(b) => {
-                                                format_args.push(b.to_string())
-                                            }
-                                            _ => break,
-                                        }
-                                    } else {
-                                        break;
-                                    }
+                            let Expr::Constant(c) = e else { return None };
+                            match &c.value {
+                                rustpython_parser::ast::Constant::Str(s) => {
+                                    Some(PercentArg::Str(s.clone()))
                                 }
+                                rustpython_parser::ast::Constant::Int(i) => {
+                                    i.to_string().parse().ok().map(PercentArg::Int)
+                                }
+                                rustpython_parser::ast::Constant::Float(f) => {
+                                    Some(PercentArg::Float(*f))
+                                }
+                                rustpython_parser::ast::Constant::Bool(b) => {
+                                    Some(PercentArg::Bool(*b))
+                                }
+                                _ => None,
                             }
-                            _ => {}
                         }
-
-                        // If we extracted arguments successfully, process the format string
-                        if !format_args.is_empty() {
-                            if let Ok(result) = process_percent_format(format_str, &format_args) {
-                                memory_layout.add_string(&result);
-                                return Ok(IRExpr::Const(IRConstant::String(result)));
-                            }
+                        let format_args: Option<Vec<PercentArg>> = match &*binop.right {
+                            Expr::Tuple(tuple) => tuple.elts.iter().map(constant).collect(),
+                            other => constant(other).map(|a| vec![a]),
+                        };
+                        if let Some(format_args) = format_args {
+                            let result =
+                                percent_format(format_str, &format_args).map_err(|why| {
+                                    anyhow!(
+                                        "'%' formatting of {format_str:?} is not supported: {why}"
+                                    )
+                                })?;
+                            memory_layout.add_string(&result);
+                            return Ok(IRExpr::Const(IRConstant::String(result)));
                         }
                     }
                 }
@@ -2682,7 +3042,9 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                             _ => return Err(anyhow!("Unsupported constant type in tuple")),
                         }
                     }
-                    Ok(IRExpr::Const(IRConstant::Tuple(tuple_items)))
+                    Ok(IRExpr::TupleLiteral(
+                        tuple_items.into_iter().map(IRExpr::Const).collect(),
+                    ))
                 }
                 _ => Err(anyhow!("Unsupported constant type")),
             }
@@ -2721,6 +3083,21 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                     // Direct function call like func()
                     let function_name = name.id.to_string();
 
+                    // The builtin lowerings below read positional arguments
+                    // only. A call with keywords keeps them for the finalize
+                    // pass to place, or for code generation to refuse.
+                    if !call.keywords.is_empty() && function_name != "sorted" {
+                        let mut arguments = Vec::new();
+                        for arg in &call.args {
+                            arguments.push(lower_expr(arg, memory_layout)?);
+                        }
+                        arguments.extend(lower_keywords(call, &function_name, memory_layout)?);
+                        return Ok(IRExpr::FunctionCall {
+                            function_name,
+                            arguments,
+                        });
+                    }
+
                     // Numeric conversions int()/float() must actually convert,
                     // so keep them as calls for the compiler to coerce. str()
                     // and bool() currently pass the value through unchanged.
@@ -2736,19 +3113,22 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                             arguments: vec![arg],
                         });
                     }
-                    // `bool(x)` is erased: every value is already carried as
-                    // the i32 word truthiness tests read, so the conversion is
-                    // the identity here. `str(x)` is *not* erased, because it
-                    // has to render digits at runtime; dropping it left
-                    // `str(123)` as the integer 123, so `len(str(n))` answered
-                    // 0 and comparing the result to a literal never matched.
+                    // `bool(x)` is `not not x`: the truthiness test, giving
+                    // 0 or 1. It used to be erased to `x` itself, which is
+                    // only right where the value is tested, so `bool(2) + 1`
+                    // answered 3 and `bool("a")` was the string.
                     if function_name == "bool" {
-                        if call.args.len() != 1 {
-                            return Err(anyhow!(
-                                "Type conversion function expects exactly one argument"
-                            ));
-                        }
-                        return lower_expr(&call.args[0], memory_layout);
+                        return match call.args.len() {
+                            0 => Ok(IRExpr::Const(IRConstant::Bool(false))),
+                            1 => {
+                                let not = |operand: IRExpr| IRExpr::UnaryOp {
+                                    operand: Box::new(operand),
+                                    op: IRUnaryOp::Not,
+                                };
+                                Ok(not(not(lower_expr(&call.args[0], memory_layout)?)))
+                            }
+                            _ => Err(anyhow!("bool() takes at most one argument")),
+                        };
                     }
 
                     // The empty constructors `list()`, `dict()`, `set()`,
@@ -2878,31 +3258,22 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                         });
                     }
 
-                    // namedtuple() function - returns a class factory
+                    // namedtuple() builds a class at run time, which nothing
+                    // here models. It compiled to a null pointer.
                     if function_name == "namedtuple" {
-                        // namedtuple(typename, field_names) -> class
-                        // For simplicity, we treat it as a function call
-                        // The arguments are (typename: str, field_names: str or list)
-                        // It returns a callable that creates instances
-                        if call.args.is_empty() {
-                            return Err(anyhow!("namedtuple() requires at least 1 argument"));
-                        }
-                        // Process arguments
-                        let mut arguments = Vec::new();
-                        for arg in &call.args {
-                            arguments.push(lower_expr(arg, memory_layout)?);
-                        }
-                        // Return as a function call - at runtime it will be a callable
-                        return Ok(IRExpr::FunctionCall {
-                            function_name: "namedtuple".to_string(),
-                            arguments,
-                        });
+                        return Err(crate::core::errors::unsupported_feature(
+                            "namedtuple() is not supported yet (planned with the collections \
+                             module for 0.20.0). Hint: write a class, or a @dataclass",
+                            None,
+                        )
+                        .into());
                     }
 
                     let mut arguments = Vec::new();
                     for arg in &call.args {
                         arguments.push(lower_expr(arg, memory_layout)?);
                     }
+                    arguments.extend(lower_keywords(call, &function_name, memory_layout)?);
 
                     Ok(IRExpr::FunctionCall {
                         function_name,
@@ -2940,6 +3311,13 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                                     "'**kwargs' is not supported in a call to '{method_name}()'"
                                 ));
                             }
+                        }
+                    }
+
+                    if matches!(&*attr.value, Expr::Name(m) if m.id.as_str() == "re") {
+                        if let Some(folded) = fold_re_call(&method_name, &arguments, memory_layout)?
+                        {
+                            return Ok(folded);
                         }
                     }
 
@@ -3137,31 +3515,37 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                                     // Fall through to runtime handling
                                 }
                                 "ljust" | "rjust" | "center" => {
-                                    // Justify methods - width, fillchar
-                                    if !arguments.is_empty() {
-                                        if let IRExpr::Const(IRConstant::Int(width)) = &arguments[0]
+                                    // Justify a constant to a constant width,
+                                    // with its fill character. The fill was
+                                    // ignored, and center() put an odd margin's
+                                    // extra space on the wrong side.
+                                    let fill = match arguments.get(1) {
+                                        None => Some(' '),
+                                        Some(IRExpr::Const(IRConstant::String(f)))
+                                            if f.chars().count() == 1 =>
                                         {
-                                            let w = *width as usize;
-                                            let result = match method_name.as_str() {
-                                                "ljust" => format!("{s:<w$}"),
-                                                "rjust" => format!("{s:>w$}"),
-                                                "center" => {
-                                                    let padding =
-                                                        if w > s.len() { w - s.len() } else { 0 };
-                                                    let left = padding / 2;
-                                                    let right = padding - left;
-                                                    format!(
-                                                        "{}{}{}",
-                                                        " ".repeat(left),
-                                                        s,
-                                                        " ".repeat(right)
-                                                    )
-                                                }
-                                                _ => s.to_string(),
-                                            };
-                                            memory_layout.add_string(&result);
-                                            return Ok(IRExpr::Const(IRConstant::String(result)));
+                                            f.chars().next()
                                         }
+                                        Some(_) => None,
+                                    };
+                                    if let (
+                                        Some(IRExpr::Const(IRConstant::Int(width))),
+                                        Some(fill),
+                                        true,
+                                    ) = (arguments.first(), fill, arguments.len() <= 2)
+                                    {
+                                        let width = (*width).max(0) as usize;
+                                        let marg = width.saturating_sub(s.chars().count());
+                                        let left = match method_name.as_str() {
+                                            "ljust" => 0,
+                                            "rjust" => marg,
+                                            _ => marg / 2 + (marg & width & 1),
+                                        };
+                                        let pad = |n: usize| fill.to_string().repeat(n);
+                                        let result =
+                                            format!("{}{s}{}", pad(left), pad(marg - left));
+                                        memory_layout.add_string(&result);
+                                        return Ok(IRExpr::Const(IRConstant::String(result)));
                                     }
                                     // Fall through to runtime handling
                                 }
@@ -3266,10 +3650,36 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                 index: Box::new(lower_expr(&subscript.slice, memory_layout)?),
             })
         }
-        Expr::Attribute(attr) => Ok(IRExpr::Attribute {
-            object: Box::new(lower_expr(&attr.value, memory_layout)?),
-            attribute: attr.attr.to_string(),
-        }),
+        Expr::Attribute(attr) => {
+            let object = lower_expr(&attr.value, memory_layout)?;
+            let attribute = attr.attr.to_string();
+            // A standard-library string constant (`os.sep`) is folded to an
+            // interned literal: read through the attribute, its offset was
+            // never in the string table and the read answered the bytes at 0.
+            let stdlib_value = match &object {
+                IRExpr::Variable(module) if crate::stdlib::is_stdlib_module(module) => {
+                    crate::stdlib::get_stdlib_attributes(module, &attribute)
+                }
+                IRExpr::Attribute {
+                    object: parent,
+                    attribute: sub,
+                } => match &**parent {
+                    IRExpr::Variable(module) if crate::stdlib::is_stdlib_submodule(module, sub) => {
+                        crate::stdlib::get_submodule_attribute(module, sub, &attribute)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(crate::stdlib::StdlibValue::String(text)) = stdlib_value {
+                memory_layout.add_string(&text);
+                return Ok(IRExpr::Const(IRConstant::String(text)));
+            }
+            Ok(IRExpr::Attribute {
+                object: Box::new(object),
+                attribute,
+            })
+        }
         Expr::ListComp(comp) => lower_comprehension(
             IRComprehensionKind::List,
             &comp.elt,
@@ -3417,6 +3827,7 @@ fn lower_format_template(
     let mut text = String::new();
     let mut parts: Vec<IRExpr> = Vec::new();
     let mut next_auto = 0usize;
+    let mut numbering: Option<bool> = None;
     let mut chars = template.chars().peekable();
 
     while let Some(c) = chars.next() {
@@ -3451,7 +3862,16 @@ fn lower_format_template(
                          Hint: interpolate the value on its own ({{}})"
                     ));
                 }
-                let index = if field.is_empty() {
+                // CPython raises ValueError for `"{} {0}"`; this compiled
+                // it, numbering the two kinds of field independently.
+                let automatic = field.is_empty();
+                if *numbering.get_or_insert(automatic) != automatic {
+                    return Err(anyhow!(
+                        "cannot switch from automatic field numbering to manual field \
+                         specification in \"{template}\""
+                    ));
+                }
+                let index = if automatic {
                     let idx = next_auto;
                     next_auto += 1;
                     idx
@@ -3633,98 +4053,173 @@ fn fixed_precision_spec(fv: &rustpython_parser::ast::ExprFormattedValue) -> Opti
     digits.parse::<u32>().ok().filter(|p| *p <= 9)
 }
 
-/// Simple format string processor for basic placeholders
-/// Handles {}, {0}, {1}, {name}, etc.
-pub fn process_format_string(format_str: &str, args: &[String]) -> Result<String> {
-    let mut result = String::new();
-    let mut chars = format_str.chars().peekable();
-    let mut arg_index = 0;
-
-    while let Some(ch) = chars.next() {
-        if ch == '{' {
-            if chars.peek() == Some(&'{') {
-                // Escaped brace {{
-                chars.next();
-                result.push('{');
-            } else {
-                // Placeholder {, {0}, {name}, etc.
-                let mut placeholder = String::new();
-                while let Some(&next_ch) = chars.peek() {
-                    if next_ch == '}' {
-                        chars.next();
-                        break;
-                    }
-                    placeholder.push(chars.next().unwrap());
-                }
-
-                // Process placeholder
-                if placeholder.is_empty() {
-                    // {} - use positional args
-                    if arg_index < args.len() {
-                        result.push_str(&args[arg_index]);
-                        arg_index += 1;
-                    }
-                } else if let Ok(idx) = placeholder.parse::<usize>() {
-                    // {0}, {1}, etc.
-                    if idx < args.len() {
-                        result.push_str(&args[idx]);
-                    }
-                } else {
-                    // {name} - named args not supported yet, just leave placeholder
-                    result.push('{');
-                    result.push_str(&placeholder);
-                    result.push('}');
-                }
-            }
-        } else if ch == '}' {
-            if chars.peek() == Some(&'}') {
-                // Escaped brace }}
-                chars.next();
-                result.push('}');
-            } else {
-                result.push(ch);
-            }
-        } else {
-            result.push(ch);
-        }
-    }
-
-    Ok(result)
+/// A constant operand of `%` formatting.
+enum PercentArg {
+    Str(String),
+    Int(i64),
+    Float(f64),
+    Bool(bool),
 }
 
-/// Simple % formatter for basic placeholders
-/// Handles %s, %d, %f, %%, etc.
-pub fn process_percent_format(format_str: &str, args: &[String]) -> Result<String> {
-    let mut result = String::new();
-    let mut chars = format_str.chars().peekable();
-    let mut arg_index = 0;
-
-    while let Some(ch) = chars.next() {
-        if ch == '%' {
-            if let Some(&next_ch) = chars.peek() {
-                match next_ch {
-                    '%' => {
-                        chars.next();
-                        result.push('%');
-                    }
-                    's' | 'd' | 'f' | 'x' | 'o' => {
-                        chars.next();
-                        if arg_index < args.len() {
-                            result.push_str(&args[arg_index]);
-                            arg_index += 1;
-                        }
-                    }
-                    _ => {
-                        result.push(ch);
-                    }
-                }
+/// `format % args` over constants, as CPython renders it, or why it cannot be
+/// folded. Covers `%s %r %d %i %u %x %X %o %f %F %%` with the `-+ 0#` flags,
+/// a width, and a precision; anything else (a mapping key, `*`, `%e`, `%g`,
+/// `%c`) is refused rather than rendered differently.
+fn percent_format(format: &str, args: &[PercentArg]) -> std::result::Result<String, String> {
+    let mut out = String::new();
+    let mut next = 0;
+    let mut chars = format.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        let mut flags = String::new();
+        while let Some(&f) = chars.peek() {
+            if "-+ 0#".contains(f) {
+                flags.push(f);
+                chars.next();
             } else {
-                result.push(ch);
+                break;
             }
+        }
+        let digits = |chars: &mut std::iter::Peekable<std::str::Chars>| {
+            let mut n = String::new();
+            while let Some(&d) = chars.peek() {
+                if d.is_ascii_digit() {
+                    n.push(d);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            n.parse::<usize>().ok()
+        };
+        let width = digits(&mut chars).unwrap_or(0);
+        let precision = if chars.peek() == Some(&'.') {
+            chars.next();
+            Some(digits(&mut chars).unwrap_or(0))
         } else {
-            result.push(ch);
+            None
+        };
+        while matches!(chars.peek(), Some('h' | 'l' | 'L')) {
+            chars.next();
+        }
+        let Some(conversion) = chars.next() else {
+            return Err("the format ends in an incomplete '%' specifier".into());
+        };
+        if conversion == '%' {
+            out.push('%');
+            continue;
+        }
+        let Some(arg) = args.get(next) else {
+            return Err("not enough arguments for format string".into());
+        };
+        next += 1;
+        let as_int = || match arg {
+            PercentArg::Int(n) => Ok(*n),
+            PercentArg::Bool(b) => Ok(*b as i64),
+            _ => Err(format!("%{conversion} format: an integer is required")),
+        };
+        let left = flags.contains('-');
+        let sign = |negative: bool| {
+            if negative {
+                "-"
+            } else if flags.contains('+') {
+                "+"
+            } else if flags.contains(' ') {
+                " "
+            } else {
+                ""
+            }
+        };
+        let (prefix, body, numeric) = match conversion {
+            's' | 'r' | 'a' => {
+                let mut text = match arg {
+                    PercentArg::Str(s) if conversion == 's' => s.clone(),
+                    PercentArg::Str(s) => python_repr(s)
+                        .ok_or("repr() of a string with quotes or non-printable characters")?,
+                    PercentArg::Int(n) => n.to_string(),
+                    PercentArg::Bool(b) => if *b { "True" } else { "False" }.to_string(),
+                    PercentArg::Float(f) => format_float_like_python(*f)
+                        .ok_or("str() of a float outside the range rendered without exponent")?,
+                };
+                if let Some(p) = precision {
+                    text = text.chars().take(p).collect();
+                }
+                (String::new(), text, false)
+            }
+            'd' | 'i' | 'u' => {
+                let n = match arg {
+                    PercentArg::Float(f) if f.is_finite() => f.trunc() as i64,
+                    _ => as_int()?,
+                };
+                (sign(n < 0).to_string(), n.unsigned_abs().to_string(), true)
+            }
+            'x' | 'X' | 'o' => {
+                let n = as_int()?;
+                let magnitude = n.unsigned_abs();
+                let (digits, alt) = match conversion {
+                    'x' => (format!("{magnitude:x}"), "0x"),
+                    'X' => (format!("{magnitude:X}"), "0X"),
+                    _ => (format!("{magnitude:o}"), "0o"),
+                };
+                let alt = if flags.contains('#') { alt } else { "" };
+                (format!("{}{alt}", sign(n < 0)), digits, true)
+            }
+            'f' | 'F' => {
+                let v = match arg {
+                    PercentArg::Float(f) => *f,
+                    PercentArg::Int(n) => *n as f64,
+                    PercentArg::Bool(b) => *b as i64 as f64,
+                    PercentArg::Str(_) => {
+                        return Err("%f format: a real number is required, not str".into())
+                    }
+                };
+                if !v.is_finite() {
+                    return Err("%f of an infinity or NaN is not folded".into());
+                }
+                let digits = format!("{:.*}", precision.unwrap_or(6), v.abs());
+                let digits = if flags.contains('#') && precision == Some(0) {
+                    format!("{digits}.")
+                } else {
+                    digits
+                };
+                (sign(v.is_sign_negative()).to_string(), digits, true)
+            }
+            other => return Err(format!("the '%{other}' conversion is not folded")),
+        };
+        let len = prefix.chars().count() + body.chars().count();
+        let pad = width.saturating_sub(len);
+        if left {
+            out.push_str(&prefix);
+            out.push_str(&body);
+            out.push_str(&" ".repeat(pad));
+        } else if numeric && flags.contains('0') {
+            out.push_str(&prefix);
+            out.push_str(&"0".repeat(pad));
+            out.push_str(&body);
+        } else {
+            out.push_str(&" ".repeat(pad));
+            out.push_str(&prefix);
+            out.push_str(&body);
         }
     }
+    if next < args.len() {
+        return Err("not all arguments converted during string formatting".into());
+    }
+    Ok(out)
+}
 
-    Ok(result)
+/// `repr()` of a string of printable ASCII, quoted the way CPython quotes it,
+/// or `None` for anything needing escapes this does not reproduce.
+fn python_repr(s: &str) -> Option<String> {
+    if !s.chars().all(|c| c.is_ascii_graphic() || c == ' ') || s.contains('\\') {
+        return None;
+    }
+    match (s.contains('\''), s.contains('"')) {
+        (false, _) => Some(format!("'{s}'")),
+        (true, false) => Some(format!("\"{s}\"")),
+        (true, true) => None,
+    }
 }

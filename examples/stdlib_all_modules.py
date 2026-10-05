@@ -1,6 +1,7 @@
 """
-Test all standard library modules - comprehensive compilation test.
-Tests that all modules can be imported and their attributes accessed.
+Every supported standard library module imports, and the constants it
+defines read back as CPython's values (sys.maxsize under waspy's 32-bit int).
+The modules' functions are not implemented yet (planned for 0.20.0).
 """
 
 import sys
@@ -14,55 +15,26 @@ import collections
 import itertools
 import functools
 
-def test_sys_module():
-    """Test sys module attributes."""
-    platform = sys.platform
-    version = sys.version
-    maxsize = sys.maxsize
-    return maxsize
 
-def test_os_module():
-    """Test os module attributes."""
-    name = os.name
-    sep = os.sep
-    pathsep = os.pathsep
-    linesep = os.linesep
-    devnull = os.devnull
-    curdir = os.curdir
-    pardir = os.pardir
-    extsep = os.extsep
-    return name
+def test_sys_module() -> int:
+    return sys.maxsize
 
-def test_math_module():
-    """Test math module constants."""
-    pi = math.pi
-    e = math.e
-    tau = math.tau
-    inf = math.inf
-    nan = math.nan
-    return pi
 
-def test_re_module():
-    """Test re module flags."""
-    i_flag = re.IGNORECASE
-    m_flag = re.MULTILINE
-    s_flag = re.DOTALL
-    x_flag = re.VERBOSE
-    a_flag = re.ASCII
-    return i_flag
+def test_os_module() -> str:
+    return os.name + os.sep + os.pathsep + os.curdir + os.pardir + os.extsep
 
-def test_datetime_module():
-    """Test datetime module constants."""
-    minyear = datetime.MINYEAR
-    maxyear = datetime.MAXYEAR
-    return maxyear
 
-def test_all_modules():
-    """Test that all modules are accessible."""
-    sys_result = test_sys_module()
-    os_result = test_os_module()
-    math_result = test_math_module()
-    re_result = test_re_module()
-    dt_result = test_datetime_module()
+def test_math_module() -> float:
+    return math.pi + math.e + math.tau
 
-    return sys_result + re_result + dt_result
+
+def test_re_module() -> int:
+    return re.IGNORECASE | re.MULTILINE | re.DOTALL | re.VERBOSE | re.ASCII
+
+
+def test_datetime_module() -> int:
+    return datetime.MAXYEAR - datetime.MINYEAR
+
+
+def test_all_modules() -> int:
+    return test_re_module() + test_datetime_module()

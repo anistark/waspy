@@ -150,13 +150,13 @@
                 status: "done",
                 version: "0.1.0",
                 features: [
-                    { name: "All operators (+, -, *, /, %, //, **)", status: "done", version: "0.1.0" },
-                    { name: "/ is true division and yields a float, // is floor division (Python 3 semantics)", status: "done", version: "0.16.0" },
-                    { name: "Type coercion (int/float)", status: "done", version: "0.1.0" },
-                    { name: "Bitwise operations (&, |, ^, <<, >>, ~)", status: "done", version: "0.1.0" },
-                    { name: "Unary operations (-, +, not)", status: "done", version: "0.1.0" },
-                    { name: "Integer // and % floor as Python does (they truncated for mixed-sign operands)", status: "done", version: "upcoming" },
-                    { name: "Augmented assignment shares the plain operators (string +=, /=, float %=, floored %= and //=)", status: "done", version: "upcoming" }
+                    { name: "All operators (+, -, *, /, %, //, **)", status: "done", version: "0.1.0", test: "arithmetic::all_operators" },
+                    { name: "/ is true division and yields a float, // is floor division (Python 3 semantics)", status: "done", version: "0.16.0", test: "arithmetic::true_and_floor_division" },
+                    { name: "Type coercion (int/float)", status: "done", version: "0.1.0", test: "arithmetic::int_float_coercion" },
+                    { name: "Bitwise operations (&, |, ^, <<, >>, ~)", status: "done", version: "0.1.0", test: "arithmetic::bitwise_operations" },
+                    { name: "Unary operations (-, +, not)", status: "done", version: "0.1.0", test: "arithmetic::unary_operations" },
+                    { name: "Integer // and % floor as Python does (they truncated for mixed-sign operands)", status: "done", version: "upcoming", test: "arithmetic::floored_division_and_modulo" },
+                    { name: "Augmented assignment shares the plain operators (string +=, /=, float %=, floored %= and //=)", status: "done", version: "upcoming", test: "arithmetic::augmented_assignment_operators" }
                 ]
             },
             controlFlow: {
@@ -164,14 +164,15 @@
                 status: "done",
                 version: "0.14.0",
                 features: [
-                    { name: "if/elif/else statements", status: "done", version: "0.1.0" },
-                    { name: "while loops", status: "done", version: "0.1.0" },
-                    { name: "for loops with list/string iteration", status: "done", version: "0.7.0" },
-                    { name: "break and continue in loops", status: "done", version: "0.11.0" },
-                    { name: "try/except/finally blocks with real exception propagation (see EXCEPTION HANDLING)", status: "done", version: "0.7.0" },
-                    { name: "with statements over user context managers (__enter__/__exit__, nested, inherited, exit before return / break / continue)", status: "done", version: "0.14.0", issue: 5 },
-                    { name: "Comparison operations (==, !=, <, <=, >, >=)", status: "done", version: "0.1.0" },
-                    { name: "Boolean logic (and, or, not) with short-circuit", status: "done", version: "0.1.0" }
+                    { name: "if/elif/else statements", status: "done", version: "0.1.0", test: "control_flow::if_elif_else" },
+                    { name: "while loops", status: "done", version: "0.1.0", test: "control_flow::while_loops" },
+                    { name: "for loops with list/string iteration", status: "done", version: "0.7.0", test: "control_flow::for_over_lists_and_strings" },
+                    { name: "break and continue in loops", status: "done", version: "0.11.0", test: "control_flow::break_and_continue" },
+                    { name: "try/except/finally blocks with real exception propagation (see EXCEPTION HANDLING)", status: "done", version: "0.7.0", test: "control_flow::try_except_finally" },
+                    { name: "with statements over user context managers (__enter__/__exit__, nested, inherited, exit before return / break / continue)", status: "done", version: "0.14.0", issue: 5, test: "control_flow::with_context_managers" },
+                    { name: "Comparison operations (==, !=, <, <=, >, >=)", status: "done", version: "0.1.0", test: "control_flow::comparisons" },
+                    { name: "Boolean logic (and, or, not) with short-circuit", status: "done", version: "0.1.0", test: "control_flow::boolean_short_circuit" },
+                    { name: "else clauses on for, while, and try", status: "done", version: "upcoming", test: "control_flow::else_clauses" }
                 ]
             },
             functions: {
@@ -179,10 +180,12 @@
                 status: "done",
                 version: "0.1.0",
                 features: [
-                    { name: "Function definitions with parameters", status: "done", version: "0.1.0" },
-                    { name: "Type annotations (params & return types)", status: "done", version: "0.1.0" },
-                    { name: "Function calls between compiled functions", status: "done", version: "0.1.0" },
-                    { name: "Multiple functions per module", status: "done", version: "0.1.0" }
+                    { name: "Function definitions with parameters", status: "done", version: "0.1.0", test: "functions::definitions_with_parameters" },
+                    { name: "Type annotations (params & return types)", status: "done", version: "0.1.0", test: "functions::annotated_signatures" },
+                    { name: "Function calls between compiled functions", status: "done", version: "0.1.0", test: "functions::calls_between_functions" },
+                    { name: "Multiple functions per module", status: "done", version: "0.1.0", test: "functions::multiple_functions" },
+                    { name: "Keyword arguments in calls to functions and constructors, placed by name with defaults filled in", status: "done", version: "upcoming", test: "functions::keyword_arguments" },
+                    { name: "An unannotated parameter or return takes ints, bools, and None; a string, float, collection, or instance through one is refused", status: "done", version: "upcoming", test: "functions::untyped_parameters_take_words" }
                 ]
             },
             typeSystem: {
@@ -190,11 +193,11 @@
                 status: "done",
                 version: "0.1.0",
                 features: [
-                    { name: "Basic types: int (32-bit two's complement, wraps on overflow rather than growing like CPython's), float (IEEE-754 double), bool", status: "done", version: "0.1.0" },
-                    { name: "Generic types (List[T], Dict[K,V], Tuple[T,...])", status: "done", version: "0.1.0" },
-                    { name: "Union/Optional types", status: "done", version: "0.1.0" },
-                    { name: "Custom class type annotations", status: "done", version: "0.1.0" },
-                    { name: "Unannotated locals typed from the value: collection element types, c = C() as an instance, a method call's declared return type", status: "done", version: "0.14.0" }
+                    { name: "Basic types: int (32-bit two's complement, wraps on overflow rather than growing like CPython's), float (IEEE-754 double), bool", status: "done", version: "0.1.0", test: "type_system::basic_types_and_int_width" },
+                    { name: "Generic types (List[T], Dict[K,V], Tuple[T,...])", status: "done", version: "0.1.0", test: "type_system::generic_types" },
+                    { name: "Union/Optional types", status: "done", version: "0.1.0", test: "type_system::union_and_optional" },
+                    { name: "Custom class type annotations", status: "done", version: "0.1.0", test: "type_system::class_annotations" },
+                    { name: "Unannotated locals typed from the value: collection element types, c = C() as an instance, a method call's declared return type", status: "done", version: "0.14.0", test: "type_system::inferred_local_types" }
                 ]
             },
             variables: {
@@ -202,15 +205,16 @@
                 status: "done",
                 version: "0.1.0",
                 features: [
-                    { name: "Variable declarations and assignments", status: "done", version: "0.1.0" },
-                    { name: "Augmented assignment (+=, -=, *=, etc.)", status: "done", version: "0.1.0" },
-                    { name: "Attribute assignment (obj.attr = value)", status: "done", version: "0.1.0" },
-                    { name: "Type inference from usage", status: "done", version: "0.1.0" },
-                    { name: "Module-level definitions evaluated once at instantiation and shared (start function + globals)", status: "done", version: "upcoming" },
-                    { name: "Class-level variables shared by the class", status: "done", version: "upcoming" },
-                    { name: "Tuple unpacking types its targets; a wrong-length value raises ValueError", status: "done", version: "upcoming" },
-                    { name: "Augmented assignment through subscripts and computed objects, each target evaluated once", status: "done", version: "upcoming" },
-                    { name: "Annotated fields: self.items: Dict[str, Item] = {}", status: "done", version: "upcoming" }
+                    { name: "Variable declarations and assignments", status: "done", version: "0.1.0", test: "variables::assignments" },
+                    { name: "Augmented assignment (+=, -=, *=, etc.)", status: "done", version: "0.1.0", test: "variables::augmented_assignment" },
+                    { name: "Attribute assignment (obj.attr = value)", status: "done", version: "0.1.0", test: "variables::attribute_assignment" },
+                    { name: "Type inference from usage", status: "done", version: "0.1.0", test: "variables::type_inference_from_usage" },
+                    { name: "Module-level definitions evaluated once at instantiation and shared (start function + globals)", status: "done", version: "upcoming", test: "variables::module_level_definitions" },
+                    { name: "Class-level variables shared by the class", status: "done", version: "upcoming", test: "variables::class_variables" },
+                    { name: "Tuple unpacking types its targets; a wrong-length value raises ValueError", status: "done", version: "upcoming", test: "variables::tuple_unpacking" },
+                    { name: "Augmented assignment through subscripts and computed objects, each target evaluated once", status: "done", version: "upcoming", test: "variables::augmented_assignment_targets" },
+                    { name: "Annotated fields: self.items: Dict[str, Item] = {}", status: "done", version: "upcoming", test: "variables::annotated_fields" },
+                    { name: "A module-level statement that would not run (a loop, a call, an augmented assignment) is refused", status: "done", version: "upcoming", test: "variables::module_statements_that_would_not_run" }
                 ]
             },
             decorators: {
@@ -218,9 +222,10 @@
                 status: "progress",
                 version: "0.6.0",
                 features: [
-                    { name: "Standard decorators applied: @staticmethod, @classmethod, @property / @x.setter, @abstractmethod, @dataclass, and the functools decorators (see their cards)", status: "done", version: "0.17.0" },
-                    { name: "Unimplemented decorators are refused (functions, methods, and classes) instead of being silently dropped", status: "done", version: "0.17.0" },
-                    { name: "User-written decorators: a function that takes a function and returns one, applied at definition time", status: "todo" }
+                    { name: "Standard decorators applied: @staticmethod, @classmethod, @property / @x.setter, @abstractmethod, @dataclass, and the functools decorators (see their cards)", status: "done", version: "0.17.0", test: "decorators::standard_decorators" },
+                    { name: "Unimplemented decorators are refused (functions, methods, and classes) instead of being silently dropped", status: "done", version: "0.17.0", test: "decorators::unimplemented_decorators_refused" },
+                    { name: "Decorators CPython does not define (@memoize, @timer, @debug, @pure, @wasm_export, ...) are refused, as CPython raises NameError", status: "done", version: "upcoming", test: "decorators::undefined_decorators_refused" },
+                    { name: "User-written decorators: a function that takes a function and returns one, applied at definition time", status: "todo", test: "decorators::user_written_decorators" }
                 ]
             },
             projectMgmt: {
@@ -228,10 +233,10 @@
                 status: "done",
                 version: "0.5.0",
                 features: [
-                    { name: "Multi-file compilation to single WASM", status: "done", version: "0.5.0" },
-                    { name: "Dependency analysis & circular detection", status: "done", version: "0.5.0" },
-                    { name: "Entry point detection (__main__.py)", status: "done", version: "0.5.0" },
-                    { name: "Config parsing (setup.py, pyproject.toml)", status: "done", version: "0.5.0" }
+                    { name: "Multi-file compilation to single WASM", status: "done", version: "0.5.0", test: "project_mgmt::multi_file_compilation" },
+                    { name: "Dependency analysis & circular detection", status: "done", version: "0.5.0", test: "project_mgmt::dependency_order_and_cycles" },
+                    { name: "Entry point detection (__main__.py)", status: "done", version: "0.5.0", test: "project_mgmt::entry_point_detection" },
+                    { name: "Config parsing (setup.py, pyproject.toml)", status: "done", version: "0.5.0", test: "project_mgmt::config_parsing" }
                 ]
             },
             optimization: {
@@ -239,16 +244,16 @@
                 status: "done",
                 version: "0.1.0",
                 features: [
-                    { name: "WebAssembly optimization (Binaryen)", status: "done", version: "0.1.0" },
-                    { name: "Compiler options & configuration (reviewed API: optimize + verbosity)", status: "done", version: "0.14.0" },
-                    { name: "Error handling with located messages (line/column, function, hints)", status: "done", version: "0.14.0" },
-                    { name: "A call to an undefined function, or an attribute read through an untyped value, is a compile error instead of answering 0", status: "done", version: "0.17.0" },
-                    { name: "Early validation - unsupported syntax rejected before codegen", status: "done", version: "0.14.0" },
-                    { name: "A parse or lowering failure fails the build naming the file, rather than skipping it with a warning", status: "done", version: "0.16.0" },
-                    { name: "Integration test suite - every example compiled, run, and asserted in CI", status: "done", version: "0.14.0" },
-                    { name: "End-to-end programs asserted under Node and wasmtime, optimized and unoptimized, as a CI gate", status: "done", version: "0.16.0" },
-                    { name: "Comment preservation - python.comments custom section, survives optimization", status: "done", version: "0.14.0" },
-                    { name: "Memory layout optimization", status: "done", version: "0.1.0" }
+                    { name: "WebAssembly optimization (Binaryen)", status: "done", version: "0.1.0", test: "optimization::binaryen_optimization" },
+                    { name: "Compiler options & configuration (reviewed API: optimize + verbosity)", status: "done", version: "0.14.0", test: "optimization::compiler_options" },
+                    { name: "Error handling with located messages (line/column, function, hints)", status: "done", version: "0.14.0", test: "optimization::located_errors" },
+                    { name: "A call to an undefined function, or an attribute read through an untyped value, is a compile error instead of answering 0", status: "done", version: "0.17.0", test: "optimization::undefined_names_refused" },
+                    { name: "Early validation - unsupported syntax rejected before codegen", status: "done", version: "0.14.0", test: "optimization::early_validation" },
+                    { name: "A parse or lowering failure fails the build naming the file, rather than skipping it with a warning", status: "done", version: "0.16.0", test: "optimization::failures_name_the_file" },
+                    { name: "Integration test suite - every example compiled, run, and asserted in CI", status: "done", version: "0.14.0", test: "optimization::every_example_compiles" },
+                    { name: "End-to-end programs asserted under Node and wasmtime, optimized and unoptimized, as a CI gate", status: "done", version: "0.16.0", test: "optimization::end_to_end_programs_have_checkers" },
+                    { name: "Comment preservation - python.comments custom section, survives optimization", status: "done", version: "0.14.0", test: "optimization::comment_preservation" },
+                    { name: "Memory layout: equal string and bytes literals share one blob in the data segment", status: "done", version: "0.1.0", test: "optimization::literals_share_one_blob" }
                 ]
             },
             strings: {
@@ -256,26 +261,26 @@
                 status: "progress",
                 version: "0.3.0",
                 features: [
-                    { name: "String literals, indexing, slicing, concatenation", status: "done", version: "0.3.0" },
-                    { name: "Case conversion (upper, lower, capitalize, title)", status: "done", version: "0.3.0" },
-                    { name: "Test methods (isdigit, isalpha, isspace, etc.) - compile-time optimized", status: "done", version: "0.3.0" },
-                    { name: "Search methods (.find, .count, .startswith, .endswith)", status: "done", version: "0.3.0" },
-                    { name: "Transform methods (.split, .join, .replace)", status: "done", version: "0.3.0" },
-                    { name: "A method on a literal receiver answers what the same method on a variable does, .split(sep) included", status: "done", version: "0.16.0" },
-                    { name: "Layout methods (.ljust, .rjust, .center)", status: "done", version: "0.3.0" },
-                    { name: "% formatting - compile-time for constants", status: "done", version: "0.3.0" },
-                    { name: "% formatting on runtime values (\"%d\" % n)", status: "todo" },
-                    { name: "Repetition: s * n and n * s", status: "todo" },
-                    { name: "Every string method works on a runtime receiver, not only a literal (case, trim, search, split/join, replace, layout, predicates)", status: "done", version: "0.16.0" },
-                    { name: ".format() interpolates runtime values - automatic {} and positional {0} fields (named fields, specifiers, and conversions rejected)", status: "done", version: "0.16.0" },
-                    { name: "Strings compare by content everywhere, so a key built at runtime matches an equal one (dict keys, in over lists and sets)", status: "done", version: "0.16.0" },
-                    { name: "sub in text searches the string", status: "done", version: "0.16.0" },
-                    { name: "F-strings - constant placeholders folded into the literal", status: "done", version: "0.3.0" },
-                    { name: "F-strings - dynamic interpolation (every placeholder rendered and concatenated)", status: "done", version: "0.15.0" },
-                    { name: "F-string fixed-point specifier f\"{value:.2f}\" (every other specifier still refused)", status: "done", version: "0.16.0" },
-                    { name: "String ordering (<, <=, >, >=) and identity (is)", status: "done", version: "upcoming" },
-                    { name: "s[i] is a real one-character string wherever it goes", status: "done", version: "upcoming" },
-                    { name: "for ch in s iterates characters", status: "done", version: "upcoming" }
+                    { name: "String literals, indexing, slicing, concatenation", status: "done", version: "0.3.0", test: "strings::literals_indexing_slicing" },
+                    { name: "Case conversion (upper, lower, capitalize, title)", status: "done", version: "0.3.0", test: "strings::case_conversion" },
+                    { name: "Test methods (isdigit, isalpha, isspace, etc.) - compile-time optimized", status: "done", version: "0.3.0", test: "strings::predicates" },
+                    { name: "Search methods (.find, .count, .startswith, .endswith)", status: "done", version: "0.3.0", test: "strings::search_methods" },
+                    { name: "Transform methods (.split, .join, .replace)", status: "done", version: "0.3.0", test: "strings::split_join_replace" },
+                    { name: "A method on a literal receiver answers what the same method on a variable does, .split(sep) included", status: "done", version: "0.16.0", test: "strings::literal_receiver_matches_runtime" },
+                    { name: "Layout methods (.ljust, .rjust, .center)", status: "done", version: "0.3.0", test: "strings::layout_methods" },
+                    { name: "% formatting - compile-time for constants: %s %r %d %i %x %X %o %f with flags, width, and precision (rendered as written, or in decimal for %x, before; anything else is refused)", status: "done", version: "upcoming", test: "strings::constant_percent_formatting" },
+                    { name: "% formatting on runtime values (\"%d\" % n)", status: "todo", test: "strings::runtime_percent_formatting" },
+                    { name: "Repetition: s * n and n * s", status: "done", version: "upcoming", test: "strings::repetition" },
+                    { name: "Every string method works on a runtime receiver, not only a literal (case, trim, search, split/join, replace, layout, predicates)", status: "done", version: "0.16.0", test: "strings::runtime_receivers" },
+                    { name: ".format() interpolates runtime values - automatic {} and positional {0} fields (named fields, specifiers, and conversions rejected)", status: "done", version: "0.16.0", test: "strings::format_method" },
+                    { name: "Strings compare by content everywhere, so a key built at runtime matches an equal one (dict keys, in over lists and sets)", status: "done", version: "0.16.0", test: "strings::content_comparison" },
+                    { name: "sub in text searches the string", status: "done", version: "0.16.0", test: "strings::substring_in" },
+                    { name: "F-strings - constant placeholders folded into the literal", status: "done", version: "0.3.0", test: "strings::fstring_constants" },
+                    { name: "F-strings - dynamic interpolation (every placeholder rendered and concatenated)", status: "done", version: "0.15.0", test: "strings::fstring_runtime" },
+                    { name: "F-string fixed-point specifier f\"{value:.2f}\" (every other specifier still refused)", status: "done", version: "0.16.0", test: "strings::fstring_fixed_point" },
+                    { name: "String ordering (<, <=, >, >=) and identity (is)", status: "done", version: "upcoming", test: "strings::string_ordering" },
+                    { name: "s[i] is a real one-character string wherever it goes", status: "done", version: "upcoming", test: "strings::indexed_character_is_a_string" },
+                    { name: "for ch in s iterates characters", status: "done", version: "upcoming", test: "strings::iterate_characters" }
                 ]
             },
             collections: {
@@ -283,30 +288,32 @@
                 status: "progress",
                 version: "0.7.0",
                 features: [
-                    { name: "List literals with memory allocation [1, 2, 3]", status: "done", version: "0.7.0" },
-                    { name: "List indexing (read & write) list[i] and list[i] = value", status: "done", version: "0.7.0" },
-                    { name: "List methods .append(), .pop([i]), .clear(), .insert(i, v)", status: "done", version: "0.7.0" },
-                    { name: ".pop(i) removes the element at i and .index(v) answers its position; a missing value or position traps, as Python raises", status: "done", version: "0.16.0" },
-                    { name: "A method called with the wrong number of arguments is a compile error, not a silently ignored one", status: "done", version: "0.16.0" },
-                    { name: "List search methods .index(v) & .count(v) with linear search", status: "done", version: "0.7.0" },
-                    { name: "Dict literals with memory allocation {'key': value}", status: "done", version: "0.7.0" },
-                    { name: "Dict indexing (read & write) dict[key] and dict[key] = value", status: "done", version: "0.7.0" },
-                    { name: "Runtime growth: lists reallocate on append/extend/insert, dicts on a new key", status: "done", version: "0.14.0" },
-                    { name: "Iterating a list of instances binds a typed element (for it in items: it.field)", status: "done", version: "0.14.0" },
-                    { name: "Set mutation .add() / .remove() / .discard(), rehashing when the table fills", status: "done", version: "0.15.0" },
-                    { name: "List methods .sort([reverse]) and .reverse(), in place", status: "done", version: "0.16.0" },
-                    { name: "List slicing xs[a:b] returns a fresh list, negative indices and clamping included (a step other than 1 is rejected)", status: "done", version: "0.16.0" },
-                    { name: "Dict methods .get(key[, default]), .keys(), .values(), .items() - .items() as a value, not only a for iterable", status: "done", version: "0.16.0" },
-                    { name: "in searches dicts and tuples as well as lists and sets; anything unsearchable is a compile error", status: "done", version: "0.16.0" },
-                    { name: "Truthiness follows Python: an empty list, dict, set, or tuple is False", status: "done", version: "0.16.0" },
-                    { name: "A method the compiler does not implement is a compile error rather than a silent no-op", status: "done", version: "0.16.0" },
-                    { name: "Value equality and ordering for tuples and lists (==, !=, <, <=, >, >=)", status: "done", version: "upcoming" },
-                    { name: "Tuples as set members and dict keys; sets hash strings by content", status: "done", version: "upcoming" },
-                    { name: "Every evaluation of a collection literal is a new object", status: "done", version: "upcoming" },
-                    { name: "A tuple subscript (d[(1, 2)]) is an index, not a slice", status: "done", version: "upcoming" },
-                    { name: "Collection writes convert the value to the element type, or are refused (append, insert, item assignment, dict values, set.add)", status: "done", version: "0.17.0" },
-                    { name: "Sequence repetition: [0] * n and (a,) * n", status: "todo" },
-                    { name: "The rest of the dict API: |, |=, update, pop, popitem, setdefault, copy, clear, fromkeys, del d[k]", status: "todo" }
+                    { name: "List literals with memory allocation [1, 2, 3]", status: "done", version: "0.7.0", test: "collections::list_literals" },
+                    { name: "List indexing (read & write) list[i] and list[i] = value", status: "done", version: "0.7.0", test: "collections::list_indexing" },
+                    { name: "List methods .append(), .pop([i]), .clear(), .insert(i, v)", status: "done", version: "0.7.0", test: "collections::list_methods" },
+                    { name: ".pop(i) removes the element at i and .index(v) answers its position; a missing value or position traps, as Python raises", status: "done", version: "0.16.0", test: "collections::pop_index_and_index_of" },
+                    { name: "A method called with the wrong number of arguments is a compile error, not a silently ignored one", status: "done", version: "0.16.0", test: "collections::method_arity_checked" },
+                    { name: "List search methods .index(v) & .count(v) with linear search", status: "done", version: "0.7.0", test: "collections::list_search" },
+                    { name: "Dict literals with memory allocation {'key': value}", status: "done", version: "0.7.0", test: "collections::dict_literals" },
+                    { name: "Dict indexing (read & write) dict[key] and dict[key] = value", status: "done", version: "0.7.0", test: "collections::dict_indexing" },
+                    { name: "Runtime growth: lists reallocate on append/extend/insert, dicts on a new key", status: "done", version: "0.14.0", test: "collections::runtime_growth" },
+                    { name: "Iterating a list of instances binds a typed element (for it in items: it.field)", status: "done", version: "0.14.0", test: "collections::iterate_instances" },
+                    { name: "Set mutation .add() / .remove() / .discard(), rehashing when the table fills", status: "done", version: "0.15.0", test: "collections::set_mutation" },
+                    { name: "List methods .sort([reverse]) and .reverse(), in place", status: "done", version: "0.16.0", test: "collections::sort_and_reverse" },
+                    { name: "List slicing xs[a:b] returns a fresh list, negative indices and clamping included (a step other than 1 is rejected)", status: "done", version: "0.16.0", test: "collections::list_slicing" },
+                    { name: "Dict methods .get(key[, default]), .keys(), .values(), .items() - .items() as a value, not only a for iterable", status: "done", version: "0.16.0", test: "collections::dict_methods" },
+                    { name: "in searches dicts and tuples as well as lists and sets; anything unsearchable is a compile error", status: "done", version: "0.16.0", test: "collections::in_dicts_and_tuples" },
+                    { name: "Truthiness follows Python: an empty list, dict, set, or tuple is False", status: "done", version: "0.16.0", test: "collections::collection_truthiness" },
+                    { name: "A method the compiler does not implement is a compile error rather than a silent no-op", status: "done", version: "0.16.0", test: "collections::unknown_methods_refused" },
+                    { name: "Value equality and ordering for tuples and lists (==, !=, <, <=, >, >=)", status: "done", version: "upcoming", test: "collections::sequence_equality_and_ordering" },
+                    { name: "Tuples as set members and dict keys; sets hash strings by content", status: "done", version: "upcoming", test: "collections::tuples_as_keys" },
+                    { name: "Every evaluation of a collection literal is a new object", status: "done", version: "upcoming", test: "collections::fresh_literals" },
+                    { name: "A tuple subscript (d[(1, 2)]) is an index, not a slice", status: "done", version: "upcoming", test: "collections::tuple_subscript" },
+                    { name: "Collection writes convert the value to the element type, or are refused (append, insert, item assignment, dict values, set.add)", status: "done", version: "0.17.0", test: "collections::collection_writes_convert" },
+                    { name: "Sequence repetition: [0] * n and (a,) * n (a tuple's count must be a constant, since its length is part of its type)", status: "done", version: "upcoming", test: "collections::sequence_repetition" },
+                    { name: "Concatenation: xs + ys for two lists or two tuples", status: "done", version: "upcoming", test: "collections::concatenation" },
+                    { name: "Dict merge: d1 | d2, in CPython's order", status: "done", version: "upcoming", test: "collections::dict_merge" },
+                    { name: "The rest of the dict API: |=, update, pop, popitem, setdefault, copy, clear, fromkeys, del d[k]", status: "todo", test: "collections::rest_of_dict_api" }
                 ]
             },
             classes: {
@@ -314,26 +321,26 @@
                 status: "done",
                 version: "0.7.0",
                 features: [
-                    { name: "Class definitions with full WASM compilation", status: "done", version: "0.7.0" },
-                    { name: "Instance method definitions with implicit self parameter", status: "done", version: "0.7.0" },
-                    { name: "Object instantiation via constructor calls (ClassName(args))", status: "done", version: "0.7.0" },
-                    { name: "Automatic __init__ method invocation during construction", status: "done", version: "0.7.0" },
-                    { name: "Method calls with proper dispatch (obj.method())", status: "done", version: "0.7.0" },
-                    { name: "Instance attribute access getter (obj.attr)", status: "done", version: "0.7.0" },
-                    { name: "Instance attribute assignment setter (obj.attr = value)", status: "done", version: "0.7.0" },
-                    { name: "Per-instance field storage with calculated memory offsets", status: "done", version: "0.7.0" },
-                    { name: "Heap-allocated instances: a distinct pointer per instantiation", status: "done", version: "0.12.0" },
-                    { name: "Multiple live instances of one class with independent state", status: "done", version: "0.12.0" },
-                    { name: "Instances as first-class values (arguments, factory returns)", status: "done", version: "0.12.0" },
-                    { name: "Single inheritance with super().__init__ / super().method()", status: "done", version: "0.12.0" },
-                    { name: "isinstance / issubclass over the class hierarchy", status: "done", version: "0.12.0" },
-                    { name: "@dataclass with generated __init__ / __eq__ / __repr__", status: "done", version: "0.12.0" },
-                    { name: "Abstract base classes (abc.ABC + @abstractmethod)", status: "done", version: "0.12.0" },
-                    { name: "Collection fields hold instances: self.items = [] filled by append keeps its element class", status: "done", version: "0.14.0" },
-                    { name: "Collection fields grow through the field, so self.items.append(v) is visible to later reads", status: "done", version: "0.14.0" },
-                    { name: "Rich comparisons on instances: <, <=, >, >= call __lt__/__le__/__gt__/__ge__, with reflection", status: "done", version: "0.17.0" },
-                    { name: "Virtual dispatch: a base method calling self.method() reaches the subclass override (methods, @property getters, __eq__)", status: "done", version: "0.17.0" },
-                    { name: "Instances of sibling classes in one list, dict, local, or field dispatch on their own class (typed as the nearest common base)", status: "done", version: "upcoming" }
+                    { name: "Class definitions with full WASM compilation", status: "done", version: "0.7.0", test: "classes::class_definitions" },
+                    { name: "Instance method definitions with implicit self parameter", status: "done", version: "0.7.0", test: "classes::methods_with_self" },
+                    { name: "Object instantiation via constructor calls (ClassName(args))", status: "done", version: "0.7.0", test: "classes::instantiation" },
+                    { name: "Automatic __init__ method invocation during construction", status: "done", version: "0.7.0", test: "classes::init_runs" },
+                    { name: "Method calls with proper dispatch (obj.method())", status: "done", version: "0.7.0", test: "classes::method_dispatch" },
+                    { name: "Instance attribute access getter (obj.attr)", status: "done", version: "0.7.0", test: "classes::attribute_read" },
+                    { name: "Instance attribute assignment setter (obj.attr = value)", status: "done", version: "0.7.0", test: "classes::attribute_write" },
+                    { name: "Per-instance field storage with calculated memory offsets", status: "done", version: "0.7.0", test: "classes::field_layout" },
+                    { name: "Heap-allocated instances: a distinct pointer per instantiation", status: "done", version: "0.12.0", test: "classes::distinct_instances" },
+                    { name: "Multiple live instances of one class with independent state", status: "done", version: "0.12.0", test: "classes::independent_instances" },
+                    { name: "Instances as first-class values (arguments, factory returns)", status: "done", version: "0.12.0", test: "classes::instances_as_values" },
+                    { name: "Single inheritance with super().__init__ / super().method()", status: "done", version: "0.12.0", test: "classes::single_inheritance" },
+                    { name: "isinstance / issubclass over the class hierarchy", status: "done", version: "0.12.0", test: "classes::isinstance_hierarchy" },
+                    { name: "@dataclass with generated __init__ / __eq__ / __repr__", status: "done", version: "0.12.0", test: "classes::dataclasses" },
+                    { name: "Abstract base classes (abc.ABC + @abstractmethod)", status: "done", version: "0.12.0", test: "classes::abstract_base_classes" },
+                    { name: "Collection fields hold instances: self.items = [] filled by append keeps its element class", status: "done", version: "0.14.0", test: "classes::collection_fields_hold_instances" },
+                    { name: "Collection fields grow through the field, so self.items.append(v) is visible to later reads", status: "done", version: "0.14.0", test: "classes::collection_fields_grow" },
+                    { name: "Rich comparisons on instances: <, <=, >, >= call __lt__/__le__/__gt__/__ge__, with reflection", status: "done", version: "0.17.0", test: "classes::rich_comparisons" },
+                    { name: "Virtual dispatch: a base method calling self.method() reaches the subclass override (methods, @property getters, __eq__)", status: "done", version: "0.17.0", test: "classes::virtual_dispatch" },
+                    { name: "Instances of sibling classes in one list, dict, local, or field dispatch on their own class (typed as the nearest common base)", status: "done", version: "upcoming", test: "classes::sibling_instances" }
                 ]
             },
             builtins: {
@@ -341,17 +348,20 @@
                 status: "progress",
                 version: "0.7.0",
                 features: [
-                    { name: "Type conversions (int(), float(), str(), bool())", status: "done", version: "0.4.0" },
-                    { name: "str() of a float, bool, or collection, and float() of a string (refused today)", status: "todo" },
-                    { name: "len() - strings, lists, and dicts", status: "done", version: "0.7.0" },
-                    { name: "print() evaluates its arguments but writes nothing: output needs a host interface", status: "progress" },
-                    { name: "min() & max() - multiple arguments", status: "done", version: "0.7.0" },
-                    { name: "min() & max() over a single iterable, with key= and default=", status: "todo", issue: 118 },
-                    { name: "sum() over lists/tuples with optional start value - real element loop", status: "done", version: "0.14.0" },
-                    { name: "sorted(iterable[, key][, reverse]) - stable, over ints, floats, strings, and tuples (a sequence or key whose type cannot be determined is refused, not guessed)", status: "done", version: "0.16.0" },
-                    { name: "int() parses a string, raising ValueError on bad input", status: "done", version: "upcoming" },
-                    { name: "round(x[, ndigits]) exact, half-to-even, matching CPython", status: "done", version: "upcoming" },
-                    { name: "abs()", status: "done", version: "upcoming" }
+                    { name: "Type conversions (int(), float(), str(), bool())", status: "done", version: "0.4.0", test: "builtins::type_conversions" },
+                    { name: "str() of a float, bool, or collection, and float() of a string (refused today)", status: "todo", test: "builtins::str_of_float_and_collections" },
+                    { name: "len() - strings, lists, and dicts", status: "done", version: "0.7.0", test: "builtins::len_of_collections" },
+                    { name: "len() of a range, and len() of anything without a length refused (TypeError in CPython)", status: "done", version: "upcoming", test: "builtins::len_of_range" },
+                    { name: "isinstance() against builtin types (int, float, str, bool, list, dict, set, tuple, bytes) and tuples of types", status: "done", version: "upcoming", test: "builtins::isinstance_builtin_types" },
+                    { name: "bool(x) is the truth value (it passed x through, so bool(2) + 1 was 3)", status: "done", version: "upcoming", test: "builtins::bool_truth_value" },
+                    { name: "print() evaluates its arguments but writes nothing: output needs a host interface", status: "progress", test: "builtins::print_output" },
+                    { name: "min() & max() - multiple arguments, all ints, all floats, or all strings, keeping the first of equals as CPython does", status: "done", version: "upcoming", test: "builtins::min_max_arguments" },
+                    { name: "min() & max() over a single iterable, with key= and default=", status: "todo", issue: 118, test: "builtins::min_max_iterable" },
+                    { name: "sum() over lists/tuples with optional start value - real element loop", status: "done", version: "0.14.0", test: "builtins::sum_with_start" },
+                    { name: "sorted(iterable[, key][, reverse]) - stable, over ints, floats, strings, and tuples (a sequence or key whose type cannot be determined is refused, not guessed)", status: "done", version: "0.16.0", test: "builtins::sorted_builtin" },
+                    { name: "int() parses a string, raising ValueError on bad input", status: "done", version: "upcoming", test: "builtins::int_parses_strings" },
+                    { name: "round(x[, ndigits]) exact, half-to-even, matching CPython", status: "done", version: "upcoming", test: "builtins::round_half_even" },
+                    { name: "abs()", status: "done", version: "upcoming", test: "builtins::abs_builtin" }
                 ]
             },
             runtimeFeatures: {
@@ -359,13 +369,13 @@
                 status: "progress",
                 version: "0.14.0",
                 features: [
-                    { name: "Set storage with de-duplication & membership (in / not in)", status: "done" },
-                    { name: "Growable collections - lists and dicts reallocate instead of overflowing their region", status: "done", version: "0.14.0" },
-                    { name: "Dict index assignment with update or append (dict[key] = value)", status: "done" },
-                    { name: "Generator State Management - execution context suspension/resumption", status: "done", version: "0.14.0" },
-                    { name: "Dynamic Module Loading - runtime module loading and execution", status: "todo" },
-                    { name: "Closure Variable Capture Analysis - detecting and capturing closure variables", status: "done", version: "0.14.0" },
-                    { name: "String Transformation in WASM - full character-by-char transformations", status: "done", version: "0.16.0" }
+                    { name: "Set storage with de-duplication & membership (in / not in)", status: "done", test: "runtime_features::set_dedup_and_membership" },
+                    { name: "Growable collections - lists and dicts reallocate instead of overflowing their region", status: "done", version: "0.14.0", test: "runtime_features::growable_collections" },
+                    { name: "Dict index assignment with update or append (dict[key] = value)", status: "done", test: "runtime_features::dict_update_or_append" },
+                    { name: "Generator State Management - execution context suspension/resumption", status: "done", version: "0.14.0", test: "runtime_features::generator_state" },
+                    { name: "Dynamic Module Loading - runtime module loading and execution", status: "todo", test: "runtime_features::dynamic_module_loading" },
+                    { name: "Closure Variable Capture Analysis - detecting and capturing closure variables", status: "done", version: "0.14.0", test: "runtime_features::closure_capture" },
+                    { name: "String Transformation in WASM - full character-by-char transformations", status: "done", version: "0.16.0", test: "runtime_features::string_transformation" }
                 ]
             },
             webInterop: {
@@ -393,23 +403,23 @@
                 status: "progress",
                 version: "0.8.0",
                 features: [
-                    { name: "Module constants: math (pi, e, tau, inf, nan), os (name, sep, pathsep, linesep, devnull, curdir, pardir, extsep), sys.maxsize (2**31 - 1 under 32-bit int), logging levels, datetime.MINYEAR / MAXYEAR", status: "done", version: "0.8.0" },
-                    { name: "sys: argv, version, stdin / stdout / stderr, path, exit (sys.argv is empty and sys.version is not CPython's today)", status: "todo" },
-                    { name: "os functions on host values: getcwd(), getenv(), environ, getpid(), urandom() (each answers a fixed placeholder today)", status: "todo" },
-                    { name: "os.path functions: join(), basename(), dirname(), split(), splitext(), abspath(), exists(), isfile(), isdir() (join and basename answer wrong today)", status: "todo" },
-                    { name: "math functions on runtime values: sqrt, sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh, exp, log, log10, log2, pow, floor, ceil, trunc, fabs, copysign, fmod, remainder, degrees, radians, hypot, factorial, gcd, isnan, isinf, isfinite (refused today)", status: "todo" },
+                    { name: "Module constants: math (pi, e, tau, inf, nan), os (name, which is posix as on every CPython WebAssembly host, sep, pathsep, linesep, devnull, curdir, pardir, extsep), re flags, sys.maxsize (2**31 - 1 under 32-bit int), logging levels, datetime.MINYEAR / MAXYEAR", status: "done", version: "0.8.0", test: "stdlib::module_constants" },
+                    { name: "sys: argv, platform, version, stdin / stdout / stderr, path, exit (refused today)", status: "todo" },
+                    { name: "os functions on host values: getcwd(), getenv(), environ, getpid(), urandom() (refused today)", status: "todo" },
+                    { name: "os.path functions: join(), basename(), dirname(), split(), splitext(), abspath(), exists(), isfile(), isdir() (refused today)", status: "todo" },
+                    { name: "math functions on runtime values: sqrt, sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh, exp, log, log10, log2, pow, floor, ceil, trunc, fabs, copysign, fmod, remainder, degrees, radians, hypot, factorial, gcd, isnan, isinf, isfinite (refused today)", status: "todo", test: "stdlib::math_functions" },
                     { name: "random module, bit-identical to CPython for a seed: random, randint, randrange, uniform, choice, shuffle, sample, seed, getrandbits, gauss, normalvariate, expovariate (refused today)", status: "todo" },
-                    { name: "json module: dumps, loads, dump, load, JSONEncoder, JSONDecoder (dumps answers \"{}\" and loads a null today)", status: "todo" },
-                    { name: "re module, compile-time folding: sub and escape over constant arguments", status: "progress", version: "0.9.0" },
-                    { name: "re module at runtime: compile, search, match, fullmatch, findall, finditer, split, sub, subn, match objects, flags (a no-match reads as a match today)", status: "todo" },
-                    { name: "datetime: date / time / datetime / timedelta construction", status: "progress", version: "0.9.0" },
-                    { name: "datetime: attributes, arithmetic, weekday, isoformat, fromisoformat, strftime, strptime, replace, timestamp, fromtimestamp, timezone, tzinfo, and now() / today() read at run time (now() is the compile time today)", status: "todo" },
+                    { name: "json module: dumps, loads, dump, load, JSONEncoder, JSONDecoder (refused today)", status: "todo", test: "stdlib::json_module" },
+                    { name: "re module, compile-time folding: sub and escape over constant arguments, where the pattern is one CPython and the compiler read alike (anything else refused)", status: "done", version: "upcoming", test: "stdlib::re_constant_folds" },
+                    { name: "re module at runtime: compile, search, match, fullmatch, findall, finditer, split, sub, subn, match objects, flags (refused today)", status: "todo" },
+                    { name: "datetime: date / time / datetime / timedelta construction (refused today: it validated nothing)", status: "todo" },
+                    { name: "datetime: attributes, arithmetic, weekday, isoformat, fromisoformat, strftime, strptime, replace, timestamp, fromtimestamp, timezone, tzinfo, and now() / today() read at run time (refused today)", status: "todo" },
                     { name: "collections module: namedtuple, deque, Counter, OrderedDict, defaultdict, ChainMap, UserDict, UserList, UserString (refused today)", status: "todo" },
                     { name: "itertools module: count, cycle, repeat, chain, compress, dropwhile, filterfalse, groupby, islice, starmap, takewhile, tee, zip_longest, product, permutations, combinations, combinations_with_replacement, accumulate, batched, pairwise (refused today)", status: "todo" },
-                    { name: "functools: @singledispatch with @f.register (static dispatch on the first argument's type), @total_ordering (derives the missing ordering methods)", status: "done", version: "0.17.0" },
-                    { name: "functools: @lru_cache, @cache, @wraps (accepted, no observable effect)", status: "done", version: "0.17.0" },
+                    { name: "functools: @singledispatch with @f.register (static dispatch on the first argument's type), @total_ordering (derives the missing ordering methods)", status: "done", version: "0.17.0", test: "stdlib::singledispatch_and_total_ordering" },
+                    { name: "functools: @lru_cache, @cache, @wraps (accepted, no observable effect)", status: "done", version: "0.17.0", test: "stdlib::caching_decorators" },
                     { name: "functools: reduce, partial, partialmethod, cmp_to_key, cached_property, singledispatchmethod (refused at compile time)", status: "todo", version: "" },
-                    { name: "logging module: debug, info, warning, error, critical, exception, log, basicConfig, getLogger, setLevel, disable, Logger, Handler, StreamHandler, FileHandler, Formatter, Filter, LogRecord (every call is dropped today)", status: "todo" }
+                    { name: "logging module: debug, info, warning, error, critical, exception, log, basicConfig, getLogger, setLevel, disable, Logger, Handler, StreamHandler, FileHandler, Formatter, Filter, LogRecord (refused today)", status: "todo" }
                 ]
             },
             comprehensions: {
@@ -417,13 +427,13 @@
                 status: "done",
                 version: "0.14.0",
                 features: [
-                    { name: "List comprehensions ([x for x in list])", status: "done", version: "0.14.0" },
-                    { name: "List comprehension filters ([x for x in list if condition])", status: "done", version: "0.14.0" },
-                    { name: "Dict comprehensions ({k: v for k, v in items})", status: "done", version: "0.14.0" },
-                    { name: "Set comprehensions ({x for x in list}) with dedup at construction", status: "done", version: "0.14.0" },
-                    { name: "Multiple generators & nesting ([x for row in m for x in row])", status: "done", version: "0.14.0" },
-                    { name: "Generator expressions (x for x in list), materialized eagerly as lists", status: "done", version: "0.14.0" },
-                    { name: "Comprehensions over generators and iterator classes (in the first for clause)", status: "done", version: "upcoming" }
+                    { name: "List comprehensions ([x for x in list])", status: "done", version: "0.14.0", test: "comprehensions::list_comprehension" },
+                    { name: "List comprehension filters ([x for x in list if condition])", status: "done", version: "0.14.0", test: "comprehensions::comprehension_filters" },
+                    { name: "Dict comprehensions ({k: v for k, v in items})", status: "done", version: "0.14.0", test: "comprehensions::dict_comprehension" },
+                    { name: "Set comprehensions ({x for x in list}) with dedup at construction", status: "done", version: "0.14.0", test: "comprehensions::set_comprehension" },
+                    { name: "Multiple generators & nesting ([x for row in m for x in row])", status: "done", version: "0.14.0", test: "comprehensions::nested_comprehension" },
+                    { name: "Generator expressions (x for x in list), materialized eagerly as lists", status: "done", version: "0.14.0", test: "comprehensions::generator_expressions" },
+                    { name: "Comprehensions over generators and iterator classes (in the first for clause)", status: "done", version: "upcoming", test: "comprehensions::comprehension_over_generator" }
                 ]
             },
             functional: {
@@ -431,13 +441,13 @@
                 status: "progress",
                 version: "0.8.0",
                 features: [
-                    { name: "Lambda functions (lambda x: x + 1) compiled to real functions", status: "done", version: "0.14.0" },
-                    { name: "Closures capture the variable, not its value: a captured variable lives in a cell the enclosing function and every closure share", status: "done", version: "0.15.0" },
-                    { name: "Closures capturing a float (refused today)", status: "todo" },
-                    { name: "Lambda parameters typed from their call sites, so indexing, len(), or a method call inside a lambda works (refused today)", status: "todo", issue: 115 },
-                    { name: "First-class closures: returned, passed as arguments, stored in collections, nested", status: "done", version: "0.14.0" },
-                    { name: "Higher-order functions (passing functions as arguments)", status: "done", version: "0.14.0" },
-                    { name: "Callable type tracking for function objects", status: "done", version: "0.8.0" }
+                    { name: "Lambda functions (lambda x: x + 1) compiled to real functions", status: "done", version: "0.14.0", test: "functional::lambdas" },
+                    { name: "Closures capture the variable, not its value: a captured variable lives in a cell the enclosing function and every closure share", status: "done", version: "0.15.0", test: "functional::closures_capture_variables" },
+                    { name: "Closures capturing a float (refused today)", status: "todo", test: "functional::float_captures" },
+                    { name: "Lambda parameters typed from their call sites, so indexing, len(), or a method call inside a lambda works (refused today)", status: "todo", issue: 115, test: "functional::typed_lambda_parameters" },
+                    { name: "First-class closures: returned, passed as arguments, stored in collections, nested", status: "done", version: "0.14.0", test: "functional::first_class_closures" },
+                    { name: "Higher-order functions (passing functions as arguments)", status: "done", version: "0.14.0", test: "functional::higher_order_functions" },
+                    { name: "Callable type tracking for function objects", status: "done", version: "0.8.0", test: "functional::callable_tracking" }
                 ]
             },
             generators: {
@@ -445,17 +455,18 @@
                 status: "progress",
                 version: "0.14.0",
                 features: [
-                    { name: "Generator functions - yield suspends and resumes with state preserved", status: "done", version: "0.14.0" },
-                    { name: "yield from delegation (ranges, lists, other generators)", status: "done", version: "0.14.0" },
-                    { name: "next(), send() with x = yield resume values, and close()", status: "done", version: "0.14.0" },
-                    { name: "Iterator protocol (__iter__, __next__) on user classes with StopIteration", status: "done", version: "0.14.0" },
-                    { name: "Generator type tracking (Generator[T])", status: "done", version: "0.8.0" },
-                    { name: "range() function implementation - all variants", status: "done", version: "0.8.0" },
-                    { name: "for loop iteration over ranges with step support", status: "done", version: "0.8.0" },
-                    { name: "Tuple targets in for loops (for a, b in pairs, star targets)", status: "done", version: "0.14.0" },
-                    { name: "enumerate(), zip(), and dict.items()/.keys()/.values() in for loops", status: "done", version: "0.14.0" },
-                    { name: "yield inside try / with, generator methods, and GeneratorExit / finally on close() (refused today)", status: "todo" },
-                    { name: "zip() and len() over a generator", status: "todo", issue: 133 }
+                    { name: "Generator functions - yield suspends and resumes with state preserved", status: "done", version: "0.14.0", test: "generators::generator_functions" },
+                    { name: "yield from delegation (ranges, lists, other generators)", status: "done", version: "0.14.0", test: "generators::yield_from" },
+                    { name: "next(), send() with x = yield resume values, and close()", status: "done", version: "0.14.0", test: "generators::next_send_close" },
+                    { name: "Iterator protocol (__iter__, __next__) on user classes with StopIteration", status: "done", version: "0.14.0", test: "generators::iterator_protocol" },
+                    { name: "Generator type tracking (Generator[T])", status: "done", version: "0.8.0", test: "generators::generator_type_tracking" },
+                    { name: "range() function implementation - all variants", status: "done", version: "0.8.0", test: "generators::range_variants" },
+                    { name: "for loop iteration over ranges with step support", status: "done", version: "0.8.0", test: "generators::range_steps" },
+                    { name: "Tuple targets in for loops (for a, b in pairs, star targets)", status: "done", version: "0.14.0", test: "generators::tuple_targets" },
+                    { name: "enumerate(), zip(), and dict.items()/.keys()/.values() in for loops", status: "done", version: "0.14.0", test: "generators::enumerate_zip_items" },
+                    { name: "yield inside try / with, generator methods, and GeneratorExit / finally on close() (refused today)", status: "todo", test: "generators::yield_in_try" },
+                    { name: "len() of a generator is refused, as CPython raises TypeError", status: "done", version: "upcoming", issue: 133, test: "generators::len_of_generator_refused" },
+                    { name: "zip() with a generator after its first argument (refused today)", status: "todo", issue: 133, test: "generators::zip_generator_later" }
                 ]
             },
             imports: {
@@ -463,15 +474,15 @@
                 status: "progress",
                 version: "0.8.0",
                 features: [
-                    { name: "Import statement parsing & IR generation", status: "done", version: "0.8.0" },
-                    { name: "From-import with named imports", status: "done", version: "0.8.0" },
-                    { name: "Star imports detection (from X import *)", status: "done", version: "0.8.0" },
-                    { name: "Conditional imports in try/except blocks", status: "done", version: "0.8.0" },
-                    { name: "Dynamic imports (__import__, importlib) (refused at compile time today)", status: "todo" },
-                    { name: "Module execution and loading", status: "done", version: "0.8.0" },
-                    { name: "User-defined module files - import mod / from mod import f resolved from sibling .py files and statically linked", status: "done", version: "0.14.0" },
-                    { name: "Namespace access on user modules (mod.f(), mod.CONST, mod.ClassName()) and aliases (import mod as m, from mod import f as g)", status: "done", version: "0.14.0" },
-                    { name: "Module caching - a module imported through several paths compiles once", status: "done", version: "0.14.0" }
+                    { name: "Import statement parsing & IR generation", status: "done", version: "0.8.0", test: "imports::import_statements" },
+                    { name: "From-import with named imports", status: "done", version: "0.8.0", test: "imports::from_imports" },
+                    { name: "Star imports detection (from X import *)", status: "done", version: "0.8.0", test: "imports::star_imports_refused" },
+                    { name: "Conditional imports in try/except blocks", status: "done", version: "0.8.0", test: "imports::conditional_imports" },
+                    { name: "Dynamic imports (__import__, importlib) (refused at compile time today)", status: "todo", test: "imports::dynamic_imports" },
+                    { name: "Module execution and loading", status: "done", version: "0.8.0", test: "imports::module_execution" },
+                    { name: "User-defined module files - import mod / from mod import f resolved from sibling .py files and statically linked", status: "done", version: "0.14.0", test: "imports::user_module_files" },
+                    { name: "Namespace access on user modules (mod.f(), mod.CONST, mod.ClassName()) and aliases (import mod as m, from mod import f as g)", status: "done", version: "0.14.0", test: "imports::module_namespaces_and_aliases" },
+                    { name: "Module caching - a module imported through several paths compiles once", status: "done", version: "0.14.0", test: "imports::module_caching" }
                 ]
             },
             fileIo: {
@@ -479,11 +490,11 @@
                 status: "done",
                 version: "0.14.0",
                 features: [
-                    { name: "open(path, mode) via the documented waspy_host import interface (r, w, a, b, + modes folded to flags)", status: "done", version: "0.14.0" },
-                    { name: "read() / read(n) returning strings (64 KiB default cap per call)", status: "done", version: "0.14.0" },
-                    { name: "write(s) returning bytes written; close() and flush()", status: "done", version: "0.14.0" },
-                    { name: "with open(...) as f: context-manager form (desugared to open/body/close)", status: "done", version: "0.14.0" },
-                    { name: "Import section emitted only when open() is used - other modules keep zero imports", status: "done", version: "0.14.0" }
+                    { name: "open(path, mode) via the documented waspy_host import interface (r, w, a, b, + modes folded to flags)", status: "done", version: "0.14.0", test: "file_io::open_with_modes" },
+                    { name: "read() / read(n) returning strings (64 KiB default cap per call)", status: "done", version: "0.14.0", test: "file_io::read_and_read_n" },
+                    { name: "write(s) returning bytes written; close() and flush()", status: "done", version: "0.14.0", test: "file_io::write_close_flush" },
+                    { name: "with open(...) as f: context-manager form (desugared to open/body/close)", status: "done", version: "0.14.0", test: "file_io::with_open" },
+                    { name: "Import section emitted only when open() is used - other modules keep zero imports", status: "done", version: "0.14.0", test: "file_io::imports_only_with_open" }
                 ]
             },
             errorHandling: {
@@ -491,16 +502,17 @@
                 status: "progress",
                 version: "0.7.0",
                 features: [
-                    { name: "try / except / finally blocks", status: "done", version: "0.7.0" },
-                    { name: "raise transfers control: it leaves the block, the try body, and the loop it is raised in", status: "done", version: "0.15.0" },
-                    { name: "Propagation across calls: an exception travels out of a callee into the caller's handler", status: "done", version: "0.15.0" },
-                    { name: "Handler matching by type, except (A, B) for either, except Exception for any; unmatched handlers pass it on", status: "done", version: "0.15.0" },
-                    { name: "finally and __exit__ run while an exception propagates, and on return / break / continue", status: "done", version: "0.15.0" },
-                    { name: "An uncaught exception unwinds out of the program and traps", status: "done", version: "0.15.0" },
-                    { name: "Exception objects: the message in raise ValueError(\"...\") is dropped, and except ... as e binds the type code, so str(e) and isinstance(e, ...) answer wrong", status: "todo" },
-                    { name: "Subclass matching: except MyBase does not catch a subclass of it (Exception / BaseException catch everything)", status: "todo" },
-                    { name: "Runtime faults raise catchable exceptions: IndexError for an out-of-range index, KeyError for a missing key, ZeroDivisionError", status: "done", version: "0.15.0" },
-                    { name: "int() of a bad string raises a catchable ValueError", status: "done", version: "upcoming" },
+                    { name: "try / except / finally blocks", status: "done", version: "0.7.0", test: "error_handling::try_except_finally_blocks" },
+                    { name: "raise transfers control: it leaves the block, the try body, and the loop it is raised in", status: "done", version: "0.15.0", test: "error_handling::raise_transfers_control" },
+                    { name: "Propagation across calls: an exception travels out of a callee into the caller's handler", status: "done", version: "0.15.0", test: "error_handling::propagation_across_calls" },
+                    { name: "Handler matching by type, except (A, B) for either, except Exception for any; unmatched handlers pass it on", status: "done", version: "0.15.0", test: "error_handling::handler_matching" },
+                    { name: "finally and __exit__ run while an exception propagates, and on return / break / continue", status: "done", version: "0.15.0", test: "error_handling::finally_runs_on_every_path" },
+                    { name: "An uncaught exception unwinds out of the program and traps", status: "done", version: "0.15.0", test: "error_handling::uncaught_exception_traps" },
+                    { name: "Exception objects: the message in raise ValueError(\"...\") is kept and except ... as e binds the exception (e can only be re-raised today; any other use is refused)", status: "todo", test: "error_handling::exception_objects" },
+                    { name: "raise and raise e inside a handler re-raise the caught exception's type", status: "done", version: "upcoming", test: "error_handling::reraise_keeps_type" },
+                    { name: "Subclass matching: except MyBase does not catch a subclass of it (Exception / BaseException catch everything)", status: "todo", test: "error_handling::subclass_matching" },
+                    { name: "Runtime faults raise catchable exceptions: IndexError for an out-of-range index, KeyError for a missing key, ZeroDivisionError", status: "done", version: "0.15.0", test: "error_handling::runtime_faults_catchable" },
+                    { name: "int() of a bad string raises a catchable ValueError", status: "done", version: "upcoming", test: "error_handling::int_bad_string_raises" },
                     { name: "The remaining faults raise instead of trapping: list.index / list.remove / set.remove of a missing value, pop from an empty list", status: "todo" },
                     { name: "__exit__ returning True suppresses the exception (it traps today)", status: "todo" }
                 ]
@@ -510,21 +522,21 @@
                 status: "progress",
                 version: "0.8.0",
                 features: [
-                    { name: "Bytes type & binary data handling", status: "done", version: "0.7.0" },
-                    { name: "Bytes literals, indexing, slicing, concatenation", status: "done", version: "0.7.0" },
-                    { name: "Set type ({1, 2, 3}) & literals", status: "done", version: "0.7.0" },
-                    { name: "Empty sets with type annotations", status: "done", version: "0.7.0" },
-                    { name: "Set mutation: add, remove, discard", status: "done", version: "0.15.0" },
-                    { name: "Set operations: union, intersection, difference, symmetric difference as methods and operators (| & ^ - answer wrong today), subset tests", status: "todo" },
-                    { name: "Tuple literals with variable expressions (a, b, c)", status: "done", version: "0.8.0" },
-                    { name: "Tuple indexing with type tracking", status: "done", version: "0.8.0" },
-                    { name: "Heterogeneous tuples with mixed types", status: "done", version: "0.8.0" },
-                    { name: "Tuple unpacking & assignment (a, b = (1, 2))", status: "done", version: "0.8.0" },
-                    { name: "Extended (starred) unpacking (a, *b, c = xs)", status: "done", version: "0.14.0" },
-                    { name: "Tuple .count()", status: "done", version: "0.8.0" },
-                    { name: "Tuple .index() (answers -1 today)", status: "todo" },
-                    { name: "Named tuples - namedtuple() factory (refused today, see STANDARD LIBRARY)", status: "todo" },
-                    { name: "String formatting: f-strings, .format() with automatic and positional fields, .2f-style precision", status: "done", version: "0.16.0" },
+                    { name: "Bytes type & binary data handling", status: "done", version: "0.7.0", test: "advanced_types::bytes_values" },
+                    { name: "Bytes literals, indexing, slicing, concatenation", status: "done", version: "0.7.0", test: "advanced_types::bytes_operations" },
+                    { name: "Set type ({1, 2, 3}) & literals", status: "done", version: "0.7.0", test: "advanced_types::set_literals" },
+                    { name: "Empty sets with type annotations", status: "done", version: "0.7.0", test: "advanced_types::empty_annotated_sets" },
+                    { name: "Set mutation: add, remove, discard", status: "done", version: "0.15.0", test: "advanced_types::set_add_remove_discard" },
+                    { name: "Set operations: union, intersection, difference, symmetric difference as methods and operators, subset and equality tests (a method takes a set argument)", status: "done", version: "upcoming", test: "advanced_types::set_operations" },
+                    { name: "Tuple literals with variable expressions (a, b, c)", status: "done", version: "0.8.0", test: "advanced_types::tuple_literals" },
+                    { name: "Tuple indexing with type tracking", status: "done", version: "0.8.0", test: "advanced_types::tuple_indexing" },
+                    { name: "Heterogeneous tuples with mixed types", status: "done", version: "0.8.0", test: "advanced_types::heterogeneous_tuples" },
+                    { name: "Tuple unpacking & assignment (a, b = (1, 2))", status: "done", version: "0.8.0", test: "advanced_types::tuple_unpack_assign" },
+                    { name: "Extended (starred) unpacking (a, *b, c = xs)", status: "done", version: "0.14.0", test: "advanced_types::starred_unpacking" },
+                    { name: "Tuple .count()", status: "done", version: "0.8.0", test: "advanced_types::tuple_count" },
+                    { name: "Tuple .index() (a missing value traps where CPython raises ValueError)", status: "done", version: "upcoming", test: "advanced_types::tuple_index" },
+                    { name: "Named tuples - namedtuple() factory (refused today, see STANDARD LIBRARY)", status: "todo", test: "advanced_types::named_tuples" },
+                    { name: "String formatting: f-strings, .format() with automatic and positional fields, .2f-style precision", status: "done", version: "0.16.0", test: "advanced_types::string_formatting" },
                     { name: "String formatting: the full format spec (width, alignment, sign, grouping, types), named .format() fields, !r / !a, runtime %", status: "todo" }
                 ]
             },
@@ -532,9 +544,9 @@
                 title: "ADVANCED OOP",
                 status: "progress",
                 features: [
-                    { name: "Property decorators (@property, @<name>.setter)", status: "done", version: "0.12.0" },
-                    { name: "Static & class methods (@staticmethod, @classmethod with cls factories)", status: "done", version: "0.12.0" },
-                    { name: "Multiple inheritance & method resolution", status: "todo" },
+                    { name: "Property decorators (@property, @<name>.setter)", status: "done", version: "0.12.0", test: "advanced_o_o_p::properties" },
+                    { name: "Static & class methods (@staticmethod, @classmethod with cls factories)", status: "done", version: "0.12.0", test: "advanced_o_o_p::static_and_class_methods" },
+                    { name: "Multiple inheritance & method resolution", status: "todo", test: "advanced_o_o_p::multiple_inheritance" },
                     { name: "Metaclasses & class creation", status: "todo", issue: 8 }
                 ]
             },
@@ -542,13 +554,13 @@
                 title: "MEMORY MANAGEMENT",
                 status: "progress",
                 features: [
-                    { name: "Bump allocator with runtime memory growth", status: "done", version: "0.12.0" },
-                    { name: "Collections carry a capacity and reallocate instead of overflowing their region", status: "done", version: "0.14.0" },
-                    { name: "Pointer identity across growth (a grown collection visible through every alias)", status: "done", version: "0.15.0" },
+                    { name: "Bump allocator with runtime memory growth", status: "done", version: "0.12.0", test: "memory::memory_growth" },
+                    { name: "Collections carry a capacity and reallocate instead of overflowing their region", status: "done", version: "0.14.0", test: "memory::collection_capacity" },
+                    { name: "Pointer identity across growth (a grown collection visible through every alias)", status: "done", version: "0.15.0", test: "memory::identity_across_growth" },
                     { name: "Garbage collection system", status: "todo" },
                     { name: "Reference counting & leak prevention", status: "todo" },
                     { name: "Memory pools for efficient allocation", status: "todo" },
-                    { name: "WASM memory optimization", status: "todo" }
+                    { name: "Bounded memory: a long-running loop that builds and drops collections stays within a fixed number of pages", status: "todo" }
                 ]
             },
             graphics: {

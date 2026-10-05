@@ -9,7 +9,6 @@ def multiply(x: int, y: int) -> int:
     result = x * y
     return result
 
-@wasm_export
 def calculate(n: int) -> int:
     return add(n, multiply(n, 2))
 "#;

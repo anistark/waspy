@@ -560,6 +560,20 @@ impl Desugarer<'_> {
                     var_type,
                 } => {
                     match self.iterator_class(&value, vars) {
+                        // A later zip() argument is read with len() and an
+                        // index (see the zip lowering in `ir::converter`),
+                        // which an iterator has neither of (#133). Draining
+                        // it first would pull every value up front, where
+                        // zip pulls one per round.
+                        Some(_) if target.starts_with(crate::ir::ZIP_SEQ_PREFIX) => {
+                            self.errors.push(format!(
+                                "'{}' passes a generator or iterator to zip() after its first \
+                                 argument, which is not supported yet. Hint: pass it as the \
+                                 first argument, or collect it into a list with a \
+                                 comprehension first",
+                                self.current
+                            ));
+                        }
                         Some(class) => {
                             vars.insert(target.clone(), class);
                         }
@@ -675,6 +689,29 @@ impl Desugarer<'_> {
             return;
         }
 
+        // `len()` of an iterator is a TypeError in Python; it read the
+        // iterator object's first word as a length (#133).
+        if let IRExpr::FunctionCall {
+            function_name,
+            arguments,
+        } = expr
+        {
+            if function_name == "len" && arguments.len() == 1 {
+                if let Some(class) = self.iterator_class(&arguments[0], vars) {
+                    let kind = if self.facts.get(&class).is_some_and(|f| f.synthetic) {
+                        "generator".to_string()
+                    } else {
+                        class
+                    };
+                    self.errors.push(format!(
+                        "object of type '{kind}' has no len() (in function '{}')",
+                        self.current
+                    ));
+                }
+            }
+            return;
+        }
+
         let IRExpr::MethodCall {
             object,
             method_name,
@@ -714,7 +751,7 @@ fn for_each_child(expr: &mut IRExpr, f: &mut impl FnMut(&mut IRExpr)) {
         // No child expressions: the slot is a constant and the environment is a
         // parameter.
         IRExpr::EnvRead { .. } | IRExpr::CellNew | IRExpr::CellLoad { .. } => {}
-        IRExpr::CellStore { value, .. } => f(value),
+        IRExpr::CellStore { value, .. } | IRExpr::Keyword { value, .. } => f(value),
         IRExpr::BinaryOp { left, right, .. }
         | IRExpr::CompareOp { left, right, .. }
         | IRExpr::BoolOp { left, right, .. } => {
@@ -800,6 +837,7 @@ fn build_state_class(
         },
     );
     desugar_suspending_fors(&mut body, counter);
+    split_literal_unpacks(&mut body, counter);
 
     // Resolved before the lift below rewrites parameter references into
     // `self.<name>` attribute reads.
@@ -825,6 +863,7 @@ fn build_state_class(
     };
     flattener.flatten_body(body.statements, &func.name)?;
     flattener.jump(EXHAUSTED);
+    check_locals_across_yields(&flattener.blocks, &exempt, &func.name)?;
 
     // __step: `while True` trampoline dispatching on the stored block id.
     // Every block ends in a `return` (yield) or a `continue` after storing
@@ -1178,6 +1217,165 @@ fn collect_assigned_names(body: &IRBody, out: &mut HashSet<String>) {
     }
 }
 
+/// `a, b = x, y` in a generator body becomes one assignment per target, so
+/// the targets are lifted into fields like any assigned local. Unpacking
+/// targets stay WASM locals of `__step`, which do not survive a `yield`, so
+/// `a, b = b, a + b` in a `while True: yield a` loop restarted from zero on
+/// every resume. When the right side reads a target, it is evaluated into
+/// temporaries first, keeping Python's evaluate-then-assign order.
+fn split_literal_unpacks(body: &mut IRBody, counter: &mut u32) {
+    let statements = std::mem::take(&mut body.statements);
+    for mut stmt in statements {
+        for sub in sub_bodies_mut(&mut stmt) {
+            split_literal_unpacks(sub, counter);
+        }
+        match stmt {
+            IRStatement::TupleUnpack {
+                targets,
+                value: IRExpr::TupleLiteral(items),
+                starred: None,
+            } if items.len() == targets.len() => {
+                let mut read = HashSet::new();
+                for item in &items {
+                    collect_read_names(item, &mut read);
+                }
+                if targets.iter().any(|t| read.contains(t)) {
+                    let temps: Vec<String> = targets
+                        .iter()
+                        .map(|_| {
+                            *counter += 1;
+                            format!("__tu_{counter}")
+                        })
+                        .collect();
+                    for (temp, item) in temps.iter().zip(items) {
+                        body.statements.push(assign(temp, item));
+                    }
+                    for (target, temp) in targets.iter().zip(&temps) {
+                        body.statements
+                            .push(assign(target, IRExpr::Variable(temp.clone())));
+                    }
+                } else {
+                    for (target, item) in targets.iter().zip(items) {
+                        body.statements.push(assign(target, item));
+                    }
+                }
+            }
+            other => body.statements.push(other),
+        }
+    }
+}
+
+fn assign(target: &str, value: IRExpr) -> IRStatement {
+    IRStatement::Assign {
+        target: target.to_string(),
+        value,
+        var_type: None,
+    }
+}
+
+/// Every name `expr` reads.
+fn collect_read_names(expr: &IRExpr, out: &mut HashSet<String>) {
+    let mut expr = expr.clone();
+    fn walk(e: &mut IRExpr, out: &mut HashSet<String>) {
+        if let IRExpr::Variable(n) | IRExpr::Param(n) = e {
+            out.insert(n.clone());
+        }
+        for_each_child(e, &mut |c| walk(c, out));
+    }
+    walk(&mut expr, out);
+}
+
+/// Every name a statement reads and writes, nested bodies included.
+fn collect_stmt_names(
+    stmt: &IRStatement,
+    reads: &mut HashSet<String>,
+    writes: &mut HashSet<String>,
+) {
+    let mut stmt = stmt.clone();
+    let mut exprs: Vec<IRExpr> = Vec::new();
+    match &mut stmt {
+        IRStatement::Assign { target, value, .. } => {
+            writes.insert(target.clone());
+            exprs.push(value.clone());
+        }
+        IRStatement::AugAssign { target, value, .. } => {
+            reads.insert(target.clone());
+            writes.insert(target.clone());
+            exprs.push(value.clone());
+        }
+        IRStatement::TupleUnpack { targets, value, .. } => {
+            writes.extend(targets.iter().cloned());
+            exprs.push(value.clone());
+        }
+        IRStatement::For {
+            target, iterable, ..
+        } => {
+            writes.insert(target.clone());
+            exprs.push(iterable.clone());
+        }
+        IRStatement::Return(Some(e))
+        | IRStatement::Expression(e)
+        | IRStatement::Yield { value: Some(e) }
+        | IRStatement::Raise { exception: Some(e) }
+        | IRStatement::If { condition: e, .. }
+        | IRStatement::While { condition: e, .. } => exprs.push(e.clone()),
+        IRStatement::AttributeAssign { object, value, .. }
+        | IRStatement::AttributeAugAssign { object, value, .. } => {
+            exprs.push(object.clone());
+            exprs.push(value.clone());
+        }
+        IRStatement::IndexAssign {
+            container,
+            index,
+            value,
+        } => {
+            exprs.extend([container.clone(), index.clone(), value.clone()]);
+        }
+        _ => {}
+    }
+    for e in &exprs {
+        collect_read_names(e, reads);
+    }
+    for sub in sub_bodies(&stmt) {
+        for inner in &sub.statements {
+            collect_stmt_names(inner, reads, writes);
+        }
+    }
+}
+
+/// Refuse a generator whose unpacking or loop target, a WASM local of
+/// `__step`, is read in a different resumption from the one that set it: the
+/// local does not survive the `yield` between them.
+fn check_locals_across_yields(
+    blocks: &[Vec<IRStatement>],
+    exempt: &HashSet<String>,
+    func_name: &str,
+) -> Result<()> {
+    for block in blocks {
+        let mut reads = HashSet::new();
+        let mut writes = HashSet::new();
+        for stmt in block {
+            collect_stmt_names(stmt, &mut reads, &mut writes);
+        }
+        if let Some(name) = reads
+            .iter()
+            .filter(|n| exempt.contains(*n) && !writes.contains(*n))
+            .min()
+        {
+            return Err(crate::core::errors::unsupported_feature(
+                format!(
+                    "generator '{func_name}' reads '{name}' after a 'yield', but '{name}' is \
+                     bound by a loop or by unpacking, which does not survive the 'yield'. Hint: \
+                     copy it into an ordinary variable first ('x = {name}')"
+                ),
+                None,
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
 /// Names that must stay WASM locals: yield-free `for` targets (the loop
 /// machinery binds a local) and tuple-unpacking targets.
 fn collect_exempt_names(body: &IRBody, out: &mut HashSet<String>) {
@@ -1347,15 +1545,36 @@ fn lift_expr(expr: &mut IRExpr, lift: &HashSet<String>) {
 /// slot type). Best-effort — deeper float inference (e.g. through plain
 /// locals) is a follow-up.
 fn yielded_type(body: &IRBody, params: &[IRParam]) -> IRType {
-    let float_params: HashSet<&str> = params
+    let mut float_params: HashSet<String> = params
         .iter()
         .filter(|p| p.param_type == IRType::Float)
-        .map(|p| p.name.as_str())
+        .map(|p| p.name.clone())
         .collect();
-    fn expr_has_float(expr: &IRExpr, float_params: &HashSet<&str>) -> bool {
+    // A local assigned a float value is a float too (`x = i / 4; yield x`),
+    // which may in turn make another one, so this runs to a fixpoint.
+    loop {
+        let mut found = Vec::new();
+        for stmt in &body.statements {
+            any_sub_body(stmt, &mut |s: &IRStatement| {
+                if let IRStatement::Assign { target, value, .. } = s {
+                    if !float_params.contains(target.as_str())
+                        && expr_has_float(value, &float_params)
+                    {
+                        found.push(target.clone());
+                    }
+                }
+                false
+            });
+        }
+        if found.is_empty() {
+            break;
+        }
+        float_params.extend(found);
+    }
+    fn expr_has_float(expr: &IRExpr, float_params: &HashSet<String>) -> bool {
         match expr {
             IRExpr::Const(IRConstant::Float(_)) => true,
-            IRExpr::Variable(name) | IRExpr::Param(name) => float_params.contains(name.as_str()),
+            IRExpr::Variable(name) | IRExpr::Param(name) => float_params.contains(name),
             // True division is a float whatever its operands are; `yield i / 2`
             // was inferred as an int and truncated every value.
             IRExpr::BinaryOp { op: IROp::Div, .. } => true,

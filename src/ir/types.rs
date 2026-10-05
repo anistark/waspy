@@ -210,6 +210,14 @@ pub enum IRExpr {
         function_name: String,
         arguments: Vec<IRExpr>,
     },
+    /// A keyword argument, `name=value`, kept in a call's argument list after
+    /// the positional ones. The finalize pass moves each one into its
+    /// parameter's position for a call to a known function or constructor;
+    /// one that reaches code generation is refused, never dropped.
+    Keyword {
+        name: String,
+        value: Box<IRExpr>,
+    },
     BoolOp {
         left: Box<IRExpr>,
         right: Box<IRExpr>,

@@ -923,6 +923,7 @@ dependencies = [
  "chrono",
  "log",
  "regex",
+ "regex-syntax",
  "rustpython-parser",
  "serde_json",
  "thiserror",
