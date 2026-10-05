@@ -1,13 +1,12 @@
 use crate::stdlib::StdlibValue;
 
+/// `sys` constants. `maxsize` is the largest `int` under the documented 32-bit
+/// integer model. `argv`, `platform`, `version`, the standard streams, and
+/// `path` describe the host and are refused until the host interface exists:
+/// they answered an empty list, "wasm32", a made-up version, and None.
 pub fn get_attribute(attr: &str) -> Option<StdlibValue> {
     match attr {
-        "argv" => Some(StdlibValue::List(vec![])),
-        "platform" => Some(StdlibValue::String("wasm32".to_string())),
-        "version" => Some(StdlibValue::String("3.11.0 (waspy)".to_string())),
         "maxsize" => Some(StdlibValue::Int(i32::MAX)),
-        "stdin" | "stdout" | "stderr" => Some(StdlibValue::None),
-        "path" => Some(StdlibValue::List(vec![])),
         _ => None,
     }
 }

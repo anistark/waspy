@@ -65,9 +65,6 @@ pub fn get_submodule_attribute(module: &str, submodule: &str, attr: &str) -> Opt
 pub enum StdlibValue {
     Int(i32),
     String(String),
-    List(Vec<String>),
-    Dict(Vec<(String, String)>),
     Float(f64),
-    None,
     Module(String), // Represents a sub-module like os.path
 }

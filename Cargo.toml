@@ -38,6 +38,7 @@ serde = { version = "1.0.228", features = ["derive"], optional = true }
 serde_json = "1.0"
 chrono = "0.4"
 regex = "1.11"
+regex-syntax = "0.8"
 
 [dev-dependencies]
 wasmi = "0.31"
@@ -98,6 +99,10 @@ path = "tests/integration/examples.rs"
 [[test]]
 name = "integration_coverage"
 path = "tests/integration/coverage.rs"
+
+[[test]]
+name = "integration_board"
+path = "tests/integration/board.rs"
 
 [[test]]
 name = "unit_basics"

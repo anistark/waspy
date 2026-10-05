@@ -54,19 +54,16 @@ impl ProjectConfig {
             return None;
         }
 
-        let value_part = parts[1].trim();
-        if (value_part.starts_with('"') && value_part.ends_with('"'))
-            || (value_part.starts_with('\'') && value_part.ends_with('\''))
+        // `name="pkg",` inside a setup() call: the comma goes before the
+        // quotes are recognized, or the quotes stay in the value.
+        let value_part = parts[1].trim().trim_end_matches(',').trim_end();
+        if value_part.len() >= 2
+            && ((value_part.starts_with('"') && value_part.ends_with('"'))
+                || (value_part.starts_with('\'') && value_part.ends_with('\'')))
         {
-            // Remove quotes and trailing comma if present
-            Some(
-                value_part[1..value_part.len() - 1]
-                    .trim_end_matches(',')
-                    .to_string(),
-            )
+            Some(value_part[1..value_part.len() - 1].to_string())
         } else {
-            // For non-string values, just take the value as is
-            Some(value_part.trim_end_matches(',').to_string())
+            Some(value_part.to_string())
         }
     }
 

@@ -52,14 +52,6 @@ fn unsupported_statements_are_rejected_with_hints() {
             "def f(x: int) -> int:\n    assert x > 0\n    return x\n",
             "'assert' is not supported",
         ),
-        (
-            "def f() -> int:\n    for i in range(3):\n        pass\n    else:\n        return 1\n    return 0\n",
-            "'for ... else:' clauses are not supported",
-        ),
-        (
-            "def f() -> int:\n    while False:\n        pass\n    else:\n        return 1\n    return 0\n",
-            "'while ... else:' clauses are not supported",
-        ),
         ("from math import *\n\ndef f() -> int:\n    return 1\n", "import *"),
     ];
     for (source, expected) in cases {

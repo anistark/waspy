@@ -972,6 +972,7 @@ dependencies = [
  "chrono",
  "log",
  "regex",
+ "regex-syntax",
  "rustpython-parser",
  "serde",
  "serde_json",

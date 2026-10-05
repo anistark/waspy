@@ -216,9 +216,16 @@ docs-check:
 dev: format format-check lint build test
     @echo "Development checks completed successfully!"
 
-# CI check - runs exactly what CI runs (format-check, lint, test)
-ci: format-check lint test
+# CI check - runs exactly what CI runs (format-check, lint, test, board-check)
+ci: format-check lint test board-check
     @echo "CI checks completed successfully!"
+
+# The development board tells the truth: every done feature on
+# docs/modules/index.html is backed by a passing test in
+# tests/integration/board.rs, and no open feature's test passes yet. This is
+# the command the 1.0 gate runs.
+board-check:
+    node scripts/board_check.mjs
 
 # Prepare for release: format, lint, build, test, and check if ready to publish
 prepare-release: format format-check lint build test check-publish

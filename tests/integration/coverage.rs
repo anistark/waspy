@@ -344,7 +344,7 @@ fn stdlib_math_pi() {
     assert_eq!(call_f64(&src, "test_math"), std::f64::consts::PI);
 }
 
-/// sys.maxsize is the compile target's i32::MAX.
+/// sys.maxsize is the largest int under the documented 32-bit int model.
 #[test]
 fn stdlib_sys_maxsize() {
     let src = read_example("test_sys.py");
@@ -358,33 +358,46 @@ fn stdlib_re_flags() {
     assert_eq!(call_i32(&src, "test_re"), 2);
 }
 
-/// datetime.MAXYEAR matches Python's 9999.
+/// datetime.MAXYEAR and MINYEAR match Python's.
 #[test]
 fn stdlib_datetime_constants() {
     let src = read_example("test_datetime.py");
     assert_eq!(call_i32(&src, "test_datetime_constants"), 9999);
+    assert_eq!(call_i32(&src, "year_span"), 9998);
 }
 
-/// The json, logging, and os example suites run their exported entry points
-/// to completion (each returns 0 on success).
+/// logging's level constants and their aliases.
 #[test]
-fn stdlib_json_logging_os_run() {
-    let json = read_example("test_json.py");
-    assert_eq!(call_i32(&json, "test_json_dumps"), 0);
-    assert_eq!(call_i32(&json, "test_json_loads"), 0);
-    let logging = read_example("test_logging.py");
-    assert_eq!(call_i32(&logging, "main"), 0);
-    let os = read_example("test_os.py");
-    assert_eq!(call_i32(&os, "test_all_os"), 0);
+fn stdlib_logging_levels() {
+    let src = read_example("test_logging.py");
+    assert_eq!(call_i32(&src, "warning_level"), 30);
+    assert_eq!(call_i32(&src, "level_sum"), 150);
+    assert_eq!(call_i32(&src, "aliases_match"), 1);
 }
 
-/// The all-modules import smoke tests still compute a real value.
+/// os's path constants, and os.name as CPython reports it on WebAssembly.
+#[test]
+fn stdlib_os_constants() {
+    let src = read_example("test_os.py");
+    assert_eq!(call_str(&src, "separators"), "/:.");
+    assert_eq!(call_str(&src, "os_name"), "posix");
+    assert_eq!(call_str(&src, "parent_dir"), "../.");
+    assert_eq!(call_i32(&src, "path_sep_matches"), 1);
+    assert_eq!(call_i32(&src, "devnull_length"), 9);
+}
+
+/// Every module imports, and the constants read back as CPython's.
 #[test]
 fn stdlib_all_modules_import() {
     let all = read_example("stdlib_all_modules.py");
     assert_eq!(call_i32(&all, "test_sys_module"), i32::MAX);
+    assert_eq!(call_str(&all, "test_os_module"), "posix/:....");
+    assert_eq!(call_i32(&all, "test_re_module"), 346);
+    assert_eq!(call_i32(&all, "test_all_modules"), 10344);
     let imports = read_example("test_all_stdlib_imports.py");
     assert_eq!(call_i32(&imports, "test_imports"), i32::MAX);
+    let smoke = read_example("stdlib_test.py");
+    assert_eq!(call_i32(&smoke, "main"), 10022);
 }
 
 // ---------------------------------------------------------------------------

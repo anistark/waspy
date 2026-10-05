@@ -76,7 +76,7 @@ After completing any set of changes, **always** run these in order:
 
 For a full local CI-equivalent check:
 
-4. **`just ci`** — Runs format-check → lint → test (mirrors GitHub Actions).
+4. **`just ci`**: runs format-check → lint → test → board-check (mirrors GitHub Actions).
 
 Or run the complete dev workflow in one shot:
 
@@ -135,13 +135,14 @@ src/
 │   ├── decorators.rs       #   DecoratorRegistry — decorator application
 │   ├── generators.rs       #   Generators to state classes; iterator consumption (for, comprehensions)
 │   ├── context_managers.rs #   `with` desugared to __enter__/__exit__ calls
-│   ├── finalize.rs         #   Whole-module checks and rewrites (abstract classes, call-site defaults)
+│   ├── finalize.rs         #   Whole-module checks and rewrites (keyword arguments, abstract classes, call-site defaults)
 │   └── entry_points.rs     #   detect_entry_points(), add_entry_point_to_module()
 ├── compiler/               # [Stage 4] IR → WASM (wasm-encoder)
 │   ├── module.rs           #   compile_ir_module() — top-level codegen entry
 │   ├── function.rs         #   Per-function codegen
 │   ├── expression.rs       #   Expression codegen
 │   ├── equality.rs         #   Value equality, ordering, and hashing (==, <, in, sets, dict keys)
+│   ├── operators.rs        #   Binary operators on non-numbers: sequence + and *, set and dict operators, set comparisons
 │   └── context.rs          #   CompilationContext, SCRATCH_LOCALS, LocalInfo/FunctionInfo/ClassInfo
 ├── optimize/               # [Stage 5] WASM optimization
 │   └── wasm.rs             #   optimize_wasm() — Binaryen
@@ -204,7 +205,8 @@ just format          # cargo fmt --all
 just format-check    # cargo fmt --all -- --check
 just lint            # cargo clippy --all-targets --all-features -- -D warnings
 just lint-fix        # clippy --fix where possible
-just ci              # format-check → lint → test (mirrors GitHub Actions)
+just ci              # format-check → lint → test → board-check (mirrors GitHub Actions)
+just board-check     # every done feature on docs/modules/ is backed by a passing test in tests/integration/board.rs
 just dev             # format → format-check → lint → build → test
 just docs            # cargo doc --all-features --no-deps --open
 just docs-check      # rustdoc with -D warnings
@@ -282,12 +284,14 @@ type_to_string(ir_type: &IRType) -> String
   - `unit/memory_safety.rs`: growth, aliasing, checked indexing, validation.
   - `unit/miscompiles.rs`: regressions for constructs that once compiled "successfully" and answered wrong. **This is where a silent-miscompile fix goes.**
   - `integration/examples.rs`, `integration/coverage.rs`: every `examples/*.py` compiled, instantiated, and asserted; `integration/wasmrun_plugin.rs` does the same through the plugin (needs `--features wasm-plugin`).
+  - `integration/board.rs`: one test per feature on the development board (`docs/modules/index.html`), in a module per card. Each feature names its test with a `test: "card::name"` key. A done feature's test must pass; an open feature may have one, marked `#[ignore]`, asserting the answer it will give once it lands. `just board-check` (`scripts/board_check.mjs`) fails when a done feature names no passing test, an open feature's test passes, or a test backs no feature, so **moving a feature on the board means adding or un-ignoring its test in the same change**, and adding a feature means adding its test.
 - **Every expected value is what CPython answers for the same source.** Run the Python first and assert its answer, so a failure means a divergence from the reference implementation rather than a change in what the compiler happens to do. Do not assert what the compiler currently does.
 - **Unit tests may also live inline** as `#[cfg(test)]` modules alongside source (`src/stdlib/re.rs`, `src/utils/logging.rs`) when they cover something with no Python-level surface.
 - **Examples double as functional tests.** `just verify-examples` compiles every bundled example, and depends on `just verify-runtime`, which runs the end-to-end programs under Node and the `wasmtime` CLI (both optimization levels) against checker suffixes in `tests/fixtures/runtime/`.
 - Always run `cargo test --all-features` before committing.
 - **The playground examples are checked too.** `docs/playground/examples.js` holds the examples the page ships; `just playground-verify` (`scripts/verify_playground.mjs`) compiles each with the wasm32 build, calls the functions listed in the script, and requires CPython's answer. Adding an example means adding its calls there, and an example must avoid constructs the compiler refuses (except the one meant to show a refusal).
-- CI runs tests on `stable` and enforces zero clippy warnings on Rust 1.88: `cargo clippy --all-targets --all-features -- -D warnings`. There are two named gates: the test binaries, and the runtime verification above.
+- CI runs tests on `stable` and enforces zero clippy warnings on Rust 1.88: `cargo clippy --all-targets --all-features -- -D warnings`. There are three named gates: the test binaries, the board check, and the runtime verification above.
+- Harness helpers worth knowing: `dedent` (write a test's Python indented in a raw string) and `call_i32_traps` (assert a call traps, how a fault CPython raises for and nothing here catches surfaces).
 
 ---
 
@@ -398,7 +402,7 @@ test: description          # Adding/fixing tests
 1. Equality or ordering between values: call `crate::compiler::equality::{eq_unsupported, order_unsupported}` and refuse on `Some`, then `emit_values_eq` / `emit_values_order` with the values in held slots.
 2. A new container that searches or hashes: go through `emit_slot_eq_needle` and `emit_set_hash`, and check `hash_unsupported` for keys and members.
 3. A new literal or runtime-built object: allocate with `__alloc` per evaluation (see `emit_literal_block`), never at a compile-time address.
-4. A new place a value is stored into a typed slot (an argument, a field, a return, a collection element, a local): call `ctx.check_class_store(&value_type, &slot_type, what)` once the value is emitted, so an instance of an unrelated class is refused instead of dispatched as the slot's class. A type inferred for a place that holds instances takes their nearest common base (`ctx.common_base`, or `common_class_base` before classes are registered), never the first instance's class.
+4. A new place a value is stored into a typed slot (an argument, a field, a return, a collection element, a local): call `ctx.check_class_store(&value_type, &slot_type, what)` once the value is emitted, so an instance of an unrelated class is refused instead of dispatched as the slot's class, and `ctx.check_untyped_store` where the slot may be untyped (see the untyped-place gotcha). A type inferred for a place that holds instances takes their nearest common base (`ctx.common_base`, or `common_class_base` before classes are registered), never the first instance's class.
 5. Test with recursion and with a second call of the same function, not just one call, since sharing across calls and activations is the failure mode.
 
 ### Adding a compiler option
@@ -441,6 +445,10 @@ test: description          # Adding/fixing tests
 - **Iterators are consumed through the IR, not by codegen.** `src/ir/generators.rs` rewrites a `for` over a generator or `__next__` class into a `__next__` loop, and a comprehension's first iterable into a call to a synthesized `__drain_<Class>` helper (`DRAIN_FN_PREFIX`, kept out of exports and function metadata) that returns a list. Codegen only ever iterates collections and ranges, and reads anything else as a list header, so a new construct that iterates must go through this pass or refuse an iterator. An iterator in a comprehension's inner `for` clause is refused, since inner iterables are evaluated twice (to size the result, then to fill it).
 - **`@singledispatch` dispatch is static.** `IRModule::dispatch_tables` (`IRDispatch` in `src/ir/types.rs`) carries each base function's registered arms; the converter fills it, `compile_ir_module` copies it onto `CompilationContext`, and the `FunctionCall` arm in `src/compiler/expression.rs` picks the arm from the *static* IR type of the first argument. There is no runtime type tag on scalars, so an argument whose type is `Unknown` is refused rather than guessed.
 - **stdlib support is an allowlist.** Only modules in `is_stdlib_module()` are recognized; everything else is treated as a user-written module: multi-file compilation links it into the single output module (namespace calls, aliases, and constants resolve statically), and `compile_python_file` resolves it from disk next to the entry file.
+- **Of the stdlib, only constants compile today.** A module constant is read (string constants are folded to interned literals in the converter), `from math import pi` reads through `ctx.stdlib_imports`, and constant `re.sub`/`re.escape` calls fold in the converter (`fold_re_call`, `stdlib::re::fold_sub`) only where the `regex` crate and CPython provably agree. Every other stdlib call or attribute is refused by one path in `src/compiler/expression.rs` (`stdlib_call_name`), naming the dotted function and the release that implements it. Implementing a stdlib function means replacing that refusal for it, never adding a placeholder: the ones removed in 0.18.0 answered `"{}"`, `"/"`, the compile time, and a match on every input.
+- **An untyped place holds one word, read as an int.** An unannotated parameter or return (`IRType::Unknown`) and the elements of a bare `list`/`set`/`dict` parameter or return (`IRType::Any`) take only ints, bools, None, and functions; `check_untyped_store` refuses anything else at the argument, return, field, or collection write, because a string loses its length and a float its width on the way. A bare annotation on a variable or field is different: its elements infer from the value (`elements_from_value` in the converter). `len()` of an untyped value is refused for the same reason.
+- **Keyword arguments are `IRExpr::Keyword`.** The converter keeps them after the positional arguments; `finalize::resolve_keyword_arguments` places them by name for this module's functions and constructors, before the generator and `with` passes (whose expression walkers have wildcard arms). One that reaches codegen is refused, never dropped.
+- **A None-valued call pushes nothing; a None value pushes 0.** Builtins and user functions declared `-> None` leave nothing on the stack (`finish_user_call` drops the callee's word), so an expression statement drops nothing after them. Where such a call's value is used, emit it with `emit_value`, which pushes the word 0. `x is None` compares words, so it is refused where None and 0 share one (`Optional[int]`, untyped values).
 - **A program that calls `open()` imports host functions.** File I/O emits a WASM import section (module `waspy_host`: `open`/`read`/`write`/`close`) that the embedder must provide; every other program keeps zero imports and must stay that way — the import section is emitted only when the IR walk finds an `open()` call.
 - **MSRV vs CI mismatch.** `Cargo.toml` declares MSRV 1.70 but CI builds and lints with Rust 1.88. Don't rely on >1.70 features without bumping the declared `rust-version`.
 - **clippy must pass with zero warnings** — CI enforces `-D warnings` on `--all-targets --all-features`.
@@ -462,6 +470,6 @@ The `examples/` directory holds both Rust **driver programs** and Python **input
 - `verbose_debug_demo.rs` — verbosity/logging demonstration
 - `plugin_test.rs`, `html_test.rs` — require the `wasm-plugin` feature
 
-**Python inputs (`.py`):** `typed_demo.py`, `basic_operations.py`, `calculator.py`, `control_flow.py`, `builtins.py`, plus `test_*.py` files exercising each stdlib module (`test_math.py`, `test_json.py`, `test_re.py`, `test_datetime.py`, `test_os.py`, `test_sys.py`, `test_logging.py`, `stdlib_all_modules.py`, …) and data-structure samples (`set_example.py`, `tuple_example.py`, `range_example.py`, `bytes_example.py`).
+**Python inputs (`.py`):** `typed_demo.py`, `basic_operations.py`, `calculator.py`, `control_flow.py`, `builtins.py`, plus `test_*.py` files exercising each stdlib module's constants (`test_math.py`, `test_re.py`, `test_datetime.py`, `test_os.py`, `test_sys.py`, `test_logging.py`, `stdlib_all_modules.py`, …) and data-structure samples (`set_example.py`, `tuple_example.py`, `range_example.py`, `bytes_example.py`).
 
 Use these for testing. `just examples` runs the full driver suite.

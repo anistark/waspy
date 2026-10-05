@@ -47,6 +47,11 @@ jobs:
           --test unit_miscompiles
           --test integration_wasmrun_plugin
 
+      # Every done feature on the development board is backed by a passing
+      # test in tests/integration/board.rs, and no open feature's test passes.
+      - name: Board check (required gate)
+        run: node scripts/board_check.mjs
+
   runtime:
     name: End-to-end programs under real runtimes
     runs-on: ubuntu-latest

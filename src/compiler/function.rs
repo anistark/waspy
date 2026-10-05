@@ -166,6 +166,34 @@ pub fn compile_function(
 /// when nothing is in flight.
 const GENERIC_EXCEPTION: i32 = 99;
 
+/// The local a handler at nesting `depth` keeps the caught exception's code
+/// in, for a re-raise.
+fn caught_code_local(depth: u32) -> String {
+    format!("__exc_caught_{depth}")
+}
+
+/// Record the pending exception as caught by a handler bound to `name` (if
+/// any), and clear it: the handler body may raise one of its own.
+fn enter_handler(func: &mut Function, ctx: &mut CompilationContext, name: Option<&String>) {
+    let depth = ctx.reraise_codes.len() as u32;
+    let code_local = ctx
+        .get_local_index(&caught_code_local(depth))
+        .expect("the scan reserves a caught-code local per handler depth");
+    func.instruction(&Instruction::GlobalGet(EXC_TYPE_GLOBAL));
+    func.instruction(&Instruction::LocalSet(code_local));
+    if let Some(var_name) = name {
+        // Bind the exception's type code; there are no exception objects to
+        // bind, which is why the converter allows the name only in `raise`.
+        if let Some(idx) = ctx.get_local_index(var_name) {
+            func.instruction(&Instruction::LocalGet(code_local));
+            func.instruction(&Instruction::LocalSet(idx));
+        }
+    }
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::GlobalSet(EXC_TYPE_GLOBAL));
+    ctx.reraise_codes.push((name.cloned(), code_local));
+}
+
 fn exception_type_code(name: &str) -> i32 {
     match name {
         "ZeroDivisionError" => 1,
@@ -368,11 +396,15 @@ fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRType {
         IRExpr::BinaryOp { left, right, op } => {
             let lt = infer_value_type(left, ctx);
             let rt = infer_value_type(right, ctx);
-            if lt == IRType::Float || rt == IRType::Float {
+            if lt == IRType::Float || rt == IRType::Float || matches!(op, IROp::Div) {
                 IRType::Float
-            } else if matches!(op, IROp::Add) && matches!(lt, IRType::String | IRType::Bytes) {
-                // String/bytes concatenation yields the same kind.
+            } else if matches!(op, IROp::Add | IROp::Mul)
+                && matches!(lt, IRType::String | IRType::Bytes)
+            {
+                // Concatenation and repetition yield the same kind.
                 lt
+            } else if matches!(op, IROp::Mul) && matches!(rt, IRType::String | IRType::Bytes) {
+                rt
             } else {
                 IRType::Unknown
             }
@@ -427,7 +459,62 @@ fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRType {
         // literal to a bare pointer.
         IRExpr::ListLiteral(elems) => IRType::List(Box::new(literal_elem_type(elems, ctx))),
         IRExpr::SetLiteral(elems) => IRType::Set(Box::new(literal_elem_type(elems, ctx))),
+        // A dict of scalars or strings, whose loop targets need the width
+        // (an f64 local) or the length companion a string needs. Anything
+        // richer is left for the emitted value to type.
+        IRExpr::DictLiteral(entries) if !entries.is_empty() => {
+            let (keys, values): (Vec<IRExpr>, Vec<IRExpr>) = entries.iter().cloned().unzip();
+            let scalar = |t: &IRType| {
+                matches!(
+                    t,
+                    IRType::Int | IRType::Float | IRType::Bool | IRType::String
+                )
+            };
+            let (k, v) = (
+                literal_elem_type(&keys, ctx),
+                literal_elem_type(&values, ctx),
+            );
+            if scalar(&k) && scalar(&v) {
+                IRType::Dict(Box::new(k), Box::new(v))
+            } else {
+                IRType::Unknown
+            }
+        }
         IRExpr::FunctionCall { function_name, .. } if function_name == "float" => IRType::Float,
+        // A dict loop's key or value (see the dict loops in `ir::converter`).
+        IRExpr::FunctionCall {
+            function_name,
+            arguments,
+        } if function_name == crate::ir::DICT_KEY_AT_FN
+            || function_name == crate::ir::DICT_VAL_AT_FN =>
+        {
+            match arguments.first().map(|d| infer_value_type(d, ctx)) {
+                Some(IRType::Dict(k, _)) if function_name == crate::ir::DICT_KEY_AT_FN => *k,
+                Some(IRType::Dict(_, v)) => *v,
+                _ => IRType::Unknown,
+            }
+        }
+        // Builtins whose result is a float when their arguments are.
+        IRExpr::FunctionCall {
+            function_name,
+            arguments,
+        } if matches!(function_name.as_str(), "min" | "max" | "abs")
+            && ctx.get_function_info(function_name).is_none() =>
+        {
+            match arguments.first().map(|a| infer_value_type(a, ctx)) {
+                Some(t @ (IRType::Float | IRType::String)) => t,
+                _ => IRType::Unknown,
+            }
+        }
+        IRExpr::FunctionCall {
+            function_name,
+            arguments,
+        } if function_name == "round"
+            && arguments.len() == 2
+            && ctx.get_function_info("round").is_none() =>
+        {
+            IRType::Float
+        }
         // `open()` yields a file handle; its local must be typed so file
         // method calls dispatch to the host I/O lowering.
         IRExpr::FunctionCall { function_name, .. }
@@ -712,6 +799,7 @@ fn scan_expr_locals(expr: &IRExpr, ctx: &mut CompilationContext, depth: u32) {
         // A closure environment read touches no locals of its own.
         IRExpr::EnvRead { .. } | IRExpr::CellNew | IRExpr::CellLoad { .. } => {}
         IRExpr::CellStore { value, .. } => scan_expr_locals(value, ctx, 0),
+        IRExpr::Keyword { value, .. } => scan_expr_locals(value, ctx, depth),
         IRExpr::Comprehension {
             kind,
             element,
@@ -1103,10 +1191,13 @@ pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
                     // Allocate exception variable if it exists
                     if let Some(name) = &handler.name {
                         if ctx.get_local_index(name).is_none() {
-                            ctx.add_local(name, IRType::Unknown);
+                            ctx.add_local(name, IRType::Int);
                         }
                     }
+                    ensure_local(ctx, &caught_code_local(ctx.except_scan_depth), IRType::Int);
+                    ctx.except_scan_depth += 1;
                     scan_and_allocate_locals(&handler.body, ctx);
+                    ctx.except_scan_depth -= 1;
                 }
 
                 if let Some(finally_body) = finally_body {
@@ -1178,10 +1269,24 @@ pub fn compile_body(
                     // that an f64, and an f64 in an i32 result does not
                     // validate.
                     let ret_ty = ctx.current_return_type.clone();
-                    let ty = emit_expr(expr, func, ctx, memory_layout, Some(&ret_ty));
+                    let ty = crate::compiler::expression::emit_value(
+                        expr,
+                        func,
+                        ctx,
+                        memory_layout,
+                        Some(&ret_ty),
+                    );
                     ctx.check_class_store(&ty, &ret_ty, "a return value");
+                    ctx.check_untyped_store(&ty, &ret_ty, "a return value");
                     match (&ret_ty, &ty) {
+                        // `return 10 / n` from `-> int`: Python returns the
+                        // float whatever the annotation says.
                         (IRType::Int | IRType::Bool, IRType::Float) => {
+                            ctx.report(
+                                "a float is returned from a function declared to return an int, \
+                                 which would truncate it; Python returns the float. Hint: \
+                                 declare '-> float', or use '//' or int()",
+                            );
                             func.instruction(&Instruction::I32TruncF64S);
                         }
                         (IRType::Float, IRType::Int | IRType::Bool) => {
@@ -1210,7 +1315,13 @@ pub fn compile_body(
                 // A module definition evaluated once: store it in its global
                 // and record the type every reader will see.
                 let global = ctx.module_global_index[target];
-                let emitted = emit_expr(value, func, ctx, memory_layout, var_type.as_ref());
+                let emitted = crate::compiler::expression::emit_value(
+                    value,
+                    func,
+                    ctx,
+                    memory_layout,
+                    var_type.as_ref(),
+                );
                 let ty = match var_type {
                     Some(declared) if !matches!(declared, IRType::Unknown) => declared.clone(),
                     _ => emitted.clone(),
@@ -1240,7 +1351,13 @@ pub fn compile_body(
                     .or_else(|| ctx.get_local_info(target).map(|info| info.var_type.clone()));
 
                 // Emit code for the value
-                let value_type = emit_expr(value, func, ctx, memory_layout, expected_type.as_ref());
+                let value_type = crate::compiler::expression::emit_value(
+                    value,
+                    func,
+                    ctx,
+                    memory_layout,
+                    expected_type.as_ref(),
+                );
                 if let Some(expected) = &expected_type {
                     ctx.check_class_store(
                         &value_type,
@@ -1278,6 +1395,7 @@ pub fn compile_body(
                                 | IRType::Class(_)
                                 | IRType::Int
                                 | IRType::Bool
+                                | IRType::Range
                         ),
                         (IRType::List(elem), IRType::List(_))
                         | (IRType::Set(elem), IRType::Set(_)) => **elem == IRType::Unknown,
@@ -1622,7 +1740,31 @@ pub fn compile_body(
                 // Everything else records the exception's type in the module
                 // global and transfers control: to the enclosing `try`'s
                 // handler dispatch, or out of the function when there is none.
-                if let Some(exc_expr) = exception {
+                // A bare `raise`, or `raise e` naming what an enclosing handler
+                // caught, raises that exception again. It raised a generic
+                // code, which no typed handler matched, and `raise e` looked
+                // `e` up as an exception class.
+                let reraise = match exception {
+                    None => Some(ctx.reraise_codes.last().map(|(_, local)| *local)),
+                    Some(IRExpr::Variable(name)) => ctx
+                        .reraise_codes
+                        .iter()
+                        .rev()
+                        .find(|(bound, _)| bound.as_deref() == Some(name.as_str()))
+                        .map(|(_, local)| Some(*local)),
+                    _ => None,
+                };
+                if let Some(code_local) = reraise {
+                    match code_local {
+                        Some(local) => func.instruction(&Instruction::LocalGet(local)),
+                        // No exception is being handled: CPython raises
+                        // RuntimeError("No active exception to reraise").
+                        None => func.instruction(&Instruction::I32Const(exception_type_code(
+                            "RuntimeError",
+                        ))),
+                    };
+                    func.instruction(&Instruction::GlobalSet(EXC_TYPE_GLOBAL));
+                } else if let Some(exc_expr) = exception {
                     // Resolve the exception to its type code by name — the same
                     // table the handler dispatch uses — instead of emitting the
                     // expression. We do not model exception objects, and emitting
@@ -1642,10 +1784,6 @@ pub fn compile_body(
                     // `raise` does.
                     let code = if code == 0 { GENERIC_EXCEPTION } else { code };
                     func.instruction(&Instruction::I32Const(code));
-                    func.instruction(&Instruction::GlobalSet(EXC_TYPE_GLOBAL));
-                } else {
-                    // Bare `raise`: generic exception code.
-                    func.instruction(&Instruction::I32Const(GENERIC_EXCEPTION));
                     func.instruction(&Instruction::GlobalSet(EXC_TYPE_GLOBAL));
                 }
 
@@ -1766,11 +1904,13 @@ pub fn compile_body(
                     // drop the length and store the offset (reads rebuild the
                     // pair from the blob prefix).
                     let value_ty = emit_expr(value, func, ctx, memory_layout, Some(&field_ty));
-                    ctx.check_class_store(
-                        &value_ty,
-                        &field_ty,
-                        &format!("assigning to '.{attribute}'"),
-                    );
+                    let what = format!("assigning to '.{attribute}'");
+                    ctx.check_class_store(&value_ty, &field_ty, &what);
+                    // Compiler-made fields (a generator's lifted iterator or
+                    // dict) hold pointers their own reads know the type of.
+                    if !attribute.starts_with("__") {
+                        ctx.check_untyped_store(&value_ty, &field_ty, &what);
+                    }
                     if matches!(value_ty, IRType::String | IRType::Bytes) {
                         func.instruction(&Instruction::Drop);
                     }
@@ -2431,22 +2571,9 @@ pub fn compile_body(
                             .any(|name| matches!(name.as_str(), "Exception" | "BaseException"));
 
                     if catch_all {
-                        if let Some(var_name) = &handler.name {
-                            let handler_var_idx = ctx
-                                .get_local_index(var_name)
-                                .unwrap_or_else(|| ctx.add_local(var_name, IRType::Unknown));
-                            // Bind the exception's type code; there are no
-                            // exception objects to bind.
-                            func.instruction(&Instruction::GlobalGet(EXC_TYPE_GLOBAL));
-                            func.instruction(&Instruction::LocalSet(handler_var_idx));
-                        }
-
-                        // Caught: nothing is pending any more, so clear it
-                        // before the handler runs (the body may raise again).
-                        func.instruction(&Instruction::I32Const(0));
-                        func.instruction(&Instruction::GlobalSet(EXC_TYPE_GLOBAL));
-
+                        enter_handler(func, ctx, handler.name.as_ref());
                         compile_body(&handler.body, func, ctx, memory_layout);
+                        ctx.reraise_codes.pop();
                         // Nothing after a catch-all can run.
                         break;
                     }
@@ -2468,20 +2595,9 @@ pub fn compile_body(
                     func.instruction(&Instruction::I32Eqz);
                     func.instruction(&Instruction::BrIf(0)); // no match: next handler
 
-                    if let Some(var_name) = &handler.name {
-                        let handler_var_idx = ctx
-                            .get_local_index(var_name)
-                            .unwrap_or_else(|| ctx.add_local(var_name, IRType::Unknown));
-                        func.instruction(&Instruction::GlobalGet(EXC_TYPE_GLOBAL));
-                        func.instruction(&Instruction::LocalSet(handler_var_idx));
-                    }
-
-                    // Caught: clear before running the body, which may raise an
-                    // exception of its own.
-                    func.instruction(&Instruction::I32Const(0));
-                    func.instruction(&Instruction::GlobalSet(EXC_TYPE_GLOBAL));
-
+                    enter_handler(func, ctx, handler.name.as_ref());
                     compile_body(&handler.body, func, ctx, memory_layout);
+                    ctx.reraise_codes.pop();
 
                     ctx.block_depth -= 1;
                     func.instruction(&Instruction::End);
@@ -2520,20 +2636,14 @@ pub fn compile_body(
                 );
             }
 
-            IRStatement::DynamicImport {
-                target,
-                module_name,
-            } => {
-                // Emit code to evaluate the module name expression
-                emit_expr(module_name, func, ctx, memory_layout, None);
-
-                // Get the target local index or create one if it doesn't exist
-                let local_idx = ctx
-                    .get_local_index(target)
-                    .unwrap_or_else(|| ctx.add_local(target, IRType::Unknown));
-
-                // Store the result (currently just a placeholder) in the target variable
-                func.instruction(&Instruction::LocalSet(local_idx));
+            // The statement form, `__import__("m")` on its own line. It used
+            // to store the name into a local and report success; the
+            // expression form was already refused.
+            IRStatement::DynamicImport { .. } => {
+                ctx.report(
+                    "a dynamic import (importlib.import_module or __import__) is not supported; \
+                     modules are linked at compile time. Hint: use an import statement",
+                );
             }
 
             IRStatement::IndexAssign {
@@ -2931,10 +3041,10 @@ pub fn compile_body(
                     func.instruction(&Instruction::I32Const(0));
                 }
 
-                // For generator support, the yielded value would be stored
-                // in a generator state and execution would be paused.
-                // For now, this is a placeholder that just drops the value.
+                // `ir::generators` lowers every generator body before code
+                // generation, so a `yield` here was never part of one.
                 func.instruction(&Instruction::Drop);
+                ctx.report("'yield' outside a generator function is not supported here");
             }
 
             IRStatement::ImportModule { module_name, alias } => {
