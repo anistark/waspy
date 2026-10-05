@@ -83,6 +83,7 @@ Three more end-to-end programs, written as ordinary Python and compiled unchange
 - `x is None` on an `Optional[int]` or an untyped value is refused, since None and 0 are the same word; `is` between two numbers is refused, as CPython leaves it undefined
 - `"{} {0}".format(n)` is refused, as CPython raises ValueError for mixed field numbering
 - A conditional expression (`a if cond else b`), or any other expression the compiler does not lower, is refused by name rather than with a dump of its syntax tree
+- The development board's headline percentage counts features (an in-progress one as half), as each card's progress bar does. It counted whole cards, so a card with one open feature added nothing and the board read 38% where its features are 80% done
 - **`sum()` of a value it cannot walk as a list or tuple is a compile error.** It used to answer the argument itself, so `sum()` of a set, or of a list whose element type had been lost, returned a pointer as the total
 - **`float()` of a string is a compile error.** It converted the string's length. Producing the double CPython would needs correctly rounded parsing, which a digit loop does not give, so it is refused rather than approximated
 - **`int()` of a collection, instance, or `None` is a compile error**, as it is a `TypeError` in CPython. It passed the pointer through as a number

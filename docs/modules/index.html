@@ -661,6 +661,7 @@
 
         function calculateStats() {
             let done = 0, progress = 0, todo = 0;
+            let features = 0, featuresComplete = 0;
 
             Object.values(moduleData).forEach(module => {
                 switch (module.status) {
@@ -668,10 +669,15 @@
                     case 'progress': progress++; break;
                     case 'todo': todo++; break;
                 }
+                module.features.forEach(feature => {
+                    features++;
+                    if (feature.status === 'done') featuresComplete++;
+                    else if (feature.status === 'progress') featuresComplete += 0.5;
+                });
             });
 
             const total = done + progress + todo;
-            const completionRate = Math.round((done / total) * 100);
+            const completionRate = Math.round((featuresComplete / features) * 100);
 
             return { done, progress, todo, total, completionRate };
         }
@@ -695,7 +701,7 @@
                 </div>
                 <div class="stat-card">
                     <div class="stat-number total" id="completion-rate">0%</div>
-                    <div class="stat-label">Complete</div>
+                    <div class="stat-label" title="Done features, with in-progress ones counted as half">Features complete</div>
                 </div>
             `;
 
