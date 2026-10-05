@@ -3808,7 +3808,21 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                 captured_vars,
             })
         }
-        _ => Err(anyhow!("Unsupported expression type: {expr:?}")),
+        Expr::IfExp(_) => Err(crate::core::errors::unsupported_feature(
+            "conditional expressions ('a if cond else b') are not supported yet. \
+             Hint: use an if/else statement that assigns or returns each branch",
+            None,
+        )
+        .into()),
+        _ => {
+            let debug = format!("{expr:?}");
+            let kind = debug.split('(').next().unwrap_or("expression");
+            Err(crate::core::errors::unsupported_feature(
+                format!("the {kind} expression is not supported"),
+                None,
+            )
+            .into())
+        }
     }
 }
 

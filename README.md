@@ -118,7 +118,7 @@ Float division by zero and integer division or modulo by zero raise
 - Division by zero raises `ZeroDivisionError` (integer and float, `/`, `//`, and `%`), catchable like any other exception
 - `**` computes by repeated multiplication: a fractional float exponent (`2.0 ** 0.5`) traps, since it needs exp/log this runtime does not carry, and a negative integer exponent traps because Python's answer is a float an int result cannot hold
 - Sequence indexing is checked: a negative index counts from the end, an index outside the sequence raises `IndexError`, a missing dict key raises `KeyError`, and item assignment into a tuple or a string is a compile error. Slicing clamps instead of raising, as Python's does
-- Where Python raises over a value a collection does not hold, the compiled module traps, since it has no exception object to carry: `list.index(v)` and `set.remove(v)` of a missing value, and `list.pop(i)` with a position the list does not have. `list.count(v)` answers 0 and `set.discard(v)` ignores the miss, both as Python's do
+- Where Python raises over a value a collection does not hold, the compiled module traps, since it has no exception object to carry: `list.index(v)` and `set.remove(v)` of a missing value, and `list.pop(i)` with a position the list does not have. `list.remove(v)` of a missing value raises a catchable `ValueError`. `list.count(v)` answers 0 and `set.discard(v)` ignores the miss, both as Python's do
 - A method called with the wrong number of arguments is a compile error, not a silently ignored one: `xs.append(3, 4)` and `xs.clear(9)` are refused. The optional forms Python accepts compile, so `pop()`, `pop(i)`, `sort()`, and `sort(reverse=True)` all work
 - A collection reads every slot at one width, so a value written into one is converted to its element type: an int into a `List[float]` widens. Where it cannot be converted the write is refused rather than stored wrong: a float into a collection of ints (it would truncate), a float into a collection with no element type, a value whose type is unknown into a collection of floats, and `list.extend()` between lists of different widths
 - `int` is 32-bit and wraps on overflow rather than growing like CPython's, which is the one place waspy answers differently without saying so by design. See [Numbers](#numbers), and [Known wrong answers](#known-wrong-answers) for the defects that do the same by accident
@@ -145,6 +145,7 @@ None are known. Every construct the board audit found compiling and then answeri
 The compiler validates syntax up front and rejects these with a located error and a hint, rather than miscompiling them:
 
 - `async def` / `await` / `async for` / `async with` (planned for 1.0)
+- Conditional expressions (`a if cond else b`); use an `if`/`else` statement
 - `match` statements, `global`, `nonlocal`, `del`, `assert`, `type` aliases, `except*`
 - `from module import *`
 - `*args`, `**kwargs`, and keyword-only parameters

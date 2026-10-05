@@ -415,10 +415,10 @@ fn scan_expr_calls(expr: &IRExpr, raises: &mut bool, calls: &mut HashSet<String>
             arguments,
         } => {
             calls.insert(method_name.clone());
-            // `str.index()` / `list.index()` raise ValueError when the value is
-            // absent, so a function calling one is a function that can raise
+            // `str.index()` and `list.remove()` raise ValueError when the value
+            // is absent, so a function calling one is a function that can raise
             // and its callers must check on the way back.
-            if method_name == "index" {
+            if method_name == "index" || method_name == "remove" {
                 *raises = true;
             }
             scan_expr_calls(object, raises, calls);

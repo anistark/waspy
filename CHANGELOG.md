@@ -41,6 +41,7 @@ Three more end-to-end programs, written as ordinary Python and compiled unchange
 - An `optimize` cargo feature, on by default, gating the Binaryen dependency. With `default-features = false` waspy builds for `wasm32-unknown-unknown`, and `CompilerOptions::optimize` has no effect
 
 ### Fixed
+- **`list.remove(v)` of a missing value raises `ValueError`.** It did nothing, so a handler never ran and the list kept its length
 - **`x is None` and `a is b` answer.** Identity on anything but strings and collections dropped both operands and answered False, so `while node is not None` never ran and `if x is None` never held
 - **A true division is a float wherever it is stored** ([#132](https://github.com/anistark/waspy/issues/132)): a field set from one truncated (`Ratio(3, 2).v` was 1.0), and a local or a generator's lifted local failed validation. Nothing truncates a float silently any more: a float stored, returned, or passed where an int is held is refused
 - **`tuple.index` answers the position.** It pushed the position it found and branched past it, answering -1 for every value the tuple held; each position is now compared at its own width, and a missing value traps
@@ -81,6 +82,7 @@ Three more end-to-end programs, written as ordinary Python and compiled unchange
 - **Module-level and class-body statements that would not run are refused**: a chained or tuple assignment, and any class-body statement other than a method, docstring, or assignment, were skipped
 - `x is None` on an `Optional[int]` or an untyped value is refused, since None and 0 are the same word; `is` between two numbers is refused, as CPython leaves it undefined
 - `"{} {0}".format(n)` is refused, as CPython raises ValueError for mixed field numbering
+- A conditional expression (`a if cond else b`), or any other expression the compiler does not lower, is refused by name rather than with a dump of its syntax tree
 - **`sum()` of a value it cannot walk as a list or tuple is a compile error.** It used to answer the argument itself, so `sum()` of a set, or of a list whose element type had been lost, returned a pointer as the total
 - **`float()` of a string is a compile error.** It converted the string's length. Producing the double CPython would needs correctly rounded parsing, which a digit loop does not give, so it is refused rather than approximated
 - **`int()` of a collection, instance, or `None` is a compile error**, as it is a `TypeError` in CPython. It passed the pointer through as a number

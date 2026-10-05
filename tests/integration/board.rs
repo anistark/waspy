@@ -409,6 +409,22 @@ mod control_flow {
             &[("f", Want::Int(111))],
         );
     }
+
+    /// Conditional expressions (a if cond else b)
+    #[test]
+    #[ignore = "open on the board"]
+    fn conditional_expressions() {
+        check(
+            r#"
+            def pick(n: int) -> str:
+                return "big" if n > 10 else "small"
+
+            def f() -> int:
+                return len(pick(50)) * 10 + len(pick(1))
+        "#,
+            &[("f", Want::Int(35))],
+        );
+    }
 }
 
 mod functions {
@@ -1278,6 +1294,24 @@ mod collections {
                 return last * 100 + first * 10 + n + len(xs)
         "#,
             &[("f", Want::Int(302))],
+        );
+    }
+
+    /// .remove(v) drops the first equal element; a missing value raises a catchable ValueError
+    #[test]
+    fn list_remove() {
+        check(
+            r#"
+            def f() -> int:
+                xs = [1, 2, 1]
+                xs.remove(1)
+                try:
+                    xs.remove(7)
+                except ValueError:
+                    return len(xs) * 10 + xs[0]
+                return 0
+        "#,
+            &[("f", Want::Int(22))],
         );
     }
 

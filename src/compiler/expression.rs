@@ -10721,6 +10721,9 @@ pub fn emit_list_method_call(
                 func.instruction(&Instruction::I32Sub);
                 func.instruction(&Instruction::I32Store(slot_arg()));
 
+                // i = -1 marks the value found
+                func.instruction(&Instruction::I32Const(-1));
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 3));
                 func.instruction(&Instruction::Br(2)); // exit search loop
                 func.instruction(&Instruction::End); // end if
 
@@ -10732,6 +10735,14 @@ pub fn emit_list_method_call(
                 func.instruction(&Instruction::Br(0));
                 func.instruction(&Instruction::End); // search loop
                 func.instruction(&Instruction::End); // search block
+
+                // A value the list does not hold raises ValueError, as in Python.
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32GeS);
+                func.instruction(&Instruction::If(BlockType::Empty));
+                emit_raise(func, ctx, "ValueError", 1);
+                func.instruction(&Instruction::End);
             }
             IRType::None
         }

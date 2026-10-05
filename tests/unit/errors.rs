@@ -185,3 +185,15 @@ fn compiled_modules_pass_validation() {
     );
     waspy::compiler::validate_wasm(&wasm).expect("compiled module must validate");
 }
+
+/// An expression the converter does not lower is refused by name, not with a
+/// dump of its AST.
+#[test]
+fn conditional_expression_is_refused_by_name() {
+    let err = compile_error("def f(n: int) -> int:\n    return 1 if n > 0 else 2\n");
+    assert!(
+        err.contains("conditional expressions ('a if cond else b') are not supported"),
+        "got: {err}"
+    );
+    assert!(!err.contains("ExprIfExp"), "got: {err}");
+}

@@ -4227,3 +4227,56 @@ fn format_refuses_mixed_field_numbering() {
         "cannot switch from automatic field numbering",
     );
 }
+
+/// `list.remove(v)` of a value the list does not hold did nothing, where
+/// CPython raises ValueError: a handler never ran and the list kept its length.
+#[test]
+fn list_remove_of_missing_value_raises() {
+    let src = dedent(
+        r#"
+        from typing import List
+
+        def drop(xs: List[int], v: int) -> int:
+            xs.remove(v)
+            return len(xs)
+
+        def f() -> int:
+            xs = [1, 2, 3]
+            r = 0
+            try:
+                xs.remove(9)
+            except ValueError:
+                r += 1
+            try:
+                drop(xs, 9)
+            except ValueError:
+                r += 10
+            xs.remove(2)
+            r += 100 * len(xs)
+            for v in [1, 5]:
+                try:
+                    xs.remove(v)
+                    r += 1000
+                except ValueError:
+                    r += 10000
+            return r
+
+        def g() -> int:
+            words = ["a", "b", "a"]
+            words.remove("a")
+            try:
+                words.remove("c")
+            except ValueError:
+                return len(words) * 10 + len(words[0])
+            return 0
+
+        def h() -> int:
+            xs = [1]
+            xs.remove(5)
+            return len(xs)
+        "#,
+    );
+    assert_eq!(call_i32(&src, "f"), 11211);
+    assert_eq!(call_i32(&src, "g"), 21);
+    assert!(call_i32_traps(&src, "h"));
+}

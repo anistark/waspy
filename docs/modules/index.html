@@ -172,7 +172,8 @@
                     { name: "with statements over user context managers (__enter__/__exit__, nested, inherited, exit before return / break / continue)", status: "done", version: "0.14.0", issue: 5, test: "control_flow::with_context_managers" },
                     { name: "Comparison operations (==, !=, <, <=, >, >=)", status: "done", version: "0.1.0", test: "control_flow::comparisons" },
                     { name: "Boolean logic (and, or, not) with short-circuit", status: "done", version: "0.1.0", test: "control_flow::boolean_short_circuit" },
-                    { name: "else clauses on for, while, and try", status: "done", version: "upcoming", test: "control_flow::else_clauses" }
+                    { name: "else clauses on for, while, and try", status: "done", version: "upcoming", test: "control_flow::else_clauses" },
+                    { name: "Conditional expressions (a if cond else b) (refused today)", status: "todo", test: "control_flow::conditional_expressions" }
                 ]
             },
             functions: {
@@ -263,7 +264,7 @@
                 features: [
                     { name: "String literals, indexing, slicing, concatenation", status: "done", version: "0.3.0", test: "strings::literals_indexing_slicing" },
                     { name: "Case conversion (upper, lower, capitalize, title)", status: "done", version: "0.3.0", test: "strings::case_conversion" },
-                    { name: "Test methods (isdigit, isalpha, isspace, etc.) - compile-time optimized", status: "done", version: "0.3.0", test: "strings::predicates" },
+                    { name: "Test methods (isdigit, isalpha, isspace, etc.), folded at compile time on a literal receiver", status: "done", version: "0.3.0", test: "strings::predicates" },
                     { name: "Search methods (.find, .count, .startswith, .endswith)", status: "done", version: "0.3.0", test: "strings::search_methods" },
                     { name: "Transform methods (.split, .join, .replace)", status: "done", version: "0.3.0", test: "strings::split_join_replace" },
                     { name: "A method on a literal receiver answers what the same method on a variable does, .split(sep) included", status: "done", version: "0.16.0", test: "strings::literal_receiver_matches_runtime" },
@@ -291,6 +292,7 @@
                     { name: "List literals with memory allocation [1, 2, 3]", status: "done", version: "0.7.0", test: "collections::list_literals" },
                     { name: "List indexing (read & write) list[i] and list[i] = value", status: "done", version: "0.7.0", test: "collections::list_indexing" },
                     { name: "List methods .append(), .pop([i]), .clear(), .insert(i, v)", status: "done", version: "0.7.0", test: "collections::list_methods" },
+                    { name: ".remove(v) drops the first equal element; a missing value raises a catchable ValueError", status: "done", version: "upcoming", test: "collections::list_remove" },
                     { name: ".pop(i) removes the element at i and .index(v) answers its position; a missing value or position traps, as Python raises", status: "done", version: "0.16.0", test: "collections::pop_index_and_index_of" },
                     { name: "A method called with the wrong number of arguments is a compile error, not a silently ignored one", status: "done", version: "0.16.0", test: "collections::method_arity_checked" },
                     { name: "List search methods .index(v) & .count(v) with linear search", status: "done", version: "0.7.0", test: "collections::list_search" },
@@ -369,9 +371,9 @@
                 status: "progress",
                 version: "0.14.0",
                 features: [
-                    { name: "Set storage with de-duplication & membership (in / not in)", status: "done", test: "runtime_features::set_dedup_and_membership" },
+                    { name: "Set storage with de-duplication & membership (in / not in)", status: "done", version: "0.10.0", test: "runtime_features::set_dedup_and_membership" },
                     { name: "Growable collections - lists and dicts reallocate instead of overflowing their region", status: "done", version: "0.14.0", test: "runtime_features::growable_collections" },
-                    { name: "Dict index assignment with update or append (dict[key] = value)", status: "done", test: "runtime_features::dict_update_or_append" },
+                    { name: "Dict index assignment with update or append (dict[key] = value)", status: "done", version: "0.10.0", test: "runtime_features::dict_update_or_append" },
                     { name: "Generator State Management - execution context suspension/resumption", status: "done", version: "0.14.0", test: "runtime_features::generator_state" },
                     { name: "Dynamic Module Loading - runtime module loading and execution", status: "todo", test: "runtime_features::dynamic_module_loading" },
                     { name: "Closure Variable Capture Analysis - detecting and capturing closure variables", status: "done", version: "0.14.0", test: "runtime_features::closure_capture" },
@@ -418,7 +420,7 @@
                     { name: "itertools module: count, cycle, repeat, chain, compress, dropwhile, filterfalse, groupby, islice, starmap, takewhile, tee, zip_longest, product, permutations, combinations, combinations_with_replacement, accumulate, batched, pairwise (refused today)", status: "todo" },
                     { name: "functools: @singledispatch with @f.register (static dispatch on the first argument's type), @total_ordering (derives the missing ordering methods)", status: "done", version: "0.17.0", test: "stdlib::singledispatch_and_total_ordering" },
                     { name: "functools: @lru_cache, @cache, @wraps (accepted, no observable effect)", status: "done", version: "0.17.0", test: "stdlib::caching_decorators" },
-                    { name: "functools: reduce, partial, partialmethod, cmp_to_key, cached_property, singledispatchmethod (refused at compile time)", status: "todo", version: "" },
+                    { name: "functools: reduce, partial, partialmethod, cmp_to_key, cached_property, singledispatchmethod (refused at compile time)", status: "todo" },
                     { name: "logging module: debug, info, warning, error, critical, exception, log, basicConfig, getLogger, setLevel, disable, Logger, Handler, StreamHandler, FileHandler, Formatter, Filter, LogRecord (refused today)", status: "todo" }
                 ]
             },
@@ -513,7 +515,7 @@
                     { name: "Subclass matching: except MyBase does not catch a subclass of it (Exception / BaseException catch everything)", status: "todo", test: "error_handling::subclass_matching" },
                     { name: "Runtime faults raise catchable exceptions: IndexError for an out-of-range index, KeyError for a missing key, ZeroDivisionError", status: "done", version: "0.15.0", test: "error_handling::runtime_faults_catchable" },
                     { name: "int() of a bad string raises a catchable ValueError", status: "done", version: "upcoming", test: "error_handling::int_bad_string_raises" },
-                    { name: "The remaining faults raise instead of trapping: list.index / list.remove / set.remove of a missing value, pop from an empty list", status: "todo" },
+                    { name: "The remaining faults raise instead of trapping: list.index / set.remove of a missing value, pop from an empty list", status: "todo" },
                     { name: "__exit__ returning True suppresses the exception (it traps today)", status: "todo" }
                 ]
             },
