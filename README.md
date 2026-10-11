@@ -166,14 +166,14 @@ Or add it to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-waspy = "0.17.0"
+waspy = "0.18.0"
 ```
 
 The Binaryen optimization pass is the default `optimize` feature. Binaryen is a native C++ library, so turn the feature off to build waspy for a target without a C++ toolchain, such as `wasm32-unknown-unknown`. `CompilerOptions::optimize` then has no effect, and the output is the unoptimized module, which is already valid and correct:
 
 ```toml
 [dependencies]
-waspy = { version = "0.17.0", default-features = false }
+waspy = { version = "0.18.0", default-features = false }
 ```
 
 To try it without installing anything, the [playground](https://anistark.github.io/waspy/playground/) runs waspy itself, built this way, in the browser.
