@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0](https://github.com/anistark/waspy/releases/tag/v0.18.0) - 2026-10-11
+
 Three more end-to-end programs, written as ordinary Python and compiled unchanged, found what follows. Most of it was silent: the compiler reported success and the program answered something CPython does not. The sixth program found no silent defect, which is what the correctness rule is now re-signed on.
 
 ### Added
