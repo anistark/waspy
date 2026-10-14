@@ -130,6 +130,17 @@ fn break_exits_innermost_loop_only() {
     assert_eq!(call_i32(&src, "count_inner_breaks"), 3);
 }
 
+/// Conditional expressions, chained and nested in f-strings, with CPython's
+/// answers for each.
+#[test]
+fn conditional_expressions_example() {
+    let src = read_example("conditional_expressions.py");
+    assert_eq!(call_i32(&src, "sign_total"), 1);
+    assert_eq!(call_str(&src, "labels"), "1 file, 4 files");
+    assert_eq!(call_f64(&src, "clamped"), 1.25);
+    assert_eq!(call_str(&src, "descriptions"), "none high low");
+}
+
 /// Statically nested list-of-lists: each inner literal occupies its own region,
 /// so `grid[0][1] + grid[1][0]` reads 2 + 3 = 5 (Issue #14).
 #[test]

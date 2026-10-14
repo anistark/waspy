@@ -173,12 +173,12 @@
                     { name: "Comparison operations (==, !=, <, <=, >, >=)", status: "done", version: "0.1.0", test: "control_flow::comparisons" },
                     { name: "Boolean logic (and, or, not) with short-circuit", status: "done", version: "0.1.0", test: "control_flow::boolean_short_circuit" },
                     { name: "else clauses on for, while, and try", status: "done", version: "0.18.0", test: "control_flow::else_clauses" },
-                    { name: "Conditional expressions (a if cond else b) (refused today)", status: "todo", test: "control_flow::conditional_expressions" }
+                    { name: "Conditional expressions (a if cond else b), evaluating only the arm taken", status: "done", version: "upcoming", test: "control_flow::conditional_expressions" }
                 ]
             },
             functions: {
                 title: "FUNCTIONS",
-                status: "done",
+                status: "progress",
                 version: "0.1.0",
                 features: [
                     { name: "Function definitions with parameters", status: "done", version: "0.1.0", test: "functions::definitions_with_parameters" },
@@ -186,7 +186,11 @@
                     { name: "Function calls between compiled functions", status: "done", version: "0.1.0", test: "functions::calls_between_functions" },
                     { name: "Multiple functions per module", status: "done", version: "0.1.0", test: "functions::multiple_functions" },
                     { name: "Keyword arguments in calls to functions and constructors, placed by name with defaults filled in", status: "done", version: "0.18.0", test: "functions::keyword_arguments" },
-                    { name: "An unannotated parameter or return takes ints, bools, and None; a string, float, collection, or instance through one is refused", status: "done", version: "0.18.0", test: "functions::untyped_parameters_take_words" }
+                    { name: "An unannotated parameter or return takes ints, bools, and None; a string, float, collection, or instance through one is refused", status: "done", version: "0.18.0", test: "functions::untyped_parameters_take_words" },
+                    { name: "Nested function definitions (def inside def), closing over the enclosing variables (refused today)", status: "todo", test: "functions::nested_functions" },
+                    { name: "*args collects extra positional arguments as a tuple (refused today)", status: "todo", test: "functions::star_args" },
+                    { name: "Keyword-only parameters, after *, passed by name with their defaults", status: "done", version: "upcoming", test: "functions::keyword_only_parameters" },
+                    { name: "**kwargs collects extra keyword arguments as a dict (refused today)", status: "todo", test: "functions::star_star_kwargs" }
                 ]
             },
             typeSystem: {
@@ -203,7 +207,7 @@
             },
             variables: {
                 title: "VARIABLES & ASSIGNMENT",
-                status: "done",
+                status: "progress",
                 version: "0.1.0",
                 features: [
                     { name: "Variable declarations and assignments", status: "done", version: "0.1.0", test: "variables::assignments" },
@@ -215,7 +219,10 @@
                     { name: "Tuple unpacking types its targets; a wrong-length value raises ValueError", status: "done", version: "0.18.0", test: "variables::tuple_unpacking" },
                     { name: "Augmented assignment through subscripts and computed objects, each target evaluated once", status: "done", version: "0.18.0", test: "variables::augmented_assignment_targets" },
                     { name: "Annotated fields: self.items: Dict[str, Item] = {}", status: "done", version: "0.18.0", test: "variables::annotated_fields" },
-                    { name: "A module-level statement that would not run (a loop, a call, an augmented assignment) is refused", status: "done", version: "0.18.0", test: "variables::module_statements_that_would_not_run" }
+                    { name: "A module-level statement that would not run (a loop, a call, an augmented assignment) is refused", status: "done", version: "0.18.0", test: "variables::module_statements_that_would_not_run" },
+                    { name: "global: a function rebinds a module-level name for every reader", status: "done", version: "upcoming", test: "variables::global_statement" },
+                    { name: "del of a list index or slice and of a dict key (IndexError / KeyError when absent)", status: "done", version: "upcoming", test: "variables::del_statement" },
+                    { name: "nonlocal: a nested function rebinds a variable of the function enclosing it (refused today)", status: "todo", test: "variables::nonlocal_statement" }
                 ]
             },
             decorators: {
@@ -303,7 +310,7 @@
                     { name: "Set mutation .add() / .remove() / .discard(), rehashing when the table fills", status: "done", version: "0.15.0", test: "collections::set_mutation" },
                     { name: "List methods .sort([reverse]) and .reverse(), in place", status: "done", version: "0.16.0", test: "collections::sort_and_reverse" },
                     { name: "List slicing xs[a:b] returns a fresh list, negative indices and clamping included (a step other than 1 is rejected)", status: "done", version: "0.16.0", test: "collections::list_slicing" },
-                    { name: "Dict methods .get(key[, default]), .keys(), .values(), .items() - .items() as a value, not only a for iterable", status: "done", version: "0.16.0", test: "collections::dict_methods" },
+                    { name: "Dict methods .get(key, default) (.get(key) on instance values, where None is distinct), .keys(), .values(), .items() - .items() as a value, not only a for iterable", status: "done", version: "0.16.0", test: "collections::dict_methods" },
                     { name: "in searches dicts and tuples as well as lists and sets; anything unsearchable is a compile error", status: "done", version: "0.16.0", test: "collections::in_dicts_and_tuples" },
                     { name: "Truthiness follows Python: an empty list, dict, set, or tuple is False", status: "done", version: "0.16.0", test: "collections::collection_truthiness" },
                     { name: "A method the compiler does not implement is a compile error rather than a silent no-op", status: "done", version: "0.16.0", test: "collections::unknown_methods_refused" },
@@ -315,7 +322,7 @@
                     { name: "Sequence repetition: [0] * n and (a,) * n (a tuple's count must be a constant, since its length is part of its type)", status: "done", version: "0.18.0", test: "collections::sequence_repetition" },
                     { name: "Concatenation: xs + ys for two lists or two tuples", status: "done", version: "0.18.0", test: "collections::concatenation" },
                     { name: "Dict merge: d1 | d2, in CPython's order", status: "done", version: "0.18.0", test: "collections::dict_merge" },
-                    { name: "The rest of the dict API: |=, update, pop, popitem, setdefault, copy, clear, fromkeys, del d[k]", status: "todo", test: "collections::rest_of_dict_api" }
+                    { name: "The rest of the dict API: |=, update, pop, popitem, setdefault, copy, clear, fromkeys", status: "todo", test: "collections::rest_of_dict_api" }
                 ]
             },
             classes: {
@@ -514,8 +521,9 @@
                     { name: "raise and raise e inside a handler re-raise the caught exception's type", status: "done", version: "0.18.0", test: "error_handling::reraise_keeps_type" },
                     { name: "Subclass matching: except MyBase does not catch a subclass of it (Exception / BaseException catch everything)", status: "todo", test: "error_handling::subclass_matching" },
                     { name: "Runtime faults raise catchable exceptions: IndexError for an out-of-range index, KeyError for a missing key, ZeroDivisionError", status: "done", version: "0.15.0", test: "error_handling::runtime_faults_catchable" },
+                    { name: "assert raises AssertionError when its condition is false, evaluating the message only then", status: "done", version: "upcoming", test: "error_handling::assert_statements" },
                     { name: "int() of a bad string raises a catchable ValueError", status: "done", version: "0.18.0", test: "error_handling::int_bad_string_raises" },
-                    { name: "The remaining faults raise instead of trapping: list.index / set.remove of a missing value, pop from an empty list", status: "todo" },
+                    { name: "Collection faults raise: list.index / list.remove of a missing value (ValueError), set.remove of a missing member (KeyError), pop out of range or from an empty list (IndexError)", status: "done", version: "upcoming", test: "error_handling::collection_faults_raise" },
                     { name: "__exit__ returning True suppresses the exception (it traps today)", status: "todo" }
                 ]
             },

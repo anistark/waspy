@@ -1,7 +1,7 @@
 use crate::core::errors::{unsupported_feature, ChakraError};
 use crate::ir::{IRExpr, IRType, MethodKind};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// WASM global holding the pending exception's type code, 0 when none.
 pub const EXC_TYPE_GLOBAL: u32 = 2;
@@ -283,6 +283,9 @@ pub struct CompilationContext {
     /// True while `__module_init` is being compiled: an assignment to a module
     /// global there stores the global instead of creating a local.
     pub in_module_init: bool,
+    /// The names the function being compiled declares `global`: assigning one
+    /// stores into its module global instead of making a local.
+    pub declared_globals: HashSet<String>,
     /// Module-level variables, by name -> (declared type, initializer). Read
     /// references to these are inlined by emitting the initializer expression.
     pub module_vars: HashMap<String, (Option<IRType>, IRExpr)>,
@@ -327,6 +330,12 @@ pub struct CompilationContext {
     /// template is rebuilt per iteration. A `Cell` because expression codegen
     /// holds `&CompilationContext`. Reset per function.
     pub comp_depth: Cell<u32>,
+    /// Frames opened by expression codegen around a nested expression (the
+    /// arms of a conditional expression, the right operand of `and`/`or`, a
+    /// comprehension's loops and filters), which `block_depth` cannot count
+    /// because expression codegen holds `&CompilationContext`. An exception
+    /// raised inside one branches out through them to its `try`.
+    pub expr_block_depth: Cell<u32>,
     /// WASM function index of the runtime bump allocator `__alloc(size) -> ptr`.
     /// Emitted after all user functions/methods, so callers (e.g. string/bytes
     /// concatenation) reference it by this index. Set during module assembly.
@@ -430,6 +439,7 @@ impl CompilationContext {
             module_global_index: HashMap::new(),
             module_global_types: HashMap::new(),
             in_module_init: false,
+            declared_globals: HashSet::new(),
             temp_local: 0,
             temp_local_f64: 0,
             temp_local_f64_2: 0,
@@ -439,6 +449,7 @@ impl CompilationContext {
             reraise_codes: Vec::new(),
             except_scan_depth: 0,
             comp_depth: Cell::new(0),
+            expr_block_depth: Cell::new(0),
             alloc_func_index: 0,
             alloc_obj_func_index: 0,
             i32_to_str_func_index: 0,
@@ -647,6 +658,16 @@ impl CompilationContext {
             .skip(column as usize)
             .step_by(stride.max(1) as usize)
             .copied()
+    }
+
+    /// Record `n` frames expression codegen has just opened around nested
+    /// emission; [`exit_expr_blocks`](Self::exit_expr_blocks) at their `end`.
+    pub fn enter_expr_blocks(&self, n: u32) {
+        self.expr_block_depth.set(self.expr_block_depth.get() + n);
+    }
+
+    pub fn exit_expr_blocks(&self, n: u32) {
+        self.expr_block_depth.set(self.expr_block_depth.get() - n);
     }
 
     /// Take the next held slot, for a value that must survive nested emission.

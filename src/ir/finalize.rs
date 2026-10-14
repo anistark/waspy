@@ -105,6 +105,23 @@ pub fn finalize_module(module: &mut IRModule) -> Result<()> {
 /// Runs before the other module passes, which walk expressions with wildcard
 /// arms that would not descend into a keyword's value.
 pub fn resolve_keyword_arguments(module: &mut IRModule) -> Result<()> {
+    // A method call never places keywords, so a keyword-only parameter of a
+    // method could not be passed at all.
+    for class in &module.classes {
+        for method in &class.methods {
+            if method.name != "__init__" && method.params.iter().any(|p| p.keyword_only) {
+                return Err(crate::core::errors::unsupported_feature(
+                    format!(
+                        "keyword-only parameters are supported on functions and __init__, \
+                         not on the method '{}.{}'. Hint: make them positional",
+                        class.name, method.name
+                    ),
+                    None,
+                )
+                .into());
+            }
+        }
+    }
     let facts = resolve_class_facts(&module.classes);
     let mut signatures: HashMap<String, Vec<IRParam>> = module
         .functions
@@ -112,7 +129,12 @@ pub fn resolve_keyword_arguments(module: &mut IRModule) -> Result<()> {
         .map(|f| (f.name.clone(), f.params.clone()))
         .collect();
     for (name, class_facts) in &facts {
-        // Instantiation supplies `self`.
+        // Instantiation supplies `self`. With no `__init__` along the chain the
+        // signature is not this module's (an exception class takes its
+        // base's arguments).
+        if class_facts.init_params.is_empty() {
+            continue;
+        }
         let params = class_facts.init_params.iter().skip(1).cloned().collect();
         signatures.insert(name.clone(), params);
     }
@@ -157,17 +179,28 @@ fn place_keywords(callee: &str, arguments: &mut Vec<IRExpr>, params: &[IRParam])
         .iter()
         .take_while(|a| !matches!(a, IRExpr::Keyword { .. }))
         .count();
-    if positional == arguments.len() {
-        return Ok(());
-    }
     let type_error = |message: String| -> anyhow::Error {
         crate::core::errors::type_error(message, None).into()
     };
-    if positional > params.len() {
+    // The signature is this module's own, so it is authoritative: a surplus
+    // positional argument was dropped and a missing one failed validation.
+    let takes = params.iter().filter(|p| !p.keyword_only).count();
+    if positional > takes {
         return Err(type_error(format!(
-            "{callee}() takes {} positional argument(s) but {positional} were given",
-            params.len()
+            "{callee}() takes {takes} positional argument(s) but {positional} were given"
         )));
+    }
+    if positional == arguments.len() {
+        if let Some(missing) = params[positional..]
+            .iter()
+            .find(|p| p.default_value.is_none())
+        {
+            return Err(type_error(format!(
+                "{callee}() missing required argument: '{}'",
+                missing.name
+            )));
+        }
+        return Ok(());
     }
 
     let keywords: Vec<(String, IRExpr)> = arguments
@@ -402,6 +435,7 @@ fn lift_lambdas(module: &mut IRModule) -> Result<()> {
             name: "__env".to_string(),
             param_type: IRType::List(Box::new(IRType::Unknown)),
             default_value: None,
+            keyword_only: false,
         });
 
         // __cell_k = __env[k] preludes, then return the lambda body. The
@@ -853,6 +887,15 @@ fn collect_free_names(
             collect_free_names(right, bound, globals, out);
         }
         IRExpr::UnaryOp { operand, .. } => collect_free_names(operand, bound, globals, out),
+        IRExpr::Conditional {
+            condition,
+            body,
+            orelse,
+        } => {
+            collect_free_names(condition, bound, globals, out);
+            collect_free_names(body, bound, globals, out);
+            collect_free_names(orelse, bound, globals, out);
+        }
         IRExpr::FunctionCall {
             function_name,
             arguments,
@@ -1154,7 +1197,10 @@ fn visit_stmt(stmt: &mut IRStatement, f: &mut impl FnMut(&mut IRExpr) -> Result<
             visit_expr(index, f)?;
             visit_expr(value, f)?;
         }
-        IRStatement::ImportModule { .. } | IRStatement::Break | IRStatement::Continue => {}
+        IRStatement::ImportModule { .. }
+        | IRStatement::Break
+        | IRStatement::Continue
+        | IRStatement::Global(_) => {}
     }
     Ok(())
 }
@@ -1175,6 +1221,15 @@ fn visit_expr(expr: &mut IRExpr, f: &mut impl FnMut(&mut IRExpr) -> Result<()>) 
             visit_expr(right, f)?;
         }
         IRExpr::UnaryOp { operand, .. } => visit_expr(operand, f)?,
+        IRExpr::Conditional {
+            condition,
+            body,
+            orelse,
+        } => {
+            visit_expr(condition, f)?;
+            visit_expr(body, f)?;
+            visit_expr(orelse, f)?;
+        }
         IRExpr::FunctionCall { arguments, .. } => {
             for arg in arguments {
                 visit_expr(arg, f)?;

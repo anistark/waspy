@@ -6,7 +6,9 @@
 //
 //   - a done feature names no test, or its test is missing, ignored, or fails;
 //   - an open feature's test passes (the feature is done: move it on the board);
-//   - a test in the suite backs no feature.
+//   - a test in the suite backs no feature;
+//   - a card's status disagrees with its features (done: every feature done;
+//     todo: none started; progress: anything in between).
 //
 // This is the command the 1.0 gate runs: the board at 100% with this passing.
 
@@ -57,6 +59,13 @@ const problems = [];
 const referenced = new Set();
 let done = 0;
 for (const [card, module] of Object.entries(moduleData)) {
+    const statuses = module.features.map((feature) => feature.status);
+    const allDone = statuses.every((status) => status === 'done');
+    const allTodo = statuses.every((status) => status === 'todo');
+    const expected = allDone ? 'done' : allTodo ? 'todo' : 'progress';
+    if (module.status !== expected) {
+        problems.push(`${module.title} is marked ${module.status}, but its features make it ${expected}`);
+    }
     for (const feature of module.features) {
         const where = `${module.title}: ${feature.name}`;
         const test = feature.test;

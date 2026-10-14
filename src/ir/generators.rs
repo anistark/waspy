@@ -333,6 +333,7 @@ fn drain_function(class: &str, element: IRType) -> IRFunction {
             name: "it".to_string(),
             param_type: IRType::Class(class.to_string()),
             default_value: None,
+            keyword_only: false,
         }],
         body: IRBody {
             statements: vec![
@@ -759,6 +760,15 @@ fn for_each_child(expr: &mut IRExpr, f: &mut impl FnMut(&mut IRExpr)) {
             f(right);
         }
         IRExpr::UnaryOp { operand, .. } => f(operand),
+        IRExpr::Conditional {
+            condition,
+            body,
+            orelse,
+        } => {
+            f(condition);
+            f(body);
+            f(orelse);
+        }
         IRExpr::FunctionCall { arguments, .. } => arguments.iter_mut().for_each(f),
         IRExpr::ListLiteral(items) | IRExpr::SetLiteral(items) | IRExpr::TupleLiteral(items) => {
             items.iter_mut().for_each(f)
@@ -890,6 +900,7 @@ fn build_state_class(
         name: "self".to_string(),
         param_type: IRType::Class(class_name.to_string()),
         default_value: None,
+        keyword_only: false,
     };
     let method =
         |name: &str, params: Vec<IRParam>, statements: Vec<IRStatement>, ret: IRType| IRFunction {
@@ -954,6 +965,7 @@ fn build_state_class(
                     name: "value".to_string(),
                     param_type: elem_type.clone(),
                     default_value: None,
+                    keyword_only: false,
                 },
             ],
             vec![
@@ -1582,6 +1594,9 @@ fn yielded_type(body: &IRBody, params: &[IRParam]) -> IRType {
                 expr_has_float(left, float_params) || expr_has_float(right, float_params)
             }
             IRExpr::UnaryOp { operand, .. } => expr_has_float(operand, float_params),
+            IRExpr::Conditional { body, orelse, .. } => {
+                expr_has_float(body, float_params) || expr_has_float(orelse, float_params)
+            }
             IRExpr::Attribute { object, .. } => expr_has_float(object, float_params),
             IRExpr::FunctionCall { function_name, .. } if function_name == "float" => true,
             _ => false,

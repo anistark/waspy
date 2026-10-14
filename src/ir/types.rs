@@ -42,6 +42,8 @@ pub struct IRParam {
     pub name: String,
     pub param_type: IRType,
     pub default_value: Option<IRExpr>, // Default parameter values
+    /// Declared after `*`: it can only be passed by name.
+    pub keyword_only: bool,
 }
 
 /// IR representation of a function body, which can contain multiple statements
@@ -141,6 +143,9 @@ pub enum IRStatement {
     Break,
     // Loop control: `continue` jumps to the next iteration of the innermost loop.
     Continue,
+    /// `global a, b`: in this function, `a` and `b` are the module's
+    /// definitions, and assigning one rebinds it for every reader.
+    Global(Vec<String>),
 }
 
 /// Except handler for try-except statements
@@ -222,6 +227,13 @@ pub enum IRExpr {
         left: Box<IRExpr>,
         right: Box<IRExpr>,
         op: IRBoolOp,
+    },
+    /// `body if condition else orelse`. Only the arm the condition picks is
+    /// evaluated, and the two arms must share one type.
+    Conditional {
+        condition: Box<IRExpr>,
+        body: Box<IRExpr>,
+        orelse: Box<IRExpr>,
     },
     ListLiteral(Vec<IRExpr>),
     DictLiteral(Vec<(IRExpr, IRExpr)>),

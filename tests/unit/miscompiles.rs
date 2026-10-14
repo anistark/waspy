@@ -4280,3 +4280,221 @@ fn list_remove_of_missing_value_raises() {
     assert_eq!(call_i32(&src, "g"), 21);
     assert!(call_i32_traps(&src, "h"));
 }
+
+/// An exception raised inside an expression that opens its own block (a
+/// comprehension's loop or filter, the right operand of `and`/`or`, an arm of
+/// a conditional expression) reaches the enclosing `try`. The branch out of
+/// the expression was counted from the statement's depth, one frame short per
+/// block: a comprehension raising inside a `try` looped forever, and `and`
+/// failed validation.
+#[test]
+fn raise_inside_a_nested_expression_reaches_the_try() {
+    let src = dedent(
+        r#"
+        from typing import Dict, List
+
+        def boom(x: int) -> int:
+            if x > 2:
+                raise ValueError()
+            return x
+
+        def comprehension() -> int:
+            try:
+                ys = [boom(i) for i in range(5)]
+                return 1
+            except ValueError:
+                return 2
+
+        def nested_comprehension() -> int:
+            try:
+                ys = [[boom(i + j) for j in range(3)] for i in range(3)]
+                return 1
+            except ValueError:
+                return 3
+
+        def comprehension_filter() -> int:
+            try:
+                ys = [i for i in range(5) if boom(i) > 0]
+                return 1
+            except ValueError:
+                return 4
+
+        def missing_key() -> int:
+            d: Dict[int, int] = {1: 1}
+            try:
+                ys = [d[i] for i in range(3)]
+                return 1
+            except KeyError:
+                return 5
+
+        def right_of_or() -> int:
+            try:
+                ok = False or boom(9) > 0
+                return 1
+            except ValueError:
+                return 6
+
+        def conditional_arm() -> int:
+            xs: List[int] = [1]
+            try:
+                v = xs[5] if len(xs) > 0 else 0
+                return v
+            except IndexError:
+                return 7
+        "#,
+    );
+    assert_eq!(call_i32(&src, "comprehension"), 2);
+    assert_eq!(call_i32(&src, "nested_comprehension"), 3);
+    assert_eq!(call_i32(&src, "comprehension_filter"), 4);
+    assert_eq!(call_i32(&src, "missing_key"), 5);
+    assert_eq!(call_i32(&src, "right_of_or"), 6);
+    assert_eq!(call_i32(&src, "conditional_arm"), 7);
+}
+
+/// A list method's argument is emitted before the list pointer is parked in a
+/// scratch local, since emitting the argument can use the same locals. With
+/// the pointer parked first, `xs.index(ys.index(1))` searched `ys` and
+/// `xs.pop(ys.pop())` popped `ys` twice, both reported as success; and a tuple
+/// passed to `extend` was dropped, so the list stayed as it was.
+#[test]
+fn list_method_arguments_do_not_clobber_the_list() {
+    let src = dedent(
+        r#"
+        from typing import List
+
+        def index_nested() -> int:
+            xs: List[int] = [10, 20, 30, 1]
+            ys: List[int] = [5, 1, 7]
+            return xs.index(ys.index(1))
+
+        def pop_nested() -> int:
+            xs: List[int] = [10, 20, 30, 40]
+            ys: List[int] = [0, 1, 2]
+            v = xs.pop(ys.pop())
+            return v * 100 + len(xs) * 10 + len(ys)
+
+        def pop_index_arg() -> int:
+            xs: List[int] = [10, 20, 30, 40]
+            ys: List[int] = [5, 6, 7]
+            v = xs.pop(ys.index(7))
+            return v + len(xs)
+
+        def count_nested() -> int:
+            xs: List[int] = [1, 1, 2, 1]
+            ys: List[int] = [5, 1]
+            return xs.count(ys.index(1))
+
+        def extend_nested() -> int:
+            xs: List[int] = [1, 2]
+            ys: List[int] = [7, 8, 9]
+            xs.extend([ys.index(8), ys.pop()])
+            return xs[2] * 10 + xs[3] + len(xs) * 100
+
+        def extend_tuple() -> int:
+            xs: List[int] = [1]
+            xs.extend((2, 3))
+            return len(xs) * 10 + xs[2]
+        "#,
+    );
+    assert_eq!(call_i32(&src, "index_nested"), 3);
+    assert_eq!(call_i32(&src, "pop_nested"), 3032);
+    assert_eq!(call_i32(&src, "pop_index_arg"), 33);
+    assert_eq!(call_i32(&src, "count_nested"), 3);
+    assert_eq!(call_i32(&src, "extend_nested"), 419);
+    assert_eq!(call_i32(&src, "extend_tuple"), 33);
+}
+
+/// `list.index`, `set.remove`, and `list.pop` raise where CPython does, so a
+/// handler runs, including across a call; they trapped.
+#[test]
+fn collection_faults_raise() {
+    let src = dedent(
+        r#"
+        from typing import List, Set
+
+        def take(xs: List[int]) -> int:
+            return xs.pop()
+
+        def index_missing() -> int:
+            xs: List[int] = [1, 2]
+            try:
+                return xs.index(9)
+            except ValueError:
+                return 7
+
+        def set_remove_missing() -> int:
+            s: Set[int] = {1, 2}
+            try:
+                s.remove(9)
+                return 0
+            except KeyError:
+                return len(s) * 10 + 1
+
+        def pop_out_of_range() -> int:
+            xs: List[int] = [1, 2, 3]
+            r = 0
+            try:
+                xs.pop(5)
+            except IndexError:
+                r += 1
+            try:
+                xs.pop(-4)
+            except IndexError:
+                r += 10
+            r += xs.pop(-1) * 100
+            return r + len(xs) * 1000
+
+        def through_a_call() -> int:
+            xs: List[int] = [4]
+            total = take(xs)
+            try:
+                total += take(xs)
+            except IndexError:
+                total += 50
+            return total
+
+        def uncaught() -> int:
+            xs: List[int] = []
+            return xs.pop()
+        "#,
+    );
+    assert_eq!(call_i32(&src, "index_missing"), 7);
+    assert_eq!(call_i32(&src, "set_remove_missing"), 21);
+    assert_eq!(call_i32(&src, "pop_out_of_range"), 2311);
+    assert_eq!(call_i32(&src, "through_a_call"), 54);
+    assert!(call_i32_traps(&src, "uncaught"));
+}
+
+/// `dict.get` keeps the dict and the key in held slots while the default is
+/// emitted, and reads a float or str value at its own width. The pointer sat in
+/// a scratch local, so `d.get(xs.index(2), -1)` searched with a clobbered
+/// pointer and answered the default; a float value failed validation.
+#[test]
+fn dict_get_keeps_its_operands_and_width() {
+    let src = dedent(
+        r#"
+        from typing import Dict, List
+
+        def nested_key() -> int:
+            d: Dict[int, int] = {1: 100, 2: 200}
+            xs: List[int] = [5, 2]
+            return d.get(xs.index(2), -1)
+
+        def nested_default() -> int:
+            d: Dict[str, int] = {"a": 1, "b": 2}
+            return d.get("q", d.get("b", 0)) * 10 + d.get("a", 9)
+
+        def float_value() -> float:
+            d: Dict[str, float] = {"a": 1.5}
+            return d.get("b", 2) + d.get("a", 0.0)
+
+        def str_value() -> int:
+            d: Dict[str, str] = {"a": "hello"}
+            return len(d.get("a", "x")) * 10 + len(d.get("b", "xyz"))
+        "#,
+    );
+    assert_eq!(call_i32(&src, "nested_key"), 100);
+    assert_eq!(call_i32(&src, "nested_default"), 21);
+    assert_eq!(call_f64(&src, "float_value"), 3.5);
+    assert_eq!(call_i32(&src, "str_value"), 53);
+}

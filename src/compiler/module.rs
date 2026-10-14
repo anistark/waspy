@@ -127,6 +127,15 @@ fn infer_field_value_type(
             }
         }
         IRExpr::UnaryOp { operand, .. } => infer_field_value_type(operand, params, classes),
+        IRExpr::Conditional { body, orelse, .. } => match (
+            infer_field_value_type(body, params, classes),
+            infer_field_value_type(orelse, params, classes),
+        ) {
+            (a, b) if a == b => a,
+            // An int arm the inference cannot see would be widened.
+            (IRType::Unknown, t) | (t, IRType::Unknown) if t != IRType::Float => t,
+            _ => IRType::Unknown,
+        },
         // Collection-valued fields (e.g. a dict literal stored by a lifted
         // generator local) keep their kind so consumers like len() and
         // indexing know the slot holds a collection pointer.
@@ -415,10 +424,14 @@ fn scan_expr_calls(expr: &IRExpr, raises: &mut bool, calls: &mut HashSet<String>
             arguments,
         } => {
             calls.insert(method_name.clone());
-            // `str.index()` and `list.remove()` raise ValueError when the value
-            // is absent, so a function calling one is a function that can raise
-            // and its callers must check on the way back.
-            if method_name == "index" || method_name == "remove" {
+            // `index()` and `remove()` raise when the value is absent (ValueError,
+            // or KeyError from a set) and `pop()` raises IndexError, so a
+            // function calling one can raise and its callers must check on the
+            // way back.
+            if matches!(
+                method_name.as_str(),
+                "index" | "remove" | "pop" | crate::ir::DEL_ITEM_METHOD
+            ) {
                 *raises = true;
             }
             scan_expr_calls(object, raises, calls);
@@ -442,6 +455,15 @@ fn scan_expr_calls(expr: &IRExpr, raises: &mut bool, calls: &mut HashSet<String>
             scan_expr_calls(right, raises, calls);
         }
         IRExpr::UnaryOp { operand, .. } => scan_expr_calls(operand, raises, calls),
+        IRExpr::Conditional {
+            condition,
+            body,
+            orelse,
+        } => {
+            scan_expr_calls(condition, raises, calls);
+            scan_expr_calls(body, raises, calls);
+            scan_expr_calls(orelse, raises, calls);
+        }
         IRExpr::ListLiteral(items) | IRExpr::SetLiteral(items) | IRExpr::TupleLiteral(items) => {
             for item in items {
                 scan_expr_calls(item, raises, calls);
@@ -869,6 +891,11 @@ fn expr_uses_open(expr: &IRExpr) -> bool {
         | IRExpr::CompareOp { left, right, .. }
         | IRExpr::BoolOp { left, right, .. } => expr_uses_open(left) || expr_uses_open(right),
         IRExpr::UnaryOp { operand, .. } => expr_uses_open(operand),
+        IRExpr::Conditional {
+            condition,
+            body,
+            orelse,
+        } => expr_uses_open(condition) || expr_uses_open(body) || expr_uses_open(orelse),
         IRExpr::ListLiteral(items) | IRExpr::SetLiteral(items) | IRExpr::TupleLiteral(items) => {
             items.iter().any(expr_uses_open)
         }
@@ -969,7 +996,10 @@ fn body_uses_open(body: &IRBody) -> bool {
         IRStatement::Raise { exception } => exception.as_ref().is_some_and(expr_uses_open),
         IRStatement::Yield { value } => value.as_ref().is_some_and(expr_uses_open),
         IRStatement::DynamicImport { module_name, .. } => expr_uses_open(module_name),
-        IRStatement::ImportModule { .. } | IRStatement::Break | IRStatement::Continue => false,
+        IRStatement::ImportModule { .. }
+        | IRStatement::Break
+        | IRStatement::Continue
+        | IRStatement::Global(_) => false,
     })
 }
 
@@ -1030,9 +1060,19 @@ fn is_pure_constant(
 /// instance wherever it was mentioned. Arbitrary module-level statements stay
 /// refused; this covers definitions, which is what Python runs at import.
 pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, ChakraError> {
+    // A definition some function declares `global` is a global even when it
+    // is a plain constant, since that function rebinds it; so is anything
+    // computed from one, which reads its import-time value.
+    let declared: std::collections::HashSet<String> = ir_module
+        .functions
+        .iter()
+        .chain(ir_module.classes.iter().flat_map(|c| c.methods.iter()))
+        .flat_map(|f| crate::compiler::function::global_declarations(&f.body))
+        .collect();
     let vars: std::collections::HashMap<&str, &IRExpr> = ir_module
         .variables
         .iter()
+        .filter(|v| !declared.contains(&v.name))
         .map(|v| (v.name.as_str(), &v.value))
         .collect();
     // Class variables the same way, under `Class.var`: `class C: items = []`
@@ -1055,7 +1095,7 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, ChakraError> {
         ir_module
             .variables
             .iter()
-            .filter(|v| !is_pure_constant(&v.value, &vars, 0))
+            .filter(|v| declared.contains(&v.name) || !is_pure_constant(&v.value, &vars, 0))
             .cloned(),
     );
     if globals.is_empty() {

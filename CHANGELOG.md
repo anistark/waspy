@@ -8,6 +8,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Conditional expressions**, `a if cond else b`, chained and nested anywhere an expression goes (returns, arguments, f-string placeholders, comprehensions, lambdas, module-level definitions). Only the arm the condition picks is evaluated, and the condition is tested for truth as `if` tests it, so an empty list or string is false. Both arms must read as one type: two classes share their nearest common base, a class and `None` make an `Optional`, an empty collection takes the other arm's element type, and an int widens only where a float is expected. Arms that would read differently, such as `1 if c else 2.5` (CPython keeps the int) or `True if c else 0`, are refused
+- `examples/conditional_expressions.py`, asserted against CPython
+- **`assert`**: `assert test, msg` raises `AssertionError` when the test is false, evaluating the message only then. It was refused
+- **`global`** in functions and methods: assigning a name the function declares `global` rebinds the module definition for every reader, augmented assignment included (a list extends in place). A plain constant that some function rebinds becomes a real global, and a definition computed from it keeps its import-time value. A rebinding must keep the definition's type, and a global bound by a loop, unpacking, or `with` is refused
+- **`del` of an item**: `del xs[i]`, `del xs[a:b]` (clamped as slicing is), and `del d[k]`, through names, fields, and several targets at once. A missing index raises `IndexError` and a missing key `KeyError`. `del` of a tuple or str item is refused as CPython's `TypeError`; `del` of a name, an attribute, or a stepped slice is still refused
+- **Keyword-only parameters** (`def f(x, *, factor=2)`) on functions and `__init__`, passed by name or taken from their default; passing one positionally is a compile-time `TypeError`. On other methods, whose calls do not take keywords, they are refused
+
+### Changed
+- **Collection faults raise instead of trapping**: `list.index(v)` of a missing value raises `ValueError`, `set.remove(v)` of a missing member raises `KeyError`, and `list.pop()` from an empty list or `list.pop(i)` out of range raises `IndexError`, each catchable and propagating out of calls like any other exception
+- `dict.get(key)` with no default is refused unless the dict holds instances. A missing key answers `None` in CPython, which an int, float, or str value has no distinct word for here, so it answered 0 and `d.get(k) == 0` held for an absent key. `dict.get(key, default)` is unchanged, and a default of a type the values do not share is refused
+- `list.extend()` of a range, a set, a string, or a tuple mixing types is refused. It dropped the argument and extended by nothing; a list, or a tuple whose members share a type, extends as before
+- `just board-check` also fails when a card's status disagrees with its features: a card marked done with an open feature, a card marked todo with one started, or a card in progress whose features are all done or all todo
+
+### Fixed
+- `dict.get()` keeps the dict and the key while the default is evaluated, so `d.get(xs.index(2), -1)` finds the key rather than answering the default, and a float or str value is read at its own width (a float value failed validation)
+- A call to one of the module's functions is checked against its signature: a surplus positional argument is a compile-time `TypeError` (`f(1, 2, 3)` on a two-parameter `f` ran `f(1, 2)` and reported success), and so is a missing one (it produced an invalid module)
+- A list method's argument no longer overwrites the list it is called on. `xs.index(ys.index(1))` searched `ys`, `xs.pop(ys.pop())` popped `ys` twice, `xs.count(ys.index(1))` counted in `ys`, and `xs.extend([...])` with a call inside the literal trapped, all answering something CPython does not
+- `xs.extend((a, b))` extends by the tuple's members; it extended by nothing
+- An exception raised inside a comprehension, or in the right operand of `and`/`or`, reaches the enclosing `try`. Inside a `try`, a comprehension whose element, filter, or inner iterable raised (an `IndexError`, a `KeyError`, a call that raises) looped forever, and a raising right operand of `and`/`or` failed validation
+
 ## [0.18.0](https://github.com/anistark/waspy/releases/tag/v0.18.0) - 2026-10-11
 
 Three more end-to-end programs, written as ordinary Python and compiled unchanged, found what follows. Most of it was silent: the compiler reported success and the program answered something CPython does not. The sixth program found no silent defect, which is what the correctness rule is now re-signed on.
