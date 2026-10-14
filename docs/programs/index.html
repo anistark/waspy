@@ -360,18 +360,18 @@ def checkout() -&gt; float:
 
                 <li>
                     <div class="shape-head">
-                        <strong><code>*args</code>, <code>**kwargs</code>, keyword-only parameters</strong>
+                        <strong><code>*args</code>, <code>**kwargs</code></strong>
                         <span class="tag tag-loud">refused</span>
                     </div>
-                    <p class="shape-note">A WebAssembly function has a fixed signature, so a function cannot collect extra arguments. Calling a function or constructor with keyword arguments (<code>f(1, c=7)</code>) works: they are placed by name and skipped defaults filled in.</p>
+                    <p class="shape-note">A WebAssembly function has a fixed signature, so a function cannot collect extra arguments. Calling a function or constructor with keyword arguments (<code>f(1, c=7)</code>) works: they are placed by name and skipped defaults filled in. Keyword-only parameters (after a bare <code>*</code>) work on functions and <code>__init__</code>, and every call is checked against the signature, so a surplus or missing argument is a compile error.</p>
                 </li>
 
                 <li>
                     <div class="shape-head">
-                        <strong><code>match</code>, <code>global</code>, <code>nonlocal</code>, <code>del</code>, <code>assert</code>, <code>except*</code>, <code>type</code> aliases, <code>from x import *</code></strong>
+                        <strong><code>match</code>, nested <code>def</code>, <code>nonlocal</code>, <code>del name</code>, <code>except*</code>, <code>type</code> aliases, <code>from x import *</code></strong>
                         <span class="tag tag-loud">refused</span>
                     </div>
-                    <p class="shape-note">Not implemented. Each is reported by name with its location.</p>
+                    <p class="shape-note">Not implemented. Each is reported by name with its location. <code>global</code>, <code>assert</code>, conditional expressions, and <code>del</code> of a list index, list slice, or dict key do work.</p>
                 </li>
 
                 <li>
