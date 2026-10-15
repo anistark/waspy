@@ -53,6 +53,16 @@ pub fn compile_function(
         }
     }
 
+    ctx.declared_globals = global_declarations(&ir_func.body).into_iter().collect();
+    for name in &ctx.declared_globals {
+        if !ctx.module_global_index.contains_key(name) {
+            ctx.report(format!(
+                "'global {name}' names no module-level definition. Hint: define '{name}' at \
+                 module level"
+            ));
+        }
+    }
+
     // Scan for variable declarations to allocate locals. The for-loop counter
     // is advanced during the scan and replayed during codegen, so reset it here.
     ctx.for_loop_seq = 0;
@@ -257,7 +267,9 @@ pub(crate) fn emit_exception_transfer(
     extra_depth: u32,
 ) {
     if let Some(level) = ctx.try_stack.last().copied() {
-        func.instruction(&Instruction::Br(ctx.block_depth + extra_depth - level));
+        func.instruction(&Instruction::Br(
+            ctx.block_depth + ctx.expr_block_depth.get() + extra_depth - level,
+        ));
         return;
     }
 
@@ -410,6 +422,14 @@ fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRType {
             }
         }
         IRExpr::UnaryOp { operand, .. } => infer_value_type(operand, ctx),
+        IRExpr::Conditional { body, orelse, .. } => {
+            match (infer_value_type(body, ctx), infer_value_type(orelse, ctx)) {
+                (a, b) if a == b => a,
+                // An int arm the inference cannot see would be widened.
+                (IRType::Unknown, t) | (t, IRType::Unknown) if t != IRType::Float => t,
+                _ => IRType::Unknown,
+            }
+        }
         // A tuple carries one type per position. `for k, v in pairs` needs
         // these so a string member binds as a string rather than a bare word.
         IRExpr::TupleLiteral(items) => {
@@ -896,6 +916,15 @@ fn scan_expr_locals(expr: &IRExpr, ctx: &mut CompilationContext, depth: u32) {
             scan_expr_locals(right, ctx, depth);
         }
         IRExpr::UnaryOp { operand, .. } => scan_expr_locals(operand, ctx, depth),
+        IRExpr::Conditional {
+            condition,
+            body,
+            orelse,
+        } => {
+            scan_expr_locals(condition, ctx, depth);
+            scan_expr_locals(body, ctx, depth);
+            scan_expr_locals(orelse, ctx, depth);
+        }
         IRExpr::FunctionCall { arguments, .. } => {
             for arg in arguments {
                 scan_expr_locals(arg, ctx, depth);
@@ -1051,13 +1080,81 @@ fn widen_class_element(target: &str, assigned: &IRType, ctx: &mut CompilationCon
     }
 }
 
+/// The names a body declares `global`, its nested blocks included.
+pub(crate) fn global_declarations(body: &IRBody) -> Vec<String> {
+    let mut names = Vec::new();
+    for stmt in &body.statements {
+        match stmt {
+            IRStatement::Global(declared) => names.extend(declared.iter().cloned()),
+            IRStatement::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                names.extend(global_declarations(then_body));
+                if let Some(else_body) = else_body {
+                    names.extend(global_declarations(else_body));
+                }
+            }
+            IRStatement::While { body, .. } | IRStatement::With { body, .. } => {
+                names.extend(global_declarations(body));
+            }
+            IRStatement::For {
+                body, else_body, ..
+            } => {
+                names.extend(global_declarations(body));
+                if let Some(else_body) = else_body {
+                    names.extend(global_declarations(else_body));
+                }
+            }
+            IRStatement::TryExcept {
+                try_body,
+                except_handlers,
+                finally_body,
+            } => {
+                names.extend(global_declarations(try_body));
+                for handler in except_handlers {
+                    names.extend(global_declarations(&handler.body));
+                }
+                if let Some(finally_body) = finally_body {
+                    names.extend(global_declarations(finally_body));
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+/// Whether an assignment to `target` stores into its module global.
+fn assigns_module_global(ctx: &CompilationContext, target: &str) -> bool {
+    (ctx.in_module_init || ctx.declared_globals.contains(target))
+        && ctx.module_global_index.contains_key(target)
+}
+
 /// Scan the function body for variable declarations and allocate local variables
 pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
     for stmt in &body.statements {
         scan_stmt_exprs(stmt, ctx);
+        let bound: Vec<&String> = match stmt {
+            IRStatement::For { target, .. } => vec![target],
+            IRStatement::TupleUnpack { targets, .. } => targets.iter().collect(),
+            IRStatement::With {
+                optional_vars: Some(name),
+                ..
+            } => vec![name],
+            _ => Vec::new(),
+        };
+        for name in bound {
+            if ctx.declared_globals.contains(name) {
+                ctx.report(format!(
+                    "the global '{name}' is bound by a loop, unpacking, or 'with' here, which \
+                     is not supported. Hint: bind a local and assign it to '{name}'"
+                ));
+            }
+        }
         match stmt {
-            IRStatement::Assign { target, .. }
-                if ctx.in_module_init && ctx.module_global_index.contains_key(target) => {}
+            IRStatement::Assign { target, .. } if assigns_module_global(ctx, target) => {}
             IRStatement::Assign {
                 target,
                 var_type,
@@ -1311,20 +1408,55 @@ pub fn compile_body(
                 target,
                 value,
                 var_type,
-            } if ctx.in_module_init && ctx.module_global_index.contains_key(target) => {
-                // A module definition evaluated once: store it in its global
-                // and record the type every reader will see.
+            } if assigns_module_global(ctx, target) => {
+                // A module definition evaluated once, or rebound by a function
+                // that declares it `global`: store it in its global. The
+                // definition records the type every reader will see, and a
+                // rebinding has to keep it.
                 let global = ctx.module_global_index[target];
+                let recorded = if ctx.in_module_init {
+                    None
+                } else {
+                    ctx.module_global_types.get(target).cloned()
+                };
+                let expected = recorded.as_ref().or(var_type.as_ref());
                 let emitted = crate::compiler::expression::emit_value(
                     value,
                     func,
                     ctx,
                     memory_layout,
-                    var_type.as_ref(),
+                    expected,
                 );
-                let ty = match var_type {
-                    Some(declared) if !matches!(declared, IRType::Unknown) => declared.clone(),
-                    _ => emitted.clone(),
+                if matches!(recorded, Some(IRType::Float))
+                    && matches!(emitted, IRType::Int | IRType::Bool)
+                {
+                    func.instruction(&Instruction::F64ConvertI32S);
+                }
+                let ty = match (&recorded, var_type) {
+                    (Some(recorded), _) => {
+                        ctx.check_class_store(&emitted, recorded, &format!("global '{target}'"));
+                        let fits = recorded == &emitted
+                            || matches!(
+                                (recorded, &emitted),
+                                (IRType::Float, IRType::Int | IRType::Bool)
+                                    | (_, IRType::Class(_))
+                                    | (IRType::List(_), IRType::List(_))
+                                    | (IRType::Dict(..), IRType::Dict(..))
+                                    | (IRType::Set(_), IRType::Set(_))
+                            );
+                        if !fits {
+                            ctx.report(format!(
+                                "the global '{target}' is typed '{}' and cannot be rebound to a '{}'",
+                                crate::type_to_string(recorded),
+                                crate::type_to_string(&emitted)
+                            ));
+                        }
+                        recorded.clone()
+                    }
+                    (None, Some(declared)) if !matches!(declared, IRType::Unknown) => {
+                        declared.clone()
+                    }
+                    (None, _) => emitted.clone(),
                 };
                 if matches!(emitted, IRType::String | IRType::Bytes) {
                     func.instruction(&Instruction::Drop); // the length; the offset carries it
@@ -1337,7 +1469,9 @@ pub fn compile_body(
                     ));
                 }
                 func.instruction(&Instruction::GlobalSet(global));
-                ctx.module_global_types.insert(target.clone(), ty);
+                if ctx.in_module_init {
+                    ctx.module_global_types.insert(target.clone(), ty);
+                }
             }
             IRStatement::Assign {
                 target,
@@ -1952,6 +2086,11 @@ pub fn compile_body(
                 let local_ty = ctx
                     .get_local_info(target)
                     .map(|info| info.var_type.clone())
+                    .or_else(|| {
+                        assigns_module_global(ctx, target)
+                            .then(|| ctx.module_global_types.get(target).cloned())
+                            .flatten()
+                    })
                     .unwrap_or(IRType::Unknown);
                 match &local_ty {
                     // A list is the one mutable target: `xs += ys` extends it in
@@ -3057,6 +3196,9 @@ pub fn compile_body(
                 func.instruction(&Instruction::I32Const(0));
                 func.instruction(&Instruction::LocalSet(_local_idx));
             }
+
+            // Read once per function, before its locals are reserved.
+            IRStatement::Global(_) => {}
 
             IRStatement::Break => {
                 // Branch out of the innermost loop's outer block. The relative

@@ -2,8 +2,8 @@
 //!
 //! [`parse_python`] turns source text into a rustpython AST and then runs a
 //! quick validation sweep that rejects Python constructs Waspy does not
-//! compile — `async`, `match`, `global`/`nonlocal`, `del`, star parameters,
-//! loop `else` clauses, and the like — with a located error and a hint,
+//! compile (`async`, `match`, `nonlocal`, `del` of a name, star parameters,
+//! and the like) with a located error and a hint,
 //! instead of letting them fail deep inside IR conversion or codegen (or,
 //! worse, compile to silently wrong code).
 
@@ -232,32 +232,28 @@ fn validate_stmt(stmt: &Stmt, source: &str, function: Option<&str>) -> Result<()
             stmt.range.start().into(),
             function,
         )),
-        Stmt::Global(stmt) => Err(unsupported(
-            "the 'global' statement is not supported. \
-             Hint: pass values as parameters and return results instead of mutating module state",
+        Stmt::Global(stmt) if function.is_none() => Err(unsupported(
+            "the 'global' statement is only supported inside a function",
             source,
             stmt.range.start().into(),
             function,
         )),
         Stmt::Nonlocal(stmt) => Err(unsupported(
-            "the 'nonlocal' statement is not supported (closures capture by value at creation). \
+            "the 'nonlocal' statement is not supported, since nested functions are not. \
              Hint: return the new value from the inner function",
             source,
             stmt.range.start().into(),
             function,
         )),
-        Stmt::Delete(stmt) => Err(unsupported(
-            "'del' is not supported (compiled modules have no runtime object reclamation)",
-            source,
-            stmt.range.start().into(),
-            function,
-        )),
-        Stmt::Assert(stmt) => Err(unsupported(
-            "'assert' is not supported. Hint: use 'if not condition: raise ValueError(...)'",
-            source,
-            stmt.range.start().into(),
-            function,
-        )),
+        Stmt::Delete(stmt) if !stmt.targets.iter().all(|t| matches!(t, Expr::Subscript(_))) => {
+            Err(unsupported(
+                "'del' of a name or an attribute is not supported. Hint: 'del' works on a \
+                 list index or slice and a dict key",
+                source,
+                stmt.range.start().into(),
+                function,
+            ))
+        }
         Stmt::TypeAlias(stmt) => Err(unsupported(
             "'type' alias statements are not supported. Hint: use the type directly",
             source,
@@ -303,15 +299,6 @@ fn validate_stmt(stmt: &Stmt, source: &str, function: Option<&str>) -> Result<()
                          Hint: declare explicit parameters",
                         kwarg.arg
                     ),
-                    source,
-                    def.range.start().into(),
-                    Some(def.name.as_str()),
-                ));
-            }
-            if !args.kwonlyargs.is_empty() {
-                return Err(unsupported(
-                    "keyword-only parameters (after '*') are not supported. \
-                     Hint: declare them as regular positional parameters",
                     source,
                     def.range.start().into(),
                     Some(def.name.as_str()),

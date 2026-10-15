@@ -7,7 +7,7 @@
 #[path = "../utils/harness.rs"]
 mod harness;
 
-use harness::{call_f64, call_i32, call_i32_2};
+use harness::{call_f64, call_i32, call_i32_2, call_i32_traps, call_str, dedent};
 
 /// The integer binary operators produce Python's results.
 #[test]
@@ -340,4 +340,376 @@ fn integers_are_32_bit_and_wrap() {
         call_i32("def f() -> int:\n    n = 40\n    return 2 ** n\n", "f"),
         0
     );
+}
+
+/// A conditional expression evaluates only the arm its condition picks, tests
+/// the condition for truth as `if` does, and chains to the right.
+#[test]
+fn conditional_expressions() {
+    let src = dedent(
+        r#"
+        from typing import List
+
+        calls: List[int] = []
+
+        def note(x: int) -> int:
+            calls.append(x)
+            return x
+
+        def lazy() -> int:
+            a = note(1) if True else note(2)
+            b = note(3) if False else note(4)
+            return len(calls) * 100 + calls[0] * 10 + calls[1]
+
+        def chained() -> int:
+            total = 0
+            for n in range(-2, 15):
+                total += 1 if n < 0 else 2 if n == 0 else 3 if n < 10 else 4
+            return total
+
+        def truthy() -> int:
+            xs: List[int] = []
+            s = ""
+            return (1 if xs else 2) + (10 if s else 20) + (100 if [1] else 200)
+
+        def label(n: int) -> str:
+            return f"{n} item{'' if n == 1 else 's'}"
+
+        def labels() -> str:
+            return label(1) + ", " + label(3)
+
+        def scaled() -> float:
+            x = 2.5
+            return x * 2 if x > 1 else x / 2
+
+        def widened() -> float:
+            n = 3
+            return n if n > 5 else 0.5
+
+        def fact(n: int) -> int:
+            return 1 if n <= 1 else n * fact(n - 1)
+
+        def recursive() -> int:
+            return fact(5) + fact(6)
+
+        def in_comprehension() -> int:
+            return sum([x if x % 2 == 0 else -x for x in range(6)])
+
+        def in_lambda() -> int:
+            f = lambda v: v * 2 if v > 0 else 0
+            return f(4) + f(-3)
+        "#,
+    );
+    assert_eq!(call_i32(&src, "lazy"), 214);
+    assert_eq!(call_i32(&src, "chained"), 51);
+    assert_eq!(call_i32(&src, "truthy"), 122);
+    assert_eq!(call_str(&src, "labels"), "1 item, 3 items");
+    assert_eq!(call_f64(&src, "scaled"), 5.0);
+    assert_eq!(call_f64(&src, "widened"), 0.5);
+    assert_eq!(call_i32(&src, "recursive"), 840);
+    assert_eq!(call_i32(&src, "in_comprehension"), -3);
+    assert_eq!(call_i32(&src, "in_lambda"), 8);
+}
+
+/// The arms of a conditional expression unify the way a list literal's
+/// elements do: instances share their nearest common base (and dispatch on
+/// their own class), a class and None make an Optional, and an empty literal
+/// takes the other arm's element type.
+#[test]
+fn conditional_expression_arm_types() {
+    let src = dedent(
+        r#"
+        from typing import List, Optional
+
+        class Shape:
+            def area(self) -> int:
+                return 1
+
+        class Sq(Shape):
+            def area(self) -> int:
+                return 4
+
+        class Circ(Shape):
+            def area(self) -> int:
+                return 9
+
+        class Node:
+            def __init__(self, v: int):
+                self.v = v
+                self.next: Optional["Node"] = None
+
+        def classes() -> int:
+            total = 0
+            for i in range(4):
+                s = Sq() if i % 2 == 0 else Circ()
+                total += s.area()
+            return total
+
+        def optional() -> int:
+            head = Node(1)
+            head.next = Node(2)
+            cur = head
+            n = 0
+            while cur is not None:
+                n += cur.v
+                cur = cur.next if cur.v < 5 else None
+            return n
+
+        def empty_arm() -> int:
+            ys: List[int] = [1, 2, 3]
+            zs = ys if len(ys) > 5 else []
+            zs.append(7)
+            return len(zs) * 10 + len(ys)
+
+        def strings() -> int:
+            parts: List[str] = []
+            for i in range(5):
+                parts.append("even" if i % 2 == 0 else "odd")
+            return len(",".join(parts))
+        "#,
+    );
+    assert_eq!(call_i32(&src, "classes"), 26);
+    assert_eq!(call_i32(&src, "optional"), 3);
+    assert_eq!(call_i32(&src, "empty_arm"), 13);
+    assert_eq!(call_i32(&src, "strings"), 22);
+}
+
+/// `assert` raises AssertionError when its test is false and evaluates the
+/// message only then; ValueError handlers pass it on.
+#[test]
+fn assert_statements() {
+    let src = dedent(
+        r#"
+        from typing import List
+
+        log: List[int] = []
+
+        def why(n: int) -> str:
+            log.append(n)
+            return "bad"
+
+        def check(n: int) -> int:
+            assert n > 0, why(n)
+            return n
+
+        def message_only_on_failure() -> int:
+            check(1)
+            check(2)
+            try:
+                check(-5)
+            except AssertionError:
+                pass
+            return len(log) * 10 - log[0]
+
+        def truthiness() -> int:
+            xs: List[int] = []
+            r = 0
+            try:
+                assert xs
+            except AssertionError:
+                r += 1
+            assert [1], "nonempty"
+            assert "s"
+            return r
+
+        def own_type() -> int:
+            try:
+                try:
+                    assert 1 == 2
+                except ValueError:
+                    return 1
+            except AssertionError:
+                return 2
+            return 3
+
+        def uncaught() -> int:
+            assert False
+            return 1
+        "#,
+    );
+    assert_eq!(call_i32(&src, "message_only_on_failure"), 15);
+    assert_eq!(call_i32(&src, "truthiness"), 1);
+    assert_eq!(call_i32(&src, "own_type"), 2);
+    assert!(call_i32_traps(&src, "uncaught"));
+}
+
+/// Keyword-only parameters take their value by name or from their default,
+/// on functions and constructors.
+#[test]
+fn keyword_only_parameters() {
+    let src = dedent(
+        r#"
+        class Box:
+            def __init__(self, w: int, *, h: int = 1):
+                self.area = w * h
+
+        def tag(*, name: str, n: int = 0) -> int:
+            return len(name) * 10 + n
+
+        def scale(x: int, *, factor: int = 2, offset: int = 0) -> int:
+            return x * factor + offset
+
+        def constructor() -> int:
+            return Box(3).area + Box(3, h=4).area * 100
+
+        def required() -> int:
+            return tag(name="abc") + tag(n=2, name="z") * 100
+
+        def defaults() -> int:
+            return scale(2, offset=1) + scale(1, factor=5) * 10
+        "#,
+    );
+    assert_eq!(call_i32(&src, "constructor"), 1203);
+    assert_eq!(call_i32(&src, "required"), 1230);
+    assert_eq!(call_i32(&src, "defaults"), 55);
+}
+
+/// `del` of a list index or slice and of a dict key, through fields too; a
+/// missing index or key raises.
+#[test]
+fn del_statements() {
+    let src = dedent(
+        r#"
+        from typing import Dict, List
+
+        class Bag:
+            def __init__(self):
+                self.items: Dict[str, int] = {"x": 1, "y": 2, "z": 3}
+                self.names: List[str] = ["a", "b", "c", "d"]
+
+        def fields() -> int:
+            b = Bag()
+            del b.items["y"]
+            del b.names[1:3]
+            return len(b.items) * 100 + len(b.names) * 10 + b.items["z"]
+
+        def slices() -> int:
+            xs = [0, 1, 2, 3, 4, 5, 6, 7]
+            del xs[5:]
+            del xs[:1]
+            del xs[-2:]
+            del xs[3:1]
+            del xs[100:200]
+            return len(xs) * 100 + xs[0] * 10 + xs[-1]
+
+        def floats() -> float:
+            xs: List[float] = [1.5, 2.5, 3.5]
+            del xs[0]
+            return xs[0] + xs[1]
+
+        def dict_order() -> int:
+            d = {"a": 1, "b": 2, "c": 3}
+            del d["a"]
+            d["d"] = 4
+            total = 0
+            for k in d:
+                total = total * 10 + d[k]
+            return total + len(d) * 1000
+
+        def several_targets() -> int:
+            xs = [1, 2, 3, 4]
+            d = {1: 1, 2: 2}
+            del xs[0], d[1]
+            return len(xs) * 10 + len(d)
+
+        def missing() -> int:
+            xs = [1]
+            d = {"a": 1}
+            r = 0
+            try:
+                del xs[3]
+            except IndexError:
+                r += 1
+            try:
+                del d["b"]
+            except KeyError:
+                r += 10
+            return r
+        "#,
+    );
+    assert_eq!(call_i32(&src, "fields"), 223);
+    assert_eq!(call_i32(&src, "slices"), 212);
+    assert_eq!(call_f64(&src, "floats"), 6.0);
+    assert_eq!(call_i32(&src, "dict_order"), 3234);
+    assert_eq!(call_i32(&src, "several_targets"), 31);
+    assert_eq!(call_i32(&src, "missing"), 11);
+}
+
+/// `global` rebinds a module definition for every reader: a plain constant is
+/// promoted to a global, a value computed from one keeps its import-time
+/// value, and lists extend in place.
+#[test]
+fn global_statements() {
+    let src = dedent(
+        r#"
+        from typing import List
+
+        counter = 0
+        NEXT = counter + 100
+        total: float = 0.0
+        names: List[str] = []
+        label = "start"
+
+        class Tally:
+            def add(self, n: int) -> None:
+                global counter
+                counter += n * 2
+
+        def reads() -> int:
+            return counter
+
+        def shared() -> int:
+            global counter
+            counter = 7
+            return reads() * 10 + counter
+
+        def derived() -> int:
+            global counter
+            counter = 50
+            return NEXT
+
+        def floats() -> float:
+            global total
+            for x in [1.5, 2.5]:
+                total += x
+            total = total * 2
+            return total
+
+        def lists() -> int:
+            global names
+            names += ["a"]
+            names.append("b")
+            alias = names
+            names += ["c"]
+            return len(alias) * 10 + len(names)
+
+        def strings() -> int:
+            global label
+            label = label + "!"
+            label += "?"
+            return len(label)
+
+        def method() -> int:
+            Tally().add(3)
+            Tally().add(1)
+            return counter
+
+        def count_down(n: int) -> int:
+            global counter
+            if n == 0:
+                return counter
+            counter += 1
+            return count_down(n - 1)
+
+        def recursive() -> int:
+            return count_down(5)
+        "#,
+    );
+    assert_eq!(call_i32(&src, "shared"), 77);
+    assert_eq!(call_i32(&src, "derived"), 100);
+    assert_eq!(call_f64(&src, "floats"), 8.0);
+    assert_eq!(call_i32(&src, "lists"), 33);
+    assert_eq!(call_i32(&src, "strings"), 7);
+    assert_eq!(call_i32(&src, "method"), 8);
+    assert_eq!(call_i32(&src, "recursive"), 5);
 }

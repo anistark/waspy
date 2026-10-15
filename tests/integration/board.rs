@@ -412,7 +412,6 @@ mod control_flow {
 
     /// Conditional expressions (a if cond else b)
     #[test]
-    #[ignore = "open on the board"]
     fn conditional_expressions() {
         check(
             r#"
@@ -429,6 +428,78 @@ mod control_flow {
 
 mod functions {
     use super::*;
+
+    /// Nested function definitions (def inside def), closing over the enclosing variables
+    #[test]
+    #[ignore = "open on the board"]
+    fn nested_functions() {
+        check(
+            r#"
+            def f() -> int:
+                base = 10
+                def add(x: int) -> int:
+                    return x + base
+                return add(1) + add(2)
+        "#,
+            &[("f", Want::Int(23))],
+        );
+    }
+
+    /// *args collects extra positional arguments as a tuple
+    #[test]
+    #[ignore = "open on the board"]
+    fn star_args() {
+        check(
+            r#"
+            def total(*nums: int) -> int:
+                s = 0
+                for n in nums:
+                    s += n
+                return s
+
+            def first_or(default: int, *rest: int) -> int:
+                return rest[0] if len(rest) > 0 else default
+
+            def f() -> int:
+                return total() + total(1, 2, 3) * 10 + first_or(7) * 100 + first_or(7, 8, 9) * 1000
+        "#,
+            &[("f", Want::Int(8760))],
+        );
+    }
+
+    /// Keyword-only parameters (after * or *args)
+    #[test]
+    fn keyword_only_parameters() {
+        check(
+            r#"
+            def scale(x: int, *, factor: int = 2, offset: int = 0) -> int:
+                return x * factor + offset
+
+            def f() -> int:
+                return scale(3) + scale(3, factor=10) * 10 + scale(1, offset=5, factor=1) * 1000
+        "#,
+            &[("f", Want::Int(6306))],
+        );
+    }
+
+    /// **kwargs collects extra keyword arguments as a dict
+    #[test]
+    #[ignore = "open on the board"]
+    fn star_star_kwargs() {
+        check(
+            r#"
+            def count_options(**opts: int) -> int:
+                total = 0
+                for k in opts:
+                    total += opts[k]
+                return len(opts) * 100 + total
+
+            def f() -> int:
+                return count_options() + count_options(a=1, b=2) * 1000
+        "#,
+            &[("f", Want::Int(203000))],
+        );
+    }
 
     /// Function definitions with parameters
     #[test]
@@ -639,6 +710,79 @@ mod type_system {
 
 mod variables {
     use super::*;
+
+    /// global: a function rebinds a module-level name
+    #[test]
+    fn global_statement() {
+        check(
+            r#"
+            counter = 0
+
+            def bump(n: int) -> None:
+                global counter
+                counter += n
+
+            def reset() -> None:
+                global counter
+                counter = 0
+
+            def f() -> int:
+                bump(2)
+                bump(5)
+                a = counter
+                reset()
+                bump(1)
+                return a * 10 + counter
+        "#,
+            &[("f", Want::Int(71))],
+        );
+    }
+
+    /// del of a list index or slice, and of a dict key (IndexError / KeyError when absent)
+    #[test]
+    fn del_statement() {
+        check(
+            r#"
+            def f() -> int:
+                xs = [1, 2, 3, 4, 5]
+                del xs[0]
+                del xs[-1]
+                del xs[0:1]
+                d = {"a": 1, "b": 2}
+                del d["a"]
+                r = len(xs) * 100 + xs[0] * 10 + len(d)
+                try:
+                    del d["zz"]
+                except KeyError:
+                    r += 1000
+                try:
+                    del xs[9]
+                except IndexError:
+                    r += 10000
+                return r
+        "#,
+            &[("f", Want::Int(11231))],
+        );
+    }
+
+    /// nonlocal: a nested function rebinds a variable of the function enclosing it
+    #[test]
+    #[ignore = "open on the board"]
+    fn nonlocal_statement() {
+        check(
+            r#"
+            def f() -> int:
+                count = 0
+                def inc() -> None:
+                    nonlocal count
+                    count += 1
+                inc()
+                inc()
+                return count
+        "#,
+            &[("f", Want::Int(2))],
+        );
+    }
 
     /// Variable declarations and assignments
     #[test]
@@ -1485,14 +1629,14 @@ mod collections {
         );
     }
 
-    /// Dict methods .get(key[, default]), .keys(), .values(), .items() - .items() as a value, not only a for iterable
+    /// Dict methods .get(key, default) (.get(key) on instance values, where None is distinct), .keys(), .values(), .items() - .items() as a value, not only a for iterable
     #[test]
     fn dict_methods() {
         check(
             r#"
             def f() -> int:
                 d = {"a": 1, "b": 2}
-                t = d.get("a") + d.get("q", 10)
+                t = d.get("a", 0) + d.get("q", 10)
                 for k in d.keys():
                     t += len(k)
                 for v in d.values():
@@ -3108,6 +3252,31 @@ mod generators {
 mod error_handling {
     use super::*;
 
+    /// assert raises AssertionError when its condition is false, evaluating the message only then
+    #[test]
+    fn assert_statements() {
+        check(
+            r#"
+            def check(n: int) -> int:
+                assert n > 0, "positive"
+                return n
+
+            def f() -> int:
+                r = check(3)
+                try:
+                    check(-1)
+                except AssertionError:
+                    r += 10
+                try:
+                    assert False
+                except AssertionError:
+                    r += 100
+                return r
+        "#,
+            &[("f", Want::Int(113))],
+        );
+    }
+
     /// try / except / finally blocks
     #[test]
     fn try_except_finally_blocks() {
@@ -3321,6 +3490,44 @@ mod error_handling {
                 return r
         "#,
             &[("f", Want::Int(111))],
+        );
+    }
+
+    /// The collection faults raise: list.index / list.remove of a missing value (ValueError), set.remove of a missing member (KeyError), pop out of range or from an empty list (IndexError)
+    #[test]
+    fn collection_faults_raise() {
+        check(
+            r#"
+            from typing import List, Set
+
+            def f() -> int:
+                xs: List[int] = [1, 2]
+                s: Set[int] = {1}
+                empty: List[int] = []
+                r = 0
+                try:
+                    r += xs.index(9)
+                except ValueError:
+                    r += 1
+                try:
+                    xs.remove(9)
+                except ValueError:
+                    r += 10
+                try:
+                    s.remove(9)
+                except KeyError:
+                    r += 100
+                try:
+                    r += empty.pop()
+                except IndexError:
+                    r += 1000
+                try:
+                    r += xs.pop(5)
+                except IndexError:
+                    r += 10000
+                return r
+        "#,
+            &[("f", Want::Int(11111))],
         );
     }
 

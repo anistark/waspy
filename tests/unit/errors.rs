@@ -37,20 +37,12 @@ fn unsupported_statements_are_rejected_with_hints() {
             "'match' statements are not supported",
         ),
         (
-            "COUNT = 0\n\ndef f() -> int:\n    global COUNT\n    return COUNT\n",
-            "'global' statement is not supported",
-        ),
-        (
             "def f() -> int:\n    def g() -> int:\n        nonlocal x\n        return x\n    x = 1\n    return g()\n",
             "'nonlocal' statement is not supported",
         ),
         (
             "def f() -> int:\n    x = 1\n    del x\n    return 0\n",
-            "'del' is not supported",
-        ),
-        (
-            "def f(x: int) -> int:\n    assert x > 0\n    return x\n",
-            "'assert' is not supported",
+            "'del' of a name or an attribute is not supported",
         ),
         ("from math import *\n\ndef f() -> int:\n    return 1\n", "import *"),
     ];
@@ -83,9 +75,38 @@ fn star_parameters_are_rejected() {
         err.contains("**opts") && err.contains("not supported"),
         "unexpected: {err}"
     );
+}
 
-    let err = compile_error("def f(a: int, *, b: int) -> int:\n    return a + b\n");
-    assert!(err.contains("keyword-only parameters"), "unexpected: {err}");
+/// A call to one of the module's own functions is checked against its
+/// signature, as CPython's TypeError would be: a surplus positional argument
+/// was dropped (`f(1, 2, 3)` ran `f(1, 2)`), and a missing one produced an
+/// invalid module.
+#[test]
+fn calls_are_checked_against_the_signature() {
+    let def = "def f(a: int, b: int = 2, *, k: int = 0) -> int:\n    return a + b + k\n\n\
+               def g(*, name: str) -> int:\n    return len(name)\n\n";
+    let cases: &[(&str, &str)] = &[
+        (
+            "f(1, 2, 3)",
+            "f() takes 2 positional argument(s) but 3 were given",
+        ),
+        ("f()", "f() missing required argument: 'a'"),
+        ("g()", "g() missing required argument: 'name'"),
+        (
+            "g('abc')",
+            "g() takes 0 positional argument(s) but 1 were given",
+        ),
+    ];
+    for (call, expected) in cases {
+        let src = format!("{def}def h() -> int:\n    return {call}\n");
+        let err = compile_error(&src);
+        assert!(err.contains(expected), "{call}: {err}");
+    }
+    let err = compile_error("class C:\n    def m(self, *, k: int = 1) -> int:\n        return k\n");
+    assert!(
+        err.contains("keyword-only parameters are supported on functions and __init__"),
+        "{err}"
+    );
 }
 
 /// Class keywords (metaclass=...) are rejected at the class definition.
@@ -189,11 +210,128 @@ fn compiled_modules_pass_validation() {
 /// An expression the converter does not lower is refused by name, not with a
 /// dump of its AST.
 #[test]
-fn conditional_expression_is_refused_by_name() {
-    let err = compile_error("def f(n: int) -> int:\n    return 1 if n > 0 else 2\n");
+fn unlowered_expression_is_refused_by_name() {
+    let err = compile_error("def f() -> int:\n    return (y := 3) + y\n");
     assert!(
-        err.contains("conditional expressions ('a if cond else b') are not supported"),
+        err.contains("the NamedExpr expression is not supported"),
         "got: {err}"
     );
-    assert!(!err.contains("ExprIfExp"), "got: {err}");
+    assert!(!err.contains("ExprNamedExpr"), "got: {err}");
+}
+
+/// A conditional expression's value is read as one type, so arms whose types
+/// would read differently are refused rather than one being converted: CPython
+/// keeps `1 if c else 2.5` an int when `c` holds, and `True if c else 0` a bool.
+#[test]
+fn conditional_expression_arms_must_share_a_type() {
+    let cases: &[(&str, &str)] = &[
+        ("x = 1 if c else 2.5", "(int and float)"),
+        ("x = True if c else 0", "(bool and int)"),
+        ("x = 'a' if c else None", "(str and None)"),
+        ("x = A() if c else B()", "(A and B)"),
+    ];
+    for (line, types) in cases {
+        let src = format!(
+            "class A:\n    pass\n\nclass B:\n    pass\n\n\
+             def f(c: int) -> int:\n    {line}\n    return 0\n"
+        );
+        let err = compile_error(&src);
+        assert!(
+            err.contains("arms of this conditional expression have different types")
+                && err.contains(types),
+            "{line}: {err}"
+        );
+    }
+}
+
+/// `list.extend()` of something other than a list or a uniformly typed tuple
+/// is refused; it dropped the argument and extended by nothing.
+#[test]
+fn list_extend_of_another_iterable_is_refused() {
+    for (arg, ty) in [
+        ("range(3)", "'range'"),
+        ("{4, 5}", "'Set[int]'"),
+        ("'bc'", "'str'"),
+    ] {
+        let src = format!(
+            "from typing import List\n\ndef f() -> int:\n    xs: List[int] = [1]\n    \
+             xs.extend({arg})\n    return len(xs)\n"
+        );
+        let err = compile_error(&src);
+        assert!(
+            err.contains("list.extend() takes a list or a tuple of one element type")
+                && err.contains(ty),
+            "{arg}: {err}"
+        );
+    }
+}
+
+/// `dict.get(key)` answers None for a missing key, which only an instance
+/// value has a distinct word for; on other values it is refused (it answered
+/// 0), and so is a default whose type the values do not share.
+#[test]
+fn dict_get_that_cannot_answer_is_refused() {
+    let err = compile_error(
+        "from typing import Dict\n\ndef f() -> int:\n    d: Dict[str, int] = {}\n    \
+         return d.get('a')\n",
+    );
+    assert!(
+        err.contains("dict.get(key) answers None for a missing key"),
+        "{err}"
+    );
+    let err = compile_error(
+        "from typing import Dict\n\ndef f() -> int:\n    d: Dict[str, int] = {}\n    \
+         x = d.get('a', 'none')\n    return 0\n",
+    );
+    assert!(err.contains("dict.get()'s default is a 'str'"), "{err}");
+}
+
+/// `del` of an item works on lists and dicts; a tuple or a str has no item
+/// deletion, as in CPython, and a stepped slice is not supported yet.
+#[test]
+fn del_of_an_immutable_item_is_refused() {
+    let cases: &[(&str, &str)] = &[
+        (
+            "x = (1, 2)\n    del x[0]",
+            "'tuple' object doesn't support item deletion",
+        ),
+        (
+            "s = 'ab'\n    del s[0]",
+            "'str' object doesn't support item deletion",
+        ),
+        (
+            "xs = [1, 2, 3]\n    del xs[::2]",
+            "'del' of a stepped slice is not supported",
+        ),
+    ];
+    for (body, expected) in cases {
+        let err = compile_error(&format!("def f() -> int:\n    {body}\n    return 0\n"));
+        assert!(err.contains(expected), "{body}: {err}");
+    }
+}
+
+/// `global` rebinds a module definition of the same type; one that names no
+/// definition, changes the type, or is bound by a loop is refused.
+#[test]
+fn global_that_cannot_rebind_is_refused() {
+    let cases: &[(&str, &str)] = &[
+        (
+            "global missing\n    missing = 1",
+            "'global missing' names no module-level definition",
+        ),
+        (
+            "global n\n    n = 'x'",
+            "the global 'n' is typed 'int' and cannot be rebound to a 'str'",
+        ),
+        (
+            "global n\n    for n in range(3):\n        pass",
+            "the global 'n' is bound by a loop",
+        ),
+    ];
+    for (body, expected) in cases {
+        let err = compile_error(&format!(
+            "n = 0\n\ndef f() -> int:\n    {body}\n    return 0\n"
+        ));
+        assert!(err.contains(expected), "{body}: {err}");
+    }
 }

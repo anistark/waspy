@@ -1223,10 +1223,186 @@ pub(crate) fn emit_value(
     if ty == IRType::None
         && matches!(
             expr,
-            IRExpr::FunctionCall { .. } | IRExpr::MethodCall { .. }
+            IRExpr::FunctionCall { .. } | IRExpr::MethodCall { .. } | IRExpr::Conditional { .. }
         )
     {
         func.instruction(&Instruction::I32Const(0));
+    }
+    ty
+}
+
+/// The type `arm` emits, found by emitting it into a scratch function and
+/// discarding the code and anything it reported. The flag says whether it
+/// reported anything.
+fn probe_type(
+    arm: &IRExpr,
+    ctx: &CompilationContext,
+    memory_layout: &MemoryLayout,
+    expected_type: Option<&IRType>,
+) -> (IRType, bool) {
+    let reported = ctx.errors.borrow().len();
+    let ty = emit_value(
+        arm,
+        &mut Function::new([]),
+        ctx,
+        memory_layout,
+        expected_type,
+    );
+    let failed = ctx.errors.borrow().len() > reported;
+    ctx.errors.borrow_mut().truncate(reported);
+    (ty, failed)
+}
+
+/// The one type both arms of a conditional expression are read as, if there
+/// is one. CPython keeps each arm's own type, but here a single value holds
+/// whichever arm ran, so the arms must agree on how it reads: two classes share
+/// their nearest common base, a class and None make an Optional, an empty
+/// collection takes the other arm's element type, and an int widens only where
+/// a float is expected (as it does when stored into a float place).
+fn conditional_type(
+    ctx: &CompilationContext,
+    body: &IRType,
+    orelse: &IRType,
+    expected: Option<&IRType>,
+) -> Option<IRType> {
+    fn element(a: &IRType, b: &IRType) -> Option<IRType> {
+        match (a, b) {
+            (IRType::Unknown, t) | (t, IRType::Unknown) => Some(t.clone()),
+            (a, b) if a == b => Some(a.clone()),
+            _ => None,
+        }
+    }
+    let class_of = |t: &IRType| match t {
+        IRType::Class(c) => Some(c.clone()),
+        IRType::Optional(inner) => match inner.as_ref() {
+            IRType::Class(c) => Some(c.clone()),
+            _ => None,
+        },
+        _ => None,
+    };
+    if body == orelse {
+        return Some(body.clone());
+    }
+    match (body, orelse) {
+        (IRType::Int, IRType::Float) | (IRType::Float, IRType::Int)
+            if expected == Some(&IRType::Float) =>
+        {
+            Some(IRType::Float)
+        }
+        (IRType::Unknown, IRType::Int | IRType::Bool | IRType::None)
+        | (IRType::Int | IRType::Bool | IRType::None, IRType::Unknown) => Some(IRType::Unknown),
+        (IRType::None, other) | (other, IRType::None) => {
+            class_of(other).map(|c| IRType::Optional(Box::new(IRType::Class(c))))
+        }
+        (IRType::Class(_) | IRType::Optional(_), IRType::Class(_) | IRType::Optional(_)) => {
+            let base = IRType::Class(ctx.common_base(&class_of(body)?, &class_of(orelse)?)?);
+            if matches!(body, IRType::Optional(_)) || matches!(orelse, IRType::Optional(_)) {
+                Some(IRType::Optional(Box::new(base)))
+            } else {
+                Some(base)
+            }
+        }
+        (IRType::List(a), IRType::List(b)) => element(a, b).map(|e| IRType::List(Box::new(e))),
+        (IRType::Set(a), IRType::Set(b)) => element(a, b).map(|e| IRType::Set(Box::new(e))),
+        (IRType::Dict(ka, va), IRType::Dict(kb, vb)) => Some(IRType::Dict(
+            Box::new(element(ka, kb)?),
+            Box::new(element(va, vb)?),
+        )),
+        _ => None,
+    }
+}
+
+/// `body if condition else orelse`: a WASM `if` whose arms each leave the
+/// shared type's value. A string's `(offset, length)` pair is two words, which
+/// a single-result block cannot carry, so it travels through held slots.
+fn emit_conditional(
+    condition: &IRExpr,
+    body: &IRExpr,
+    orelse: &IRExpr,
+    func: &mut Function,
+    ctx: &CompilationContext,
+    memory_layout: &MemoryLayout,
+    expected_type: Option<&IRType>,
+) -> IRType {
+    let (body_ty, body_failed) = probe_type(body, ctx, memory_layout, expected_type);
+    let (orelse_ty, orelse_failed) = probe_type(orelse, ctx, memory_layout, expected_type);
+    if body_failed || orelse_failed {
+        // Report what the arms report, once; the module is not built.
+        let mut scratch = Function::new([]);
+        emit_value(body, &mut scratch, ctx, memory_layout, expected_type);
+        emit_value(orelse, &mut scratch, ctx, memory_layout, expected_type);
+        func.instruction(&Instruction::I32Const(0));
+        return IRType::Unknown;
+    }
+    let Some(ty) = conditional_type(ctx, &body_ty, &orelse_ty, expected_type) else {
+        ctx.report(format!(
+            "the arms of this conditional expression have different types ({} and {}), \
+             and the value it produces can only be read as one of them. Hint: make both \
+             arms the same type, or use an if/else statement",
+            crate::type_to_string(&body_ty),
+            crate::type_to_string(&orelse_ty)
+        ));
+        func.instruction(&Instruction::I32Const(0));
+        return IRType::Unknown;
+    };
+
+    let pair = matches!(ty, IRType::String | IRType::Bytes);
+    let slots = if pair {
+        let Some(offset) = ctx.hold() else {
+            ctx.report("a conditional expression is nested deeper than the compiler supports");
+            func.instruction(&Instruction::I32Const(0));
+            return IRType::Unknown;
+        };
+        let Some(length) = ctx.hold() else {
+            ctx.release_held();
+            ctx.report("a conditional expression is nested deeper than the compiler supports");
+            func.instruction(&Instruction::I32Const(0));
+            return IRType::Unknown;
+        };
+        Some((offset, length))
+    } else {
+        None
+    };
+
+    let cond_ty = emit_expr(condition, func, ctx, memory_layout, Some(&IRType::Bool));
+    emit_truthiness(func, ctx, &cond_ty);
+    func.instruction(&Instruction::If(match ty {
+        IRType::Float => BlockType::Result(ValType::F64),
+        IRType::None | IRType::String | IRType::Bytes => BlockType::Empty,
+        _ => BlockType::Result(ValType::I32),
+    }));
+    ctx.enter_expr_blocks(1);
+    for (i, arm) in [body, orelse].into_iter().enumerate() {
+        if i == 1 {
+            func.instruction(&Instruction::Else);
+        }
+        let expected = if ty == IRType::Float {
+            Some(&ty)
+        } else {
+            expected_type
+        };
+        let arm_ty = emit_value(arm, func, ctx, memory_layout, expected);
+        match (&ty, &arm_ty) {
+            (IRType::None, _) => {
+                func.instruction(&Instruction::Drop);
+            }
+            (IRType::Float, IRType::Int | IRType::Bool) => {
+                func.instruction(&Instruction::F64ConvertI32S);
+            }
+            _ => {}
+        }
+        if let Some((offset, length)) = slots {
+            func.instruction(&Instruction::LocalSet(length));
+            func.instruction(&Instruction::LocalSet(offset));
+        }
+    }
+    ctx.exit_expr_blocks(1);
+    func.instruction(&Instruction::End);
+    if let Some((offset, length)) = slots {
+        func.instruction(&Instruction::LocalGet(offset));
+        func.instruction(&Instruction::LocalGet(length));
+        ctx.release_held();
+        ctx.release_held();
     }
     ty
 }
@@ -3418,6 +3594,15 @@ fn infer_key_body(expr: &IRExpr, param: &str, elem_ty: &IRType) -> IRType {
         IRExpr::Const(IRConstant::String(_)) => IRType::String,
         IRExpr::Variable(name) | IRExpr::Param(name) if name == param => elem_ty.clone(),
         IRExpr::UnaryOp { operand, .. } => infer_key_body(operand, param, elem_ty),
+        IRExpr::Conditional { body, orelse, .. } => {
+            match (
+                infer_key_body(body, param, elem_ty),
+                infer_key_body(orelse, param, elem_ty),
+            ) {
+                (a, b) if a == b => a,
+                _ => IRType::Unknown,
+            }
+        }
         IRExpr::BinaryOp { left, right, .. } => {
             let lt = infer_key_body(left, param, elem_ty);
             let rt = infer_key_body(right, param, elem_ty);
@@ -3509,6 +3694,13 @@ fn key_needs_param_type(expr: &IRExpr, param: &str) -> bool {
             .iter()
             .any(|a| is_param(a, param) || key_needs_param_type(a, param)),
         IRExpr::UnaryOp { operand, .. } => key_needs_param_type(operand, param),
+        IRExpr::Conditional {
+            condition,
+            body,
+            orelse,
+        } => [condition, body, orelse]
+            .iter()
+            .any(|e| key_needs_param_type(e, param)),
         IRExpr::BinaryOp { left, right, .. } => {
             key_needs_param_type(left, param) || key_needs_param_type(right, param)
         }
@@ -3872,6 +4064,7 @@ fn emit_comp_loops(
 
         func.instruction(&Instruction::Block(BlockType::Empty));
         func.instruction(&Instruction::Loop(BlockType::Empty));
+        ctx.enter_expr_blocks(2);
 
         // Exit test depends on the runtime sign of step.
         func.instruction(&Instruction::LocalGet(ptr));
@@ -3896,6 +4089,7 @@ fn emit_comp_loops(
             for condition in &generator.conditions {
                 emit_expr(condition, func, ctx, memory_layout, Some(&IRType::Bool));
                 func.instruction(&Instruction::If(BlockType::Empty));
+                ctx.enter_expr_blocks(1);
             }
         }
         emit_comp_loops(
@@ -3912,6 +4106,7 @@ fn emit_comp_loops(
         for _ in 0..n_conds {
             func.instruction(&Instruction::End);
         }
+        ctx.exit_expr_blocks(n_conds as u32);
 
         // target += step
         func.instruction(&Instruction::LocalGet(target));
@@ -3921,6 +4116,8 @@ fn emit_comp_loops(
         func.instruction(&Instruction::LocalSet(target));
 
         func.instruction(&Instruction::Br(0));
+
+        ctx.exit_expr_blocks(2);
         func.instruction(&Instruction::End);
         func.instruction(&Instruction::End);
     } else {
@@ -3933,6 +4130,7 @@ fn emit_comp_loops(
 
         func.instruction(&Instruction::Block(BlockType::Empty));
         func.instruction(&Instruction::Loop(BlockType::Empty));
+        ctx.enter_expr_blocks(2);
 
         func.instruction(&Instruction::LocalGet(idx));
         func.instruction(&Instruction::LocalGet(len));
@@ -4022,6 +4220,7 @@ fn emit_comp_loops(
             for condition in &generator.conditions {
                 emit_expr(condition, func, ctx, memory_layout, Some(&IRType::Bool));
                 func.instruction(&Instruction::If(BlockType::Empty));
+                ctx.enter_expr_blocks(1);
             }
         }
         emit_comp_loops(
@@ -4038,6 +4237,7 @@ fn emit_comp_loops(
         for _ in 0..n_conds {
             func.instruction(&Instruction::End);
         }
+        ctx.exit_expr_blocks(n_conds as u32);
 
         func.instruction(&Instruction::LocalGet(idx));
         func.instruction(&Instruction::I32Const(1));
@@ -4045,6 +4245,8 @@ fn emit_comp_loops(
         func.instruction(&Instruction::LocalSet(idx));
 
         func.instruction(&Instruction::Br(0));
+
+        ctx.exit_expr_blocks(2);
         func.instruction(&Instruction::End);
         func.instruction(&Instruction::End);
     }
@@ -5949,7 +6151,9 @@ pub fn emit_expr(
                     // If-else pattern for short-circuit evaluation. Both arms
                     // leave the boolean result, so the if yields an i32.
                     func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+                    ctx.enter_expr_blocks(1);
                     emit_expr(right, func, ctx, memory_layout, Some(&IRType::Bool));
+                    ctx.exit_expr_blocks(1);
                     func.instruction(&Instruction::Else);
                     func.instruction(&Instruction::I32Const(0)); // False
                     func.instruction(&Instruction::End);
@@ -5965,13 +6169,28 @@ pub fn emit_expr(
                     func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
                     func.instruction(&Instruction::I32Const(1)); // True
                     func.instruction(&Instruction::Else);
+                    ctx.enter_expr_blocks(1);
                     emit_expr(right, func, ctx, memory_layout, Some(&IRType::Bool));
+                    ctx.exit_expr_blocks(1);
                     func.instruction(&Instruction::End);
                 }
             }
 
             IRType::Bool
         }
+        IRExpr::Conditional {
+            condition,
+            body,
+            orelse,
+        } => emit_conditional(
+            condition,
+            body,
+            orelse,
+            func,
+            ctx,
+            memory_layout,
+            expected_type,
+        ),
         IRExpr::Keyword { name, .. } => {
             ctx.report(format!("keyword argument '{name}' is not supported here"));
             func.instruction(&Instruction::I32Const(0));
@@ -8400,6 +8619,29 @@ pub fn emit_expr(
 
             let object_type = emit_expr(object, func, ctx, memory_layout, None);
 
+            let deletes = matches!(
+                method_name.as_str(),
+                crate::ir::DEL_ITEM_METHOD | crate::ir::DEL_SLICE_METHOD
+            );
+            if deletes && !matches!(object_type, IRType::List(_) | IRType::Dict(..)) {
+                let kind = match &object_type {
+                    IRType::Tuple(_) => "tuple".to_string(),
+                    other => crate::type_to_string(other),
+                };
+                ctx.report(format!("'{kind}' object doesn't support item deletion"));
+                if matches!(object_type, IRType::String | IRType::Bytes) {
+                    func.instruction(&Instruction::Drop);
+                }
+                func.instruction(&Instruction::Drop);
+                return IRType::None;
+            }
+            if method_name == crate::ir::DEL_SLICE_METHOD && matches!(object_type, IRType::Dict(..))
+            {
+                ctx.report("a dict cannot be sliced, so 'del d[a:b]' is a TypeError");
+                func.instruction(&Instruction::Drop);
+                return IRType::None;
+            }
+
             match &object_type {
                 IRType::String => {
                     // String methods: upper(), lower(), split(sep), etc.
@@ -10159,12 +10401,11 @@ pub fn emit_set_method_call(
     func.instruction(&Instruction::End); // block
 
     if method_name == "remove" {
-        // Python raises KeyError here. Nothing in the compiled module can carry
-        // one, so trap: failing loudly beats quietly not removing anything.
+        // A member the set does not hold raises KeyError.
         func.instruction(&Instruction::LocalGet(saved));
         func.instruction(&Instruction::I32Eqz);
         func.instruction(&Instruction::If(BlockType::Empty));
-        func.instruction(&Instruction::Unreachable);
+        emit_raise(func, ctx, "KeyError", 1);
         func.instruction(&Instruction::End);
     }
 
@@ -10176,7 +10417,8 @@ pub fn emit_set_method_call(
 /// lowering rewrites into a positional argument.
 fn list_method_arity(method_name: &str) -> Option<(usize, usize)> {
     Some(match method_name {
-        "append" | "count" | "extend" | "index" | "remove" => (1, 1),
+        "append" | "count" | "extend" | "index" | "remove" | "__delitem__" => (1, 1),
+        "__delslice__" => (2, 2),
         "clear" | "reverse" => (0, 0),
         "insert" => (2, 2),
         "pop" | "sort" => (0, 1),
@@ -10265,6 +10507,71 @@ pub fn emit_list_method_call(
             // append() returns None
             IRType::None
         }
+        "__delitem__" => {
+            // `del xs[i]` is `xs.pop(i)` with the element dropped.
+            let popped =
+                emit_list_method_call(func, ctx, memory_layout, "pop", arguments, list_type);
+            if matches!(popped, IRType::String | IRType::Bytes) {
+                func.instruction(&Instruction::Drop);
+            }
+            func.instruction(&Instruction::Drop);
+            IRType::None
+        }
+        "__delslice__" => {
+            // `del xs[a:b]`: clamp both bounds as slicing does and close the
+            // gap. Both bounds are emitted while list_ptr is on the stack.
+            emit_expr(&arguments[0], func, ctx, memory_layout, Some(&IRType::Int));
+            emit_expr(&arguments[1], func, ctx, memory_layout, Some(&IRType::Int));
+            let ptr = ctx.temp_local;
+            let len = ctx.temp_local + 1;
+            let start = ctx.temp_local + 2;
+            let end = ctx.temp_local + 3;
+            func.instruction(&Instruction::LocalSet(end));
+            func.instruction(&Instruction::LocalSet(start));
+            func.instruction(&Instruction::LocalSet(ptr));
+            func.instruction(&Instruction::LocalGet(ptr));
+            func.instruction(&Instruction::I32Load(slot_arg()));
+            func.instruction(&Instruction::LocalSet(len));
+            emit_normalize_and_clamp(func, start, len);
+            emit_normalize_and_clamp(func, end, len);
+
+            func.instruction(&Instruction::LocalGet(end));
+            func.instruction(&Instruction::LocalGet(start));
+            func.instruction(&Instruction::I32GtS);
+            func.instruction(&Instruction::If(BlockType::Empty));
+            // memmove(data + start, data + end, (len - end) slots)
+            func.instruction(&Instruction::LocalGet(ptr));
+            emit_data_base(func);
+            func.instruction(&Instruction::LocalGet(start));
+            func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+            func.instruction(&Instruction::I32Mul);
+            func.instruction(&Instruction::I32Add);
+            func.instruction(&Instruction::LocalGet(ptr));
+            emit_data_base(func);
+            func.instruction(&Instruction::LocalGet(end));
+            func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+            func.instruction(&Instruction::I32Mul);
+            func.instruction(&Instruction::I32Add);
+            func.instruction(&Instruction::LocalGet(len));
+            func.instruction(&Instruction::LocalGet(end));
+            func.instruction(&Instruction::I32Sub);
+            func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+            func.instruction(&Instruction::I32Mul);
+            func.instruction(&Instruction::MemoryCopy {
+                src_mem: 0,
+                dst_mem: 0,
+            });
+            // length -= end - start
+            func.instruction(&Instruction::LocalGet(ptr));
+            func.instruction(&Instruction::LocalGet(len));
+            func.instruction(&Instruction::LocalGet(end));
+            func.instruction(&Instruction::LocalGet(start));
+            func.instruction(&Instruction::I32Sub);
+            func.instruction(&Instruction::I32Sub);
+            func.instruction(&Instruction::I32Store(slot_arg()));
+            func.instruction(&Instruction::End);
+            IRType::None
+        }
         "pop" => {
             // list.pop([index]) — remove the element at `index` (the last one
             // by default) and answer it. Entry stack: (list_ptr).
@@ -10281,6 +10588,13 @@ pub fn emit_list_method_call(
                 _ => IRType::Unknown,
             };
 
+            // The index is emitted while list_ptr is still on the stack: its
+            // emission can use the scratch locals, and `xs.pop(ys.pop())`
+            // popped from `ys` twice.
+            if let Some(index) = arguments.first() {
+                emit_expr(index, func, ctx, memory_layout, Some(&IRType::Int));
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 2)); // index
+            }
             func.instruction(&Instruction::LocalSet(ctx.temp_local)); // list_ptr
 
             // length = load(list_ptr)
@@ -10289,9 +10603,6 @@ pub fn emit_list_method_call(
             func.instruction(&Instruction::LocalSet(ctx.temp_local + 1)); // length
 
             if !arguments.is_empty() {
-                emit_expr(&arguments[0], func, ctx, memory_layout, Some(&IRType::Int));
-                func.instruction(&Instruction::LocalSet(ctx.temp_local + 2)); // index
-
                 // A negative index counts from the end, as everywhere else.
                 func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
                 func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
@@ -10310,9 +10621,8 @@ pub fn emit_list_method_call(
                 func.instruction(&Instruction::LocalSet(ctx.temp_local + 2)); // index
             }
 
-            // Python raises IndexError for a position the list does not have,
-            // an empty list included. Trap rather than reading a neighbouring
-            // slot, which is what an out-of-range index read does too.
+            // A position the list does not have, an empty list included,
+            // raises IndexError.
             func.instruction(&Instruction::LocalGet(ctx.temp_local + 2));
             func.instruction(&Instruction::I32Const(0));
             func.instruction(&Instruction::I32LtS);
@@ -10321,7 +10631,7 @@ pub fn emit_list_method_call(
             func.instruction(&Instruction::I32GeS);
             func.instruction(&Instruction::I32Or);
             func.instruction(&Instruction::If(BlockType::Empty));
-            func.instruction(&Instruction::Unreachable);
+            emit_raise(func, ctx, "IndexError", 1);
             func.instruction(&Instruction::End);
 
             // Read the element out before the shift overwrites its slot. A
@@ -10406,11 +10716,38 @@ pub fn emit_list_method_call(
             // Stack: list_ptr, iterable
 
             if !arguments.is_empty() {
-                // Save list_ptr
-                func.instruction(&Instruction::LocalSet(ctx.temp_local));
-
-                // Emit the iterable
+                // Emit the iterable while list_ptr is still on the stack: its
+                // emission can use the scratch locals.
                 let iterable_type = emit_expr(&arguments[0], func, ctx, memory_layout, None);
+
+                // A tuple shares the list layout; one whose members share a type
+                // copies slot for slot like a list.
+                let source = match &iterable_type {
+                    IRType::List(_) => Some(iterable_type.clone()),
+                    IRType::Tuple(members) if members.windows(2).all(|w| w[0] == w[1]) => {
+                        Some(IRType::List(Box::new(
+                            members.first().cloned().unwrap_or(IRType::Unknown),
+                        )))
+                    }
+                    _ => None,
+                };
+                let Some(iterable_type) = source else {
+                    // It dropped the iterable and extended by nothing, so
+                    // `xs.extend(range(3))` left `xs` as it was.
+                    ctx.report(format!(
+                        "list.extend() takes a list or a tuple of one element type here, \
+                         not '{}'. Hint: append the elements in a loop",
+                        crate::type_to_string(&iterable_type)
+                    ));
+                    if matches!(iterable_type, IRType::String | IRType::Bytes) {
+                        func.instruction(&Instruction::Drop);
+                    }
+                    func.instruction(&Instruction::Drop);
+                    func.instruction(&Instruction::Drop);
+                    return IRType::None;
+                };
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 1)); // iterable_ptr
+                func.instruction(&Instruction::LocalSet(ctx.temp_local)); // list_ptr
 
                 // Elements are copied slot for slot, so the two lists have to
                 // read their slots at the same width. Extending a float list
@@ -10437,109 +10774,98 @@ pub fn emit_list_method_call(
                     ));
                 }
 
-                match iterable_type {
-                    IRType::List(_) => {
-                        // Save iterable_ptr
-                        func.instruction(&Instruction::LocalSet(ctx.temp_local + 1));
+                // Load iterable length
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
+                func.instruction(&Instruction::I32Load(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 2)); // iterable_len
 
-                        // Load iterable length
-                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 1));
-                        func.instruction(&Instruction::I32Load(MemArg {
-                            offset: 0,
-                            align: 2,
-                            memory_index: 0,
-                        }));
-                        func.instruction(&Instruction::LocalSet(ctx.temp_local + 2)); // iterable_len
+                // Make room for every element about to be copied in;
+                // this may replace list_ptr with a larger region.
+                emit_collection_reserve(
+                    func,
+                    ctx,
+                    Reserve::Local(ctx.temp_local + 2),
+                    COLLECTION_SLOT,
+                );
 
-                        // Make room for every element about to be copied in;
-                        // this may replace list_ptr with a larger region.
-                        emit_collection_reserve(
-                            func,
-                            ctx,
-                            Reserve::Local(ctx.temp_local + 2),
-                            COLLECTION_SLOT,
-                        );
+                // Load list length
+                func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                func.instruction(&Instruction::I32Load(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 3)); // list_len
 
-                        // Load list length
-                        func.instruction(&Instruction::LocalGet(ctx.temp_local));
-                        func.instruction(&Instruction::I32Load(MemArg {
-                            offset: 0,
-                            align: 2,
-                            memory_index: 0,
-                        }));
-                        func.instruction(&Instruction::LocalSet(ctx.temp_local + 3)); // list_len
+                // Initialize loop counter
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 4)); // i = 0
 
-                        // Initialize loop counter
-                        func.instruction(&Instruction::I32Const(0));
-                        func.instruction(&Instruction::LocalSet(ctx.temp_local + 4)); // i = 0
+                // Loop: for i in range(iterable_len)
+                func.instruction(&Instruction::Block(BlockType::Empty));
+                func.instruction(&Instruction::Loop(BlockType::Empty));
 
-                        // Loop: for i in range(iterable_len)
-                        func.instruction(&Instruction::Block(BlockType::Empty));
-                        func.instruction(&Instruction::Loop(BlockType::Empty));
+                // Check if i >= iterable_len
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 4)); // i
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 2)); // iterable_len
+                func.instruction(&Instruction::I32GeS);
+                func.instruction(&Instruction::BrIf(1)); // Exit loop if done
 
-                        // Check if i >= iterable_len
-                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 4)); // i
-                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 2)); // iterable_len
-                        func.instruction(&Instruction::I32GeS);
-                        func.instruction(&Instruction::BrIf(1)); // Exit loop if done
+                // Copy the whole 8-byte slot from iterable[i] to
+                // list[list_len] with a type-agnostic memory.copy, so any
+                // element width (i32 word or full f64) moves intact.
+                // dest = list_ptr + HEADER + list_len*SLOT
+                func.instruction(&Instruction::LocalGet(ctx.temp_local)); // list_ptr
+                emit_data_base(func);
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3)); // list_len
+                func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+                func.instruction(&Instruction::I32Mul);
+                func.instruction(&Instruction::I32Add);
+                // src = iterable_ptr + HEADER + i*SLOT
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 1)); // iterable_ptr
+                emit_data_base(func);
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 4)); // i
+                func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+                func.instruction(&Instruction::I32Mul);
+                func.instruction(&Instruction::I32Add);
+                // size = SLOT
+                func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+                func.instruction(&Instruction::MemoryCopy {
+                    src_mem: 0,
+                    dst_mem: 0,
+                });
 
-                        // Copy the whole 8-byte slot from iterable[i] to
-                        // list[list_len] with a type-agnostic memory.copy, so any
-                        // element width (i32 word or full f64) moves intact.
-                        // dest = list_ptr + HEADER + list_len*SLOT
-                        func.instruction(&Instruction::LocalGet(ctx.temp_local)); // list_ptr
-                        emit_data_base(func);
-                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 3)); // list_len
-                        func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
-                        func.instruction(&Instruction::I32Mul);
-                        func.instruction(&Instruction::I32Add);
-                        // src = iterable_ptr + HEADER + i*SLOT
-                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 1)); // iterable_ptr
-                        emit_data_base(func);
-                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 4)); // i
-                        func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
-                        func.instruction(&Instruction::I32Mul);
-                        func.instruction(&Instruction::I32Add);
-                        // size = SLOT
-                        func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
-                        func.instruction(&Instruction::MemoryCopy {
-                            src_mem: 0,
-                            dst_mem: 0,
-                        });
+                // Increment list_len
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
+                func.instruction(&Instruction::I32Const(1));
+                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 3));
 
-                        // Increment list_len
-                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 3));
-                        func.instruction(&Instruction::I32Const(1));
-                        func.instruction(&Instruction::I32Add);
-                        func.instruction(&Instruction::LocalSet(ctx.temp_local + 3));
+                // Increment i
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
+                func.instruction(&Instruction::I32Const(1));
+                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::LocalSet(ctx.temp_local + 4));
 
-                        // Increment i
-                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
-                        func.instruction(&Instruction::I32Const(1));
-                        func.instruction(&Instruction::I32Add);
-                        func.instruction(&Instruction::LocalSet(ctx.temp_local + 4));
+                // Loop back
+                func.instruction(&Instruction::Br(0));
 
-                        // Loop back
-                        func.instruction(&Instruction::Br(0));
+                // End loop
+                func.instruction(&Instruction::End);
+                func.instruction(&Instruction::End);
 
-                        // End loop
-                        func.instruction(&Instruction::End);
-                        func.instruction(&Instruction::End);
-
-                        // Update list length
-                        func.instruction(&Instruction::LocalGet(ctx.temp_local)); // list_ptr
-                        func.instruction(&Instruction::LocalGet(ctx.temp_local + 3)); // new length
-                        func.instruction(&Instruction::I32Store(MemArg {
-                            offset: 0,
-                            align: 2,
-                            memory_index: 0,
-                        }));
-                    }
-                    _ => {
-                        // For non-list iterables, just drop
-                        func.instruction(&Instruction::Drop);
-                    }
-                }
+                // Update list length
+                func.instruction(&Instruction::LocalGet(ctx.temp_local)); // list_ptr
+                func.instruction(&Instruction::LocalGet(ctx.temp_local + 3)); // new length
+                func.instruction(&Instruction::I32Store(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
             }
             IRType::None
         }
@@ -10750,13 +11076,14 @@ pub fn emit_list_method_call(
             // list.index(value) -> int
             // Linear search for first occurrence
             if !arguments.is_empty() {
-                // Save list_ptr
-                func.instruction(&Instruction::LocalSet(ctx.temp_local));
-
-                // Emit value to search for and stash it as a needle (f64 for
-                // floats) so the per-slot compare matches the element width.
+                // Emit the value to search for while list_ptr is still on the
+                // stack, and stash it as a needle (f64 for floats) so the
+                // per-slot compare matches the element width. Parking list_ptr
+                // first lost it to the scratch locals the value's emission
+                // used: `xs.index(ys.index(1))` searched `ys`.
                 let value_type = emit_expr(&arguments[0], func, ctx, memory_layout, None);
                 stash_search_needle(func, ctx, &value_type, ctx.temp_local + 1);
+                func.instruction(&Instruction::LocalSet(ctx.temp_local)); // list_ptr
 
                 // Load length
                 func.instruction(&Instruction::LocalGet(ctx.temp_local));
@@ -10822,15 +11149,12 @@ pub fn emit_list_method_call(
                 func.instruction(&Instruction::End);
                 func.instruction(&Instruction::End);
 
-                // Python raises ValueError when the value is absent. Nothing
-                // in the compiled module can carry one, so trap, the way
-                // `set.remove` of a missing member does: failing loudly beats
-                // answering an index the caller would then index with.
+                // A value the list does not hold raises ValueError.
                 func.instruction(&Instruction::LocalGet(ctx.temp_local + 4)); // found
                 func.instruction(&Instruction::I32Const(-1));
                 func.instruction(&Instruction::I32Eq);
                 func.instruction(&Instruction::If(BlockType::Empty));
-                func.instruction(&Instruction::Unreachable);
+                emit_raise(func, ctx, "ValueError", 1);
                 func.instruction(&Instruction::End);
                 func.instruction(&Instruction::LocalGet(ctx.temp_local + 4));
             } else {
@@ -10843,13 +11167,14 @@ pub fn emit_list_method_call(
             // list.count(value) -> int
             // Count occurrences
             if !arguments.is_empty() {
-                // Save list_ptr
-                func.instruction(&Instruction::LocalSet(ctx.temp_local));
-
-                // Emit value to search for and stash it as a needle (f64 for
-                // floats) so the per-slot compare matches the element width.
+                // Emit the value to search for while list_ptr is still on the
+                // stack, and stash it as a needle (f64 for floats) so the
+                // per-slot compare matches the element width. Parking list_ptr
+                // first lost it to the scratch locals the value's emission
+                // used: `xs.index(ys.index(1))` searched `ys`.
                 let value_type = emit_expr(&arguments[0], func, ctx, memory_layout, None);
                 stash_search_needle(func, ctx, &value_type, ctx.temp_local + 1);
+                func.instruction(&Instruction::LocalSet(ctx.temp_local)); // list_ptr
 
                 // Load length
                 func.instruction(&Instruction::LocalGet(ctx.temp_local));
@@ -11209,6 +11534,91 @@ fn emit_dict_method_call(
     };
 
     match method_name {
+        "__delitem__" => {
+            // `del d[k]`: find the entry, close the gap, and raise KeyError
+            // for a key the dict does not hold.
+            let arg_key_ty = emit_expr(&arguments[0], func, ctx, memory_layout, None);
+            narrow_element_to_word(func, &arg_key_ty);
+            let ptr = ctx.temp_local;
+            let needle = ctx.temp_local + 1;
+            let count = ctx.temp_local + 2;
+            let i = ctx.temp_local + 3;
+            let found = ctx.temp_local + 4;
+            let slot = ctx.temp_local + 6;
+            func.instruction(&Instruction::LocalSet(needle));
+            func.instruction(&Instruction::LocalSet(ptr));
+            func.instruction(&Instruction::LocalGet(ptr));
+            func.instruction(&Instruction::I32Load(slot_arg()));
+            func.instruction(&Instruction::LocalSet(count));
+            func.instruction(&Instruction::I32Const(0));
+            func.instruction(&Instruction::LocalSet(i));
+            func.instruction(&Instruction::I32Const(-1));
+            func.instruction(&Instruction::LocalSet(found));
+
+            func.instruction(&Instruction::Block(BlockType::Empty));
+            func.instruction(&Instruction::Loop(BlockType::Empty));
+            func.instruction(&Instruction::LocalGet(i));
+            func.instruction(&Instruction::LocalGet(count));
+            func.instruction(&Instruction::I32GeU);
+            func.instruction(&Instruction::BrIf(1));
+            func.instruction(&Instruction::LocalGet(ptr));
+            emit_data_base(func);
+            func.instruction(&Instruction::LocalGet(i));
+            func.instruction(&Instruction::I32Const(DICT_ENTRY as i32));
+            func.instruction(&Instruction::I32Mul);
+            func.instruction(&Instruction::I32Add);
+            func.instruction(&Instruction::LocalTee(slot));
+            let key_is_str = matches!(key_type, IRType::String | IRType::Bytes)
+                || matches!(arg_key_ty, IRType::String | IRType::Bytes);
+            let cmp_ty = if key_is_str {
+                IRType::String
+            } else {
+                key_type.clone()
+            };
+            emit_slot_eq_needle(func, ctx, &cmp_ty, needle);
+            func.instruction(&Instruction::If(BlockType::Empty));
+            func.instruction(&Instruction::LocalGet(i));
+            func.instruction(&Instruction::LocalSet(found));
+            func.instruction(&Instruction::Br(2));
+            func.instruction(&Instruction::End);
+            func.instruction(&Instruction::LocalGet(i));
+            func.instruction(&Instruction::I32Const(1));
+            func.instruction(&Instruction::I32Add);
+            func.instruction(&Instruction::LocalSet(i));
+            func.instruction(&Instruction::Br(0));
+            func.instruction(&Instruction::End);
+            func.instruction(&Instruction::End);
+
+            func.instruction(&Instruction::LocalGet(found));
+            func.instruction(&Instruction::I32Const(0));
+            func.instruction(&Instruction::I32LtS);
+            func.instruction(&Instruction::If(BlockType::Empty));
+            emit_raise(func, ctx, "KeyError", 1);
+            func.instruction(&Instruction::Else);
+            // memmove(entry found, entry found + 1, (count - found - 1) entries)
+            func.instruction(&Instruction::LocalGet(slot));
+            func.instruction(&Instruction::LocalGet(slot));
+            func.instruction(&Instruction::I32Const(DICT_ENTRY as i32));
+            func.instruction(&Instruction::I32Add);
+            func.instruction(&Instruction::LocalGet(count));
+            func.instruction(&Instruction::LocalGet(found));
+            func.instruction(&Instruction::I32Sub);
+            func.instruction(&Instruction::I32Const(1));
+            func.instruction(&Instruction::I32Sub);
+            func.instruction(&Instruction::I32Const(DICT_ENTRY as i32));
+            func.instruction(&Instruction::I32Mul);
+            func.instruction(&Instruction::MemoryCopy {
+                src_mem: 0,
+                dst_mem: 0,
+            });
+            func.instruction(&Instruction::LocalGet(ptr));
+            func.instruction(&Instruction::LocalGet(count));
+            func.instruction(&Instruction::I32Const(1));
+            func.instruction(&Instruction::I32Sub);
+            func.instruction(&Instruction::I32Store(slot_arg()));
+            func.instruction(&Instruction::End);
+            IRType::None
+        }
         "get" => {
             if arguments.is_empty() || arguments.len() > 2 {
                 ctx.report("dict.get() takes one or two arguments");
@@ -11217,36 +11627,75 @@ fn emit_dict_method_call(
                 func.instruction(&Instruction::I32Const(0));
                 return IRType::Unknown;
             }
-            let ptr = ctx.temp_local;
-            let needle = ctx.temp_local + 1;
+            // A missing key with no default answers None, which only an
+            // instance value can be told apart from: it answered 0, so
+            // `d.get(k) == 0` held for a key `d` does not have.
+            if arguments.len() == 1 && !matches!(value_type, IRType::Class(_)) {
+                ctx.report(format!(
+                    "dict.get(key) answers None for a missing key, which a '{}' value cannot \
+                     be told apart from here. Hint: pass a default, d.get(key, default)",
+                    crate::type_to_string(&value_type)
+                ));
+                func.instruction(&Instruction::Drop);
+                func.instruction(&Instruction::Unreachable);
+                func.instruction(&Instruction::I32Const(0));
+                return IRType::Unknown;
+            }
+
+            // The dict pointer stays on the stack while the key is emitted,
+            // and both stay in held slots while the default is: the default
+            // is an ordinary argument, so Python evaluates it eagerly, and its
+            // emission can use the scratch locals. `d.get(xs.index(2), -1)`
+            // searched with a clobbered pointer.
+            let arg_key_ty = emit_expr(&arguments[0], func, ctx, memory_layout, None);
+            narrow_element_to_word(func, &arg_key_ty);
+            let (Some(needle), Some(ptr)) = (ctx.hold(), ctx.hold()) else {
+                report_literal_too_deep(func, ctx, "dict.get()");
+                return IRType::Unknown;
+            };
+            func.instruction(&Instruction::LocalSet(needle));
+            func.instruction(&Instruction::LocalSet(ptr));
+
+            let float = matches!(value_type, IRType::Float);
+            let result_f64 = ctx.temp_local_f64;
             let count = ctx.temp_local + 2;
             let i = ctx.temp_local + 3;
             let result = ctx.temp_local + 4;
-            let found = ctx.temp_local + 5;
             let slot = ctx.temp_local + 6;
 
-            func.instruction(&Instruction::LocalSet(ptr));
-            let arg_key_ty = emit_expr(&arguments[0], func, ctx, memory_layout, None);
-            narrow_element_to_word(func, &arg_key_ty);
-            func.instruction(&Instruction::LocalSet(needle));
-
-            // The default is evaluated up front: Python evaluates it eagerly
-            // too, since it is an ordinary argument.
-            let default_ty = if arguments.len() == 2 {
-                let t = emit_expr(&arguments[1], func, ctx, memory_layout, None);
+            let expected = (!matches!(value_type, IRType::Unknown)).then_some(&value_type);
+            let default_ty = if let Some(default) = arguments.get(1) {
+                let t = emit_expr(default, func, ctx, memory_layout, expected);
+                if float && matches!(t, IRType::Int | IRType::Bool) {
+                    func.instruction(&Instruction::F64ConvertI32S);
+                }
                 narrow_element_to_word(func, &t);
-                func.instruction(&Instruction::LocalSet(result));
                 t
             } else {
-                // Missing and no default is Python's `None`; there is no None
-                // value here, so it is zero, matching what an absent key used
-                // to answer before dict reads started raising KeyError.
                 func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::LocalSet(result));
-                IRType::Unknown
+                IRType::None
             };
-            func.instruction(&Instruction::I32Const(0));
-            func.instruction(&Instruction::LocalSet(found));
+            let fits = match (&value_type, &default_ty) {
+                (IRType::Unknown, _) => true,
+                (v, d) if v == d => true,
+                (IRType::Float, IRType::Int | IRType::Bool) => true,
+                (IRType::Class(_), IRType::None) => true,
+                (IRType::Class(a), IRType::Class(b)) => ctx.common_base(a, b).as_ref() == Some(a),
+                _ => false,
+            };
+            if !fits {
+                ctx.report(format!(
+                    "dict.get()'s default is a '{}' where the dict holds '{}' values, and the \
+                     answer can only be read as one of them. Hint: pass a default of the value type",
+                    crate::type_to_string(&default_ty),
+                    crate::type_to_string(&value_type)
+                ));
+            }
+            func.instruction(&Instruction::LocalSet(if float {
+                result_f64
+            } else {
+                result
+            }));
 
             func.instruction(&Instruction::LocalGet(ptr));
             func.instruction(&Instruction::I32Load(slot_arg()));
@@ -11280,10 +11729,13 @@ fn emit_dict_method_call(
             emit_slot_eq_needle(func, ctx, &cmp_ty, needle);
             func.instruction(&Instruction::If(BlockType::Empty));
             func.instruction(&Instruction::LocalGet(slot));
-            func.instruction(&Instruction::I32Load(mem_off(COLLECTION_SLOT as u64)));
-            func.instruction(&Instruction::LocalSet(result));
-            func.instruction(&Instruction::I32Const(1));
-            func.instruction(&Instruction::LocalSet(found));
+            if float {
+                func.instruction(&Instruction::F64Load(mem_off(COLLECTION_SLOT as u64)));
+                func.instruction(&Instruction::LocalSet(result_f64));
+            } else {
+                func.instruction(&Instruction::I32Load(mem_off(COLLECTION_SLOT as u64)));
+                func.instruction(&Instruction::LocalSet(result));
+            }
             func.instruction(&Instruction::Br(2));
             func.instruction(&Instruction::End);
             func.instruction(&Instruction::LocalGet(i));
@@ -11293,14 +11745,23 @@ fn emit_dict_method_call(
             func.instruction(&Instruction::Br(0));
             func.instruction(&Instruction::End);
             func.instruction(&Instruction::End);
+            ctx.release_held();
+            ctx.release_held();
 
-            func.instruction(&Instruction::LocalGet(result));
-            // A found value has the dict's value type; otherwise the default's.
-            if matches!(value_type, IRType::Unknown) {
-                default_ty
+            let answer = match (&value_type, &default_ty) {
+                (IRType::Unknown, d) => d.clone(),
+                (IRType::Class(_), IRType::None) => IRType::Optional(Box::new(value_type.clone())),
+                (v, _) => v.clone(),
+            };
+            func.instruction(&Instruction::LocalGet(if float {
+                result_f64
             } else {
-                value_type
+                result
+            }));
+            if matches!(answer, IRType::String | IRType::Bytes) {
+                recover_str_pair(func, ctx);
             }
+            answer
         }
         "keys" | "values" | "items" => {
             // Build a real list: keys, values, or two-slot tuples. As a `for`
