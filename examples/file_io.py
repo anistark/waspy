@@ -1,10 +1,10 @@
-# File I/O through the waspy_host interface (#25).
+# File I/O through WASI (#25).
 #
-# open()/read()/write()/close() compile to calls into four imported host
-# functions (module "waspy_host": open, read, write, close). The embedder
-# provides them — WASM has no filesystem of its own — so the same binary can
-# be backed by real files (a runtime shim), an in-memory store (browser), or
-# anything else. Modules that never call open() import nothing.
+# open()/read()/write()/close() go through WASI preview 1: path_open on the
+# host's preopened directories, then fd_read/fd_write/fd_close. Run it with
+# `wasmtime run --dir . file_io.wasm`, or under any WASI host; the playground's
+# shim keeps files in memory. A file open() cannot open raises CPython's
+# FileNotFoundError. Modules that never call open() import nothing.
 
 
 def write_greeting() -> int:

@@ -45,7 +45,7 @@ fn byte(offset: u64) -> MemArg {
 /// cannot. `None` means every `emit_*_eq` below handles the type.
 pub(crate) fn eq_unsupported(ctx: &CompilationContext, ty: &IRType) -> Option<String> {
     match ty {
-        IRType::Int | IRType::Bool | IRType::None | IRType::Float => None,
+        IRType::Int | IRType::Bool | IRType::None | IRType::Float | IRType::ClassRef(_) => None,
         IRType::String | IRType::Bytes => None,
         IRType::Class(name) => {
             // An `__eq__` that can raise cannot be called from inside the
@@ -66,6 +66,12 @@ pub(crate) fn eq_unsupported(ctx: &CompilationContext, ty: &IRType) -> Option<St
         IRType::List(elem) => match elem.as_ref() {
             IRType::Unknown | IRType::Any => {
                 Some("a list whose element type is not known".to_string())
+            }
+            e => eq_unsupported(ctx, e),
+        },
+        IRType::VarTuple(elem) => match elem.as_ref() {
+            IRType::Unknown | IRType::Any => {
+                Some("a tuple whose member type is not known".to_string())
             }
             e => eq_unsupported(ctx, e),
         },
@@ -90,7 +96,7 @@ pub(crate) fn eq_unsupported(ctx: &CompilationContext, ty: &IRType) -> Option<St
 pub(crate) fn hash_unsupported(ctx: &CompilationContext, ty: &IRType) -> Option<String> {
     match ty {
         IRType::Unknown | IRType::Any => None,
-        IRType::Int | IRType::Bool | IRType::None | IRType::Float => None,
+        IRType::Int | IRType::Bool | IRType::None | IRType::Float | IRType::ClassRef(_) => None,
         IRType::String | IRType::Bytes => None,
         IRType::List(_) => Some("unhashable type: 'list'".to_string()),
         IRType::Dict(_, _) => Some("unhashable type: 'dict'".to_string()),
@@ -99,6 +105,12 @@ pub(crate) fn hash_unsupported(ctx: &CompilationContext, ty: &IRType) -> Option<
             Some("a tuple whose member types are not known".to_string())
         }
         IRType::Tuple(members) => members.iter().find_map(|m| hash_unsupported(ctx, m)),
+        IRType::VarTuple(member) => match member.as_ref() {
+            IRType::Unknown | IRType::Any => {
+                Some("a tuple whose member type is not known".to_string())
+            }
+            m => hash_unsupported(ctx, m),
+        },
         // A class hashes by identity, which agrees with its equality only when
         // it does not define `__eq__`. With one, CPython sets `__hash__` to
         // None unless the class defines it too, and calling a user `__hash__`
@@ -120,9 +132,9 @@ pub(crate) fn order_unsupported(ctx: &CompilationContext, ty: &IRType) -> Option
     match ty {
         IRType::Int | IRType::Bool | IRType::Float => None,
         IRType::String | IRType::Bytes => None,
-        IRType::List(elem) => match elem.as_ref() {
+        IRType::List(elem) | IRType::VarTuple(elem) => match elem.as_ref() {
             IRType::Unknown | IRType::Any => {
-                Some("a list whose element type is not known".to_string())
+                Some("a sequence whose element type is not known".to_string())
             }
             e => order_unsupported(ctx, e).or_else(|| eq_unsupported(ctx, e)),
         },
@@ -223,7 +235,8 @@ pub(crate) fn emit_values_eq(
             }
         }
         IRType::Tuple(members) => emit_tuple_eq(func, ctx, members, a, b),
-        IRType::List(elem) => emit_list_eq(func, ctx, elem, a, b),
+        // Laid out as a list, and compared as one.
+        IRType::List(elem) | IRType::VarTuple(elem) => emit_list_eq(func, ctx, elem, a, b),
         _ => {
             func.instruction(&Instruction::LocalGet(a));
             func.instruction(&Instruction::LocalGet(b));
@@ -385,7 +398,7 @@ pub(crate) fn emit_values_order(
             func.instruction(&i32_order(op));
         }
         IRType::Tuple(members) => emit_tuple_order(func, ctx, members, a, b, op),
-        IRType::List(elem) => emit_list_order(func, ctx, elem, a, b, op),
+        IRType::List(elem) | IRType::VarTuple(elem) => emit_list_order(func, ctx, elem, a, b, op),
         _ => {
             func.instruction(&Instruction::LocalGet(a));
             func.instruction(&Instruction::LocalGet(b));
@@ -601,97 +614,4 @@ pub(crate) fn emit_str_cmp(func: &mut Function, ctx: &CompilationContext, a: u32
     func.instruction(&Instruction::End);
     func.instruction(&Instruction::LocalGet(res));
     release(ctx, 7);
-}
-
-/// Push the hash of the value of type `ty` in word local `v`. Equal values
-/// hash equal: a string by its bytes (FNV-1a), a tuple by its members
-/// (CPython's multiply-and-xor combine), anything else by its word. `ty` must
-/// pass [`hash_unsupported`] and must not be a float.
-pub(crate) fn emit_value_hash(func: &mut Function, ctx: &CompilationContext, ty: &IRType, v: u32) {
-    match ty {
-        IRType::String | IRType::Bytes => {
-            let h = hold(ctx);
-            let n = hold(ctx);
-            let i = hold(ctx);
-            func.instruction(&Instruction::I32Const(0x811c_9dc5_u32 as i32));
-            func.instruction(&Instruction::LocalSet(h));
-            func.instruction(&Instruction::LocalGet(v));
-            func.instruction(&Instruction::I32Const(STRING_LEN_PREFIX as i32));
-            func.instruction(&Instruction::I32Sub);
-            func.instruction(&Instruction::I32Load(mem(0)));
-            func.instruction(&Instruction::LocalSet(n));
-            func.instruction(&Instruction::I32Const(0));
-            func.instruction(&Instruction::LocalSet(i));
-            func.instruction(&Instruction::Block(BlockType::Empty));
-            func.instruction(&Instruction::Loop(BlockType::Empty));
-            func.instruction(&Instruction::LocalGet(i));
-            func.instruction(&Instruction::LocalGet(n));
-            func.instruction(&Instruction::I32GeU);
-            func.instruction(&Instruction::BrIf(1));
-            func.instruction(&Instruction::LocalGet(h));
-            func.instruction(&Instruction::LocalGet(v));
-            func.instruction(&Instruction::LocalGet(i));
-            func.instruction(&Instruction::I32Add);
-            func.instruction(&Instruction::I32Load8U(byte(0)));
-            func.instruction(&Instruction::I32Xor);
-            func.instruction(&Instruction::I32Const(0x0100_0193));
-            func.instruction(&Instruction::I32Mul);
-            func.instruction(&Instruction::LocalSet(h));
-            func.instruction(&Instruction::LocalGet(i));
-            func.instruction(&Instruction::I32Const(1));
-            func.instruction(&Instruction::I32Add);
-            func.instruction(&Instruction::LocalSet(i));
-            func.instruction(&Instruction::Br(0));
-            func.instruction(&Instruction::End);
-            func.instruction(&Instruction::End);
-            func.instruction(&Instruction::LocalGet(h));
-            release(ctx, 3);
-        }
-        IRType::Tuple(members) => {
-            let h = hold(ctx);
-            let s = hold(ctx);
-            func.instruction(&Instruction::I32Const(0x0034_5678));
-            func.instruction(&Instruction::LocalSet(h));
-            for (i, member) in members.iter().enumerate() {
-                push_element_addr(func, v, None, i as u32);
-                func.instruction(&Instruction::LocalSet(s));
-                func.instruction(&Instruction::LocalGet(h));
-                emit_slot_hash(func, ctx, member, s);
-                func.instruction(&Instruction::I32Xor);
-                func.instruction(&Instruction::I32Const(1_000_003));
-                func.instruction(&Instruction::I32Mul);
-                func.instruction(&Instruction::LocalSet(h));
-            }
-            func.instruction(&Instruction::LocalGet(h));
-            release(ctx, 2);
-        }
-        _ => {
-            func.instruction(&Instruction::LocalGet(v));
-        }
-    }
-}
-
-/// Push the hash of the value of type `ty` in the slot at address `s`.
-pub(crate) fn emit_slot_hash(func: &mut Function, ctx: &CompilationContext, ty: &IRType, s: u32) {
-    if matches!(ty, IRType::Float) {
-        // high32(bits) ^ low32(bits), the fold sets already use for floats.
-        for high in [true, false] {
-            func.instruction(&Instruction::LocalGet(s));
-            func.instruction(&Instruction::F64Load(mem(0)));
-            func.instruction(&Instruction::I64ReinterpretF64);
-            if high {
-                func.instruction(&Instruction::I64Const(32));
-                func.instruction(&Instruction::I64ShrU);
-            }
-            func.instruction(&Instruction::I32WrapI64);
-        }
-        func.instruction(&Instruction::I32Xor);
-        return;
-    }
-    let v = hold(ctx);
-    func.instruction(&Instruction::LocalGet(s));
-    func.instruction(&Instruction::I32Load(mem(0)));
-    func.instruction(&Instruction::LocalSet(v));
-    emit_value_hash(func, ctx, ty, v);
-    release(ctx, 1);
 }

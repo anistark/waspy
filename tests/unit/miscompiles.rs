@@ -76,11 +76,11 @@ fn unknown_methods_name_the_method_and_the_receiver() {
                 \n\
                 def f() -> int:\n\
                 \x20   d: Dict[str, int] = {\"a\": 1}\n\
-                \x20   d.popitem()\n\
+                \x20   d.frobnicate()\n\
                 \x20   return d[\"a\"]\n";
     let err = try_compile(dict).expect_err("an unknown dict method must be rejected");
     assert!(
-        err.contains("popitem") && err.contains("dict"),
+        err.contains("frobnicate") && err.contains("dict"),
         "expected the method and receiver, got: {err}"
     );
 }
@@ -493,46 +493,57 @@ fn a_file_that_cannot_be_parsed_reports_why() {
 // unnoticed and so the fix has a test waiting for it. A known defect with a
 // test is a roadmap item; a known defect without one is a future surprise.
 
-/// A lambda's parameters carry no type (#115), so code generation reads one as
-/// a bare word. That was not the loud failure the roadmap recorded it as:
-/// `(lambda kv: kv[1])((1, 5))` answered 0 where CPython answers 5, and
-/// `(lambda w: len(w))("abcd")` answered 1684234849, which is the four bytes
-/// read as an integer. Both compiled and reported success.
-///
-/// Typing a lambda's parameters from its call sites is a typing pass of its
-/// own, so until then the three uses that need the type are refused rather
-/// than miscompiled.
+/// A lambda's parameters carry no type (#115), so code generation read one as
+/// a bare word: `(lambda kv: kv[1])((1, 5))` answered 0 where CPython answers
+/// 5, and `(lambda w: len(w))("abcd")` answered 1684234849, the four bytes
+/// read as an integer. Both compiled and reported success. The uses that need
+/// the type were refused next; now a lambda's parameters are typed from the
+/// calls that pass them, so each answers CPython's value.
 #[test]
-fn a_lambda_parameter_that_needs_a_type_is_refused() {
+fn a_lambda_parameter_is_typed_from_its_calls() {
     let indexed = "from typing import List, Tuple\n\
                    \n\
                    def f() -> int:\n\
                    \x20   pairs: List[Tuple[int, int]] = [(1, 5)]\n\
                    \x20   g = lambda kv: kv[1]\n\
                    \x20   return g(pairs[0])\n";
-    let err = try_compile(indexed).expect_err("indexing a lambda parameter must be rejected");
-    assert!(
-        err.contains("lambda parameter carries no type") && err.contains("'kv'"),
-        "expected the parameter and the reason, got: {err}"
-    );
+    assert_eq!(call_i32(indexed, "f"), 5);
 
     let measured = "def f() -> int:\n\
                     \x20   g = lambda w: len(w)\n\
                     \x20   return g(\"abcd\")\n";
-    let err = try_compile(measured).expect_err("len() of a lambda parameter must be rejected");
-    assert!(
-        err.contains("len()") && err.contains("'w'"),
-        "expected len() and the parameter, got: {err}"
-    );
+    assert_eq!(call_i32(measured, "f"), 4);
 
     let method = "def f() -> str:\n\
                   \x20   g = lambda w: w.upper()\n\
                   \x20   return g(\"ab\")\n";
-    let err = try_compile(method).expect_err("a method on a lambda parameter must be rejected");
+    assert_eq!(call_str(method, "f"), "AB");
+}
+
+/// A parameter nothing types stays untyped, holding only a word, and a use of
+/// it that needs a type is refused where code generation meets it. Indexing an
+/// untyped value answered 0 even outside a lambda: `def g(kv): return kv[1]`
+/// called with 5, where CPython raises TypeError.
+#[test]
+fn an_untyped_value_that_needs_a_type_is_refused() {
+    let lambda = "def apply(fn, v: int) -> int:\n\
+                  \x20   return fn(v)\n\
+                  \n\
+                  def f() -> int:\n\
+                  \x20   return apply(lambda kv: kv[0], 5)\n";
+    let err = try_compile(lambda).expect_err("indexing an untyped parameter must be rejected");
     assert!(
-        err.contains(".upper()") && err.contains("'w'"),
-        "expected the method and the parameter, got: {err}"
+        err.contains("cannot be indexed") && err.contains("<lambda>"),
+        "expected the refusal and the function, got: {err}"
     );
+
+    let def = "def g(kv) -> int:\n\
+               \x20   return kv[1]\n\
+               \n\
+               def f() -> int:\n\
+               \x20   return g(5)\n";
+    let err = try_compile(def).expect_err("indexing an untyped parameter must be rejected");
+    assert!(err.contains("cannot be indexed"), "got: {err}");
 }
 
 /// The refusal above must stay narrow. Arithmetic and comparison on an untyped
@@ -1253,13 +1264,12 @@ fn unimplemented_decorators_are_refused_and_caching_ones_accepted() {
 
     let cases: [(&str, &str); 3] = [
         (
-            "def deco(fn):\n\
-             \x20   return fn\n\
+            "import functools\n\
              \n\
-             @deco\n\
+             @functools.partial\n\
              def g(x: int) -> int:\n\
              \x20   return x + 1\n",
-            "'@deco' on function 'g'",
+            "'@functools.partial' on function 'g'",
         ),
         (
             "from functools import cached_property\n\
@@ -1954,16 +1964,15 @@ fn int_of_a_string_parses_it() {
     assert_eq!(call_i32(propagated, "f"), 1);
 }
 
-/// What `int()` and `float()` cannot do honestly is refused: `float()` of a
-/// string needs correctly rounded parsing (it converted the string's length
-/// before), and `int()` of a collection or instance is a TypeError in CPython
-/// (it passed the pointer through as a number).
+/// `float()` of a string converted the string's length; it parses the
+/// string now, correctly rounded. `int()` of a collection or instance is a
+/// TypeError in CPython (it passed the pointer through as a number), so it is
+/// refused.
 #[test]
 fn conversions_that_cannot_be_made_good_on_are_refused() {
     let float_of_str = "def f() -> float:\n\
                         \x20   return float(\"2.5\")\n";
-    let err = try_compile(float_of_str).expect_err("float() of a string must be refused");
-    assert!(err.contains("float() of a string"), "got: {err}");
+    assert_eq!(call_f64(float_of_str, "f"), 2.5);
 
     let int_of_list = "from typing import List\n\
                        \n\
@@ -2251,8 +2260,35 @@ fn a_list_of_lists_binds_typed_rows_and_sum_refuses_what_it_cannot_walk() {
                    def f() -> int:\n\
                    \x20   s: Set[int] = {1, 2}\n\
                    \x20   return sum(s)\n";
-    let err = try_compile(set_sum).expect_err("sum() of a set must be refused");
-    assert!(err.contains("sum() of a value of type"), "got: {err}");
+    // A set is walked member by member now; CPython answers 3.
+    assert_eq!(call_i32(set_sum, "f"), 3);
+    let dict_sum = "from typing import Dict\n\
+                    \n\
+                    def f() -> int:\n\
+                    \x20   d: Dict[int, int] = {1: 2, 5: 9}\n\
+                    \x20   return sum(d)\n";
+    // A dict walks its keys; CPython answers 6.
+    assert_eq!(call_i32(dict_sum, "f"), 6);
+}
+
+/// A comprehension, `sum`, `sorted`, `min`, or `max` over a dict walked its
+/// entries' slots as a list's, keys and values interleaved, so
+/// `[k for k in {5: 3, 7: 2}]` was `[5, 3]` and a str key read as an int.
+/// They walk its keys now, as CPython does.
+#[test]
+fn walking_a_dict_visits_its_keys() {
+    let src = dedent(
+        r#"
+        def f() -> str:
+            c = {"a": 3, "b": 2}
+            d = {5: 3, 7: 2}
+            return str([w for w in c]) + str([(w, c[w]) for w in c]) + str([k for k in d]) + str(sum(d)) + str(sorted(c)) + str(max(d))
+        "#,
+    );
+    assert_eq!(
+        call_str(&src, "f"),
+        "['a', 'b'][('a', 3), ('b', 2)][5, 7]12['a', 'b']7"
+    );
 }
 
 /// `a or b or c` is one operation over three operands in Python's AST, and only
@@ -3410,12 +3446,16 @@ fn generators_have_no_len_and_lead_zip() {
         &format!("{gen}def f() -> int:\n    return len(evens(3))\n"),
         "object of type 'generator' has no len()",
     );
-    refused(
-        &format!(
-            "{gen}def f() -> int:\n    t = 0\n    for a, b in zip([1, 2], evens(3)):\n        \
-             t += a * b\n    return t\n"
+    // A later argument is pulled one value per round, as zip pulls it.
+    assert_eq!(
+        call_i32(
+            &format!(
+                "{gen}def f() -> int:\n    t = 0\n    for a, b in zip([1, 2], evens(3)):\n        \
+                 t += a * b\n    return t\n"
+            ),
+            "f"
         ),
-        "to zip() after its first argument",
+        2
     );
 }
 
@@ -3507,9 +3547,9 @@ fn min_and_max_follow_cpython() {
     assert_eq!(call_f64(&src, "nan_second"), 1.0);
     assert_eq!(call_str(&src, "strings"), "babd");
     assert_eq!(call_i32(&src, "ints"), 9);
-    refused(
-        "def f() -> int:\n    return min([3, 1])\n",
-        "single iterable",
+    assert_eq!(
+        call_i32("def f() -> int:\n    return min([3, 1])\n", "f"),
+        1
     );
     refused(
         "def f() -> float:\n    return max(1, 2.5)\n",
@@ -3561,16 +3601,19 @@ fn isinstance_against_builtin_types_and_tuples() {
     );
 }
 
-/// `except E as e` binds the exception's type code, not an object, so
-/// `str(e)` answered "1" and `isinstance(e, E)` False. Until exception
-/// objects land, the name can only be re-raised; and re-raising, bare or by
-/// name, now raises the caught exception again rather than a generic one.
+/// `except E as e` bound the exception's type code, not an object, so
+/// `str(e)` answered "1" and `isinstance(e, E)` False; it binds the
+/// exception object now. Re-raising, bare or by name, raises the caught
+/// exception again rather than a generic one.
 #[test]
 fn except_as_names_only_re_raise_the_caught_exception() {
-    refused(
-        "def f() -> int:\n    try:\n        raise ValueError(\"boom\")\n    \
-         except ValueError as e:\n        return len(str(e))\n",
-        "can only be re-raised",
+    assert_eq!(
+        call_i32(
+            "def f() -> int:\n    try:\n        raise ValueError(\"boom\")\n    \
+             except ValueError as e:\n        return len(str(e))\n",
+            "f"
+        ),
+        4
     );
     let src = dedent(
         r#"
@@ -3819,8 +3862,8 @@ fn standard_library_placeholders_are_refused() {
             "'os.path.join()'",
         ),
         (
-            "import sys\n\ndef f() -> int:\n    return len(sys.argv)\n",
-            "'sys.argv'",
+            "import sys\n\ndef f() -> int:\n    return len(sys.path)\n",
+            "'sys.path'",
         ),
         (
             "import datetime\n\ndef f() -> int:\n    d = datetime.datetime.now()\n    return 1\n",
@@ -3907,7 +3950,7 @@ fn standard_library_string_constants() {
 
 /// Constant `%` formatting rendered `%5d`, `%.2f`, and `%r` as written, `%x`
 /// in decimal, `%d` of a float with its fraction, and `%s` of True as
-/// "true". A runtime operand failed validation; it is refused until 0.19.0.
+/// "true". A runtime operand failed validation; it formats now.
 #[test]
 fn constant_percent_formatting_matches_cpython() {
     let src = dedent(
@@ -3929,10 +3972,25 @@ fn constant_percent_formatting_matches_cpython() {
     assert_eq!(call_str(&src, "flags"), "+0042|-1.00 |0xff|10|BEE");
     assert_eq!(call_str(&src, "conversions"), "3 True \"it's\" %");
     assert_eq!(call_str(&src, "strings"), "a|   ab|cd   |");
-    refused("def f(n: int) -> str:\n    return \"%d!\" % n\n", "0.19.0");
+    assert_eq!(
+        call_str_1("def f(n: int) -> str:\n    return \"%d!\" % n\n", "f", 7),
+        "7!"
+    );
     refused(
         "def f() -> str:\n    return \"%d %d\" % (1,)\n",
         "not enough arguments",
+    );
+    refused(
+        "def f() -> str:\n    return \"%d\" % (1, 2)\n",
+        "not all arguments converted",
+    );
+    refused(
+        "def f() -> str:\n    return \"%q\" % 1\n",
+        "unsupported format character 'q'",
+    );
+    refused(
+        "def f() -> str:\n    return \"%x\" % 1.5\n",
+        "an integer is required",
     );
 }
 
@@ -3956,17 +4014,30 @@ fn decorators_cpython_does_not_define_are_refused() {
     }
 }
 
-/// `print()` writes nothing until the host interface lands in 0.19.0, so a
-/// program that prints imports nothing. This pins that state: when print
-/// gains a host import, this test fails, and the README's statement that
-/// print writes nothing has to change with it.
+/// `print()` wrote nothing: a module had no output channel. It writes to
+/// standard output through WASI's `fd_write`, the one import a program that
+/// prints makes; a program that does not print imports nothing.
 #[test]
-fn print_writes_nothing_and_imports_nothing_yet() {
-    let src = "def f() -> int:\n    print(\"hello\", 1)\n    return 3\n";
+fn print_writes_to_stdout_through_wasi() {
+    let src = "def f() -> int:\n    print(\"hello\", 1, 2.5, [1, 2], sep=\"|\")\n    return 3\n";
     let wasm = try_compile(src).expect("print compiles");
     let module = wasmi::Module::new(&wasmi::Engine::default(), &wasm[..]).expect("valid module");
-    assert_eq!(module.imports().count(), 0, "print gained a host import");
-    assert_eq!(call_i32(src, "f"), 3);
+    let imports: Vec<String> = module
+        .imports()
+        .map(|i| format!("{}.{}", i.module(), i.name()))
+        .collect();
+    assert_eq!(imports, ["wasi_snapshot_preview1.fd_write"]);
+    assert_eq!(
+        harness::call_i32_printing(src, "f"),
+        (3, "hello|1|2.5|[1, 2]\n".to_string())
+    );
+    let quiet = try_compile("def f() -> int:\n    return 3\n").expect("compiles");
+    let module = wasmi::Module::new(&wasmi::Engine::default(), &quiet[..]).expect("valid module");
+    assert_eq!(
+        module.imports().count(),
+        0,
+        "a program that prints nothing imports nothing"
+    );
 }
 
 /// Placeholders the audit found in calls the board did not list: `super()`
@@ -4040,9 +4111,13 @@ fn identity_and_is_none() {
     assert_eq!(call_i32(&src, "walk"), 3);
     assert_eq!(call_str(&src, "labels"), "nonea");
     assert_eq!(call_i32(&src, "instances"), 11);
+    // An optional int is boxed, so None is told apart from 0; past the None
+    // test its number is returned as an int.
+    let narrowed = "from typing import Optional\n\ndef f(x: Optional[int]) -> int:\n    if x is None:\n        \
+                    return -1\n    return x\n\ndef g() -> int:\n    return f(None) * 100 + f(0) * 10 + f(7)\n";
+    assert_eq!(call_i32(narrowed, "g"), -93);
     refused(
-        "from typing import Optional\n\ndef f(x: Optional[int]) -> int:\n    if x is None:\n        \
-         return -1\n    return x\n",
+        "def f(x) -> int:\n    return 1 if x is None else 2\n",
         "cannot tell None from 0",
     );
 }
@@ -4081,10 +4156,14 @@ fn generator_unpacking_survives_yield() {
     );
     assert_eq!(call_i32(&src, "total"), 88);
     assert_eq!(call_i32(&src, "weighted"), 5);
-    refused(
-        "def lost():\n    for i in range(3):\n        pass\n    yield 1\n    yield i\n\n\
-         def f() -> int:\n    t = 0\n    for x in lost():\n        t += x\n    return t\n",
-        "does not survive the 'yield'",
+    // A loop target read after a `yield` keeps the loop's last value.
+    assert_eq!(
+        call_i32(
+            "def lost():\n    for i in range(3):\n        pass\n    yield 1\n    yield i\n\n\
+             def f() -> int:\n    t = 0\n    for x in lost():\n        t += x\n    return t\n",
+            "f"
+        ),
+        3
     );
 }
 
@@ -4497,4 +4576,344 @@ fn dict_get_keeps_its_operands_and_width() {
     assert_eq!(call_i32(&src, "nested_default"), 21);
     assert_eq!(call_f64(&src, "float_value"), 3.5);
     assert_eq!(call_i32(&src, "str_value"), 53);
+}
+
+// ---------------------------------------------------------------------------
+// Values of the wrong type in a typed place
+// ---------------------------------------------------------------------------
+
+/// A collection whose elements are of another type than the slot's is
+/// refused. A `List[str]` passed as a `List[int]` answered with the string's
+/// offset plus one (5), a `str` appended to a `List[int]` the same, and a
+/// `str` stored as a `Dict[str, int]` value 18; CPython raises TypeError at
+/// each `+ 1`.
+#[test]
+fn collections_of_the_wrong_element_type_are_refused() {
+    let cases = [
+        (
+            "from typing import List\n\ndef g(xs: List[int]) -> int:\n    return xs[0] + 1\n\ndef f() -> int:\n    return g([\"ab\"])\n",
+            "its elements are read back as 'int' and they are 'str'",
+        ),
+        (
+            "from typing import List\n\ndef f() -> int:\n    xs: List[int] = []\n    xs.append(\"ab\")\n    return xs[0] + 1\n",
+            "stores a 'str' into a collection whose elements are 'int'",
+        ),
+        (
+            "from typing import Dict\n\ndef f() -> int:\n    d: Dict[str, int] = {}\n    d[\"k\"] = \"zz\"\n    return d[\"k\"] + 1\n",
+            "stores a 'str' into a collection whose elements are 'int'",
+        ),
+    ];
+    for (source, needle) in cases {
+        let err = try_compile(source).expect_err("must be refused");
+        assert!(err.contains(needle), "expected `{needle}` in: {err}");
+    }
+}
+
+/// An int passed to a float parameter is widened. The module failed
+/// validation, blamed on code generation.
+#[test]
+fn an_int_argument_widens_to_a_float_parameter() {
+    let src = dedent(
+        r#"
+        def g(x: float) -> float:
+            return x * 2
+
+        def f() -> float:
+            n = 3
+            return g(1) + g(n)
+        "#,
+    );
+    assert_eq!(call_f64(&src, "f"), 8.0);
+}
+
+/// A `for` loop over a set walked its hash table as a list, so the loop bound
+/// arbitrary words (`for x in {1, 9, 17}` summed to 37855888 through a
+/// parameter), and a comprehension over a set built nothing (its sum was 0).
+/// Every walk of a set now visits its members in CPython's order.
+#[test]
+fn iterating_a_set_visits_its_members() {
+    let src = dedent(
+        r#"
+        from typing import Set
+
+        def total(s: Set[int]) -> int:
+            r = 0
+            for x in s:
+                r = r + x
+            return r
+
+        def through_a_parameter() -> int:
+            return total({1, 9, 17})
+
+        def in_order() -> int:
+            s = {1, 9, 17}
+            r = 0
+            for x in s:
+                r = r * 100 + x
+            return r
+
+        def comprehension() -> int:
+            s = {1, 9, 17}
+            return sum([x for x in s])
+
+        def builtins() -> int:
+            s = {5, 3, 8}
+            return sum(s) * 100 + max(s) * 10 + min(s) + sorted(s)[1] * 1000
+        "#,
+    );
+    assert_eq!(call_i32(&src, "through_a_parameter"), 27);
+    assert_eq!(call_i32(&src, "in_order"), 10917);
+    assert_eq!(call_i32(&src, "comprehension"), 27);
+    assert_eq!(call_i32(&src, "builtins"), 6683);
+}
+
+/// Walking a tuple read every member at one type: `sorted((1, "a"))`
+/// answered `[1, 9]` (the string's address sorted as an int), `sum` added the
+/// address, and `for x in (1, "a")` read out of bounds. A walk over a tuple
+/// whose members differ is refused now; one whose members agree walks as a
+/// list does.
+#[test]
+fn walking_a_tuple_of_mixed_types_is_refused() {
+    for src in [
+        "def f() -> str:\n    return str(sorted((1, \"a\")))\n",
+        "def f() -> int:\n    return sum((1, \"a\"))\n",
+        "def f() -> int:\n    n = 0\n    for x in (1, \"a\"):\n        n += 1\n    return n\n",
+    ] {
+        refused(src, "members have different types");
+    }
+    let uniform = dedent(
+        r#"
+        def f() -> str:
+            t = (3, 1, 2)
+            out = ""
+            for x in t:
+                out = out + str(x)
+            return out + str(sorted(t)) + str(sum(t)) + str([y * 2 for y in t])
+        "#,
+    );
+    assert_eq!(call_str(&uniform, "f"), "312[1, 2, 3]6[6, 2, 4]");
+}
+
+/// `in` scanned a list at the needle's type, so `"a" in [1]` loaded the int
+/// as a string pointer and `1 in [1.0]` read the float's low word; both
+/// trapped. A tuple is searched position by position, each member at its
+/// own type, and `tuple.index` of a missing value raises ValueError instead
+/// of trapping.
+#[test]
+fn membership_compares_at_the_elements_type() {
+    let src = dedent(
+        r#"
+        def members() -> str:
+            xs = [1.0, 2.0]
+            ys = [1, 2]
+            zs = ["a", "b"]
+            t = (1, "a", 2.5)
+            return str(1 in xs) + str(2.0 in ys) + str(2.5 in ys) + str(1 in zs) + str("a" in ys) + str(True in ys) + str("a" in t) + str(2 in t) + str(1.0 in t) + str(t.count(1))
+
+        def missing() -> int:
+            t = (1, "a")
+            try:
+                return t.index("b")
+            except ValueError:
+                return -1
+        "#,
+    );
+    assert_eq!(
+        call_str(&src, "members"),
+        "TrueTrueFalseFalseFalseTrueTrueFalseTrue1"
+    );
+    assert_eq!(call_i32(&src, "missing"), -1);
+}
+
+/// A runtime str was indexed by UTF-8 bytes: `len("aßc")` built at run time
+/// was 4, `s[1]` half of the `ß`, `s.find("c")` 3, a slice could cut a
+/// character, and `center` with a multi-byte fill trapped. A comprehension
+/// over any runtime str read its text as a list header and trapped. Each
+/// expected value is CPython's.
+#[test]
+fn strings_count_code_points() {
+    let src = dedent(
+        r#"
+        def f(n: int) -> str:
+            s = str(n)[0:0] + "aßc"
+            return str(len(s)) + s[1] + s[-2] + "|" + s[1:3] + "|" + s[::-1] + s[::2] + "|" + str(s.find("c")) + str(s.index("c")) + "|" + s.center(6, "é") + s.ljust(5, "*") + "|" + str([c for c in s])
+        "#,
+    );
+    assert_eq!(
+        call_str_1(&src, "f", 1),
+        "3ßß|ßc|cßaac|22|éaßcééaßc**|['a', 'ß', 'c']"
+    );
+}
+
+/// Case methods and predicates folded on a literal used Rust's rules where
+/// CPython's differ: `title()` started a word only after whitespace,
+/// `capitalize()` uppercased where CPython titlecases, `strip()` kept the
+/// `\x1c` separators, `"123".isupper()` was True, and a folded `index()` of a
+/// missing substring answered 0. At run time a non-ASCII character trapped
+/// in a case method and failed every predicate.
+#[test]
+fn case_methods_and_predicates_follow_cpython() {
+    let src = dedent(
+        r#"
+        def literal() -> str:
+            return "hello-world 3rd".title() + "|" + "ǆemal".capitalize() + "|" + "\x1chi\x1c".strip() + "|" + str("123".isupper()) + "|" + str("aßc".find("c"))
+
+        def runtime(n: int) -> str:
+            s = str(n)[0:0] + "straße ΑΣ é"
+            return s.upper() + "|" + s.lower() + "|" + s.title() + "|" + str(s[10].isalpha())
+
+        def missing() -> int:
+            try:
+                return "abc".index("z")
+            except ValueError:
+                return -1
+        "#,
+    );
+    assert_eq!(
+        call_str(&src, "literal"),
+        "Hello-World 3Rd|\u{1c5}emal|hi|False|2"
+    );
+    assert_eq!(
+        call_str_1(&src, "runtime", 1),
+        "STRASSE \u{391}\u{3a3} \u{c9}|stra\u{df}e \u{3b1}\u{3c2} \u{e9}|Stra\u{df}e \u{391}\u{3c2} \u{c9}|True"
+    );
+    assert_eq!(call_i32(&src, "missing"), -1);
+}
+
+/// A dataclass's generated `__repr__` quoted a str field without escaping it
+/// and was not generated for a float or collection field; it renders each
+/// field with `repr()`, as CPython's does.
+#[test]
+fn dataclass_repr_renders_each_field_with_repr() {
+    let src = dedent(
+        r#"
+        from dataclasses import dataclass
+        from typing import List
+
+        @dataclass
+        class P:
+            x: int
+            y: float
+            name: str
+            tags: List[str]
+
+        def f() -> str:
+            return str(P(1, 2.5, "it's", ["a"])) + repr([P(2, 0.5, "q", [])])
+        "#,
+    );
+    assert_eq!(
+        call_str(&src, "f"),
+        "P(x=1, y=2.5, name=\"it's\", tags=['a'])[P(x=2, y=0.5, name='q', tags=[])]"
+    );
+}
+
+/// A range loop counts in a local of its own: counting in the target left it
+/// at the stop value after the loop (CPython leaves the last value), set it
+/// for an empty range, and let the body's assignments to it change the
+/// iteration. A `for` over a value that is not iterable is refused; it was
+/// counted down as a length.
+#[test]
+fn range_loop_target_is_the_last_value() {
+    let src = dedent(
+        r#"
+        def f() -> int:
+            i = 0
+            for i in range(3):
+                pass
+            j = 7
+            for j in range(10, 0, -3):
+                pass
+            k = 5
+            for k in range(0):
+                pass
+            n = 0
+            for m in range(4):
+                n += 1
+                m += 10
+            return i * 1000 + j * 100 + k * 10 + n
+        "#,
+    );
+    assert_eq!(call_i32(&src, "f"), 2154);
+    refused(
+        "def f() -> int:\n    t = 0\n    for x in 5:\n        t += 1\n    return t\n",
+        "a 'for' loop over a value of type 'int' is not supported",
+    );
+}
+
+/// After a `zip()` cut short by a later argument, the targets hold the last
+/// whole tuple: the first target was bound before the round was known to
+/// complete.
+#[test]
+fn zip_targets_keep_the_last_whole_tuple() {
+    let src =
+        "def f() -> int:\n    a = 0\n    b = 0\n    for a, b in zip([1, 2, 3], [9]):\n        \
+               pass\n    return a * 100 + b\n";
+    assert_eq!(call_i32(src, "f"), 109);
+}
+
+/// A generator yielding text is typed str; it was typed int, so its
+/// consumers read each string's address.
+#[test]
+fn string_generators_yield_strings() {
+    let src = dedent(
+        r#"
+        def words():
+            yield "a"
+            yield "bc"
+
+        def f() -> str:
+            out = ""
+            for w in words():
+                out += w
+            return out + str(len([w for w in words()]))
+        "#,
+    );
+    assert_eq!(call_str(&src, "f"), "abc2");
+}
+
+/// A generator object whose class the generator pass cannot see where it is
+/// iterated is refused; it was walked as a list header.
+#[test]
+fn untracked_generator_iteration_is_refused() {
+    refused(
+        "def gen():\n    yield 1\n\nclass Box:\n    def make(self):\n        return gen()\n\n\
+         def f() -> int:\n    t = 0\n    for v in Box().make():\n        t += v\n    return t\n",
+        "iterating the generator 'gen()' here is not supported",
+    );
+}
+
+/// A class variable read through an instance reads the class's (or the
+/// subclass's own): it was laid out as an instance field nothing set, so
+/// `self.label` trapped on a string and read 0 for an int. Assigning one
+/// through its class's name from a function rebinds it for every reader; it
+/// was refused, and a constant one was inlined at every read.
+#[test]
+fn class_variables_through_instances_and_writes() {
+    let src = dedent(
+        r#"
+        class Counter:
+            created = 0
+            label = "c"
+
+            def __init__(self) -> None:
+                Counter.created += 1
+                self.id = Counter.created
+
+            def describe(self) -> str:
+                return self.label + str(self.id) + "/" + str(self.created)
+
+        class Sub(Counter):
+            label = "s"
+
+        def f() -> str:
+            a = Counter()
+            b = Sub()
+            return a.describe() + "," + b.describe() + "," + str(Sub.created)
+        "#,
+    );
+    assert_eq!(call_str(&src, "f"), "c1/2,s2/2,2");
+    refused(
+        "class A:\n    n = 0\n\nclass B(A):\n    pass\n\ndef f() -> int:\n    B.n = 1\n    return 0\n",
+        "gives 'B' an attribute of its own that shadows 'A.n'",
+    );
 }

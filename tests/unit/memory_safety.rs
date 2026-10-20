@@ -439,11 +439,11 @@ fn removing_a_missing_member_traps_but_discarding_does_not() {
 fn unsupported_set_methods_are_a_compile_error() {
     let src = "def f() -> int:\n\
                \x20   s = {1}\n\
-               \x20   s.update({2})\n\
+               \x20   s.frobnicate({2})\n\
                \x20   return len(s)\n";
-    let err = try_compile(src).expect_err("update() is not implemented");
+    let err = try_compile(src).expect_err("frobnicate() is not a set method");
     assert!(
-        err.contains("'update' is not supported"),
+        err.contains("'frobnicate' is not a set method"),
         "unexpected: {err}"
     );
     assert!(
@@ -673,10 +673,6 @@ fn mixed_width_literals_are_a_compile_error() {
             "list literal mixing float and int",
         ),
         (
-            "def f() -> float:\n    t = (1, 2.5)\n    return t[1]\n",
-            "tuple literal mixing float and int",
-        ),
-        (
             "def f() -> float:\n    d = {1: 1.5, 2: 2}\n    return d[1]\n",
             "dict literal's values mixing float and int",
         ),
@@ -699,8 +695,20 @@ fn mixed_width_literals_are_a_compile_error() {
         );
     }
 
-    // Uniform literals are unaffected, including bools next to ints (Python
-    // treats bool as an int, and both live in the slot's low word).
+    // A tuple is typed per position, so its int and float each read at
+    // their own width; a walk over it, which reads one width, is refused.
+    assert_eq!(
+        call_f64(
+            "def f() -> float:\n    t = (1, 2.5)\n    return t[1] + t[0]\n",
+            "f"
+        ),
+        3.5
+    );
+    let err = try_compile("def f() -> float:\n    return sum((1, 2.5))\n")
+        .expect_err("a walk over a mixed tuple is refused");
+    assert!(err.contains("members have different types"), "{err}");
+
+    // Uniform literals are unaffected.
     assert_eq!(
         call_f64(
             "def f() -> float:\n    xs = [1.5, 2.5]\n    return xs[1]\n",
@@ -708,13 +716,11 @@ fn mixed_width_literals_are_a_compile_error() {
         ),
         2.5
     );
-    assert_eq!(
-        call_i32(
-            "def f() -> int:\n    xs = [1, True]\n    return xs[0] + xs[1]\n",
-            "f"
-        ),
-        2
-    );
+    // A bool beside an int is refused too: both fit the slot, but the list
+    // holds one element type, so `str([1, True])` would print `[1, 1]`.
+    let err = try_compile("def f() -> int:\n    xs = [1, True]\n    return xs[0] + xs[1]\n")
+        .expect_err("a list of ints and bools must be rejected");
+    assert!(err.contains("mixing int and bool"), "{err}");
 }
 
 // ---------------------------------------------------------------------------
@@ -1322,63 +1328,29 @@ fn fstring_folds_constants_python_style() {
     assert_eq!(call_str_1(src, "escaped", 9), "{9}");
 }
 
-/// A format specifier and an `!r`/`!a` conversion change what a placeholder
-/// renders and have no implementation here, so they are rejected rather than
-/// dropped on the floor. `!s` is `str(value)`, which is what a bare placeholder
-/// already does, so it is accepted.
+/// A format specifier and the `!r`/`!a`/`!s` conversions render the way
+/// CPython renders them.
 #[test]
-fn fstring_rejects_specs_and_conversions() {
-    let spec = "def f(x: int) -> str:\n\
-                \x20   return f\"{x:>8}\"\n";
-    let err = try_compile(spec).expect_err("format specifier must be rejected");
-    assert!(
-        err.contains("format specifier"),
-        "expected a format-specifier error, got: {err}"
-    );
-
-    let repr = "def f(x: int) -> str:\n\
-                \x20   return f\"{x!r}\"\n";
-    let err = try_compile(repr).expect_err("!r must be rejected");
-    assert!(err.contains("!r"), "expected an `!r` error, got: {err}");
-
-    let ascii = "def f(x: int) -> str:\n\
-                 \x20   return f\"{x!a}\"\n";
-    let err = try_compile(ascii).expect_err("!a must be rejected");
-    assert!(err.contains("!a"), "expected an `!a` error, got: {err}");
-
-    let str_conv = "def f(x: int) -> str:\n\
-                    \x20   return f\"n={x!s}\"\n";
-    assert_eq!(call_str_1(str_conv, "f", 5), "n=5");
+fn fstring_renders_specs_and_conversions() {
+    let src = "def f(x: int) -> str:\n\
+               \x20   return f\"{x:>8}|{x!r}|{x!a}|n={x!s}|{'\u{e9}'!a}|{'q'!r}\"\n";
+    assert_eq!(call_str_1(src, "f", 5), "       5|5|5|n=5|'\\xe9'|'q'");
 }
 
-/// A value `str()` cannot render is a compile error, not an empty or partial
-/// string. Floats and bools are the two a program hits first.
+/// Floats and bools render as `str()` renders them: the shortest repr for a
+/// float, exponent notation from 1e16, and a bool's name.
 #[test]
-fn fstring_rejects_values_str_cannot_render() {
-    let float = "def f(x: float) -> str:\n\
-                 \x20   return f\"v={x}\"\n";
-    let err = try_compile(float).expect_err("float placeholder must be rejected");
-    assert!(
-        err.contains("str() of float"),
-        "expected a str()-of-float error, got: {err}"
-    );
-
-    let boolean = "def f(x: bool) -> str:\n\
-                   \x20   return f\"v={x}\"\n";
-    let err = try_compile(boolean).expect_err("bool placeholder must be rejected");
-    assert!(
-        err.contains("str() of bool"),
-        "expected a str()-of-bool error, got: {err}"
-    );
-
-    // A float constant folds only where Rust and Python spell it the same
-    // way. Past 1e16 Python switches to exponent notation and Rust does not,
-    // so the placeholder is reported rather than folded to the wrong digits.
-    let big = "def f() -> str:\n\
-               \x20   return f\"v={1e16}\"\n";
-    let err = try_compile(big).expect_err("out-of-range float constant must be rejected");
-    assert!(
-        err.contains("str() of float"),
-        "expected a str()-of-float error, got: {err}"
+fn fstring_renders_floats_and_bools() {
+    let src = "def g(x: float) -> str:\n\
+               \x20   return f\"v={x}\"\n\
+               \n\
+               def h(x: bool) -> str:\n\
+               \x20   return f\"v={x}\"\n\
+               \n\
+               def f() -> str:\n\
+               \x20   return g(2.5) + g(1e16) + g(0.1 + 0.2) + h(True) + f\"v={1e16}\"\n";
+    assert_eq!(
+        call_str(src, "f"),
+        "v=2.5v=1e+16v=0.30000000000000004v=Truev=1e+16"
     );
 }

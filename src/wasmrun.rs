@@ -177,6 +177,7 @@ impl WasmBuilder for WaspyBuilder {
                 OptimizationLevel::Release | OptimizationLevel::Size
             ),
             verbosity: crate::Verbosity::from_flags(config.verbose, false),
+            ..CompilerOptions::default()
         };
 
         // Determine if input is file or directory

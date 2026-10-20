@@ -20,18 +20,19 @@
 //! was fixed, which produced a module that failed WASM validation while the
 //! compiler reported success.
 //!
-//! A `return` inside the body runs `__exit__` first: the returned expression is
-//! evaluated into a temporary, `__exit__` runs, then the temporary is returned.
-//! Nested `with` statements compose because the inner one is rewritten first,
-//! so the inner `__exit__` is already in place when the outer pass walks the
-//! same `return`.
+//! The body runs inside a `try`: an exception leaving it is handed to
+//! `__exit__(exc, exc, None)`, which suppresses it by answering true, and
+//! otherwise it goes on; a `return`, `break`, or `continue` leaving the body
+//! runs `__exit__(None, None, None)` first (the returned expression is
+//! evaluated into a temporary before it), and so does falling off the end.
+//! Classes are not values here, so `__exit__`'s `exc_type` is given the
+//! exception object too and `tb` None, and either may only be compared with
+//! None. Nested `with` statements compose because the inner one is rewritten
+//! first.
 //!
-//! Known limits, rejected or documented rather than miscompiled: the context
-//! expression's class must be resolvable at compile time (an instantiation, a
-//! call whose return type is annotated, or a variable of known class type), and
-//! `__exit__` runs on the normal and `return` paths only. An exception
-//! propagating out of the body, or a `break`/`continue` leaving it, skips
-//! `__exit__`, and its return value never suppresses an exception.
+//! Known limits, rejected rather than miscompiled: the context expression's
+//! class must be resolvable at compile time (an instantiation, a call whose
+//! return type is annotated, or a variable of known class type).
 
 use crate::ir::{IRBody, IRExpr, IRFunction, IRModule, IRStatement, IRType};
 use anyhow::Result;
@@ -68,7 +69,43 @@ pub fn desugar_with_statements(module: &mut IRModule) -> Result<()> {
         protocols,
         class_returns,
         classes,
+        in_generator: std::cell::Cell::new(false),
     };
+
+    // `__exit__(self, exc_type, exc, tb)` is called with the exception
+    // object (or None) as `exc`. Classes are not values here, so `exc_type`
+    // is given the same object, and `tb` None: either may only be compared
+    // with None (or tested for truth), which reads the same of both.
+    for class in &mut module.classes {
+        for method in &mut class.methods {
+            if method.name != "__exit__" || method.params.len() != 4 {
+                continue;
+            }
+            for (position, param) in method.params.iter_mut().enumerate().skip(1) {
+                let exception = IRType::Class("BaseException".to_string());
+                match &param.param_type {
+                    IRType::Class(_) => {}
+                    IRType::Optional(inner) if matches!(inner.as_ref(), IRType::Class(_)) => {}
+                    _ => param.param_type = exception,
+                }
+                if position != 2 {
+                    let name = param.name.clone();
+                    if uses_beyond_none_checks(&mut method.body, &name) {
+                        return Err(crate::core::errors::unsupported_feature(
+                            format!(
+                                "'{name}' in {}.__exit__ can only be compared with None: \
+                                 exception classes and tracebacks are not values here. Hint: \
+                                 use the exception itself, the second parameter",
+                                class.name
+                            ),
+                            None,
+                        )
+                        .into());
+                    }
+                }
+            }
+        }
+    }
 
     for func in &mut module.functions {
         rewrite_function(func, &resolver, None)?;
@@ -88,6 +125,9 @@ struct Resolver {
     /// Module functions whose declared return type is a class instance.
     class_returns: HashMap<String, String>,
     classes: Vec<String>,
+    /// Whether the function being rewritten is a generator, whose `finally`
+    /// blocks the generator pass runs on every exit itself.
+    in_generator: std::cell::Cell<bool>,
 }
 
 impl Resolver {
@@ -164,6 +204,9 @@ fn rewrite_function(func: &mut IRFunction, resolver: &Resolver, owner: Option<&s
     }
 
     let return_type = func.return_type.clone();
+    resolver
+        .in_generator
+        .set(crate::ir::generators::body_has_yield(&func.body));
     let body = std::mem::replace(
         &mut func.body,
         IRBody {
@@ -330,8 +373,12 @@ fn rewrite_nested(
             // exit gets its own copy of the body ahead of it (there are no
             // landing pads to jump to here), and the trailing copy still covers
             // the ordinary path, so the body runs exactly once either way.
+            // A generator's are run on every exit by the generator pass.
             let (mut try_body, mut handlers) = (try_body, handlers);
-            if let Some(finally) = &finally_body {
+            if let Some(finally) = finally_body
+                .as_ref()
+                .filter(|_| !resolver.in_generator.get())
+            {
                 run_cleanup_before_exits(&mut try_body, &finally.statements, return_type, false);
                 for handler in &mut handlers {
                     run_cleanup_before_exits(
@@ -422,24 +469,134 @@ fn expand_with(
         var_type: Some(enter_returns),
     });
 
-    // The body goes inside a `try` whose `finally` is the `__exit__` call, so
-    // every way out runs it: falling off the end, a `return`/`break`/
-    // `continue` (which `run_cleanup_before_exits` puts a copy ahead of, since
-    // those jump past the trailing one), and an exception leaving the block,
-    // which the try's own propagation path covers now that exceptions transfer
-    // control.
+    // The body goes inside a `try`. An exception leaving it is handed to
+    // `__exit__`, which suppresses it by answering true and otherwise lets
+    // it go on; leaving it any other way calls `__exit__(None, None, None)`:
+    // falling off the end (after the `try`, under a flag, so an exception
+    // `__exit__` raises itself is not handed back to it), and a
+    // `return`/`break`/`continue` (which `run_cleanup_before_exits` puts a
+    // copy ahead of, since those jump past the end).
     let mut inner = rewrite_body(body, resolver, &mut env.clone(), return_type)?;
-    let finally = IRBody {
-        statements: vec![exit_call(&manager)],
-    };
-    run_cleanup_before_exits(&mut inner, &finally.statements, return_type, false);
+    let normal_exit = vec![exit_call(&manager)];
+    run_cleanup_before_exits(&mut inner, &normal_exit, return_type, false);
+    let ok = format!("__with_ok_{seq}");
+    let caught = format!("__with_exc_{seq}");
+    out.push(IRStatement::Assign {
+        target: ok.clone(),
+        value: IRExpr::Const(crate::ir::IRConstant::Bool(true)),
+        var_type: Some(IRType::Bool),
+    });
+    let exc = || IRExpr::Variable(caught.clone());
     out.push(IRStatement::TryExcept {
         try_body: Box::new(inner),
-        except_handlers: Vec::new(),
-        finally_body: Some(Box::new(finally)),
+        except_handlers: vec![crate::ir::IRExceptHandler {
+            exception_types: vec!["BaseException".to_string()],
+            name: Some(caught.clone()),
+            body: IRBody {
+                statements: vec![
+                    IRStatement::Assign {
+                        target: ok.clone(),
+                        value: IRExpr::Const(crate::ir::IRConstant::Bool(false)),
+                        var_type: Some(IRType::Bool),
+                    },
+                    IRStatement::If {
+                        condition: IRExpr::UnaryOp {
+                            operand: Box::new(IRExpr::MethodCall {
+                                object: Box::new(IRExpr::Variable(manager.clone())),
+                                method_name: "__exit__".to_string(),
+                                arguments: vec![
+                                    exc(),
+                                    exc(),
+                                    IRExpr::Const(crate::ir::IRConstant::None),
+                                ],
+                            }),
+                            op: crate::ir::IRUnaryOp::Not,
+                        },
+                        then_body: Box::new(IRBody {
+                            statements: vec![IRStatement::Raise {
+                                exception: None,
+                                cause: None,
+                            }],
+                        }),
+                        else_body: None,
+                    },
+                ],
+            },
+        }],
+        finally_body: None,
+    });
+    out.push(IRStatement::If {
+        condition: IRExpr::Variable(ok),
+        then_body: Box::new(IRBody {
+            statements: normal_exit,
+        }),
+        else_body: None,
     });
 
     Ok(out)
+}
+
+/// Whether `name` is used in `body` other than in `name is None`,
+/// `name is not None`, `not name`, or as the condition of an `if` or a
+/// `while`.
+fn uses_beyond_none_checks(body: &mut IRBody, name: &str) -> bool {
+    use crate::ir::{IRCompareOp, IRConstant, IRUnaryOp};
+    let is_name = |e: &IRExpr| matches!(e, IRExpr::Variable(n) | IRExpr::Param(n) if n == name);
+    let is_none = |e: &IRExpr| matches!(e, IRExpr::Const(IRConstant::None));
+    let mut total = 0;
+    let mut allowed = 0;
+    let _ = crate::ir::visit_body(body, &mut |e: &mut IRExpr| {
+        match e {
+            _ if is_name(e) => total += 1,
+            IRExpr::CompareOp { left, right, op }
+                if matches!(op, IRCompareOp::Is | IRCompareOp::IsNot)
+                    && ((is_name(left) && is_none(right)) || (is_none(left) && is_name(right))) =>
+            {
+                allowed += 1
+            }
+            IRExpr::UnaryOp {
+                operand,
+                op: IRUnaryOp::Not,
+            } if is_name(operand) => allowed += 1,
+            _ => {}
+        }
+        Ok(())
+    });
+    fn conditions(body: &IRBody, is_name: &dyn Fn(&IRExpr) -> bool) -> usize {
+        body.statements
+            .iter()
+            .map(|stmt| match stmt {
+                IRStatement::If {
+                    condition,
+                    then_body,
+                    else_body,
+                } => {
+                    usize::from(is_name(condition))
+                        + conditions(then_body, is_name)
+                        + else_body.as_ref().map_or(0, |b| conditions(b, is_name))
+                }
+                IRStatement::While { condition, body } => {
+                    usize::from(is_name(condition)) + conditions(body, is_name)
+                }
+                IRStatement::For { body, .. } => conditions(body, is_name),
+                IRStatement::TryExcept {
+                    try_body,
+                    except_handlers,
+                    finally_body,
+                } => {
+                    conditions(try_body, is_name)
+                        + except_handlers
+                            .iter()
+                            .map(|h| conditions(&h.body, is_name))
+                            .sum::<usize>()
+                        + finally_body.as_ref().map_or(0, |b| conditions(b, is_name))
+                }
+                _ => 0,
+            })
+            .sum()
+    }
+    allowed += conditions(body, &is_name);
+    total > allowed
 }
 
 /// The `__exit__(None, None, None)` call. The normal exit path has no exception

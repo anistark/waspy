@@ -11,21 +11,13 @@
 
 import { readFile } from "node:fs/promises";
 import { argv, exit } from "node:process";
+import { createWasi, WasiExit } from "../docs/playground/wasi.js";
 
 const manifestPath = argv[2] ?? "examples/output/runtime/manifest.json";
 
-// A compiled waspy module has no host imports unless the program uses file
-// I/O, and none of these do. The stubs are defined anyway so that a program
-// added later still instantiates; an unused import object is ignored.
-const imports = {
-  waspy_host: {
-    open: () => -1,
-    read: () => 0,
-    write: (_fd, _buf, len) => len,
-    close: () => 0,
-  },
-};
-
+// A compiled waspy module imports what its program uses, all of it WASI
+// preview 1 (printing, input, arguments, and `open()`), through the same shim
+// the playground ships.
 const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
 const failures = [];
 let passed = 0;
@@ -35,7 +27,9 @@ for (const mod of manifest.modules) {
   let instance;
   try {
     const bytes = await readFile(mod.wasm);
-    ({ instance } = await WebAssembly.instantiate(bytes, imports));
+    const wasi = createWasi({ onStdout: () => {}, onStderr: () => {} });
+    ({ instance } = await WebAssembly.instantiate(bytes, wasi.imports));
+    wasi.bind(instance);
   } catch (error) {
     failures.push(`${label}: instantiate failed: ${error.message}`);
     continue;
@@ -61,6 +55,41 @@ for (const mod of manifest.modules) {
     }
   }
   console.log(`  ${label}: ${mod.checks.length} checks`);
+}
+
+// The WASI commands: `_start` with the fixture's input and arguments must
+// write exactly what CPython wrote, and exit as it did.
+for (const cmd of manifest.commands ?? []) {
+  const label = `${cmd.program} (${cmd.optimized ? "optimized" : "unoptimized"}, command)`;
+  let stdout = "";
+  let stderr = "";
+  const wasi = createWasi({
+    args: ["main.py", ...cmd.args],
+    stdin: await readFile(cmd.stdin),
+    onStdout: (t) => (stdout += t),
+    onStderr: (t) => (stderr += t),
+  });
+  let code = 0;
+  try {
+    const { instance } = await WebAssembly.instantiate(await readFile(cmd.wasm), wasi.imports);
+    wasi.bind(instance);
+    instance.exports._start();
+  } catch (error) {
+    if (error instanceof WasiExit) code = error.code;
+    else {
+      failures.push(`${label}: ${error.message}`);
+      continue;
+    }
+  }
+  const want = {
+    stdout: await readFile(cmd.stdout, "utf8"),
+    stderr: await readFile(cmd.stderr, "utf8"),
+  };
+  if (stdout !== want.stdout) failures.push(`${label}: stdout differs from CPython's`);
+  else if (stderr !== want.stderr) failures.push(`${label}: stderr differs from CPython's`);
+  else if (code !== cmd.exit) failures.push(`${label}: exited ${code}, CPython ${cmd.exit}`);
+  else passed += 1;
+  console.log(`  ${label}: output compared`);
 }
 
 if (failures.length > 0) {

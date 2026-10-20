@@ -41,7 +41,7 @@ pub fn get_python_file_metadata(source: &str) -> Result<Vec<FunctionSignature>> 
     // Extract function signatures
     let mut signatures = Vec::new();
     for func in &ir_module.functions {
-        if func.name.starts_with(ir::DRAIN_FN_PREFIX) {
+        if ir::is_internal_function(&func.name) {
             continue;
         }
         let param_types: Vec<String> = func
@@ -119,6 +119,7 @@ fn type_to_string(ir_type: &ir::IRType) -> String {
                 .join(", ");
             format!("Tuple[{inner}]")
         }
+        ir::IRType::VarTuple(elem_type) => format!("Tuple[{}, ...]", type_to_string(elem_type)),
         ir::IRType::Optional(inner) => format!("Optional[{}]", type_to_string(inner)),
         ir::IRType::Union(types) => {
             let inner = types
@@ -129,6 +130,7 @@ fn type_to_string(ir_type: &ir::IRType) -> String {
             format!("Union[{inner}]")
         }
         ir::IRType::Class(name) => name.clone(),
+        ir::IRType::ClassRef(name) => format!("type[{name}]"),
         ir::IRType::Module(name) => format!("Module[{name}]"),
         ir::IRType::Bytes => "bytes".to_string(),
         ir::IRType::Set(elem_type) => format!("Set[{}]", type_to_string(elem_type)),

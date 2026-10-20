@@ -140,6 +140,7 @@ pub fn compile_python_to_wasm(source: &str) -> Result<Vec<u8>> {
 /// let options = CompilerOptions {
 ///     optimize: false,
 ///     verbosity: Verbosity::Quiet,
+///     ..CompilerOptions::default()
 /// };
 ///
 /// let unoptimized = compile_python_to_wasm_with_options(source, &options)?;
@@ -198,6 +199,11 @@ pub fn compile_python_to_wasm_with_options(
 
     // Generate WASM binary
     log_verbose!("Generating WebAssembly binary...");
+    if options.waspy_host_file_io {
+        ir_module
+            .metadata
+            .insert(ir::FILE_IO_HOST_KEY.to_string(), "waspy_host".to_string());
+    }
     let raw_wasm = compiler::compile_ir_module(&ir_module)?;
     log_debug!("Generated WASM binary: {} bytes", raw_wasm.len());
 
@@ -360,6 +366,11 @@ fn compile_merged_sources(
         }
     }
 
+    // Which file each class came from, and the one run as `__main__` (the
+    // entry point's, else the first), so a class's repr names its module.
+    let mut class_files: Vec<(String, String)> = Vec::new();
+    let mut main_file: Option<String> = None;
+    let mut first_file: Option<String> = None;
     for (filename, source) in sources {
         // A module reached through several import paths is merged once (#41).
         if !seen_files.insert(filename.to_string()) {
@@ -445,6 +456,18 @@ fn compile_merged_sources(
         // Add module-level variables and imports (might use these later)
         combined_module.variables.extend(ir_module.variables);
         combined_module.imports.extend(ir_module.imports);
+        class_files.extend(
+            ir_module
+                .classes
+                .iter()
+                .map(|c| (c.name.clone(), filename.to_string())),
+        );
+        if has_entry_point && main_file.is_none() {
+            main_file = Some(filename.to_string());
+        }
+        if first_file.is_none() {
+            first_file = Some(filename.to_string());
+        }
         combined_module.classes.extend(ir_module.classes);
         combined_module
             .dispatch_tables
@@ -471,6 +494,18 @@ fn compile_merged_sources(
             "No valid functions found in any of the provided files"
         ));
     }
+    let main_file = main_file.or(first_file);
+    for (class, file) in &class_files {
+        if Some(file) != main_file.as_ref() {
+            let module = file
+                .trim_end_matches(".py")
+                .trim_end_matches("/__init__")
+                .replace(['/', '\\'], ".");
+            combined_module
+                .metadata
+                .insert(format!("{}{class}", ir::CLASS_MODULE_KEY), module);
+        }
+    }
 
     // Process decorators on the combined module
     let decorator_registry = ir::DecoratorRegistry::new();
@@ -494,6 +529,11 @@ fn compile_merged_sources(
     }
 
     // Generate WASM binary from the combined module
+    if options.waspy_host_file_io {
+        combined_module
+            .metadata
+            .insert(ir::FILE_IO_HOST_KEY.to_string(), "waspy_host".to_string());
+    }
     let raw_wasm = compiler::compile_ir_module(&combined_module)?;
     compiler::validate_wasm(&raw_wasm)?;
 
@@ -640,6 +680,7 @@ pub fn compile_python_file<P: AsRef<Path>>(path: P, optimize: bool) -> Result<Ve
 /// let options = CompilerOptions {
 ///     optimize: true,
 ///     verbosity: Verbosity::Verbose,
+///     ..CompilerOptions::default()
 /// };
 ///
 /// let wasm = compile_python_file_with_options(&entry, &options)?;
@@ -759,6 +800,7 @@ pub fn compile_python_project<P: AsRef<Path>>(project_dir: P, optimize: bool) ->
 /// let options = CompilerOptions {
 ///     optimize: false,
 ///     verbosity: Verbosity::Quiet,
+///     ..CompilerOptions::default()
 /// };
 ///
 /// let wasm = compile_python_project_with_options(&dir, &options)?;
@@ -904,7 +946,7 @@ pub fn get_python_file_metadata(
     // Extract function signatures
     let mut signatures = Vec::new();
     for func in &ir_module.functions {
-        if func.name.starts_with(ir::DRAIN_FN_PREFIX) {
+        if ir::is_internal_function(&func.name) {
             continue;
         }
         let param_types: Vec<String> = func
@@ -1021,6 +1063,7 @@ pub fn type_to_string(ir_type: &IRType) -> String {
                 .join(", ");
             format!("Tuple[{inner}]")
         }
+        IRType::VarTuple(elem_type) => format!("Tuple[{}, ...]", type_to_string(elem_type)),
         IRType::Optional(inner) => format!("Optional[{}]", type_to_string(inner)),
         IRType::Union(types) => {
             let inner = types
@@ -1031,6 +1074,7 @@ pub fn type_to_string(ir_type: &IRType) -> String {
             format!("Union[{inner}]")
         }
         IRType::Class(name) => name.clone(),
+        IRType::ClassRef(name) => format!("type[{name}]"),
         IRType::Module(name) => format!("Module[{name}]"),
         IRType::Bytes => "bytes".to_string(),
         IRType::Set(elem_type) => format!("Set[{}]", type_to_string(elem_type)),
@@ -1069,12 +1113,81 @@ mod collection_tests {
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm[..]).expect("valid wasm module");
         let mut store = Store::new(&engine, ());
-        let instance = Linker::<()>::new(&engine)
+        let mut linker = Linker::<()>::new(&engine);
+        link_quiet_wasi(&mut linker);
+        let instance = linker
             .instantiate(&mut store, &module)
             .expect("instantiation")
             .start(&mut store)
             .expect("start");
         (instance, store)
+    }
+
+    /// A WASI that takes every write and discards it, reads end of input,
+    /// and has no arguments: enough for a module that prints to run.
+    fn link_quiet_wasi(linker: &mut Linker<()>) {
+        let module = "wasi_snapshot_preview1";
+        linker
+            .func_wrap(
+                module,
+                "fd_write",
+                |mut caller: wasmi::Caller<'_, ()>,
+                 _fd: i32,
+                 iovs: i32,
+                 n: i32,
+                 done: i32|
+                 -> i32 {
+                    let memory = caller
+                        .get_export("memory")
+                        .and_then(wasmi::Extern::into_memory)
+                        .expect("memory");
+                    let data = memory.data_mut(&mut caller);
+                    let word = |d: &[u8], at: usize| {
+                        u32::from_le_bytes(d[at..at + 4].try_into().expect("word"))
+                    };
+                    let total: u32 = (0..n as usize)
+                        .map(|k| word(data, iovs as usize + 8 * k + 4))
+                        .sum();
+                    data[done as usize..done as usize + 4].copy_from_slice(&total.to_le_bytes());
+                    0
+                },
+            )
+            .expect("fd_write");
+        linker
+            .func_wrap(
+                module,
+                "fd_read",
+                |mut caller: wasmi::Caller<'_, ()>,
+                 _fd: i32,
+                 _iovs: i32,
+                 _n: i32,
+                 done: i32|
+                 -> i32 {
+                    let memory = caller
+                        .get_export("memory")
+                        .and_then(wasmi::Extern::into_memory)
+                        .expect("memory");
+                    memory.data_mut(&mut caller)[done as usize..done as usize + 4]
+                        .copy_from_slice(&0u32.to_le_bytes());
+                    0
+                },
+            )
+            .expect("fd_read");
+        linker
+            .func_wrap(module, "args_sizes_get", |_: i32, _: i32| -> i32 { 0 })
+            .expect("args_sizes_get");
+        linker
+            .func_wrap(module, "args_get", |_: i32, _: i32| -> i32 { 0 })
+            .expect("args_get");
+        linker
+            .func_wrap(
+                module,
+                "proc_exit",
+                |code: i32| -> Result<(), wasmi::core::Trap> {
+                    Err(wasmi::core::Trap::i32_exit(code))
+                },
+            )
+            .expect("proc_exit");
     }
 
     fn call_i32(source: &str, func: &str) -> i32 {
@@ -1707,8 +1820,9 @@ mod file_io_tests {
     use std::collections::HashMap;
     use wasmi::{Caller, Engine, Extern, Linker, Module, Store};
 
-    /// In-memory filesystem backing the `waspy_host` imports in tests. This is
-    /// a reference implementation of the documented host interface (#25).
+    /// In-memory filesystem backing the `waspy_host` imports in tests: a
+    /// reference implementation of that interface (#25), which file I/O
+    /// compiles to under the deprecated `waspy_host_file_io` option.
     #[derive(Default)]
     struct HostFs {
         files: HashMap<String, Vec<u8>>,
@@ -1826,8 +1940,10 @@ mod file_io_tests {
     /// Compile (unoptimized), instantiate with the in-memory host filesystem,
     /// and return the instance + store for calls and post-run inspection.
     fn instantiate_with_fs(source: &str) -> (wasmi::Instance, Store<HostFs>) {
+        // The deprecated interface these tests are the reference host for.
         let options = CompilerOptions {
             optimize: false,
+            waspy_host_file_io: true,
             ..CompilerOptions::default()
         };
         let wasm = compile_python_to_wasm_with_options(source, &options).expect("compilation");

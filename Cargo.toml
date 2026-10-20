@@ -121,6 +121,10 @@ name = "unit_miscompiles"
 path = "tests/unit/miscompiles.rs"
 
 [[test]]
+name = "unit_language"
+path = "tests/unit/language.rs"
+
+[[test]]
 name = "integration_wasmrun_plugin"
 path = "tests/integration/wasmrun_plugin.rs"
 required-features = ["wasm-plugin"]

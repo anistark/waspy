@@ -594,16 +594,12 @@ fn abstract_subclass_instantiation_is_rejected() {
     );
 }
 
-/// Multiple inheritance is rejected with a compile error rather than silently
-/// compiling a class with a broken field layout.
+/// A class with several bases takes each base's methods and fields, in
+/// CPython's method resolution order.
 #[test]
-fn multiple_inheritance_is_rejected() {
-    let src = "class A:\n    def ping(self) -> int:\n        return 1\n\nclass B:\n    def pong(self) -> int:\n        return 2\n\nclass C(A, B):\n    def both(self) -> int:\n        return 3\n";
-    let err = try_compile(src).expect_err("multiple inheritance must not compile");
-    assert!(
-        err.contains("single inheritance"),
-        "unexpected error message: {err}"
-    );
+fn multiple_inheritance_combines_bases() {
+    let src = "class A:\n    def ping(self) -> int:\n        return 1\n\nclass B:\n    def pong(self) -> int:\n        return 2\n\nclass C(A, B):\n    def both(self) -> int:\n        return self.ping() * 10 + self.pong()\n\ndef f() -> int:\n    return C().both()\n";
+    assert_eq!(call_i32(src, "f"), 12);
 }
 
 /// List comprehensions: mapping, filtering, range sources (ascending and
@@ -825,26 +821,30 @@ fn enumerate_and_items_inside_generators() {
     assert_eq!(call_i32(&src, "items_in_generator"), 41);
 }
 
-/// Suspension across a `try`/`with` frame cannot be resumed by the state
-/// machine, so it is rejected at compile time rather than miscompiled.
+/// A `yield` inside a `try` resumes inside it: an exception raised after the
+/// resume reaches the `try`'s handler.
 #[test]
-fn yield_inside_try_is_rejected() {
-    let src = "def gen():\n    try:\n        yield 1\n    except ValueError:\n        pass\n";
-    let err = try_compile(src).expect_err("yield inside try must not compile");
-    assert!(
-        err.contains("yield/return inside try/with"),
-        "unexpected error message: {err}"
-    );
+fn yield_inside_try_resumes_inside_it() {
+    let src = "def gen():\n    try:\n        yield 1\n        raise ValueError\n    except ValueError:\n        yield 2\n\n\
+               def f() -> int:\n    t = 0\n    for v in gen():\n        t = t * 10 + v\n    return t\n";
+    assert_eq!(call_i32(src, "f"), 12);
 }
 
-/// Generator methods (yield inside a class method) are not supported and fail
-/// loudly instead of compiling a placeholder that silently does nothing.
+/// A generator method makes a generator holding its receiver. One that
+/// another class of its hierarchy also defines is refused, since the
+/// generator a call makes would depend on the instance.
 #[test]
-fn generator_methods_are_rejected() {
-    let src = "class A:\n    def items(self):\n        yield 1\n";
-    let err = try_compile(src).expect_err("generator method must not compile");
+fn generator_methods() {
+    let src = "class A:\n    def __init__(self, n: int) -> None:\n        self.n = n\n\n    \
+               def walk(self):\n        for i in range(self.n):\n            yield i * self.n\n\n\
+               def f() -> int:\n    t = 0\n    for v in A(3).walk():\n        t += v\n    return t\n";
+    assert_eq!(call_i32(src, "f"), 9);
+    let err = try_compile(
+        "class A:\n    def items(self):\n        yield 1\n\nclass B(A):\n    def items(self):\n        yield 2\n",
+    )
+    .expect_err("an overridden generator method must not compile");
     assert!(
-        err.contains("generator methods are not supported"),
+        err.contains("is also defined by") && err.contains("depend on the instance"),
         "unexpected error message: {err}"
     );
 }
@@ -888,4 +888,25 @@ fn polymorphism_dispatches_on_the_runtime_class() {
     let src = read_example("oop_polymorphism.py");
     assert_eq!(call_f64(&src, "total_cost"), 0.01 + 0.07 + 0.07 * 3.0);
     assert_eq!(call_f64(&src, "priority_cost"), 0.07 * 3.0);
+}
+
+/// `examples/word_frequency_cli.py` run as a WASI command, with the input and
+/// argument of its runtime fixture: it writes exactly what CPython wrote.
+#[test]
+fn word_frequency_cli_prints_what_cpython_prints() {
+    let fixture = |ext: &str| {
+        std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("tests/fixtures/runtime/word_frequency_cli.{ext}")),
+        )
+        .expect("fixture")
+    };
+    let run = harness::run_main(
+        &read_example("word_frequency_cli.py"),
+        &fixture("stdin"),
+        &["4"],
+    );
+    assert_eq!(run.stdout, fixture("stdout"));
+    assert_eq!(run.stderr, fixture("stderr"));
+    assert_eq!(run.exit, 0);
 }

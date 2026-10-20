@@ -291,11 +291,10 @@ fn str_of_an_int_renders_its_digits() {
         3
     );
 
-    let of_a_bool = harness::try_compile("def f() -> int:\n    return len(str(True))\n")
-        .expect_err("str() of a bool is not supported");
-    assert!(
-        of_a_bool.contains("str() of bool"),
-        "unexpected: {of_a_bool}"
+    // A bool renders as its name.
+    assert_eq!(
+        call_i32("def f() -> int:\n    return len(str(True))\n", "f"),
+        4
     );
 }
 
@@ -712,4 +711,57 @@ fn global_statements() {
     assert_eq!(call_i32(&src, "strings"), 7);
     assert_eq!(call_i32(&src, "method"), 8);
     assert_eq!(call_i32(&src, "recursive"), 5);
+}
+
+/// `float()` of a string is CPython's correctly rounded parse: whitespace,
+/// a sign, underscores between digits, the overflow and underflow ends, the
+/// exact halfway case between the two smallest floats (which rounds to the
+/// even one, 5e-324), and an int that is not a float (9007199254740993 rounds
+/// to even). The strings are built at run time, so the runtime parser reads
+/// them, and an invalid one raises a ValueError `except` catches; a literal
+/// is parsed when compiling, and an invalid one is refused with CPython's
+/// ValueError message.
+#[test]
+fn float_of_a_string_is_correctly_rounded() {
+    let src = dedent(
+        r#"
+        def parse(n: int) -> str:
+            a = float(str(n) + "e-3")
+            b = float(" 0." + str(n) + "_5 ")
+            c = float("-" + str(n) + "e400")
+            d = float(str(n)[0:0] + "2.4703282292062328e-324")
+            e = float(str(n)[0:0] + "nAn")
+            g = float(str(n)[0:0] + "9007199254740993")
+            return repr(a) + "|" + repr(b) + "|" + repr(c) + "|" + repr(d) + "|" + repr(e) + "|" + repr(g)
+
+        def parse_bad(n: int) -> int:
+            x = float(str(n) + "_")
+            return 1
+
+        def bad() -> int:
+            return parse_bad(1)
+
+        def caught() -> int:
+            try:
+                return parse_bad(1)
+            except ValueError:
+                return 7
+
+        def literal() -> float:
+            return float(" 1_000.25 ")
+        "#,
+    );
+    assert_eq!(
+        harness::call_str_1(&src, "parse", 12),
+        "0.012|0.125|-inf|5e-324|nan|9007199254740992.0"
+    );
+    assert!(call_i32_traps(&src, "bad"));
+    assert_eq!(call_i32(&src, "caught"), 7);
+    assert_eq!(call_f64(&src, "literal"), 1000.25);
+    let err = harness::try_compile("def f() -> float:\n    return float(\"12_\")\n")
+        .expect_err("an invalid literal is refused");
+    assert!(
+        err.contains("could not convert string to float: \"12_\""),
+        "{err}"
+    );
 }

@@ -104,6 +104,67 @@ const PROGRAMS: &[Program] = &[
     },
 ];
 
+/// A program run as a WASI command: its `__main__` block, given `args` and
+/// the fixture's standard input, must write exactly what CPython wrote to
+/// standard output and error (the `.stdout` and `.stderr` fixtures, recorded
+/// from CPython) and exit with `exit`.
+struct Command {
+    name: &'static str,
+    source: &'static str,
+    args: &'static [&'static str],
+    exit: i32,
+}
+
+const COMMANDS: &[Command] = &[Command {
+    name: "word_frequency_cli",
+    source: "examples/word_frequency_cli.py",
+    args: &["4"],
+    exit: 0,
+}];
+
+/// Build each command at both optimization levels, as manifest entries.
+fn build_commands(root: &Path, out_dir: &Path) -> Result<Vec<serde_json::Value>> {
+    let mut entries = Vec::new();
+    for command in COMMANDS {
+        let fixture = |ext: &str| format!("tests/fixtures/runtime/{}.{ext}", command.name);
+        for ext in ["stdin", "stdout", "stderr"] {
+            anyhow::ensure!(
+                root.join(fixture(ext)).exists(),
+                "{} is missing; record it from CPython",
+                fixture(ext)
+            );
+        }
+        let source = read(&root.join(command.source))?;
+        for optimize in [false, true] {
+            let options = CompilerOptions {
+                optimize,
+                ..CompilerOptions::default()
+            };
+            let wasm = compile_python_to_wasm_with_options(&source, &options)
+                .with_context(|| format!("compile {}", command.source))?;
+            let file_name = if optimize {
+                format!("{}.opt.wasm", command.name)
+            } else {
+                format!("{}.wasm", command.name)
+            };
+            let path = out_dir.join(&file_name);
+            fs::write(&path, &wasm).with_context(|| format!("write {}", path.display()))?;
+            println!("built {file_name} ({} bytes, a WASI command)", wasm.len());
+            entries.push(serde_json::json!({
+                "program": command.name,
+                "optimized": optimize,
+                "wasm": format!("{OUT_DIR}/{file_name}"),
+                "args": command.args,
+                "stdin": fixture("stdin"),
+                "stdout": fixture("stdout"),
+                "stderr": fixture("stderr"),
+                "exit": command.exit,
+            }));
+        }
+    }
+    Ok(entries)
+}
+
 fn main() -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let out_dir = root.join(OUT_DIR);
@@ -161,6 +222,7 @@ fn main() -> Result<()> {
         }
     }
 
+    let commands = build_commands(root, &out_dir)?;
     let manifest = out_dir.join("manifest.json");
     let total: usize = entries
         .iter()
@@ -168,7 +230,10 @@ fn main() -> Result<()> {
         .sum();
     fs::write(
         &manifest,
-        serde_json::to_string_pretty(&serde_json::json!({ "modules": entries }))?,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "modules": entries,
+            "commands": commands,
+        }))?,
     )
     .with_context(|| format!("write {}", manifest.display()))?;
     println!(

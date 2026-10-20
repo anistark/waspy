@@ -26,6 +26,7 @@ pub fn compile(source: &str) -> Result<Vec<u8>, JsError> {
     let options = CompilerOptions {
         optimize: false,
         verbosity: Verbosity::Quiet,
+        ..CompilerOptions::default()
     };
     waspy::compile_python_to_wasm_with_options(source, &options).map_err(to_js_error)
 }

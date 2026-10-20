@@ -37,8 +37,8 @@ fn unsupported_statements_are_rejected_with_hints() {
             "'match' statements are not supported",
         ),
         (
-            "def f() -> int:\n    def g() -> int:\n        nonlocal x\n        return x\n    x = 1\n    return g()\n",
-            "'nonlocal' statement is not supported",
+            "x = 1\nnonlocal x\n\ndef f() -> int:\n    return 0\n",
+            "nonlocal declaration not allowed at module level",
         ),
         (
             "def f() -> int:\n    x = 1\n    del x\n    return 0\n",
@@ -59,22 +59,21 @@ fn unsupported_statements_are_rejected_with_hints() {
     }
 }
 
-/// Star/keyword parameter forms fail at the function definition, naming the
-/// function.
+/// Star parameters on a method, whose calls are not bound by name, are
+/// refused naming the method; positional-only parameters are refused rather
+/// than dropped.
 #[test]
-fn star_parameters_are_rejected() {
-    let err = compile_error("def f(*args) -> int:\n    return 0\n");
+fn star_parameters_on_methods_are_rejected() {
+    let err = compile_error(
+        "class C:\n    def m(self, *xs: int) -> int:\n        return len(xs)\n\ndef f() -> int:\n    return C().m(1)\n",
+    );
     assert!(
-        err.contains("*args") && err.contains("not supported"),
+        err.contains("*xs") && err.contains("C.m") && err.contains("not on the method"),
         "unexpected: {err}"
     );
-    assert!(err.contains("'f'"), "error should name the function: {err}");
 
-    let err = compile_error("def f(**opts) -> int:\n    return 0\n");
-    assert!(
-        err.contains("**opts") && err.contains("not supported"),
-        "unexpected: {err}"
-    );
+    let err = compile_error("def g(a: int, /, b: int) -> int:\n    return a + b\n");
+    assert!(err.contains("positional-only"), "unexpected: {err}");
 }
 
 /// A call to one of the module's own functions is checked against its
@@ -109,28 +108,44 @@ fn calls_are_checked_against_the_signature() {
     );
 }
 
-/// Class keywords (metaclass=...) are rejected at the class definition.
+/// A class keyword other than `metaclass=Name` is refused at the class
+/// definition, and so is a metaclass that would give the class attributes
+/// under names known only at run time.
 #[test]
-fn metaclass_is_rejected() {
-    let err = compile_error("class Meta(type):\n    pass\n\nclass A(metaclass=Meta):\n    pass\n");
+fn class_keywords_and_namespaces_are_rejected() {
+    let err = compile_error("class A(flag=True):\n    pass\n");
     assert!(
-        err.contains("class keywords") || err.contains("metaclass"),
+        err.contains("class keywords other than 'metaclass=Name'"),
+        "unexpected: {err}"
+    );
+    let err = compile_error(
+        "class M(type):\n    def __new__(mcs, name, bases, ns):\n        ns['x'] = 1\n        \
+         return super().__new__(mcs, name, bases, ns)\n\nclass A(metaclass=M):\n    pass\n",
+    );
+    assert!(
+        err.contains("uses 'ns', the class namespace"),
         "unexpected: {err}"
     );
 }
 
-/// min()/max() over one iterable argument used to compile to a stub that
-/// always produced 0; they now fail loudly with a workaround hint.
+/// `min()`/`max()` of what has no order, or of nothing, fail loudly: an
+/// unordered element type and a dict (not supported yet) at compile time, an
+/// empty iterable without a default with CPython's ValueError.
 #[test]
-fn single_iterable_min_max_are_rejected() {
-    let err = compile_error("def f() -> int:\n    xs = [3, 1, 2]\n    return min(xs)\n");
-    assert!(
-        err.contains("min() over a single iterable"),
-        "unexpected: {err}"
+fn min_max_that_cannot_answer_are_rejected() {
+    let err = compile_error("def f() -> int:\n    xs = [{1: 2}]\n    return 0 if min(xs) else 1\n");
+    assert!(err.contains("min() cannot order"), "unexpected: {err}");
+    // A dict walks its keys, as in CPython.
+    assert_eq!(
+        harness::call_i32(
+            "def f() -> int:\n    d = {3: 1, 7: 0}\n    return max(d)\n",
+            "f"
+        ),
+        7
     );
-    let err = compile_error("def f() -> int:\n    xs = [3, 1, 2]\n    return max(xs)\n");
+    let err = compile_error("def f() -> int:\n    return min(5)\n");
     assert!(
-        err.contains("max() over a single iterable"),
+        err.contains("'int' object is not iterable"),
         "unexpected: {err}"
     );
     // The multi-argument forms still compile and compute.
@@ -266,19 +281,27 @@ fn list_extend_of_another_iterable_is_refused() {
     }
 }
 
-/// `dict.get(key)` answers None for a missing key, which only an instance
-/// value has a distinct word for; on other values it is refused (it answered
-/// 0), and so is a default whose type the values do not share.
+/// `dict.get(key)` answers None for a missing key: an instance value's null
+/// pointer, or a boxed optional number. A value with no distinct None (a
+/// str here) is refused, and so is a default whose type the values do not
+/// share.
 #[test]
 fn dict_get_that_cannot_answer_is_refused() {
     let err = compile_error(
-        "from typing import Dict\n\ndef f() -> int:\n    d: Dict[str, int] = {}\n    \
-         return d.get('a')\n",
+        "from typing import Dict\n\ndef f() -> int:\n    d: Dict[str, str] = {}\n    \
+         return len(d.get('a'))\n",
     );
     assert!(
         err.contains("dict.get(key) answers None for a missing key"),
         "{err}"
     );
+    // Returned where an int is declared, a found value is that int, and a
+    // missing key's None, which an int cannot hold, traps.
+    let src = "from typing import Dict\n\ndef f() -> int:\n    d: Dict[str, int] = {'a': 4}\n    \
+               return d.get('a')\n\ndef g() -> int:\n    d: Dict[str, int] = {}\n    \
+               return d.get('a')\n";
+    assert_eq!(harness::call_i32(src, "f"), 4);
+    assert!(harness::call_i32_traps(src, "g"));
     let err = compile_error(
         "from typing import Dict\n\ndef f() -> int:\n    d: Dict[str, int] = {}\n    \
          x = d.get('a', 'none')\n    return 0\n",
@@ -334,4 +357,43 @@ fn global_that_cannot_rebind_is_refused() {
         ));
         assert!(err.contains(expected), "{body}: {err}");
     }
+}
+
+/// A user-written decorator is applied by specializing its wrapper for the
+/// function it decorates, so a wrapper whose answer would depend on how each
+/// call is written, or whose names the function's parameters would capture,
+/// is refused; so is a return whose type its function's annotation would
+/// misread, which is what an unannotated wrapper takes on.
+#[test]
+fn decorators_that_cannot_be_specialized_are_refused() {
+    let deco = |wrapper: &str| {
+        format!(
+            "def d(fn):\n    def w(*args):\n        {wrapper}\n    return w\n\n\
+             @d\ndef k(a: int) -> int:\n    return a\n\n\
+             def f() -> int:\n    return k(1)\n"
+        )
+    };
+    let cases: &[(&str, &str)] = &[
+        (
+            "return len(args)",
+            "uses 'args' other than passing it on to the function",
+        ),
+        (
+            "return fn(*args) + a",
+            "uses the name 'a', which is also a parameter of 'k'",
+        ),
+        (
+            "return str(fn(*args))",
+            "a 'str' is returned from a function declared to return 'int'",
+        ),
+    ];
+    for (wrapper, expected) in cases {
+        let err = compile_error(&deco(wrapper));
+        assert!(err.contains(expected), "{wrapper}: {err}");
+    }
+    let err = compile_error("@nothere\ndef k(a: int) -> int:\n    return a\n");
+    assert!(
+        err.contains("decorator '@nothere' on function 'k' is not supported"),
+        "{err}"
+    );
 }
