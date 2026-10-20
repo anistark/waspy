@@ -98,6 +98,7 @@ fn measure(entry: &Path, optimize: bool) -> Result<Measurement> {
     let options = CompilerOptions {
         optimize,
         verbosity: waspy::Verbosity::Quiet,
+        ..CompilerOptions::default()
     };
 
     let mut times = Vec::with_capacity(RUNS);

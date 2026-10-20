@@ -1,4 +1,5 @@
 import { EXAMPLES } from './examples.js';
+import { createWasi, WasiExit } from './wasi.js';
 
 const COMPILER_JS = new URL('./compiler/waspy.js', import.meta.url).href;
 const COMPILER_WASM = new URL('./compiler/waspy_bg.wasm', import.meta.url).href;
@@ -25,9 +26,18 @@ const SECTION_COLORS = {
     tag: 'var(--red)',
 };
 
-const HOST_IMPORTS = {
-    waspy_host: { open: () => -1, read: () => 0, write: (_fd, _ptr, len) => len, close: () => 0 },
-};
+// What a call prints, collected by the WASI shim and shown with its result.
+const printed = { text: '' };
+
+function hostImports() {
+    const wasi = createWasi({
+        args: ['main.py'],
+        onStdout: (t) => (printed.text += t),
+        onStderr: (t) => (printed.text += t),
+    });
+    // Files a program opens live in the shim's in-memory directory.
+    return { wasi, imports: wasi.imports };
+}
 
 const $ = (id) => document.getElementById(id);
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
@@ -238,7 +248,9 @@ async function compile() {
     state.bytes = bytes;
     $('output').classList.add('ready');
     try {
-        state.instance = (await WebAssembly.instantiate(bytes, HOST_IMPORTS)).instance;
+        const host = hostImports();
+        state.instance = (await WebAssembly.instantiate(bytes, host.imports)).instance;
+        host.wasi.bind(state.instance);
     } catch (err) {
         state.instance = null;
         console.error(err);
@@ -628,16 +640,18 @@ function call(sig, params, inputs) {
     const started = performance.now();
     let result;
     let isError = false;
+    printed.text = '';
     try {
         result = formatResult(state.instance.exports[sig.name](...args), sig.returns);
     } catch (err) {
         isError = true;
-        result = err instanceof WebAssembly.RuntimeError ? `Trapped: ${err.message}. An exception nothing caught unwinds out of the module.` : String(err);
+        if (err instanceof WasiExit) result = `Exited with status ${err.code}`;
+        else result = err instanceof WebAssembly.RuntimeError ? `Trapped: ${err.message}. An exception nothing caught unwinds out of the module.` : String(err);
     }
-    log(`${sig.name}(${shown.join(', ')})`, result, isError, performance.now() - started);
+    log(`${sig.name}(${shown.join(', ')})`, result, isError, performance.now() - started, printed.text);
 }
 
-function log(callText, result, isError, ms) {
+function log(callText, result, isError, ms, output = '') {
     const body = $('console');
     const empty = body.querySelector('.pg-console-empty');
     if (empty) empty.remove();
@@ -646,6 +660,12 @@ function log(callText, result, isError, ms) {
     row.innerHTML = `<span class="pg-log-call"></span><span class="pg-log-result${isError ? ' err' : ''}"></span><span class="pg-log-time">${ms < 1 ? '<1' : ms.toFixed(1)} ms</span>`;
     row.querySelector('.pg-log-call').textContent = callText;
     row.querySelector('.pg-log-result').textContent = result;
+    if (output) {
+        const out = document.createElement('pre');
+        out.className = 'pg-log-out';
+        out.textContent = output;
+        row.insertBefore(out, row.querySelector('.pg-log-result'));
+    }
     body.appendChild(row);
     body.scrollTop = body.scrollHeight;
 }

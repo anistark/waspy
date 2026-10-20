@@ -15,6 +15,9 @@ pub const DICT_VAL_AT_FN: &str = "__dict_val_at";
 /// Prefix of the locals holding zip()'s arguments after the first, which the
 /// loop reads by length and index.
 pub const ZIP_SEQ_PREFIX: &str = "__zip_";
+/// The values one round of a `for ... in zip(...)` pulls, before they are
+/// bound to the loop's targets.
+pub const ZIP_VALUE_PREFIX: &str = "__zipv_";
 /// The method calls `del xs[i]` / `del d[k]` and `del xs[a:b]` lower to,
 /// implemented per receiver in expression codegen.
 pub const DEL_ITEM_METHOD: &str = "__delitem__";
@@ -24,6 +27,8 @@ pub const DEL_SLICE_METHOD: &str = "__delslice__";
 pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
     let mut module = IRModule::new();
     let mut memory_layout = MemoryLayout::new();
+    // `format(x)` with no spec formats with the empty one.
+    memory_layout.add_string("");
     let mut in_try_block = false;
     let mut conditional_fallbacks = Vec::new();
 
@@ -44,10 +49,22 @@ pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
                 // floor, because a decorator that is accepted and not applied
                 // is a silent wrong answer (#120).
                 let mut decorators = Vec::new();
+                let mut user_decorators = Vec::new();
                 let mut name = name;
                 for dec in &fundef.decorator_list {
                     match classify_function_decorator(dec, &name)? {
                         FunctionDecorator::Inert(spelling) => decorators.push(spelling),
+                        FunctionDecorator::User { name: deco, args } => {
+                            let args = match args {
+                                Some(args) => Some(
+                                    args.iter()
+                                        .map(|a| lower_expr(a, &mut memory_layout))
+                                        .collect::<Result<Vec<_>>>()?,
+                                ),
+                                None => None,
+                            };
+                            user_decorators.push((deco, args));
+                        }
                         FunctionDecorator::Singledispatch => {
                             if module.dispatch_tables.iter().any(|d| d.base == name) {
                                 return Err(crate::core::errors::unsupported_feature(
@@ -123,6 +140,25 @@ pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
                     }
                 }
 
+                if !user_decorators.is_empty() && name != fundef.name.as_str() {
+                    return Err(crate::core::errors::unsupported_feature(
+                        format!(
+                            "function '{}' combines a '@register' with a decorator of its own, \
+                             which is not supported",
+                            fundef.name
+                        ),
+                        None,
+                    )
+                    .into());
+                }
+                if !user_decorators.is_empty() {
+                    module.user_decorations.push(IRUserDecoration {
+                        function: name.clone(),
+                        decorators: user_decorators,
+                        position: module.variables.len(),
+                    });
+                }
+
                 let body = lower_function_body(&fundef.body, &mut memory_layout)?;
 
                 module.functions.push(IRFunction {
@@ -135,7 +171,8 @@ pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
             }
             Stmt::ClassDef(_) => {
                 // Process class definition
-                let class = process_class_definition(stmt, &mut memory_layout)?;
+                let mut class = process_class_definition(stmt, &mut memory_layout)?;
+                class.position = module.variables.len();
                 module.classes.push(class);
             }
             Stmt::Assign(_) => {
@@ -240,13 +277,18 @@ pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
     // resolved offsets to emit loads and the data section.
     module.memory_layout = memory_layout;
 
-    // Generator lowering first (it synthesizes classes and constructor bodies
-    // the later passes must still see, and rejects `yield` inside `with`),
-    // then the context-manager protocol, then whole-module checks and rewrites
+    // User decorators first (they rewrite which function a name is), then
+    // metaclasses (specialized per class they make), nested functions, keyword placement, the context-manager protocol (so
+    // a `with` in a generator is a `try` the generator pass can flatten),
+    // generator lowering (it synthesizes classes and constructor bodies the
+    // later passes must still see), then whole-module checks and rewrites
     // (abstract-class instantiation, call-site parameter defaults).
+    crate::ir::apply_user_decorators(&mut module)?;
+    crate::ir::apply_metaclasses(&mut module)?;
+    crate::ir::finalize::lift_nested_functions(&mut module)?;
     crate::ir::finalize::resolve_keyword_arguments(&mut module)?;
-    crate::ir::generators::transform_generators(&mut module)?;
     crate::ir::context_managers::desugar_with_statements(&mut module)?;
+    crate::ir::generators::transform_generators(&mut module)?;
     crate::ir::finalize::finalize_module(&mut module)?;
 
     Ok(module)
@@ -324,6 +366,28 @@ fn fold_re_call(
     Ok(Some(IRExpr::Const(IRConstant::String(folded))))
 }
 
+/// The name an unpacked positional argument (`f(*xs)`) carries as an
+/// [`IRExpr::Keyword`]: it is placed by the finalize pass into the callee's
+/// `*args`, and refused like any other keyword if it reaches code generation.
+pub const STARRED_ARG: &str = "*";
+
+/// A call's positional arguments, with `*xs` as a [`STARRED_ARG`] keyword.
+fn lower_call_args(
+    call: &rustpython_parser::ast::ExprCall,
+    memory_layout: &mut MemoryLayout,
+) -> Result<Vec<IRExpr>> {
+    call.args
+        .iter()
+        .map(|arg| match arg {
+            Expr::Starred(star) => Ok(IRExpr::Keyword {
+                name: STARRED_ARG.to_string(),
+                value: Box::new(lower_expr(&star.value, memory_layout)?),
+            }),
+            other => lower_expr(other, memory_layout),
+        })
+        .collect()
+}
+
 /// A call's keyword arguments as [`IRExpr::Keyword`]s, to follow the
 /// positional ones. `**kwargs` has no static meaning and is refused.
 fn lower_keywords(
@@ -334,13 +398,24 @@ fn lower_keywords(
     call.keywords
         .iter()
         .map(|keyword| match &keyword.arg {
-            Some(name) => Ok(IRExpr::Keyword {
-                name: name.to_string(),
-                value: Box::new(lower_expr(&keyword.value, memory_layout)?),
-            }),
-            None => Err(anyhow!(
-                "'**kwargs' is not supported in a call to '{callee}()'"
-            )),
+            Some(name) => {
+                // A keyword a `**kwargs` collects becomes a string key, built
+                // after lowering; its text has to be in memory by then.
+                memory_layout.add_string(name.as_str());
+                Ok(IRExpr::Keyword {
+                    name: name.to_string(),
+                    value: Box::new(lower_expr(&keyword.value, memory_layout)?),
+                })
+            }
+            // Kept for a decorator's wrapper to forward, and refused by the
+            // finalize pass anywhere else.
+            None => {
+                let _ = callee;
+                Ok(IRExpr::Keyword {
+                    name: crate::ir::DOUBLE_STAR_ARG.to_string(),
+                    value: Box::new(lower_expr(&keyword.value, memory_layout)?),
+                })
+            }
         })
         .collect()
 }
@@ -538,25 +613,6 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
                 _ => None,
             })
             .collect();
-
-        // Only single inheritance is supported: reject multiple bases loudly
-        // rather than silently compiling a class with a broken field layout.
-        // `object` is every class's implicit root and `ABC` is a marker (it
-        // contributes no fields or methods), so neither counts.
-        let real_bases: Vec<&String> = bases
-            .iter()
-            .filter(|b| !matches!(b.as_str(), "object" | "ABC" | "abc.ABC"))
-            .collect();
-        if real_bases.len() > 1 {
-            return Err(anyhow!(
-                "class '{name}' declares multiple base classes ({}); only single inheritance is supported",
-                real_bases
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
 
         // Class decorators: `@dataclass`, `@dataclasses.dataclass`, and the
         // bare call form `@dataclass()`. The argument form (`frozen=True`,
@@ -765,11 +821,25 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
             synthesize_total_ordering(&name, &mut methods)?;
         }
 
+        // `metaclass=M`, the one class keyword with a meaning here (the parser
+        // refuses any other).
+        let metaclass = classdef
+            .keywords
+            .iter()
+            .find(|k| k.arg.as_deref() == Some("metaclass"))
+            .and_then(|k| match &k.value {
+                Expr::Name(n) => Some(n.id.to_string()),
+                _ => None,
+            });
+
         Ok(IRClass {
             name,
             bases,
             methods,
             class_vars,
+            metaclass,
+            position: 0,
+            deferred_vars: Vec::new(),
         })
     } else {
         Err(anyhow!("Expected ClassDef statement"))
@@ -809,6 +879,13 @@ enum FunctionDecorator<'a> {
     Register {
         base: String,
         explicit: Option<&'a Expr>,
+    },
+    /// A function of this module, or a call of one with positional arguments
+    /// (a decorator factory): applied by `ir::decorate`, which refuses a name
+    /// that turns out not to be one.
+    User {
+        name: String,
+        args: Option<&'a [Expr]>,
     },
 }
 
@@ -852,6 +929,11 @@ fn classify_function_decorator<'a>(
                     _ => return Err(unsupported(&format!("{name}(...)"))),
                 }
             }
+            (None, None) => FunctionDecorator::User { name, args: None },
+            (None, Some(call)) if call.keywords.is_empty() => FunctionDecorator::User {
+                name,
+                args: Some(call.args.as_slice()),
+            },
             _ => return Err(unsupported(&name)),
         },
     })
@@ -945,6 +1027,7 @@ fn synthesize_total_ordering(class_name: &str, methods: &mut Vec<IRFunction>) ->
             param_type: IRType::Class(class_name.to_string()),
             default_value: None,
             keyword_only: false,
+            star: crate::ir::ParamStar::None,
         };
         methods.push(IRFunction {
             name: name.to_string(),
@@ -1121,6 +1204,7 @@ fn synthesize_dataclass_methods(
         param_type: IRType::Class(class_name.to_string()),
         default_value: None,
         keyword_only: false,
+        star: crate::ir::ParamStar::None,
     };
     let self_field = |field: &str| IRExpr::Attribute {
         object: Box::new(IRExpr::Variable("self".to_string())),
@@ -1136,6 +1220,7 @@ fn synthesize_dataclass_methods(
                 param_type: field.ty.clone(),
                 default_value: field.default.clone(),
                 keyword_only: false,
+                star: crate::ir::ParamStar::None,
             });
             statements.push(IRStatement::AttributeAssign {
                 object: IRExpr::Variable("self".to_string()),
@@ -1159,6 +1244,7 @@ fn synthesize_dataclass_methods(
             param_type: IRType::Class(class_name.to_string()),
             default_value: None,
             keyword_only: false,
+            star: crate::ir::ParamStar::None,
         };
         let other_field = |field: &str| IRExpr::Attribute {
             object: Box::new(IRExpr::Variable("other".to_string())),
@@ -1194,10 +1280,10 @@ fn synthesize_dataclass_methods(
         });
     }
 
-    let reprable = fields
-        .iter()
-        .all(|f| matches!(f.ty, IRType::Int | IRType::Bool | IRType::String));
-    if reprable && !has_method(methods, "__repr__") {
+    // `name=value!r` for each field, as CPython's generated `__repr__` is.
+    // It used to be generated only for int, bool, and str fields, quoting a
+    // string without escaping it.
+    if !has_method(methods, "__repr__") {
         // Alternate constant labels with runtime field values, merging adjacent
         // constants so each interned label is a single blob. Every constant is
         // registered in the module layout here, since these strings never pass
@@ -1217,19 +1303,11 @@ fn synthesize_dataclass_methods(
             }
             text.push_str(&field.name);
             text.push('=');
-            if field.ty == IRType::String {
-                // repr() quotes string values.
-                text.push('\'');
-                flush(&mut text, &mut parts, memory_layout);
-                parts.push(self_field(&field.name));
-                text.push('\'');
-            } else {
-                flush(&mut text, &mut parts, memory_layout);
-                parts.push(IRExpr::FunctionCall {
-                    function_name: "str".to_string(),
-                    arguments: vec![self_field(&field.name)],
-                });
-            }
+            flush(&mut text, &mut parts, memory_layout);
+            parts.push(IRExpr::FunctionCall {
+                function_name: "repr".to_string(),
+                arguments: vec![self_field(&field.name)],
+            });
         }
         text.push(')');
         flush(&mut text, &mut parts, memory_layout);
@@ -1490,6 +1568,12 @@ fn type_annotation_to_ir_type(expr: &Expr) -> Result<IRType> {
             "set" => Ok(IRType::Set(Box::new(IRType::Any))),
             "tuple" => Ok(IRType::Tuple(vec![])),
             "dict" => Ok(IRType::Dict(Box::new(IRType::Any), Box::new(IRType::Any))),
+            // A function whose signature is not given, called with untyped
+            // words like any closure that passed through an untyped place.
+            "Callable" => Ok(IRType::Callable {
+                params: Vec::new(),
+                return_type: Box::new(IRType::Unknown),
+            }),
             _ => Ok(IRType::Class(name.id.to_string())),
         },
         Expr::Subscript(subscript) => {
@@ -1523,7 +1607,26 @@ fn type_annotation_to_ir_type(expr: &Expr) -> Result<IRType> {
                         let inner_type = type_annotation_to_ir_type(&subscript.slice)?;
                         Ok(IRType::Optional(Box::new(inner_type)))
                     }
-                    "Tuple" => {
+                    // `type[A]`: the class object of A or of a subclass.
+                    "Type" | "type" => match type_annotation_to_ir_type(&subscript.slice)? {
+                        IRType::Class(name) => Ok(IRType::ClassRef(name)),
+                        other => Err(anyhow!(
+                            "'type[{}]' is not supported: only the class objects of classes \
+                             this program defines are values",
+                            crate::type_to_string(&other)
+                        )),
+                    },
+                    "Tuple" | "tuple" => {
+                        // `Tuple[int, ...]`: any length, every member an int.
+                        if let Expr::Tuple(tuple) = &*subscript.slice {
+                            if let [member, Expr::Constant(c)] = tuple.elts.as_slice() {
+                                if matches!(c.value, rustpython_parser::ast::Constant::Ellipsis) {
+                                    return Ok(IRType::VarTuple(Box::new(
+                                        type_annotation_to_ir_type(member)?,
+                                    )));
+                                }
+                            }
+                        }
                         if let Expr::Tuple(tuple) = &*subscript.slice {
                             let mut types = Vec::new();
                             for elem in &tuple.elts {
@@ -1535,6 +1638,38 @@ fn type_annotation_to_ir_type(expr: &Expr) -> Result<IRType> {
                                 &subscript.slice,
                             )?]))
                         }
+                    }
+                    // `Callable[[int, str], bool]`. `Callable[..., R]` gives
+                    // the result but not the parameters, which a call through
+                    // it cannot be made with, so it is refused.
+                    "Callable" => {
+                        let Expr::Tuple(tuple) = &*subscript.slice else {
+                            return Err(anyhow!(
+                                "Callable takes [parameter types] and a result type"
+                            ));
+                        };
+                        let [params, result] = tuple.elts.as_slice() else {
+                            return Err(anyhow!(
+                                "Callable takes [parameter types] and a result type"
+                            ));
+                        };
+                        let Expr::List(params) = params else {
+                            return Err(crate::core::errors::unsupported_feature(
+                                "'Callable[..., R]' does not say what the function takes. Hint: \
+                                 list the parameter types, 'Callable[[int, str], R]'",
+                                None,
+                            )
+                            .into());
+                        };
+                        let params = params
+                            .elts
+                            .iter()
+                            .map(type_annotation_to_ir_type)
+                            .collect::<Result<Vec<_>>>()?;
+                        Ok(IRType::Callable {
+                            params,
+                            return_type: Box::new(type_annotation_to_ir_type(result)?),
+                        })
                     }
                     "Union" => {
                         if let Expr::Tuple(tuple) = &*subscript.slice {
@@ -1565,37 +1700,76 @@ fn process_function_params(
     args: &Arguments,
     memory_layout: &mut MemoryLayout,
 ) -> Result<Vec<IRParam>> {
-    let positional = args.args.iter().map(|arg| (arg, false));
-    let keyword_only = args.kwonlyargs.iter().map(|arg| (arg, true));
-    positional
-        .chain(keyword_only)
-        .map(
-            |(arg_with_default, keyword_only): (&ArgWithDefault, bool)| {
-                let name = arg_with_default.def.arg.to_string();
-
-                // Check for type annotation
-                let param_type = if let Some(annotation) = &arg_with_default.def.annotation {
-                    type_annotation_to_ir_type(annotation)?
-                } else {
-                    IRType::Unknown
-                };
-
-                // Check for default value
-                let default_value = if let Some(default) = &arg_with_default.default {
-                    Some(lower_expr(default, memory_layout)?)
-                } else {
-                    None
-                };
-
-                Ok(IRParam {
-                    name,
-                    param_type,
-                    default_value,
-                    keyword_only,
-                })
-            },
+    if !args.posonlyargs.is_empty() {
+        return Err(crate::core::errors::unsupported_feature(
+            "positional-only parameters (before '/') are not supported. Hint: drop the '/'",
+            None,
         )
-        .collect()
+        .into());
+    }
+    let lower = |arg_with_default: &ArgWithDefault,
+                 keyword_only: bool,
+                 memory_layout: &mut MemoryLayout|
+     -> Result<IRParam> {
+        let name = arg_with_default.def.arg.to_string();
+
+        // Check for type annotation
+        let param_type = if let Some(annotation) = &arg_with_default.def.annotation {
+            type_annotation_to_ir_type(annotation)?
+        } else {
+            IRType::Unknown
+        };
+
+        // Check for default value
+        let default_value = if let Some(default) = &arg_with_default.default {
+            Some(lower_expr(default, memory_layout)?)
+        } else {
+            None
+        };
+
+        Ok(IRParam {
+            name,
+            param_type,
+            default_value,
+            keyword_only,
+            star: ParamStar::None,
+        })
+    };
+    // `*args: T` collects a `tuple[T, ...]` and `**kwargs: T` a `dict[str, T]`;
+    // the annotation names one member's type, as in CPython.
+    let star = |arg: &rustpython_parser::ast::Arg, star: ParamStar| -> Result<IRParam> {
+        let member = match &arg.annotation {
+            Some(annotation) => type_annotation_to_ir_type(annotation)?,
+            None => IRType::Unknown,
+        };
+        let param_type = match star {
+            ParamStar::Args => IRType::VarTuple(Box::new(member)),
+            _ => IRType::Dict(Box::new(IRType::String), Box::new(member)),
+        };
+        Ok(IRParam {
+            name: arg.arg.to_string(),
+            param_type,
+            default_value: None,
+            keyword_only: false,
+            star,
+        })
+    };
+
+    // CPython's order: positional, *args, keyword-only, **kwargs.
+    let mut params = Vec::new();
+    for arg in &args.args {
+        params.push(lower(arg, false, memory_layout)?);
+    }
+    if let Some(vararg) = &args.vararg {
+        params.push(star(vararg, ParamStar::Args)?);
+    }
+    for arg in &args.kwonlyargs {
+        params.push(lower(arg, true, memory_layout)?);
+    }
+    if let Some(kwarg) = &args.kwarg {
+        params.push(star(kwarg, ParamStar::Kwargs)?);
+    }
+    Ok(params)
 }
 
 /// Lower a function body (sequence of statements) to IR
@@ -1873,13 +2047,59 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                     None
                 };
 
-                // print!("Expression generated by parse: {:?}\n", expr);
-                ir_statements.push(IRStatement::Raise { exception: expr });
+                let cause = match &raise_stmt.cause {
+                    Some(cause) => Some(lower_expr(cause, memory_layout)?),
+                    None => None,
+                };
+                ir_statements.push(IRStatement::Raise {
+                    exception: expr,
+                    cause,
+                });
             }
             Stmt::Global(global) => {
                 ir_statements.push(IRStatement::Global(
                     global.names.iter().map(|n| n.to_string()).collect(),
                 ));
+            }
+            Stmt::Nonlocal(nonlocal) => {
+                ir_statements.push(IRStatement::Nonlocal(
+                    nonlocal.names.iter().map(|n| n.to_string()).collect(),
+                ));
+            }
+            Stmt::FunctionDef(fundef) => {
+                // A nested function. `finalize::lift_nested_functions` turns it
+                // into a module function and a closure bound to its name.
+                // Only a decorator with no effect on what is computed:
+                // `@functools.wraps(fn)` on a wrapper, typically.
+                let mut decorators = Vec::new();
+                for dec in &fundef.decorator_list {
+                    match classify_function_decorator(dec, fundef.name.as_str()) {
+                        Ok(FunctionDecorator::Inert(spelling)) => decorators.push(spelling),
+                        _ => {
+                            return Err(crate::core::errors::unsupported_feature(
+                                format!(
+                                    "a decorator on the nested function '{}' is not supported",
+                                    fundef.name
+                                ),
+                                None,
+                            )
+                            .into())
+                        }
+                    }
+                }
+                let params = process_function_params(&fundef.args, memory_layout)?;
+                let return_type = match &fundef.returns {
+                    Some(returns) => type_annotation_to_ir_type(returns)?,
+                    None => IRType::Unknown,
+                };
+                let body = lower_function_body(&fundef.body, memory_layout)?;
+                ir_statements.push(IRStatement::FunctionDef(Box::new(IRFunction {
+                    name: fundef.name.to_string(),
+                    params,
+                    body,
+                    return_type,
+                    decorators,
+                })));
             }
             Stmt::Delete(delete) => {
                 // `del xs[i]`, `del xs[a:b]`, `del d[k]`, one target at a time.
@@ -1932,6 +2152,7 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                 }
                 then_body.push(IRStatement::Raise {
                     exception: Some(IRExpr::Variable("AssertionError".to_string())),
+                    cause: None,
                 });
                 ir_statements.push(IRStatement::If {
                     condition: IRExpr::UnaryOp {
@@ -2074,26 +2295,7 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                     let handler_name = name.as_ref().map(|n| n.to_string());
 
                     // Process the body
-                    let mut handler_body = lower_function_body(body, memory_layout)?;
-
-                    // The name is bound to the exception's type code, not to
-                    // an exception object, so `str(e)` and `isinstance(e, E)`
-                    // answered wrong. Until exceptions carry objects it can
-                    // only be re-raised.
-                    if let Some(bound) = &handler_name {
-                        if crate::ir::finalize::reads_name_beyond_reraise(&mut handler_body, bound)
-                        {
-                            return Err(crate::core::errors::unsupported_feature(
-                                format!(
-                                    "'except ... as {bound}' binds no exception object yet, so \
-                                     '{bound}' can only be re-raised with 'raise {bound}' \
-                                     (exception objects are planned for 0.19.0)"
-                                ),
-                                None,
-                            )
-                            .into());
-                        }
-                    }
+                    let handler_body = lower_function_body(body, memory_layout)?;
 
                     except_handlers.push(IRExceptHandler {
                         exception_types,
@@ -2515,9 +2717,14 @@ fn lower_for_loop(
             ]);
         }
 
-        // for a, b, ... in zip(s0, s1, ...) — one target per sequence; the
-        // first sequence drives the loop, the rest are indexed by a shared
-        // counter and the shortest one ends the iteration.
+        // for a, b, ... in zip(s0, s1, ...): one target per sequence. The
+        // first sequence drives the loop and the rest are indexed by a shared
+        // counter, each pulled in argument order and the first exhausted one
+        // ending the iteration, as CPython's zip pulls. The targets are bound
+        // only once every value of the round is in hand, so a round cut
+        // short leaves them holding the last whole tuple. (A later argument
+        // that is a generator is pulled through `__next__` instead, by the
+        // generator pass, which recognizes these statements.)
         if matches!(&*call.func, Expr::Name(n) if n.id.as_str() == "zip") {
             if !call.keywords.is_empty() {
                 return Err(anyhow!("zip() keyword arguments are not supported"));
@@ -2531,6 +2738,7 @@ fn lower_for_loop(
                 ));
             }
             let counter = format!("__zipi_{uniq}");
+            let first = format!("{ZIP_VALUE_PREFIX}{uniq}_0");
             let mut stmts = Vec::new();
             let mut seq_names = Vec::new();
             for (k, arg) in call.args.iter().enumerate().skip(1) {
@@ -2541,33 +2749,29 @@ fn lower_for_loop(
             stmts.push(assign(&counter, int_const(-1)));
 
             let mut inner = vec![increment(&counter)];
-            // counter >= len(s1) or counter >= len(s2) or ... -> break
-            let exhausted = seq_names
-                .iter()
-                .map(|seq| IRExpr::CompareOp {
+            let mut values = vec![first.clone()];
+            for (k, seq) in seq_names.iter().enumerate() {
+                let value = format!("{ZIP_VALUE_PREFIX}{uniq}_{}", k + 1);
+                inner.push(break_if(IRExpr::CompareOp {
                     left: Box::new(variable(&counter)),
                     right: Box::new(len_of(seq)),
                     op: IRCompareOp::GtE,
-                })
-                .reduce(|left, right| IRExpr::BoolOp {
-                    left: Box::new(left),
-                    right: Box::new(right),
-                    op: IRBoolOp::Or,
-                })
-                .expect("zip always has trailing sequences");
-            inner.push(break_if(exhausted));
-            for (target, seq) in targets[1..].iter().zip(&seq_names) {
+                }));
                 inner.push(assign(
-                    target,
+                    &value,
                     IRExpr::Indexing {
                         container: Box::new(variable(seq)),
                         index: Box::new(variable(&counter)),
                     },
                 ));
+                values.push(value);
+            }
+            for (target, value) in targets.iter().zip(&values) {
+                inner.push(assign(target, variable(value)));
             }
             inner.extend(body.statements);
             stmts.push(IRStatement::For {
-                target: targets[0].clone(),
+                target: first,
                 iterable: lower_expr(&call.args[0], memory_layout)?,
                 body: Box::new(IRBody { statements: inner }),
                 else_body,
@@ -2963,51 +3167,11 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                     }
                 }
             } else if op == IROp::Mod {
-                // `%` formatting over constants folds to the string CPython
-                // renders. A runtime operand is left to code generation.
+                // `"template" % args`: each conversion becomes a format call
+                // on its argument (see `lower_percent_format`).
                 if let Expr::Constant(left_c) = &*binop.left {
-                    if let rustpython_parser::ast::Constant::Str(format_str) = &left_c.value {
-                        fn constant(e: &Expr) -> Option<PercentArg> {
-                            if let Expr::UnaryOp(u) = e {
-                                if matches!(u.op, rustpython_parser::ast::UnaryOp::USub) {
-                                    return match constant(&u.operand)? {
-                                        PercentArg::Int(n) => Some(PercentArg::Int(-n)),
-                                        PercentArg::Float(f) => Some(PercentArg::Float(-f)),
-                                        _ => None,
-                                    };
-                                }
-                            }
-                            let Expr::Constant(c) = e else { return None };
-                            match &c.value {
-                                rustpython_parser::ast::Constant::Str(s) => {
-                                    Some(PercentArg::Str(s.clone()))
-                                }
-                                rustpython_parser::ast::Constant::Int(i) => {
-                                    i.to_string().parse().ok().map(PercentArg::Int)
-                                }
-                                rustpython_parser::ast::Constant::Float(f) => {
-                                    Some(PercentArg::Float(*f))
-                                }
-                                rustpython_parser::ast::Constant::Bool(b) => {
-                                    Some(PercentArg::Bool(*b))
-                                }
-                                _ => None,
-                            }
-                        }
-                        let format_args: Option<Vec<PercentArg>> = match &*binop.right {
-                            Expr::Tuple(tuple) => tuple.elts.iter().map(constant).collect(),
-                            other => constant(other).map(|a| vec![a]),
-                        };
-                        if let Some(format_args) = format_args {
-                            let result =
-                                percent_format(format_str, &format_args).map_err(|why| {
-                                    anyhow!(
-                                        "'%' formatting of {format_str:?} is not supported: {why}"
-                                    )
-                                })?;
-                            memory_layout.add_string(&result);
-                            return Ok(IRExpr::Const(IRConstant::String(result)));
-                        }
+                    if let rustpython_parser::ast::Constant::Str(template) = &left_c.value {
+                        return lower_percent_format(template, &binop.right, memory_layout);
                     }
                 }
             }
@@ -3172,15 +3336,18 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                 Expr::Name(name) => {
                     // Direct function call like func()
                     let function_name = name.id.to_string();
+                    if function_name == "print" {
+                        // Its default separator and end.
+                        memory_layout.add_string(" ");
+                        memory_layout.add_string("\n");
+                    }
 
                     // The builtin lowerings below read positional arguments
                     // only. A call with keywords keeps them for the finalize
                     // pass to place, or for code generation to refuse.
-                    if !call.keywords.is_empty() && function_name != "sorted" {
-                        let mut arguments = Vec::new();
-                        for arg in &call.args {
-                            arguments.push(lower_expr(arg, memory_layout)?);
-                        }
+                    let starred = call.args.iter().any(|a| matches!(a, Expr::Starred(_)));
+                    if (!call.keywords.is_empty() && function_name != "sorted") || starred {
+                        let mut arguments = lower_call_args(call, memory_layout)?;
                         arguments.extend(lower_keywords(call, &function_name, memory_layout)?);
                         return Ok(IRExpr::FunctionCall {
                             function_name,
@@ -3359,10 +3526,7 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                         .into());
                     }
 
-                    let mut arguments = Vec::new();
-                    for arg in &call.args {
-                        arguments.push(lower_expr(arg, memory_layout)?);
-                    }
+                    let mut arguments = lower_call_args(call, memory_layout)?;
                     arguments.extend(lower_keywords(call, &function_name, memory_layout)?);
 
                     Ok(IRExpr::FunctionCall {
@@ -3373,6 +3537,23 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                 Expr::Attribute(attr) => {
                     // Method call like obj.method()
                     let method_name = attr.attr.to_string();
+                    // `super().m(*args, **kwargs)` forwards a wrapper's
+                    // arguments (a metaclass's `__call__`); the passes that
+                    // consume it place them, and any left is refused.
+                    let forwards_to_super = matches!(&*attr.value, Expr::Call(c)
+                        if matches!(&*c.func, Expr::Name(n) if n.id.as_str() == "super"));
+                    if forwards_to_super
+                        && (call.args.iter().any(|a| matches!(a, Expr::Starred(_)))
+                            || call.keywords.iter().any(|k| k.arg.is_none()))
+                    {
+                        let mut arguments = lower_call_args(call, memory_layout)?;
+                        arguments.extend(lower_keywords(call, &method_name, memory_layout)?);
+                        return Ok(IRExpr::MethodCall {
+                            object: Box::new(lower_expr(&attr.value, memory_layout)?),
+                            method_name,
+                            arguments,
+                        });
+                    }
                     let mut arguments = Vec::new();
                     for arg in &call.args {
                         arguments.push(lower_expr(arg, memory_layout)?);
@@ -3389,6 +3570,13 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                         match (method_name.as_str(), name.as_deref()) {
                             ("sort", Some("reverse")) => {
                                 arguments.push(lower_expr(&keyword.value, memory_layout)?);
+                            }
+                            // `str.format`'s named fields.
+                            ("format", Some(kw)) => {
+                                arguments.push(IRExpr::Keyword {
+                                    name: kw.to_string(),
+                                    value: Box::new(lower_expr(&keyword.value, memory_layout)?),
+                                });
                             }
                             (_, Some(kw)) => {
                                 return Err(anyhow!(
@@ -3416,95 +3604,66 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                         if let rustpython_parser::ast::Constant::Str(s) = &const_expr.value {
                             // Optimize string methods on constants
                             match method_name.as_str() {
-                                // Transforming methods
-                                "upper" => {
-                                    let result = s.to_uppercase();
-                                    memory_layout.add_string(&result);
-                                    return Ok(IRExpr::Const(IRConstant::String(result)));
-                                }
-                                "lower" => {
-                                    let result = s.to_lowercase();
-                                    memory_layout.add_string(&result);
-                                    return Ok(IRExpr::Const(IRConstant::String(result)));
-                                }
-                                "capitalize" => {
-                                    let mut chars = s.chars();
-                                    let result = match chars.next() {
-                                        None => String::new(),
-                                        Some(first) => {
-                                            first.to_uppercase().collect::<String>()
-                                                + &chars.collect::<String>().to_lowercase()
-                                        }
+                                // Transforming methods, as CPython maps
+                                // case (`core::unicode`). These used Rust's
+                                // mappings: `title()` started a word only
+                                // after whitespace ("Hello-world"),
+                                // `capitalize()` uppercased where CPython
+                                // titlecases, and `strip()` missed CPython's
+                                // whitespace beyond Rust's.
+                                "upper" | "lower" | "capitalize" | "title"
+                                    if arguments.is_empty() =>
+                                {
+                                    use crate::core::unicode;
+                                    let result = match method_name.as_str() {
+                                        "upper" => unicode::upper(s),
+                                        "lower" => unicode::lower(s),
+                                        "capitalize" => unicode::capitalize(s),
+                                        _ => unicode::title(s),
                                     };
                                     memory_layout.add_string(&result);
                                     return Ok(IRExpr::Const(IRConstant::String(result)));
                                 }
-                                "title" => {
-                                    let mut result = String::new();
-                                    let mut capitalize_next = true;
-                                    for c in s.chars() {
-                                        if c.is_whitespace() {
-                                            result.push(c);
-                                            capitalize_next = true;
-                                        } else if capitalize_next {
-                                            result.push_str(&c.to_uppercase().to_string());
-                                            capitalize_next = false;
-                                        } else {
-                                            result.push_str(&c.to_lowercase().to_string());
+                                "strip" | "lstrip" | "rstrip"
+                                    if arguments.is_empty()
+                                        || matches!(
+                                            arguments.as_slice(),
+                                            [IRExpr::Const(IRConstant::String(_))]
+                                        ) =>
+                                {
+                                    let chars = match arguments.first() {
+                                        Some(IRExpr::Const(IRConstant::String(c))) => {
+                                            Some(c.as_str())
                                         }
-                                    }
-                                    memory_layout.add_string(&result);
-                                    return Ok(IRExpr::Const(IRConstant::String(result)));
-                                }
-                                "strip" => {
-                                    let result = s.trim().to_string();
-                                    memory_layout.add_string(&result);
-                                    return Ok(IRExpr::Const(IRConstant::String(result)));
-                                }
-                                "lstrip" => {
-                                    let result = s.trim_start().to_string();
-                                    memory_layout.add_string(&result);
-                                    return Ok(IRExpr::Const(IRConstant::String(result)));
-                                }
-                                "rstrip" => {
-                                    let result = s.trim_end().to_string();
+                                        _ => None,
+                                    };
+                                    let result = crate::core::unicode::strip(
+                                        s,
+                                        chars,
+                                        method_name != "rstrip",
+                                        method_name != "lstrip",
+                                    )
+                                    .to_string();
                                     memory_layout.add_string(&result);
                                     return Ok(IRExpr::Const(IRConstant::String(result)));
                                 }
                                 // Non-transforming (test) methods - return boolean as constant
-                                "isdigit" => {
-                                    let result =
-                                        !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
-                                    return Ok(IRExpr::Const(IRConstant::Bool(result)));
-                                }
-                                "isalpha" => {
-                                    let result =
-                                        !s.is_empty() && s.chars().all(|c| c.is_alphabetic());
-                                    return Ok(IRExpr::Const(IRConstant::Bool(result)));
-                                }
-                                "isalnum" => {
-                                    let result =
-                                        !s.is_empty() && s.chars().all(|c| c.is_alphanumeric());
-                                    return Ok(IRExpr::Const(IRConstant::Bool(result)));
-                                }
-                                "isspace" => {
-                                    let result =
-                                        !s.is_empty() && s.chars().all(|c| c.is_whitespace());
-                                    return Ok(IRExpr::Const(IRConstant::Bool(result)));
-                                }
-                                "isupper" => {
-                                    let result = !s.is_empty()
-                                        && s.chars()
-                                            .filter(|c| c.is_alphabetic())
-                                            .all(|c| c.is_uppercase());
-                                    return Ok(IRExpr::Const(IRConstant::Bool(result)));
-                                }
-                                "islower" => {
-                                    let result = !s.is_empty()
-                                        && s.chars()
-                                            .filter(|c| c.is_alphabetic())
-                                            .all(|c| c.is_lowercase());
-                                    return Ok(IRExpr::Const(IRConstant::Bool(result)));
+                                "isdigit" | "isalpha" | "isalnum" | "isspace" | "isupper"
+                                | "islower" | "isdecimal" | "isnumeric"
+                                    if arguments.is_empty() =>
+                                {
+                                    use crate::core::unicode::Predicate;
+                                    let predicate = match method_name.as_str() {
+                                        "isdigit" => Predicate::Digit,
+                                        "isalpha" => Predicate::Alpha,
+                                        "isalnum" => Predicate::Alnum,
+                                        "isspace" => Predicate::Space,
+                                        "isupper" => Predicate::Upper,
+                                        "islower" => Predicate::Lower,
+                                        "isdecimal" => Predicate::Decimal,
+                                        _ => Predicate::Numeric,
+                                    };
+                                    return Ok(IRExpr::Const(IRConstant::Bool(predicate.test(s))));
                                 }
                                 // `split` is deliberately not folded. It used to
                                 // be, for a constant separator, into a *string*
@@ -3524,9 +3683,11 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                                         if let IRExpr::Const(IRConstant::String(sub)) =
                                             &arguments[0]
                                         {
+                                            // A code point index, as CPython
+                                            // counts; it was the byte offset.
                                             let index = s
                                                 .find(sub.as_str())
-                                                .map(|i| i as i32)
+                                                .map(|i| s[..i].chars().count() as i32)
                                                 .unwrap_or(-1);
                                             return Ok(IRExpr::Const(IRConstant::Int(index)));
                                         }
@@ -3539,9 +3700,13 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                                         if let IRExpr::Const(IRConstant::String(sub)) =
                                             &arguments[0]
                                         {
-                                            let index =
-                                                s.find(sub.as_str()).map(|i| i as i32).unwrap_or(0);
-                                            return Ok(IRExpr::Const(IRConstant::Int(index)));
+                                            // A miss is left to the runtime,
+                                            // which raises ValueError; it
+                                            // folded to 0.
+                                            if let Some(i) = s.find(sub.as_str()) {
+                                                let index = s[..i].chars().count() as i32;
+                                                return Ok(IRExpr::Const(IRConstant::Int(index)));
+                                            }
                                         }
                                     }
                                     // Fall through to runtime handling
@@ -3821,24 +3986,38 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                         }
                     }
                     Expr::FormattedValue(fv) => {
-                        reject_unsupported_format(fv)?;
-
-                        // `{x:.2f}` renders through the fixed-point formatter
-                        // rather than `str()`, which cannot render a float.
-                        if let Some(precision) = fixed_precision_spec(fv) {
-                            let value = lower_expr(&fv.value, memory_layout)?;
+                        // `{value!r:spec}` is `format(repr(value), spec)`; the
+                        // spec is itself an f-string, so it may hold fields.
+                        let conversion = match fv.conversion {
+                            ConversionFlag::None => None,
+                            ConversionFlag::Str => Some("str"),
+                            ConversionFlag::Repr => Some("repr"),
+                            ConversionFlag::Ascii => Some("ascii"),
+                        };
+                        let spec = match fv.format_spec.as_deref() {
+                            None => None,
+                            Some(Expr::JoinedStr(spec)) if spec.values.is_empty() => None,
+                            Some(spec) => Some(lower_expr(spec, memory_layout)?),
+                        };
+                        let lowered = lower_expr(&fv.value, memory_layout)?;
+                        if conversion.is_some() || spec.is_some() {
                             flush_fstring_text(&mut text, &mut parts, memory_layout);
-                            parts.push(IRExpr::FunctionCall {
-                                function_name: "__format_fixed".to_string(),
-                                arguments: vec![
-                                    value,
-                                    IRExpr::Const(IRConstant::Int(precision as i32)),
-                                ],
+                            let value = match conversion {
+                                Some(name) => IRExpr::FunctionCall {
+                                    function_name: name.to_string(),
+                                    arguments: vec![lowered],
+                                },
+                                None => lowered,
+                            };
+                            parts.push(match spec {
+                                Some(spec) => IRExpr::FunctionCall {
+                                    function_name: "format".to_string(),
+                                    arguments: vec![value, spec],
+                                },
+                                None => value,
                             });
                             continue;
                         }
-
-                        let lowered = lower_expr(&fv.value, memory_layout)?;
                         // A constant interpolation is rendered here, so
                         // `f"{2}nd"` stays one string constant rather than
                         // becoming a runtime concatenation.
@@ -3924,117 +4103,212 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
     }
 }
 
-/// Lower `"template".format(args...)` into the concatenation of its pieces,
-/// the same shape an f-string lowers to.
-///
-/// Only automatic (`{}`) and positional (`{0}`) fields are supported. A named
-/// field, a format specifier, or a conversion is rejected rather than ignored,
-/// because honouring none of them while reporting success is how `.format()`
-/// used to return the bare separator.
+/// `"template".format(...)` lowered to the same `+` chain an f-string is:
+/// each replacement field `{name.attr[key]!conv:spec}` becomes
+/// `format(conv(value), spec)` (or `str(value)` when it has neither), with
+/// the field numbering, names, attribute and index lookups, and nested fields
+/// in the spec CPython's `str.format` reads. The arguments are evaluated
+/// once each, in order, as CPython evaluates them, so a lowering that would
+/// repeat, reorder, or drop one that has an effect is refused.
 fn lower_format_template(
     template: &str,
     arguments: Vec<IRExpr>,
     memory_layout: &mut MemoryLayout,
 ) -> Result<IRExpr> {
-    let mut text = String::new();
-    let mut parts: Vec<IRExpr> = Vec::new();
-    let mut next_auto = 0usize;
-    let mut numbering: Option<bool> = None;
-    let mut chars = template.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        match c {
-            '{' if chars.peek() == Some(&'{') => {
-                chars.next();
-                text.push('{');
-            }
-            '}' if chars.peek() == Some(&'}') => {
-                chars.next();
-                text.push('}');
-            }
-            '{' => {
-                let mut field = String::new();
-                let mut closed = false;
-                for inner in chars.by_ref() {
-                    if inner == '}' {
-                        closed = true;
-                        break;
-                    }
-                    field.push(inner);
-                }
-                if !closed {
-                    return Err(anyhow!(
-                        "unmatched '{{' in the format string \"{template}\""
-                    ));
-                }
-                if field.contains(':') || field.contains('!') {
-                    return Err(anyhow!(
-                        "format specifiers and conversions are not supported in \
-                         str.format() (the '{{{field}}}' field). \
-                         Hint: interpolate the value on its own ({{}})"
-                    ));
-                }
-                // CPython raises ValueError for `"{} {0}"`; this compiled
-                // it, numbering the two kinds of field independently.
-                let automatic = field.is_empty();
-                if *numbering.get_or_insert(automatic) != automatic {
-                    return Err(anyhow!(
-                        "cannot switch from automatic field numbering to manual field \
-                         specification in \"{template}\""
-                    ));
-                }
-                let index = if automatic {
-                    let idx = next_auto;
-                    next_auto += 1;
-                    idx
-                } else {
-                    match field.parse::<usize>() {
-                        Ok(idx) => idx,
-                        Err(_) => {
-                            return Err(anyhow!(
-                                "named fields are not supported in str.format() \
-                                 (the '{{{field}}}' field). \
-                                 Hint: pass the value positionally ({{}})"
-                            ));
-                        }
-                    }
-                };
-                let Some(arg) = arguments.get(index) else {
-                    return Err(anyhow!(
-                        "the format string \"{template}\" refers to argument \
-                         {index}, but only {} were given",
-                        arguments.len()
-                    ));
-                };
-                match arg {
-                    IRExpr::Const(constant) => match render_constant(constant) {
-                        Some(rendered) => text.push_str(&rendered),
-                        None => {
-                            flush_fstring_text(&mut text, &mut parts, memory_layout);
-                            parts.push(IRExpr::FunctionCall {
-                                function_name: "str".to_string(),
-                                arguments: vec![arg.clone()],
-                            });
-                        }
-                    },
-                    other => {
-                        flush_fstring_text(&mut text, &mut parts, memory_layout);
-                        parts.push(IRExpr::FunctionCall {
-                            function_name: "str".to_string(),
-                            arguments: vec![other.clone()],
-                        });
-                    }
-                }
-            }
-            '}' => {
-                return Err(anyhow!(
-                    "unmatched '}}' in the format string \"{template}\""
-                ));
-            }
-            other => text.push(other),
+    let mut positional = Vec::new();
+    let mut named: Vec<(String, IRExpr)> = Vec::new();
+    for arg in arguments {
+        match arg {
+            IRExpr::Keyword { name, value } => named.push((name, *value)),
+            other => positional.push(other),
         }
     }
+    let mut state = FormatState {
+        template: template.to_string(),
+        positional,
+        named,
+        next_auto: 0,
+        numbering: None,
+        uses: Vec::new(),
+    };
+    let expr = format_template_parts(template, &mut state, memory_layout, 0)?;
 
+    // Every argument, used once each in order, if any has an effect.
+    let effects = |e: &IRExpr| {
+        !matches!(
+            e,
+            IRExpr::Const(_) | IRExpr::Variable(_) | IRExpr::Param(_) | IRExpr::Lambda { .. }
+        )
+    };
+    let all: Vec<&IRExpr> = state
+        .positional
+        .iter()
+        .chain(state.named.iter().map(|(_, v)| v))
+        .collect();
+    if all.iter().any(|e| effects(e)) {
+        let order: Vec<usize> = (0..all.len()).collect();
+        if state.uses != order {
+            return Err(crate::core::errors::unsupported_feature(
+                format!(
+                    "the format string \"{template}\" uses its arguments other than once each \
+                     in the order given, and one of them is computed, which CPython evaluates \
+                     exactly once, first. Hint: compute the values into variables first"
+                ),
+                None,
+            )
+            .into());
+        }
+    }
+    Ok(expr)
+}
+
+/// What lowering one `str.format` call keeps track of.
+struct FormatState {
+    template: String,
+    positional: Vec<IRExpr>,
+    named: Vec<(String, IRExpr)>,
+    next_auto: usize,
+    numbering: Option<bool>,
+    /// Each argument used, as its index among positional then named.
+    uses: Vec<usize>,
+}
+
+fn format_template_parts(
+    template: &str,
+    state: &mut FormatState,
+    memory_layout: &mut MemoryLayout,
+    depth: usize,
+) -> Result<IRExpr> {
+    let whole = state.template.clone();
+    let mut text = String::new();
+    let mut parts: Vec<IRExpr> = Vec::new();
+    let chars: Vec<char> = template.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '{' && chars.get(i + 1) == Some(&'{') {
+            text.push('{');
+            i += 2;
+            continue;
+        }
+        if c == '}' && chars.get(i + 1) == Some(&'}') {
+            text.push('}');
+            i += 2;
+            continue;
+        }
+        if c == '}' {
+            return Err(crate::core::errors::type_error(
+                format!("Single '}}' encountered in format string \"{whole}\" (ValueError)"),
+                None,
+            )
+            .into());
+        }
+        if c != '{' {
+            text.push(c);
+            i += 1;
+            continue;
+        }
+        // The field, to its matching brace.
+        let mut level = 1;
+        let mut j = i + 1;
+        while j < chars.len() {
+            match chars[j] {
+                '{' => level += 1,
+                '}' => {
+                    level -= 1;
+                    if level == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        if j >= chars.len() {
+            return Err(crate::core::errors::type_error(
+                format!("expected '}}' before end of string in \"{whole}\" (ValueError)"),
+                None,
+            )
+            .into());
+        }
+        let field: String = chars[i + 1..j].iter().collect();
+        i = j + 1;
+        if depth > 1 {
+            return Err(crate::core::errors::type_error(
+                format!("Max string recursion exceeded in \"{whole}\" (ValueError)"),
+                None,
+            )
+            .into());
+        }
+        // name[!conv][:spec], the spec running to the end
+        let (head, spec) = match field.find(':') {
+            Some(at) if !field[..at].contains('[') || field[..at].contains(']') => {
+                (field[..at].to_string(), Some(field[at + 1..].to_string()))
+            }
+            _ => (field.clone(), None),
+        };
+        let (name, conversion) = match head.find('!') {
+            Some(at) => {
+                let conv = &head[at + 1..];
+                let conv = match conv {
+                    "r" => "repr",
+                    "s" => "str",
+                    "a" => "ascii",
+                    _ => {
+                        return Err(crate::core::errors::type_error(
+                            format!("Unknown conversion specifier {conv} (ValueError)"),
+                            None,
+                        )
+                        .into())
+                    }
+                };
+                (head[..at].to_string(), Some(conv))
+            }
+            None => (head, None),
+        };
+        let value = format_field_value(&name, state, memory_layout)?;
+        let spec_expr = match spec {
+            Some(spec) if !spec.is_empty() => Some(format_template_parts(
+                &spec,
+                state,
+                memory_layout,
+                depth + 1,
+            )?),
+            _ => None,
+        };
+        let value = match conversion {
+            Some(conv) => IRExpr::FunctionCall {
+                function_name: conv.to_string(),
+                arguments: vec![value],
+            },
+            None => value,
+        };
+        let part = match spec_expr {
+            Some(spec) => IRExpr::FunctionCall {
+                function_name: "format".to_string(),
+                arguments: vec![value, spec],
+            },
+            None if conversion.is_some() => value,
+            None => match value {
+                IRExpr::Const(constant) => match render_constant(&constant) {
+                    Some(rendered) => {
+                        text.push_str(&rendered);
+                        continue;
+                    }
+                    None => IRExpr::FunctionCall {
+                        function_name: "str".to_string(),
+                        arguments: vec![IRExpr::Const(constant)],
+                    },
+                },
+                other => IRExpr::FunctionCall {
+                    function_name: "str".to_string(),
+                    arguments: vec![other],
+                },
+            },
+        };
+        flush_fstring_text(&mut text, &mut parts, memory_layout);
+        parts.push(part);
+    }
     if parts.is_empty() {
         memory_layout.add_string(&text);
         return Ok(IRExpr::Const(IRConstant::String(text)));
@@ -4048,6 +4322,103 @@ fn lower_format_template(
             op: IROp::Add,
         })
         .expect("parts is non-empty"))
+}
+
+/// The value a field name names: an argument (auto-numbered, by position, or
+/// by keyword), then each `.attr` and `[key]` applied in turn.
+fn format_field_value(
+    name: &str,
+    state: &mut FormatState,
+    memory_layout: &mut MemoryLayout,
+) -> Result<IRExpr> {
+    let whole = state.template.clone();
+    let value_error = |message: String| -> anyhow::Error {
+        crate::core::errors::type_error(format!("{message} (ValueError)"), None).into()
+    };
+    let first_end = name.find(['.', '[']).unwrap_or(name.len());
+    let arg = &name[..first_end];
+    let mut rest = &name[first_end..];
+    let automatic = arg.is_empty();
+    let numbered = automatic || arg.parse::<usize>().is_ok();
+    if numbered && *state.numbering.get_or_insert(automatic) != automatic {
+        return Err(value_error(format!(
+            "cannot switch from automatic field numbering to manual field specification in \"{whole}\""
+        )));
+    }
+    let (index, mut value) = if automatic {
+        let idx = state.next_auto;
+        state.next_auto += 1;
+        match state.positional.get(idx) {
+            Some(v) => (idx, v.clone()),
+            None => {
+                return Err(crate::core::errors::type_error(
+                    format!(
+                    "Replacement index {idx} out of range for positional args tuple (IndexError)"
+                ),
+                    None,
+                )
+                .into())
+            }
+        }
+    } else if let Ok(idx) = arg.parse::<usize>() {
+        match state.positional.get(idx) {
+            Some(v) => (idx, v.clone()),
+            None => {
+                return Err(crate::core::errors::type_error(
+                    format!(
+                    "Replacement index {idx} out of range for positional args tuple (IndexError)"
+                ),
+                    None,
+                )
+                .into())
+            }
+        }
+    } else {
+        match state.named.iter().position(|(n, _)| n == arg) {
+            Some(at) => (state.positional.len() + at, state.named[at].1.clone()),
+            None => {
+                return Err(
+                    crate::core::errors::type_error(format!("'{arg}' (KeyError)"), None).into(),
+                )
+            }
+        }
+    };
+    state.uses.push(index);
+    while !rest.is_empty() {
+        if let Some(after) = rest.strip_prefix('.') {
+            let end = after.find(['.', '[']).unwrap_or(after.len());
+            if end == 0 {
+                return Err(value_error("Empty attribute in format string".to_string()));
+            }
+            value = IRExpr::Attribute {
+                object: Box::new(value),
+                attribute: after[..end].to_string(),
+            };
+            rest = &after[end..];
+        } else if let Some(after) = rest.strip_prefix('[') {
+            let Some(end) = after.find(']') else {
+                return Err(value_error("Missing ']' in format string".to_string()));
+            };
+            let key = &after[..end];
+            let index = match key.parse::<i32>() {
+                Ok(n) if !key.starts_with('-') => IRExpr::Const(IRConstant::Int(n)),
+                _ => {
+                    memory_layout.add_string(key);
+                    IRExpr::Const(IRConstant::String(key.to_string()))
+                }
+            };
+            value = IRExpr::Indexing {
+                container: Box::new(value),
+                index: Box::new(index),
+            };
+            rest = &after[end + 1..];
+        } else {
+            return Err(value_error(
+                "Only '.' or '[' may follow ']' in format field specifier".to_string(),
+            ));
+        }
+    }
+    Ok(value)
 }
 
 /// Move the accumulated constant text of an f-string into `parts` as one
@@ -4099,239 +4470,299 @@ fn format_float_like_python(value: f64) -> Option<String> {
     })
 }
 
-/// Reject the f-string placeholder syntax that would otherwise be dropped on
-/// the floor. A format specifier or an `!r`/`!a` conversion changes what the
-/// placeholder renders, and neither has an implementation here, so honouring
-/// them silently would print the wrong thing.
-fn reject_unsupported_format(fv: &rustpython_parser::ast::ExprFormattedValue) -> Result<()> {
-    // `!s` is `str(value)`, which is what a bare placeholder already does.
-    match fv.conversion {
-        ConversionFlag::None | ConversionFlag::Str => {}
-        ConversionFlag::Repr => {
-            return Err(anyhow!(
-                "f-string conversion '!r' is not supported. \
-                 Hint: interpolate the value itself ({{value}})"
-            ));
-        }
-        ConversionFlag::Ascii => {
-            return Err(anyhow!(
-                "f-string conversion '!a' is not supported. \
-                 Hint: interpolate the value itself ({{value}})"
-            ));
-        }
-    }
-
-    let has_spec = match fv.format_spec.as_deref() {
-        None => false,
-        Some(Expr::JoinedStr(spec)) => !spec.values.is_empty(),
-        Some(_) => true,
-    };
-    // `.Nf` is handled (see `fixed_precision_spec`); every other specifier
-    // would change what the placeholder renders and has no implementation, so
-    // honouring it silently is not an option.
-    if has_spec && fixed_precision_spec(fv).is_none() {
-        return Err(anyhow!(
-            "this f-string format specifier is not supported yet; only \
-             fixed-point '.Nf' is (as in f\"{{value:.2f}}\"). \
-             Hint: interpolate the value without a specifier ({{value}})"
-        ));
-    }
-
-    Ok(())
+/// One conversion of a `%` format string.
+struct PercentField {
+    key: Option<String>,
+    flags: String,
+    width: Option<usize>,
+    precision: Option<usize>,
+    conversion: char,
 }
 
-/// The `N` of a `.Nf` format specifier, when the placeholder carries exactly
-/// that and nothing else.
-///
-/// `f"{x:.2f}"` is how a program prints money, and rejecting it was the last
-/// thing standing between a real report and this compiler. Anything richer
-/// (widths, alignment, thousands separators) still goes through the rejection
-/// above rather than being quietly dropped.
-fn fixed_precision_spec(fv: &rustpython_parser::ast::ExprFormattedValue) -> Option<u32> {
-    let Some(Expr::JoinedStr(spec)) = fv.format_spec.as_deref() else {
-        return None;
+/// The pieces of a `%` format string: text, and the conversions, with
+/// CPython's `ValueError` for a malformed one.
+fn parse_percent(template: &str) -> Result<Vec<std::result::Result<String, PercentField>>> {
+    let value_error = |m: String| -> anyhow::Error {
+        crate::core::errors::type_error(format!("{m} (ValueError)"), None).into()
     };
-    let [Expr::Constant(part)] = spec.values.as_slice() else {
-        return None;
-    };
-    let rustpython_parser::ast::Constant::Str(text) = &part.value else {
-        return None;
-    };
-    let digits = text.strip_prefix('.')?.strip_suffix('f')?;
-    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
-        return None;
-    }
-    // More than nine places would overflow the scaled fraction.
-    digits.parse::<u32>().ok().filter(|p| *p <= 9)
-}
-
-/// A constant operand of `%` formatting.
-enum PercentArg {
-    Str(String),
-    Int(i64),
-    Float(f64),
-    Bool(bool),
-}
-
-/// `format % args` over constants, as CPython renders it, or why it cannot be
-/// folded. Covers `%s %r %d %i %u %x %X %o %f %F %%` with the `-+ 0#` flags,
-/// a width, and a precision; anything else (a mapping key, `*`, `%e`, `%g`,
-/// `%c`) is refused rather than rendered differently.
-fn percent_format(format: &str, args: &[PercentArg]) -> std::result::Result<String, String> {
-    let mut out = String::new();
-    let mut next = 0;
-    let mut chars = format.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '%' {
-            out.push(c);
+    let chars: Vec<char> = template.chars().collect();
+    let mut pieces = Vec::new();
+    let mut text = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '%' {
+            text.push(chars[i]);
+            i += 1;
             continue;
         }
+        i += 1;
+        let mut key = None;
+        if chars.get(i) == Some(&'(') {
+            let mut depth = 1;
+            let start = i + 1;
+            i += 1;
+            while i < chars.len() && depth > 0 {
+                match chars[i] {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+                i += 1;
+            }
+            if depth > 0 {
+                return Err(value_error("incomplete format key".to_string()));
+            }
+            key = Some(chars[start..i - 1].iter().collect::<String>());
+        }
         let mut flags = String::new();
-        while let Some(&f) = chars.peek() {
+        while let Some(&f) = chars.get(i) {
             if "-+ 0#".contains(f) {
                 flags.push(f);
-                chars.next();
+                i += 1;
             } else {
                 break;
             }
         }
-        let digits = |chars: &mut std::iter::Peekable<std::str::Chars>| {
-            let mut n = String::new();
-            while let Some(&d) = chars.peek() {
-                if d.is_ascii_digit() {
-                    n.push(d);
-                    chars.next();
-                } else {
-                    break;
-                }
+        let digits = |i: &mut usize| {
+            let start = *i;
+            while chars.get(*i).is_some_and(|c| c.is_ascii_digit()) {
+                *i += 1;
             }
-            n.parse::<usize>().ok()
+            chars[start..*i]
+                .iter()
+                .collect::<String>()
+                .parse::<usize>()
+                .ok()
         };
-        let width = digits(&mut chars).unwrap_or(0);
-        let precision = if chars.peek() == Some(&'.') {
-            chars.next();
-            Some(digits(&mut chars).unwrap_or(0))
-        } else {
-            None
-        };
-        while matches!(chars.peek(), Some('h' | 'l' | 'L')) {
-            chars.next();
+        if chars.get(i) == Some(&'*') {
+            return Err(crate::core::errors::unsupported_feature(
+                "a '*' width or precision in '%' formatting is not supported. \
+                 Hint: use an f-string, for example f\"{x:>{w}}\"",
+                None,
+            )
+            .into());
         }
-        let Some(conversion) = chars.next() else {
-            return Err("the format ends in an incomplete '%' specifier".into());
+        let width = digits(&mut i);
+        let mut precision = None;
+        if chars.get(i) == Some(&'.') {
+            i += 1;
+            if chars.get(i) == Some(&'*') {
+                return Err(crate::core::errors::unsupported_feature(
+                    "a '*' width or precision in '%' formatting is not supported. \
+                     Hint: use an f-string, for example f\"{x:.{p}f}\"",
+                    None,
+                )
+                .into());
+            }
+            precision = Some(digits(&mut i).unwrap_or(0));
+        }
+        while matches!(chars.get(i), Some('h' | 'l' | 'L')) {
+            i += 1;
+        }
+        let Some(&conversion) = chars.get(i) else {
+            return Err(value_error("incomplete format".to_string()));
         };
-        if conversion == '%' {
-            out.push('%');
+        i += 1;
+        if conversion == '%' && key.is_none() {
+            text.push('%');
             continue;
         }
-        let Some(arg) = args.get(next) else {
-            return Err("not enough arguments for format string".into());
-        };
-        next += 1;
-        let as_int = || match arg {
-            PercentArg::Int(n) => Ok(*n),
-            PercentArg::Bool(b) => Ok(*b as i64),
-            _ => Err(format!("%{conversion} format: an integer is required")),
-        };
-        let left = flags.contains('-');
-        let sign = |negative: bool| {
-            if negative {
-                "-"
-            } else if flags.contains('+') {
-                "+"
-            } else if flags.contains(' ') {
-                " "
-            } else {
-                ""
-            }
-        };
-        let (prefix, body, numeric) = match conversion {
-            's' | 'r' | 'a' => {
-                let mut text = match arg {
-                    PercentArg::Str(s) if conversion == 's' => s.clone(),
-                    PercentArg::Str(s) => python_repr(s)
-                        .ok_or("repr() of a string with quotes or non-printable characters")?,
-                    PercentArg::Int(n) => n.to_string(),
-                    PercentArg::Bool(b) => if *b { "True" } else { "False" }.to_string(),
-                    PercentArg::Float(f) => format_float_like_python(*f)
-                        .ok_or("str() of a float outside the range rendered without exponent")?,
-                };
-                if let Some(p) = precision {
-                    text = text.chars().take(p).collect();
-                }
-                (String::new(), text, false)
-            }
-            'd' | 'i' | 'u' => {
-                let n = match arg {
-                    PercentArg::Float(f) if f.is_finite() => f.trunc() as i64,
-                    _ => as_int()?,
-                };
-                (sign(n < 0).to_string(), n.unsigned_abs().to_string(), true)
-            }
-            'x' | 'X' | 'o' => {
-                let n = as_int()?;
-                let magnitude = n.unsigned_abs();
-                let (digits, alt) = match conversion {
-                    'x' => (format!("{magnitude:x}"), "0x"),
-                    'X' => (format!("{magnitude:X}"), "0X"),
-                    _ => (format!("{magnitude:o}"), "0o"),
-                };
-                let alt = if flags.contains('#') { alt } else { "" };
-                (format!("{}{alt}", sign(n < 0)), digits, true)
-            }
-            'f' | 'F' => {
-                let v = match arg {
-                    PercentArg::Float(f) => *f,
-                    PercentArg::Int(n) => *n as f64,
-                    PercentArg::Bool(b) => *b as i64 as f64,
-                    PercentArg::Str(_) => {
-                        return Err("%f format: a real number is required, not str".into())
-                    }
-                };
-                if !v.is_finite() {
-                    return Err("%f of an infinity or NaN is not folded".into());
-                }
-                let digits = format!("{:.*}", precision.unwrap_or(6), v.abs());
-                let digits = if flags.contains('#') && precision == Some(0) {
-                    format!("{digits}.")
-                } else {
-                    digits
-                };
-                (sign(v.is_sign_negative()).to_string(), digits, true)
-            }
-            other => return Err(format!("the '%{other}' conversion is not folded")),
-        };
-        let len = prefix.chars().count() + body.chars().count();
-        let pad = width.saturating_sub(len);
-        if left {
-            out.push_str(&prefix);
-            out.push_str(&body);
-            out.push_str(&" ".repeat(pad));
-        } else if numeric && flags.contains('0') {
-            out.push_str(&prefix);
-            out.push_str(&"0".repeat(pad));
-            out.push_str(&body);
-        } else {
-            out.push_str(&" ".repeat(pad));
-            out.push_str(&prefix);
-            out.push_str(&body);
+        if !"%sradiuxXoeEfFgGc".contains(conversion) {
+            return Err(value_error(format!(
+                "unsupported format character '{conversion}' (0x{:x}) at index {}",
+                conversion as u32,
+                i - 1
+            )));
         }
+        if !text.is_empty() {
+            pieces.push(Ok(std::mem::take(&mut text)));
+        }
+        pieces.push(Err(PercentField {
+            key,
+            flags,
+            width,
+            precision,
+            conversion,
+        }));
     }
-    if next < args.len() {
-        return Err("not all arguments converted during string formatting".into());
+    if !text.is_empty() {
+        pieces.push(Ok(text));
     }
-    Ok(out)
+    Ok(pieces)
 }
 
-/// `repr()` of a string of printable ASCII, quoted the way CPython quotes it,
-/// or `None` for anything needing escapes this does not reproduce.
-fn python_repr(s: &str) -> Option<String> {
-    if !s.chars().all(|c| c.is_ascii_graphic() || c == ' ') || s.contains('\\') {
-        return None;
+/// The format specs a `%` conversion is the same as: one for a number, one
+/// for text (which `%` right-aligns where `format` left-aligns).
+fn percent_specs(field: &PercentField) -> Result<(String, String)> {
+    let c = field.conversion;
+    let flags = &field.flags;
+    let left = flags.contains('-');
+    let width = field.width.map(|w| w.to_string()).unwrap_or_default();
+    let mut text = String::from(if left { "<" } else { ">" });
+    text.push_str(&width);
+    if let (Some(p), true) = (field.precision, "sra".contains(c)) {
+        text.push_str(&format!(".{p}"));
     }
-    match (s.contains('\''), s.contains('"')) {
-        (false, _) => Some(format!("'{s}'")),
-        (true, false) => Some(format!("\"{s}\"")),
-        (true, true) => None,
+    let mut num = String::new();
+    if left {
+        num.push('<');
     }
+    if c != 'c' {
+        if flags.contains('+') {
+            num.push('+');
+        } else if flags.contains(' ') {
+            num.push(' ');
+        }
+        if flags.contains('#') && "xXoeEfFgG".contains(c) {
+            num.push('#');
+        }
+        if flags.contains('0') && !left {
+            num.push('0');
+        }
+    }
+    num.push_str(&width);
+    if let Some(p) = field.precision {
+        if "eEfFgG".contains(c) {
+            num.push_str(&format!(".{p}"));
+        } else if "diuxXo".contains(c) {
+            return Err(crate::core::errors::unsupported_feature(
+                format!(
+                    "a precision on '%{c}' (a minimum digit count) is not supported. \
+                     Hint: use a zero-filled width, for example '%05d'"
+                ),
+                None,
+            )
+            .into());
+        }
+    }
+    num.push(match c {
+        'i' | 'u' => 'd',
+        other => other,
+    });
+    Ok((num, text))
+}
+
+/// `"template" % args` as a `+` chain of one `__percent_field(value,
+/// number_spec, text_spec, conversion)` per conversion, which code
+/// generation renders from the value's type. A tuple literal supplies the
+/// values in order; a `%(key)` format reads them from a mapping; any other
+/// operand is one value, or, when it is a tuple, each of its items, decided
+/// once its type is known (`__percent_item`).
+fn lower_percent_format(
+    template: &str,
+    right: &Expr,
+    memory_layout: &mut MemoryLayout,
+) -> Result<IRExpr> {
+    let type_error = |m: String| -> anyhow::Error {
+        crate::core::errors::type_error(format!("{m} (TypeError)"), None).into()
+    };
+    let pieces = parse_percent(template)?;
+    let fields: Vec<&PercentField> = pieces.iter().filter_map(|p| p.as_ref().err()).collect();
+    let keyed = fields.iter().filter(|f| f.key.is_some()).count();
+    if keyed > 0 && keyed < fields.len() {
+        return Err(type_error("format requires a mapping".to_string()));
+    }
+    // A value read more than once must be one that reads the same each time.
+    let simple =
+        |e: &IRExpr| matches!(e, IRExpr::Variable(_) | IRExpr::Param(_) | IRExpr::Const(_));
+    let mut values: Vec<IRExpr> = Vec::new();
+    match right {
+        Expr::Tuple(tuple) if keyed == 0 => {
+            if tuple.elts.len() > fields.len() {
+                return Err(type_error(
+                    "not all arguments converted during string formatting".to_string(),
+                ));
+            }
+            if tuple.elts.len() < fields.len() {
+                return Err(type_error(
+                    "not enough arguments for format string".to_string(),
+                ));
+            }
+            for e in &tuple.elts {
+                values.push(lower_expr(e, memory_layout)?);
+            }
+        }
+        _ => {
+            let value = lower_expr(right, memory_layout)?;
+            if fields.len() > 1 && !simple(&value) {
+                return Err(crate::core::errors::unsupported_feature(
+                    "a '%' format with several conversions over a computed operand is not \
+                     supported. Hint: assign the operand to a variable first",
+                    None,
+                )
+                .into());
+            }
+            for (i, field) in fields.iter().enumerate() {
+                values.push(match &field.key {
+                    Some(key) => {
+                        memory_layout.add_string(key);
+                        IRExpr::Indexing {
+                            container: Box::new(value.clone()),
+                            index: Box::new(IRExpr::Const(IRConstant::String(key.clone()))),
+                        }
+                    }
+                    None => IRExpr::FunctionCall {
+                        function_name: "__percent_item".to_string(),
+                        arguments: vec![
+                            value.clone(),
+                            IRExpr::Const(IRConstant::Int(i as i32)),
+                            IRExpr::Const(IRConstant::Int(fields.len() as i32)),
+                        ],
+                    },
+                });
+            }
+            if fields.is_empty() {
+                // Only a mapping may go unused; anything else raises.
+                values.push(IRExpr::FunctionCall {
+                    function_name: "__percent_item".to_string(),
+                    arguments: vec![
+                        value,
+                        IRExpr::Const(IRConstant::Int(0)),
+                        IRExpr::Const(IRConstant::Int(0)),
+                    ],
+                });
+            }
+        }
+    }
+    let mut parts: Vec<IRExpr> = Vec::new();
+    let mut next = values.into_iter();
+    if fields.is_empty() {
+        if let Some(check) = next.next() {
+            parts.push(check);
+        }
+    }
+    for piece in &pieces {
+        match piece {
+            Ok(text) => {
+                memory_layout.add_string(text);
+                parts.push(IRExpr::Const(IRConstant::String(text.clone())));
+            }
+            Err(field) => {
+                let (num, text) = percent_specs(field)?;
+                memory_layout.add_string(&num);
+                memory_layout.add_string(&text);
+                parts.push(IRExpr::FunctionCall {
+                    function_name: "__percent_field".to_string(),
+                    arguments: vec![
+                        next.next().expect("one value per field"),
+                        IRExpr::Const(IRConstant::String(num)),
+                        IRExpr::Const(IRConstant::String(text)),
+                        IRExpr::Const(IRConstant::Int(field.conversion as i32)),
+                    ],
+                });
+            }
+        }
+    }
+    if parts.is_empty() {
+        memory_layout.add_string("");
+        return Ok(IRExpr::Const(IRConstant::String(String::new())));
+    }
+    Ok(parts
+        .into_iter()
+        .reduce(|acc, part| IRExpr::BinaryOp {
+            left: Box::new(acc),
+            right: Box::new(part),
+            op: IROp::Add,
+        })
+        .expect("parts is non-empty"))
 }

@@ -12,7 +12,29 @@ pub struct IRModule {
     /// consulted by call codegen to pick the implementation registered for
     /// the first argument's static type.
     pub dispatch_tables: Vec<IRDispatch>,
+    /// Module functions decorated by a function of this module, recorded by
+    /// the converter and applied by `ir::decorate` before the other passes.
+    pub user_decorations: Vec<IRUserDecoration>,
 }
+
+/// One function decorated by functions this module defines: its decorators
+/// outermost first, each a function name with the arguments a factory was
+/// called with (`@repeat(3)`), and how many module definitions precede the
+/// `def`, which is where decoration-time work runs.
+#[derive(Debug, Clone)]
+pub struct IRUserDecoration {
+    pub function: String,
+    pub decorators: Vec<(String, Option<Vec<IRExpr>>)>,
+    pub position: usize,
+}
+
+/// The `IRModule::metadata` key set (to `waspy_host`) when file I/O compiles
+/// to the deprecated `waspy_host` imports rather than WASI.
+pub const FILE_IO_HOST_KEY: &str = "file_io_host";
+
+/// The `IRModule::metadata` key prefix naming the module a class merged in
+/// from another file belongs to (`class_module:Square` -> `shapes`).
+pub const CLASS_MODULE_KEY: &str = "class_module:";
 
 /// A `@functools.singledispatch` function and its registered
 /// implementations. Each `@base.register` definition is lowered to an
@@ -44,6 +66,20 @@ pub struct IRParam {
     pub default_value: Option<IRExpr>, // Default parameter values
     /// Declared after `*`: it can only be passed by name.
     pub keyword_only: bool,
+    /// `*args` or `**kwargs`: the parameter collects the arguments no other
+    /// parameter takes.
+    pub star: ParamStar,
+}
+
+/// Whether a parameter collects the surplus arguments of a call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ParamStar {
+    #[default]
+    None,
+    /// `*args`: the surplus positional arguments, as a tuple.
+    Args,
+    /// `**kwargs`: the surplus keyword arguments, as a dict keyed by name.
+    Kwargs,
 }
 
 /// IR representation of a function body, which can contain multiple statements
@@ -68,6 +104,8 @@ pub enum IRStatement {
     },
     Raise {
         exception: Option<IRExpr>,
+        /// `raise X from Y`: the exception's `__cause__`.
+        cause: Option<IRExpr>,
     },
     While {
         condition: IRExpr,
@@ -146,6 +184,14 @@ pub enum IRStatement {
     /// `global a, b`: in this function, `a` and `b` are the module's
     /// definitions, and assigning one rebinds it for every reader.
     Global(Vec<String>),
+    /// A `def` inside a function body. It exists only between the converter
+    /// and `finalize::lift_nested_functions`, which runs before every other
+    /// module pass and replaces it with a module function plus an assignment
+    /// of the closure that calls it.
+    FunctionDef(Box<IRFunction>),
+    /// `nonlocal a, b`: in this nested function, `a` and `b` are variables of
+    /// an enclosing function. Consumed by the same pass as `FunctionDef`.
+    Nonlocal(Vec<String>),
 }
 
 /// Except handler for try-except statements
@@ -189,6 +235,15 @@ pub struct IRClass {
     pub bases: Vec<String>,
     pub methods: Vec<IRFunction>,
     pub class_vars: Vec<IRVariable>,
+    /// `class C(metaclass=M)`: the metaclass named, applied by
+    /// `ir::metaclasses`.
+    pub metaclass: Option<String>,
+    /// How many module definitions precede the class statement: where its
+    /// creation (a metaclass's `__new__`/`__init__`) runs.
+    pub position: usize,
+    /// Class attributes a metaclass gives the class when it is created, each
+    /// defined by the module definition `Class.attr` at the class's position.
+    pub deferred_vars: Vec<String>,
 }
 
 /// Expression types in the intermediate representation
@@ -400,9 +455,19 @@ pub enum IRType {
     Unknown,
     // New types
     Tuple(Vec<IRType>),
+    /// A tuple of any length whose members share one type, Python's
+    /// `tuple[T, ...]`: what `*args` collects, and what a `Tuple[T, ...]`
+    /// annotation names. Laid out exactly like a list (`[len][cap][data]`),
+    /// so the read-only operations are the list's; anything that would change
+    /// it is refused, as it is for a tuple.
+    VarTuple(Box<IRType>),
     Optional(Box<IRType>),
     Union(Vec<IRType>),
     Class(String),
+    /// A class object (`A`, `type(x)`, `x.__class__`): the named class or a
+    /// subclass of it, held as its class id. Classes are compared by
+    /// identity, so two of these are equal exactly when the ids are.
+    ClassRef(String),
     // New type for modules
     Module(String),
     Bytes,
@@ -611,6 +676,7 @@ impl IRModule {
             memory_layout: MemoryLayout::new(),
             comments: Vec::new(),
             dispatch_tables: Vec::new(),
+            user_decorations: Vec::new(),
         }
     }
 }

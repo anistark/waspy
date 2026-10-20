@@ -83,6 +83,13 @@ pub struct CompilerOptions {
     /// How much diagnostic output the compiler emits while running
     /// (defaults to [`Verbosity::Normal`]).
     pub verbosity: Verbosity,
+
+    /// Deprecated: compile `open()` to the four `waspy_host` imports
+    /// (`open`/`read`/`write`/`close`) instead of WASI preview 1 (defaults to
+    /// `false`). File I/O goes through WASI's `path_open` and preopened
+    /// directories like every other side effect; this keeps embedders that
+    /// implement the older interface working until 1.0.
+    pub waspy_host_file_io: bool,
 }
 
 impl Default for CompilerOptions {
@@ -90,6 +97,7 @@ impl Default for CompilerOptions {
         Self {
             optimize: true,
             verbosity: Verbosity::default(),
+            waspy_host_file_io: false,
         }
     }
 }

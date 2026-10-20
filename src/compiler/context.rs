@@ -33,14 +33,18 @@ pub const HELD_LOCALS: u32 = 64;
 /// emission of nested expressions (the value an `in` test searches for).
 pub const HELD_F64_LOCALS: u32 = 16;
 
+/// Held 64-bit integer slots, for the hashes and probe perturbations a set
+/// works in (CPython's are 64-bit, and a set's order follows from them).
+pub const HELD_I64_LOCALS: u32 = 12;
+
 /// The synthesized function that evaluates module-level definitions once, in
 /// source order, into their globals. See `compile_ir_module`.
 pub const MODULE_INIT_FN: &str = "__module_init";
 
 /// Index of the first WASM global holding a module-level definition; the
 /// globals below it are the runtime's own (allocator, StopIteration, the
-/// pending exception, call depth).
-pub const FIRST_MODULE_GLOBAL: u32 = 4;
+/// pending exception's class, call depth, the pending exception).
+pub const FIRST_MODULE_GLOBAL: u32 = 5;
 
 /// Where the runtime heap starts: every collection, instance, and runtime
 /// string is an `__alloc` block from here up. Sits above the string (from 0)
@@ -95,6 +99,33 @@ pub const DICT_ENTRY: u32 = COLLECTION_SLOT * 2;
 /// The nearest class that both `a` and `b` are or inherit from, walking the
 /// single-inheritance chain `base_of` describes. `None` when the chains share
 /// no class.
+/// CPython's C3 linearization of a class with these bases, each given with
+/// its own linearization. `None` when no consistent order exists (CPython's
+/// "Cannot create a consistent method resolution order" `TypeError`).
+pub fn c3_linearization(name: &str, bases: &[(String, Vec<String>)]) -> Option<Vec<String>> {
+    let mut sequences: Vec<Vec<String>> = bases.iter().map(|(_, mro)| mro.clone()).collect();
+    sequences.push(bases.iter().map(|(b, _)| b.clone()).collect());
+    let mut out = vec![name.to_string()];
+    loop {
+        sequences.retain(|s| !s.is_empty());
+        if sequences.is_empty() {
+            return Some(out);
+        }
+        // The first head that appears in no other sequence's tail.
+        let head = sequences.iter().map(|s| s[0].clone()).find(|candidate| {
+            sequences
+                .iter()
+                .all(|s| !s[1..].iter().any(|c| c == candidate))
+        })?;
+        for s in &mut sequences {
+            if s[0] == head {
+                s.remove(0);
+            }
+        }
+        out.push(head);
+    }
+}
+
 pub fn common_class_base(
     a: &str,
     b: &str,
@@ -137,6 +168,7 @@ pub fn comp_gen_local_name(role: &str, depth: u32, gen: usize) -> String {
 }
 
 /// Local variable
+#[derive(Clone)]
 pub struct LocalInfo {
     pub index: u32,
     pub var_type: IRType,
@@ -175,6 +207,10 @@ pub struct ClassInfo {
     /// word at offset 0 of every instance by `__alloc_obj`, and compared by
     /// `isinstance`. Ids start at 1 so zeroed memory never matches a class.
     pub class_id: i32,
+    /// The method resolution order: the class, then its bases in CPython's C3
+    /// linearization (`object` left out). Attribute and method lookup,
+    /// `isinstance`, and `super()` all follow it.
+    pub mro: Vec<String>,
     pub methods: HashMap<String, u32>, // method_name -> function_index
     /// Which class textually defines each method. For an inherited method this
     /// names the base, so the `Owner::method` qualified lookup (parameter and
@@ -192,7 +228,9 @@ pub struct ClassInfo {
     pub field_offsets: HashMap<String, u64>, // field_name -> byte_offset
     pub field_types: HashMap<String, IRType>, // field_name -> value type (f64 vs i32)
     pub class_var_values: HashMap<String, IRExpr>, // class-level var name -> initializer
-    pub instance_size: u32,                  // size of instance in bytes
+    /// The class along the MRO whose body defines each class variable.
+    pub class_var_owner: HashMap<String, String>,
+    pub instance_size: u32, // size of instance in bytes
 }
 
 /// WASM function indices of the `waspy_host` file-I/O imports. Present only
@@ -209,6 +247,55 @@ pub struct FileIoImports {
     pub write: u32,
     /// `waspy_host.close(fd) -> status` (0 = ok).
     pub close: u32,
+}
+
+/// The element types, value first, when `value` is a collection whose
+/// elements a reader of `slot` would read at a different type: a `List[str]`
+/// passed as a `List[int]` answered with the string's offset. The elements
+/// cannot be converted where they sit, so even an int into a float collection
+/// (a narrower slot) counts. Where either side's elements are not known, or
+/// differ only between classes (checked by `class_mismatch`), there is
+/// nothing to say.
+fn element_mismatch(value: &IRType, slot: &IRType) -> Option<(IRType, IRType)> {
+    fn element(value: &IRType, slot: &IRType) -> Option<(IRType, IRType)> {
+        let open = |t: &IRType| matches!(t, IRType::Unknown | IRType::Any);
+        if open(value) || open(slot) || value == slot {
+            return None;
+        }
+        match (value, slot) {
+            (IRType::Class(_), IRType::Class(_)) => None,
+            // A bool is an int with a word of 0 or 1.
+            (IRType::Bool, IRType::Int) => None,
+            (IRType::None, IRType::Optional(_)) => None,
+            (v, IRType::Optional(s)) if v == s.as_ref() => None,
+            (v, s) if is_collection(v) && is_collection(s) => element_mismatch(v, s),
+            (v, s) => Some((v.clone(), s.clone())),
+        }
+    }
+    fn is_collection(t: &IRType) -> bool {
+        matches!(
+            t,
+            IRType::List(_)
+                | IRType::Set(_)
+                | IRType::Dict(..)
+                | IRType::Tuple(_)
+                | IRType::VarTuple(_)
+        )
+    }
+    match (value, slot) {
+        (IRType::List(v), IRType::List(s))
+        | (IRType::Set(v), IRType::Set(s))
+        | (IRType::VarTuple(v), IRType::VarTuple(s))
+        | (IRType::List(v), IRType::VarTuple(s)) => element(v, s),
+        (IRType::Dict(vk, vv), IRType::Dict(sk, sv)) => element(vk, sk).or_else(|| element(vv, sv)),
+        (IRType::Tuple(v), IRType::Tuple(s)) if v.len() == s.len() => {
+            v.iter().zip(s).find_map(|(v, s)| element(v, s))
+        }
+        (IRType::Tuple(v), IRType::VarTuple(s)) => v.iter().find_map(|v| element(v, s)),
+        (IRType::Optional(v), IRType::Optional(s)) => element_mismatch(v, s),
+        (v, IRType::Optional(s)) => element_mismatch(v, s),
+        _ => None,
+    }
 }
 
 /// Compiled Local variables and function types
@@ -269,6 +356,9 @@ pub struct CompilationContext {
     /// order. Call codegen picks the arm matching the first argument's static
     /// type and falls back to the base function itself.
     pub dispatch_tables: HashMap<String, Vec<(IRType, String)>>,
+    /// The module each class imported from another file belongs to, for its
+    /// `repr` (`<class 'shapes.Square'>`); a class absent is `__main__`'s.
+    pub class_modules: HashMap<String, String>,
     /// File-I/O host import indices; `Some` only when the module uses file
     /// operations (an `open()` call somewhere in its IR).
     pub file_io: Option<FileIoImports>,
@@ -316,7 +406,7 @@ pub struct CompilationContext {
     /// name `except ... as` binds (if any) and the local holding the code of
     /// the exception it caught, which a bare `raise` (or `raise name`)
     /// raises again.
-    pub reraise_codes: Vec<(Option<String>, u32)>,
+    pub reraise_codes: Vec<(Option<String>, u32, u32)>,
     /// Handler nesting depth during the local-allocation scan, which reserves
     /// one caught-code local per depth.
     pub except_scan_depth: u32,
@@ -365,6 +455,37 @@ pub struct CompilationContext {
     /// call site with more arguments than this has no matching signature and
     /// falls back to yielding 0.
     pub closure_max_arity: u32,
+    /// The type index of each function signature the module defines, keyed by
+    /// its WASM parameter and result types. A call through a closure value
+    /// whose static type names its signature uses the exact type, so a closure
+    /// taking or returning a float is called at its real width.
+    pub signature_types: HashMap<(Vec<wasm_encoder::ValType>, wasm_encoder::ValType), u32>,
+    /// What each closure cell of the function being compiled holds, keyed by
+    /// the local that holds the cell's pointer. Learned from the first store
+    /// (or, in a lifted function, from what its creator stored), so a captured
+    /// float is kept at its width and a captured string keeps its length.
+    pub cell_types: RefCell<HashMap<String, IRType>>,
+    /// The closures the function being compiled creates and the cells each
+    /// captures, resolved against `cell_types` once its body is compiled.
+    pub pending_captures: RefCell<Vec<(String, Vec<String>)>>,
+    /// The type of each cell a lifted function reads out of its environment,
+    /// keyed by the lifted function and then by the cell's local. Filled when
+    /// the function that creates the closure is compiled, which is always
+    /// before the lifted function itself.
+    pub capture_types: HashMap<String, HashMap<String, IRType>>,
+    /// The function's held i64 locals (see [`HELD_I64_LOCALS`]) and how many
+    /// are taken; every local index in `i64_locals` is declared as an i64.
+    pub held_i64_locals: Vec<u32>,
+    pub held_i64_depth: Cell<u32>,
+    pub i64_locals: HashSet<u32>,
+    /// The runtime helpers (see `compiler::runtime`) code generation has called
+    /// so far, in the order their function indices were handed out, from
+    /// `helper_base` up. They are built and appended once every function is
+    /// compiled, so a module carries only the helpers it uses.
+    pub helpers: RefCell<Vec<crate::compiler::runtime::Helper>>,
+    /// The function index of each WASI import the module makes.
+    pub wasi: HashMap<crate::compiler::host::Wasi, u32>,
+    pub helper_base: u32,
     /// True while compiling an `__init__` method. Its `return` paths (explicit
     /// bare `return` and the implicit fall-through) yield `self` (local 0)
     /// instead of the usual 0, so `ClassName(...)` receives the instance
@@ -434,6 +555,7 @@ impl CompilationContext {
             held_f64_locals: Vec::new(),
             held_f64_depth: Cell::new(0),
             dispatch_tables: HashMap::new(),
+            class_modules: HashMap::new(),
             file_io: None,
             module_vars: HashMap::new(),
             module_global_index: HashMap::new(),
@@ -456,6 +578,16 @@ impl CompilationContext {
             lambda_slots: HashMap::new(),
             closure_type_base: None,
             closure_max_arity: 0,
+            signature_types: HashMap::new(),
+            wasi: HashMap::new(),
+            cell_types: RefCell::new(HashMap::new()),
+            pending_captures: RefCell::new(Vec::new()),
+            capture_types: HashMap::new(),
+            held_i64_locals: Vec::new(),
+            held_i64_depth: Cell::new(0),
+            i64_locals: HashSet::new(),
+            helpers: RefCell::new(Vec::new()),
+            helper_base: 0,
             return_self: false,
             current_class: None,
             temp_local_f64_3: 0,
@@ -502,22 +634,27 @@ impl CompilationContext {
     /// True if `sub` is `base` or reaches `base` by walking single-inheritance
     /// `base` links. Both must be known classes.
     pub fn is_class_or_subclass(&self, sub: &str, base: &str) -> bool {
-        let mut current = Some(sub.to_string());
-        while let Some(name) = current {
-            if name == base {
-                return true;
-            }
-            current = self.class_map.get(&name).and_then(|info| info.base.clone());
-        }
-        false
+        sub == base
+            || self
+                .class_map
+                .get(sub)
+                .is_some_and(|info| info.mro.iter().any(|c| c == base))
     }
 
     /// The nearest class that both `a` and `b` are or inherit from, or `None`
     /// when they share nothing but `object`.
     pub fn common_base(&self, a: &str, b: &str) -> Option<String> {
-        common_class_base(a, b, |name| {
-            self.class_map.get(name).and_then(|info| info.base.clone())
-        })
+        // The first class along `a`'s MRO that `b` also is.
+        match self.class_map.get(a) {
+            Some(info) => info
+                .mro
+                .iter()
+                .find(|c| self.is_class_or_subclass(b, c))
+                .cloned(),
+            None => common_class_base(a, b, |name| {
+                self.class_map.get(name).and_then(|info| info.base.clone())
+            }),
+        }
     }
 
     /// The two class names when `value` holds an instance of a class that is
@@ -526,11 +663,15 @@ impl CompilationContext {
     /// so such a value would run another class's method on itself (#128).
     pub fn class_mismatch(&self, value: &IRType, slot: &IRType) -> Option<(String, String)> {
         match (value, slot) {
-            (IRType::Class(v), IRType::Class(s)) => (self.class_map.contains_key(v)
-                && self.class_map.contains_key(s)
-                && !self.is_class_or_subclass(v, s))
-            .then(|| (v.clone(), s.clone())),
+            (IRType::Class(v), IRType::Class(s)) | (IRType::ClassRef(v), IRType::ClassRef(s)) => {
+                (self.class_map.contains_key(v)
+                    && self.class_map.contains_key(s)
+                    && !self.is_class_or_subclass(v, s))
+                .then(|| (v.clone(), s.clone()))
+            }
             (IRType::List(v), IRType::List(s))
+            | (IRType::VarTuple(v), IRType::VarTuple(s))
+            | (IRType::List(v), IRType::VarTuple(s))
             | (IRType::Set(v), IRType::Set(s))
             | (IRType::Optional(v), IRType::Optional(s)) => self.class_mismatch(v, s),
             (v, IRType::Optional(s)) => self.class_mismatch(v, s),
@@ -548,6 +689,63 @@ impl CompilationContext {
     /// of an unrelated class (see [`class_mismatch`](Self::class_mismatch)).
     /// `what` names the store for the message, e.g. "list.append()".
     pub fn check_class_store(&self, value: &IRType, slot: &IRType, what: &str) {
+        // An optional number is a cell, and a number is not: one would be
+        // read as the other.
+        let number = |t: &IRType| matches!(t, IRType::Int | IRType::Bool | IRType::Float);
+        match (value, slot) {
+            (IRType::Optional(v), s) if number(v) && number(s) => {
+                self.report(format!(
+                    "an {} is used where {} is expected ({what}), but Python would pass a None \
+                     on. Hint: annotate the place Optional[{}], or test the value for None \
+                     first and pass the number",
+                    crate::type_to_string(value),
+                    crate::compiler::operators::python_type_name(slot),
+                    crate::compiler::operators::python_type_name(v),
+                ));
+                return;
+            }
+            (v, IRType::Optional(s)) if number(v) && number(s) => {
+                self.report(format!(
+                    "storing a {} where an {} is held is not supported here ({what}). Hint: \
+                     assign it to a variable annotated Optional[{}] first",
+                    crate::compiler::operators::python_type_name(v),
+                    crate::type_to_string(slot),
+                    crate::compiler::operators::python_type_name(s),
+                ));
+                return;
+            }
+            _ => {}
+        }
+        // A class where an instance is expected, or the other way round: one
+        // would be read as the other.
+        if let (IRType::ClassRef(c), IRType::Class(_)) | (IRType::Class(c), IRType::ClassRef(_)) =
+            (value, slot)
+        {
+            let given = if matches!(value, IRType::ClassRef(_)) {
+                format!("the class {c} itself")
+            } else {
+                format!("an instance of {c}")
+            };
+            self.report(format!(
+                "{given} is used where {} is expected ({what})",
+                match slot {
+                    IRType::Class(s) => format!("an instance of {s}"),
+                    _ => crate::type_to_string(slot),
+                }
+            ));
+            return;
+        }
+        if let Some((v, s)) = element_mismatch(value, slot) {
+            self.report(format!(
+                "a {} is used where a {} is expected ({what}): its elements are read back as \
+                 '{}' and they are '{}'. Hint: give both the same element type",
+                crate::type_to_string(value),
+                crate::type_to_string(slot),
+                crate::type_to_string(&s),
+                crate::type_to_string(&v)
+            ));
+            return;
+        }
         let Some((v, s)) = self.class_mismatch(value, slot) else {
             return;
         };
@@ -574,12 +772,22 @@ impl CompilationContext {
     /// `-> list` function stopped matching as dict keys (#116).
     pub fn check_untyped_store(&self, value: &IRType, slot: &IRType, what: &str) {
         fn lost(value: &IRType, slot: &IRType) -> Option<IRType> {
-            let word = |t: &IRType| {
-                matches!(
-                    t,
-                    IRType::Int | IRType::Bool | IRType::None | IRType::Callable { .. }
-                )
-            };
+            // A function value is a word too, but one called through an
+            // untyped place is called with word arguments for a word result,
+            // so only a function whose signature is all words survives it.
+            fn word(t: &IRType) -> bool {
+                match t {
+                    IRType::Int | IRType::Bool | IRType::None => true,
+                    IRType::Callable {
+                        params,
+                        return_type,
+                    } => params
+                        .iter()
+                        .chain(std::iter::once(return_type.as_ref()))
+                        .all(|t| matches!(t, IRType::Unknown | IRType::Any) || word(t)),
+                    _ => false,
+                }
+            }
             match (value, slot) {
                 // An untyped parameter or return passes on another untyped
                 // value, which is held to the same rule where it came from.
@@ -589,7 +797,9 @@ impl CompilationContext {
                 // never learned may hold strings.
                 (IRType::Any, IRType::Any) => None,
                 (v, IRType::Unknown | IRType::Any) if !word(v) => Some(v.clone()),
-                (IRType::List(v), IRType::List(s)) | (IRType::Set(v), IRType::Set(s)) => lost(v, s),
+                (IRType::List(v), IRType::List(s))
+                | (IRType::Set(v), IRType::Set(s))
+                | (IRType::VarTuple(v), IRType::VarTuple(s)) => lost(v, s),
                 (IRType::Dict(vk, vv), IRType::Dict(sk, sv)) => {
                     lost(vk, sk).or_else(|| lost(vv, sv))
                 }
@@ -700,6 +910,41 @@ impl CompilationContext {
 
     pub fn release_held_f64(&self) {
         self.held_f64_depth.set(self.held_f64_depth.get() - 1);
+    }
+
+    /// [`hold`](Self::hold) for an i64, reporting when the slots run out (the
+    /// module still validates, with the error collected). Pair with
+    /// [`release_held_i64`](Self::release_held_i64).
+    pub fn hold_i64(&self) -> u32 {
+        let depth = self.held_i64_depth.get();
+        self.held_i64_depth.set(depth + 1);
+        match self.held_i64_locals.get(depth as usize) {
+            Some(slot) => *slot,
+            None => {
+                self.report(
+                    "a set operation nests more deeply than the compiler reserves room for",
+                );
+                self.held_i64_locals.first().copied().unwrap_or(0)
+            }
+        }
+    }
+
+    pub fn release_held_i64(&self) {
+        self.held_i64_depth.set(self.held_i64_depth.get() - 1);
+    }
+
+    /// The function index of the runtime helper `helper`, which the module
+    /// will carry from now on.
+    pub fn helper(&self, helper: crate::compiler::runtime::Helper) -> u32 {
+        let mut helpers = self.helpers.borrow_mut();
+        let position = match helpers.iter().position(|h| *h == helper) {
+            Some(position) => position,
+            None => {
+                helpers.push(helper);
+                helpers.len() - 1
+            }
+        };
+        self.helper_base + position as u32
     }
 
     /// Add a local variable to the context

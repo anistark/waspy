@@ -431,7 +431,6 @@ mod functions {
 
     /// Nested function definitions (def inside def), closing over the enclosing variables
     #[test]
-    #[ignore = "open on the board"]
     fn nested_functions() {
         check(
             r#"
@@ -447,7 +446,6 @@ mod functions {
 
     /// *args collects extra positional arguments as a tuple
     #[test]
-    #[ignore = "open on the board"]
     fn star_args() {
         check(
             r#"
@@ -484,7 +482,6 @@ mod functions {
 
     /// **kwargs collects extra keyword arguments as a dict
     #[test]
-    #[ignore = "open on the board"]
     fn star_star_kwargs() {
         check(
             r#"
@@ -644,6 +641,85 @@ mod type_system {
         );
     }
 
+    /// Optional numbers: None distinct from 0 (an Optional[int], Optional[bool], or Optional[float] is boxed), `is None`, arithmetic and ordering raising CPython's TypeError on None, `==`, truthiness, str(), and dict.get(key) on number values
+    #[test]
+    fn optional_numbers() {
+        check(
+            r##"
+            from typing import Dict, List, Optional
+
+
+            def find(xs: List[int], target: int) -> Optional[int]:
+                for i in range(len(xs)):
+                    if xs[i] == target:
+                        return i
+                return None
+
+
+            def ratio(a: int, b: int) -> Optional[float]:
+                if b == 0:
+                    return None
+                return a / b
+
+
+            class Slot:
+                def __init__(self) -> None:
+                    self.value: Optional[int] = None
+
+
+            def f() -> str:
+                xs = [5, 0, 7]
+                out = ""
+                i = find(xs, 0)
+                j = find(xs, 9)
+                out += str(i) + "," + str(j) + "," + str(i is None) + str(j is None) + "|"
+                if i is not None:
+                    out += str(i + 10) + "|"
+                out += str(ratio(1, 4)) + str(ratio(1, 0)) + "|"
+                counts: Dict[str, int] = {"a": 0, "b": 3}
+                a = counts.get("a")
+                z = counts.get("z")
+                out += str(a) + str(z) + str(a is None) + str(z is None) + "|"
+                out += str(a == 0) + str(z == 0) + str(z != 0) + str(bool(a)) + str(bool(z)) + "|"
+                s = Slot()
+                out += str(s.value) + "|"
+                s.value = 0
+                out += str(s.value) + str(s.value is None) + "|"
+                try:
+                    out += str(z + 1)
+                except TypeError as e:
+                    out += str(e) + "|"
+                try:
+                    out += str(z < 3)
+                except TypeError as e:
+                    out += str(e) + "|"
+                k: Optional[int] = 4
+                k = None if k > 3 else k
+                out += str(k) + repr(counts.get("b")) + f"{counts.get('q')}"
+                return out
+        "##,
+            &[("f", Want::Str("1,None,FalseTrue|11|0.25None|0NoneFalseTrue|TrueFalseTrueFalseFalse|None|0False|unsupported operand type(s) for +: 'NoneType' and 'int'|'<' not supported between instances of 'NoneType' and 'int'|None3None"))],
+        );
+        check(
+            r##"
+            from typing import Optional
+
+            def add1(x: Optional[int]) -> int:
+                return x + 1
+
+            def f() -> str:
+                try:
+                    return str(add1(None))
+                except TypeError as e:
+                    return "caught " + str(e)
+        "##,
+            &[(
+                "f",
+                Want::Str("caught unsupported operand type(s) for +: 'NoneType' and 'int'"),
+            )],
+        );
+    }
+
     /// Union/Optional types
     #[test]
     fn union_and_optional() {
@@ -767,7 +843,6 @@ mod variables {
 
     /// nonlocal: a nested function rebinds a variable of the function enclosing it
     #[test]
-    #[ignore = "open on the board"]
     fn nonlocal_statement() {
         check(
             r#"
@@ -1032,11 +1107,23 @@ mod decorators {
             def deco(fn):
                 return fn
 
-            @deco
-            def f() -> int:
-                return 1
+            class C:
+                @deco
+                def m(self) -> int:
+                    return 1
         "#,
-            "decorator '@deco'",
+            "decorator '@deco' on method 'C.m'",
+        );
+        refused(
+            r#"
+            def deco(cls):
+                return cls
+
+            @deco
+            class C:
+                pass
+        "#,
+            "decorator '@deco' on class 'C'",
         );
     }
 
@@ -1053,25 +1140,98 @@ mod decorators {
         );
     }
 
-    /// User-written decorators: a function that takes a function and returns one, applied at definition time
+    /// User-written decorators applied at definition time: wrappers forwarding *args and **kwargs (with keyword arguments at the call), state the wrapper keeps through nonlocal (one per decorated function), decorator factories (@repeat(3)), stacked decorators, decorators that register and return the function, fn.__name__, and @functools.wraps
     #[test]
-    #[ignore = "open on the board"]
     fn user_written_decorators() {
         check(
             r#"
-            def twice(fn):
-                def wrapper(x: int) -> int:
-                    return fn(fn(x))
+            import functools
+            from typing import List
+
+            log: List[str] = []
+
+
+            def traced(fn):
+                @functools.wraps(fn)
+                def wrapper(*args, **kwargs):
+                    log.append("call " + fn.__name__)
+                    result = fn(*args, **kwargs)
+                    log.append("done " + fn.__name__)
+                    return result
                 return wrapper
 
-            @twice
-            def inc(x: int) -> int:
-                return x + 1
 
-            def f() -> int:
-                return inc(1)
+            def counted(fn):
+                calls = 0
+
+                def wrapper(*args):
+                    nonlocal calls
+                    calls += 1
+                    return fn(*args) + calls * 1000
+                return wrapper
+
+
+            def repeat(times: int):
+                def deco(fn):
+                    def wrapper(x: int) -> int:
+                        total = 0
+                        for _ in range(times):
+                            total += fn(x)
+                        return total
+                    return wrapper
+                return deco
+
+
+            registry: List[str] = []
+
+
+            def register(fn):
+                registry.append(fn.__name__)
+                return fn
+
+
+            @traced
+            def add(a: int, b: int = 10) -> int:
+                return a + b
+
+
+            @counted
+            def square(x: int) -> int:
+                return x * x
+
+
+            @counted
+            def cube(x: int) -> int:
+                return x * x * x
+
+
+            @repeat(3)
+            def double(x: int) -> int:
+                return 2 * x
+
+
+            @register
+            @traced
+            def greet(name: str) -> str:
+                return "hi " + name
+
+
+            @traced
+            def fact(n: int) -> int:
+                return 1 if n <= 1 else n * fact(n - 1)
+
+
+            def g() -> str:
+                out = str(add(1, 2)) + "," + str(add(5)) + "," + str(add(a=1, b=1)) + "|"
+                out += str(square(3)) + "," + str(square(4)) + "," + str(cube(2)) + "|"
+                out += str(double(5)) + "|" + greet("bob") + "|" + ",".join(registry) + "|"
+                out += str(fact(4)) + "|" + str(len(log)) + log[0] + log[-1]
+                return out
         "#,
-            &[("f", Want::Int(3))],
+            &[(
+                "g",
+                Want::Str("3,15,2|1009,2016,1008|30|hi bob|greet|24|16call adddone fact"),
+            )],
         );
     }
 }
@@ -1197,9 +1357,8 @@ mod strings {
         );
     }
 
-    /// % formatting on runtime values ("%d" % n)
+    /// % formatting on runtime values ("%d" % n), every conversion, flags, width, precision, %(key) mappings, and a tuple operand
     #[test]
-    #[ignore = "open on the board"]
     fn runtime_percent_formatting() {
         check(
             r#"
@@ -1207,9 +1366,24 @@ mod strings {
                 return "%d!" % n
 
             def g() -> str:
-                return f(5)
+                x = -1.005
+                t = (3, "z")
+                d = {"name": "bob", "job": "x"}
+                a = "%5d|%-6.2f|%#x|%r|%s" % (42, x, 255, "a", True)
+                b = "%s-%s" % t
+                c = "%(name)s is %(job)5s" % d
+                e = "%e %g %G %+.3E" % (12345.678, 0.00001234, 1e20, 3.0)
+                h = "%c%c %o %X %a %5.2s| %%" % (72, 105, 8, 3054, "\u00e9", "hello")
+                k = "%d %i %u" % (3.99, -2.5, True)
+                m = "%-8s|%8r|%08.3f|% d|%+d" % ("ab", "ab", -3.14159, 5, 0)
+                return f(5) + ";" + a + ";" + b + ";" + c + ";" + e + ";" + h + ";" + k + ";" + m
         "#,
-            &[("g", Want::Str("5!"))],
+            &[(
+                "g",
+                Want::Str(
+                    "5!;   42|-1.00 |0xff|'a'|True;3-z;bob is     x;1.234568e+04 1.234e-05 1E+20 +3.000E+00;Hi 10 BEE '\\xe9'    he| %;3 -2 1;ab      |    'ab'|-003.142| 5|+0",
+                ),
+            )],
         );
     }
 
@@ -1241,7 +1415,7 @@ mod strings {
         );
     }
 
-    /// .format() interpolates runtime values - automatic {} and positional {0} fields (named fields, specifiers, and conversions rejected)
+    /// .format() interpolates runtime values - automatic {} and positional {0} fields
     #[test]
     fn format_method() {
         check(
@@ -1322,7 +1496,7 @@ mod strings {
         );
     }
 
-    /// F-string fixed-point specifier f"{value:.2f}" (every other specifier still refused)
+    /// F-string fixed-point specifier f"{value:.2f}"
     #[test]
     fn fstring_fixed_point() {
         check(
@@ -1334,6 +1508,80 @@ mod strings {
                 return f(2.675)
         "#,
             &[("g", Want::Str("2.67|3"))],
+        );
+    }
+
+    /// F-strings: the full format spec (fill, alignment, sign, z, #, 0, width, grouping, precision, every type letter), nested {x:{w}.{p}f} specs, and !r / !s / !a conversions, digit for digit with CPython
+    #[test]
+    fn fstring_format_spec() {
+        check(
+            r#"
+            def f(x: float, n: int, s: str) -> str:
+                w = 9
+                p = 2
+                return f"[{x:{w}.{p}f}][{n:,}][{n:_b}][{n:#o}][{n:+08X}][{s:*^8}][{s!r}][{x:e}][{x:.3g}][{x:%}][{-0.0:z.1f}][{n:c}][{x!s:>6}]"
+
+            def g() -> str:
+                return f(0.125, 1000, "hé")
+        "#,
+            &[(
+                "g",
+                Want::Str(
+                    r#"[     0.12][1,000][11_1110_1000][0o1750][+00003E8][***hé***]['hé'][1.250000e-01][0.125][12.500000%][0.0][Ϩ][ 0.125]"#,
+                ),
+            )],
+        );
+    }
+
+    /// .format() named fields, attribute and index lookups ({0.x}, {1[2]}, {2[k]}), format specs with nested fields, and !r / !s / !a conversions
+    #[test]
+    fn format_method_fields() {
+        check(
+            r#"
+            class Point:
+                def __init__(self, x: int, y: int):
+                    self.x = x
+                    self.y = y
+
+            def g() -> str:
+                p = Point(3, 4)
+                xs = [10, 20, 30]
+                d = {"k": 7}
+                w = 6
+                return "{name}={value:>{w}.2f}|{0.x},{0.y}|{1[2]}|{2[k]}|{3!r:^7}|{3!a}".format(p, xs, d, "é", name="pi", value=3.14159, w=w)
+        "#,
+            &[("g", Want::Str(r#"pi=  3.14|3,4|30|7|  'é'  |'\xe9'"#))],
+        );
+    }
+
+    /// A str is a sequence of code points: len, indexing, slicing with any step, find and index, padding, iteration, and comprehensions count characters, not UTF-8 bytes
+    #[test]
+    fn code_points() {
+        check(
+            r#"
+            def g() -> str:
+                s = str(len("x"))[0:0] + "straße ☃ ΑΣ"
+                out = str(len(s)) + "|" + s[5] + s[-1] + "|" + s[4:8] + "|" + s[::-1] + "|" + str(s.find("☃")) + "|" + s.center(15, "·")
+                acc = ""
+                for c in s:
+                    acc = acc + c + "."
+                return out + "|" + acc + "|" + str([c for c in s if c.isupper()])
+        "#,
+            &[("g", Want::Str("11|e\u{3a3}|\u{df}e \u{2603}|\u{3a3}\u{391} \u{2603} e\u{df}arts|7|\u{b7}\u{b7}stra\u{df}e \u{2603} \u{391}\u{3a3}\u{b7}\u{b7}|s.t.r.a.\u{df}.e. .\u{2603}. .\u{391}.\u{3a3}.|['\u{391}', '\u{3a3}']"))],
+        );
+    }
+
+    /// Case conversion, the is* predicates, strip, and split over the whole of Unicode, as CPython maps and classifies it (final sigma, titlecase, ß to SS, CPython's whitespace), on literals and runtime strings alike
+    #[test]
+    fn unicode_case_and_classes() {
+        check(
+            r#"
+            def g() -> str:
+                s = str(len("x"))[0:0] + "straße ΑΣ hello-world ǆemal \xa0x"
+                lit = "hello-world 3rd".title() + "," + "ǆemal".capitalize() + "," + str("123".isupper())
+                return s.upper() + "|" + s.lower() + "|" + s.title() + "|" + s.capitalize() + "|" + "/".join(s.split()) + "|" + str(s.isalpha()) + str("é²".isalnum()) + str(s[8].islower()) + "|" + lit
+        "#,
+            &[("g", Want::Str("STRASSE \u{391}\u{3a3} HELLO-WORLD \u{1c4}EMAL \u{a0}X|stra\u{df}e \u{3b1}\u{3c2} hello-world \u{1c6}emal \u{a0}x|Stra\u{df}e \u{391}\u{3c2} Hello-World \u{1c5}emal \u{a0}X|Stra\u{df}e \u{3b1}\u{3c2} hello-world \u{1c6}emal \u{a0}x|stra\u{df}e/\u{391}\u{3a3}/hello-world/\u{1c6}emal/x|FalseTrueFalse|Hello-World 3Rd,\u{1c5}emal,False"))],
         );
     }
 
@@ -1393,6 +1641,44 @@ mod strings {
 
 mod collections {
     use super::*;
+
+    /// A tuple mixing int and float members ((1, 2.5)), each read at its own width: indexing, unpacking, equality, ordering, hashing, in, count, index, str()
+    #[test]
+    fn mixed_number_tuples() {
+        check(
+            r#"
+            def f() -> str:
+                t = (1, 2.5)
+                a, b = t
+                s = {(1, 2.5), (1, 2.5), (2, 0.5)}
+                d = {(1, 2.5): "x"}
+                out = str(t) + str(t[0]) + str(t[1] * 2) + str(a + b) + str(len(s)) + d[(1, 2.5)]
+                return out + str(t == (1, 2.5)) + str(t < (1, 3.0)) + str(1.0 in t) + str(2 in t) + str(t.count(2.5)) + str(t.index(2.5))
+        "#,
+            &[("f", Want::Str("(1, 2.5)15.03.52xTrueTrueTrueFalse11"))],
+        );
+    }
+
+    /// A literal mixing element types no one type holds ([1, "a"], {"n": "bob", "age": 30}) is refused instead of reading the others back as the first; [[], [1]] and tuples of one shape unify
+    #[test]
+    fn mixed_literals_refused() {
+        check(
+            r#"
+            def g() -> str:
+                xs = [[], [1, 2]]
+                ys = [(1, "a"), (2, "b")]
+                return str(xs) + str(ys)
+        "#,
+            &[("g", Want::Str("[[], [1, 2]][(1, 'a'), (2, 'b')]"))],
+        );
+        for src in [
+            "def g() -> str:\n    xs = [1, \"a\"]\n    return str(xs[1])\n",
+            "def g() -> str:\n    d = {\"n\": \"bob\", \"age\": 30}\n    return str(d[\"age\"])\n",
+        ] {
+            let err = try_compile(src).expect_err("a mixed literal is refused");
+            assert!(err.contains("mixing"), "{err}");
+        }
+    }
 
     /// List literals with memory allocation [1, 2, 3]
     #[test]
@@ -1836,7 +2122,6 @@ mod collections {
 
     /// The rest of the dict API: |=, update, pop, popitem, setdefault, copy, clear, fromkeys, del d[k]
     #[test]
-    #[ignore = "open on the board"]
     fn rest_of_dict_api() {
         check(
             r#"
@@ -2334,17 +2619,63 @@ mod builtins {
         );
     }
 
-    /// str() of a float, bool, or collection, and float() of a string (refused today)
+    /// str() and repr() of every type: floats (shortest round-trip digits), bools, None, quoted and escaped strings and bytes, ranges, nested collections, and instances through __str__ / __repr__
     #[test]
-    #[ignore = "open on the board"]
     fn str_of_float_and_collections() {
         check(
             r#"
-            def f() -> str:
+            class Money:
+                def __init__(self, cents: int):
+                    self.cents = cents
+
+                def __repr__(self) -> str:
+                    return "Money(" + str(self.cents) + ")"
+
+            def g() -> str:
                 x = 1.5
-                return str(x) + str([1, 2])
+                return str(x) + "|" + str([1, 2]) + "|" + repr("it's") + "|" + str(True) + "|" + str(None) + "|" + repr([0.1, 1e16, -0.0]) + "|" + str({"a": (1,)}) + "|" + str(range(2, 9, 3)) + "|" + repr(b"a\x00'") + "|" + str(Money(5)) + "|" + str({1.5, 2.5})
         "#,
-            &[("f", Want::Str("1.5[1, 2]"))],
+            &[(
+                "g",
+                Want::Str(
+                    r#"1.5|[1, 2]|"it's"|True|None|[0.1, 1e+16, -0.0]|{'a': (1,)}|range(2, 9, 3)|b"a\x00'"|Money(5)|{1.5, 2.5}"#,
+                ),
+            )],
+        );
+    }
+
+    /// format() and ascii() builtins
+    #[test]
+    fn format_and_ascii() {
+        check(
+            r##"
+            def g() -> str:
+                n = 255
+                return format(n, "#x") + "|" + format(3.0) + "|" + format(1234567.891, ",.2f") + "|" + format("ab", "^6") + "|" + format(True) + "|" + format(True, "d") + "|" + ascii("naïve ☃ \U0001f600") + "|" + ascii(["é", "ü"])
+        "##,
+            &[(
+                "g",
+                Want::Str(
+                    r##"0xff|3.0|1,234,567.89|  ab  |True|1|'na\xefve \u2603 \U0001f600'|['\xe9', '\xfc']"##,
+                ),
+            )],
+        );
+    }
+
+    /// float() of a string, correctly rounded
+    #[test]
+    fn float_of_string() {
+        check(
+            r#"
+            def g() -> str:
+                return repr(float("0.1")) + "|" + repr(float(" -2.5e-3 ")) + "|" + repr(float("1e23")) + "|" + repr(float("2.2250738585072014e-308")) + "|" + repr(float("123456789012345678901234567890e-10")) + "|" + repr(float("Infinity")) + "|" + repr(float("1_000.5"))
+        "#,
+            &[(
+                "g",
+                Want::Str(
+                    "0.1|-0.0025|1e+23|2.2250738585072014e-308|1.2345678901234567e+19|inf|1000.5",
+                ),
+            )],
         );
     }
 
@@ -2405,18 +2736,71 @@ mod builtins {
         );
     }
 
-    /// print() evaluates its arguments but writes nothing: output needs a host interface
+    /// print() writes to standard output through WASI: sep, end, file=sys.stderr, flush, every argument through str() after all are evaluated
     #[test]
-    #[ignore = "open on the board"]
     fn print_output() {
-        // print() writes through the host interface once it has one, so a module
-        // that prints imports what it writes with.
-        let wasm = compile_with(
-            "def f() -> int:\n    print(\"hello\")\n    return 1\n",
-            false,
+        let run = run_main(
+            &dedent(
+                r#"
+            import sys
+
+            class Point:
+                def __init__(self, x: int, y: int):
+                    self.x = x
+                    self.y = y
+
+                def __str__(self) -> str:
+                    return "(" + str(self.x) + ", " + str(self.y) + ")"
+
+            def main() -> None:
+                xs = [1, 2]
+                print("a", 1, 2.5, True, None, xs, (1, "b"), {"k": 1.5}, Point(3, 4))
+                print(xs, xs.append(3))
+                print("x", "y", sep="", end="|\n")
+                print("err", 7, file=sys.stderr)
+                print()
+                print("done", flush=True)
+
+            if __name__ == "__main__":
+                main()
+        "#,
+            ),
+            "",
+            &[],
         );
-        let module = wasmi::Module::new(&wasmi::Engine::default(), &wasm[..]).unwrap();
-        assert!(module.imports().count() > 0, "print() reaches no host");
+        assert_eq!(
+            run.stdout,
+            "a 1 2.5 True None [1, 2] (1, 'b') {'k': 1.5} (3, 4)\n[1, 2, 3] None\nxy|\n\ndone\n"
+        );
+        assert_eq!(run.stderr, "err 7\n");
+        assert_eq!(run.exit, 0);
+    }
+
+    /// input([prompt]) reads a line of standard input, writing the prompt first; EOFError at the end of input
+    #[test]
+    fn input_reads_a_line() {
+        let run = run_main(
+            &dedent(
+                r#"
+            def main() -> None:
+                name = input("name? ")
+                age = int(input())
+                print("hi", name, age + 1)
+                try:
+                    input()
+                except EOFError:
+                    print("eof")
+
+            if __name__ == "__main__":
+                main()
+        "#,
+            ),
+            "bob\n41\n",
+            &[],
+        );
+        assert_eq!(run.stdout, "name? hi bob 42\neof\n");
+        assert_eq!(run.stderr, "");
+        assert_eq!(run.exit, 0);
     }
 
     /// min() & max() - multiple arguments, all ints, all floats, or all strings, keeping the first of equals as CPython does
@@ -2436,14 +2820,27 @@ mod builtins {
 
     /// min() & max() over a single iterable, with key= and default=
     #[test]
-    #[ignore = "open on the board"]
     fn min_max_iterable() {
         check(
             r#"
+            from typing import List
+
             def f() -> int:
                 return min([3, 1, 2])
+
+            def g() -> str:
+                ws = ["pear", "fig", "banana"]
+                return min(ws, key=lambda w: len(w)) + max(ws, key=len)
+
+            def h() -> int:
+                xs: List[int] = []
+                return min(xs, default=-1) + max(range(3, 10, 2)) * 10
         "#,
-            &[("f", Want::Int(1))],
+            &[
+                ("f", Want::Int(1)),
+                ("g", Want::Str("figbanana")),
+                ("h", Want::Int(89)),
+            ],
         );
     }
 
@@ -2647,6 +3044,86 @@ mod runtime_features {
 
 mod stdlib {
     use super::*;
+
+    /// sys.exit([status]) raises a catchable SystemExit; one nothing catches exits with its status (an int, 0 for none or None, 1 with the message printed to stderr for anything else)
+    #[test]
+    fn sys_exit() {
+        let src = dedent(
+            r#"
+                import sys
+
+                def main() -> None:
+                    n = int(input())
+                    try:
+                        sys.exit(9)
+                    except SystemExit:
+                        print("caught")
+                    if n == 0:
+                        sys.exit()
+                    if n == 1:
+                        sys.exit(3)
+                    if n == 2:
+                        sys.exit("bye now")
+                    if n == 3:
+                        raise SystemExit(True)
+                    if n == 4:
+                        sys.exit(None)
+                    print("end")
+
+                if __name__ == "__main__":
+                    main()
+        "#,
+        );
+        let run = run_main(&src, "0\n", &[]);
+        assert_eq!(run.stdout, "caught\n");
+        assert_eq!(run.stderr, "");
+        assert_eq!(run.exit, 0);
+        let run = run_main(&src, "1\n", &[]);
+        assert_eq!(run.stdout, "caught\n");
+        assert_eq!(run.stderr, "");
+        assert_eq!(run.exit, 3);
+        let run = run_main(&src, "2\n", &[]);
+        assert_eq!(run.stdout, "caught\n");
+        assert_eq!(run.stderr, "bye now\n");
+        assert_eq!(run.exit, 1);
+        let run = run_main(&src, "3\n", &[]);
+        assert_eq!(run.stdout, "caught\n");
+        assert_eq!(run.stderr, "");
+        assert_eq!(run.exit, 1);
+        let run = run_main(&src, "5\n", &[]);
+        assert_eq!(run.stdout, "caught\nend\n");
+        assert_eq!(run.stderr, "");
+        assert_eq!(run.exit, 0);
+    }
+
+    /// sys.argv, and sys.stdin / sys.stdout / sys.stderr: write, flush, read, readline, readlines, and iterating lines, through WASI
+    #[test]
+    fn sys_streams_and_argv() {
+        let run = run_main(
+            &dedent(
+                r#"
+            import sys
+
+            def main() -> None:
+                first = sys.stdin.readline()
+                count = 0
+                for line in sys.stdin:
+                    count += 1
+                    sys.stdout.write(str(count) + ":" + line)
+                sys.stderr.write("first=" + first)
+                print(len(sys.argv), sys.argv[1:], first == "one\n")
+
+            if __name__ == "__main__":
+                main()
+        "#,
+            ),
+            "one\ntwo\r\nthree",
+            &["x", "y"],
+        );
+        assert_eq!(run.stdout, "1:two\r\n2:three3 ['x', 'y'] True\n");
+        assert_eq!(run.stderr, "first=one\n");
+        assert_eq!(run.exit, 0);
+    }
 
     /// Module constants: math (pi, e, tau, inf, nan), os (name, which is posix as on every CPython WebAssembly host, sep, pathsep, linesep, devnull, curdir, pardir, extsep), re flags, sys.maxsize (2**31 - 1 under 32-bit int), logging levels, datetime.MINYEAR / MAXYEAR
     #[test]
@@ -2919,7 +3396,6 @@ mod functional {
 
     /// Closures capturing a float (refused today)
     #[test]
-    #[ignore = "open on the board"]
     fn float_captures() {
         check(
             r#"
@@ -2934,7 +3410,6 @@ mod functional {
 
     /// Lambda parameters typed from their call sites, so indexing, len(), or a method call inside a lambda works (refused today)
     #[test]
-    #[ignore = "open on the board"]
     fn typed_lambda_parameters() {
         check(
             r#"
@@ -3191,25 +3666,252 @@ mod generators {
         );
     }
 
-    /// yield inside try / with, generator methods, and GeneratorExit / finally on close() (refused today)
+    /// yield inside try / except / finally and with, resuming inside them; close() raising GeneratorExit at the suspended yield (finally blocks and handlers run, a generator yielding instead is CPython's RuntimeError); and generator methods holding their instance
     #[test]
-    #[ignore = "open on the board"]
     fn yield_in_try() {
         check(
             r#"
-            def gen():
+            from typing import List
+
+            log: List[str] = []
+
+
+            class Boom(Exception):
+                def __init__(self, code: int) -> None:
+                    super().__init__("boom")
+                    self.code = code
+
+
+            def risky(i: int) -> int:
+                if i == 2:
+                    raise Boom(i * 10)
+                if i == 4:
+                    raise ValueError("four")
+                return i
+
+
+            def gen(n: int):
+                for i in range(n):
+                    try:
+                        yield risky(i)
+                    except Boom as e:
+                        log.append("boom" + str(e.code))
+                        yield -e.code
+                    except ValueError as e:
+                        log.append("value:" + str(e))
+                    finally:
+                        log.append("fin" + str(i))
+                log.append("end")
+
+
+            def counter():
+                try:
+                    i = 0
+                    while True:
+                        yield i
+                        i += 1
+                finally:
+                    log.append("closed")
+
+
+            def early():
+                for i in range(10):
+                    try:
+                        if i == 3:
+                            return
+                        yield i
+                    finally:
+                        log.append("e" + str(i))
+
+
+            class Res:
+                def __init__(self, name: str) -> None:
+                    self.name = name
+
+                def __enter__(self) -> "Res":
+                    log.append("open " + self.name)
+                    return self
+
+                def __exit__(self, exc_type, exc, tb) -> bool:
+                    log.append("close " + self.name)
+                    return False
+
+
+            def lines():
+                with Res("r") as r:
+                    yield 1
+                    yield 2
+
+
+            def stubborn():
+                try:
+                    yield 1
+                except GeneratorExit:
+                    log.append("ge")
+                    raise
+
+
+            def broken():
                 try:
                     yield 1
                 finally:
-                    pass
+                    yield 2
 
-            def f() -> int:
-                t = 0
-                for v in gen():
-                    t += v
-                return t
+
+            def f() -> str:
+                out = str([v for v in gen(6)]) + "|"
+                c = counter()
+                out += str(next(c)) + str(next(c)) + str(next(c))
+                c.close()
+                out += "|" + str([v for v in early()]) + "|"
+                out += str(sum([v for v in lines()])) + "|"
+                s = stubborn()
+                next(s)
+                s.close()
+                b = broken()
+                next(b)
+                try:
+                    b.close()
+                except RuntimeError as e:
+                    out += str(e) + "|"
+                out += ",".join(log)
+                return out
         "#,
-            &[("f", Want::Int(1))],
+            &[("f", Want::Str("[0, 1, -20, 3, 5]|012|[0, 1, 2]|3|generator ignored GeneratorExit|fin0,fin1,boom20,fin2,fin3,value:four,fin4,fin5,end,closed,e0,e1,e2,e3,open r,close r,ge"))],
+        );
+        check(
+            r#"
+            from typing import List
+
+            log: List[str] = []
+
+
+            def nested():
+                for i in range(6):
+                    try:
+                        try:
+                            if i == 1:
+                                continue
+                            if i == 4:
+                                break
+                            if i == 2:
+                                raise KeyError("k")
+                            yield i
+                        finally:
+                            log.append("in" + str(i))
+                    except KeyError as e:
+                        log.append("caught " + repr(e))
+                        yield 100
+                    finally:
+                        log.append("out" + str(i))
+                log.append("done")
+
+
+            def reraiser():
+                try:
+                    yield 1
+                    raise ValueError("bad")
+                except ValueError:
+                    log.append("seen")
+                    raise
+
+
+            def leaky():
+                try:
+                    yield 1
+                    raise IndexError("idx")
+                except KeyError:
+                    log.append("never")
+                finally:
+                    log.append("leaky fin")
+
+
+            def in_handler():
+                try:
+                    raise LookupError("look")
+                except LookupError as e:
+                    yield str(e)
+                    yield "after"
+                yield "end"
+
+
+            def f() -> str:
+                out = str([v for v in nested()]) + "|"
+                try:
+                    for v in reraiser():
+                        out += str(v)
+                except ValueError as e:
+                    out += "VE:" + str(e) + "|"
+                try:
+                    for v in leaky():
+                        out += str(v)
+                except IndexError as e:
+                    out += "IE:" + str(e) + "|"
+                out += ",".join([s for s in in_handler()]) + "|"
+                return out + ",".join(log)
+        "#,
+            &[("f", Want::Str("[0, 100, 3]|1VE:bad|1IE:idx|look,after,end|in0,out0,in1,out1,in2,caught KeyError('k'),out2,in3,out3,in4,out4,done,seen,leaky fin"))],
+        );
+        check(
+            r#"
+            from typing import List
+
+
+            class Node:
+                def __init__(self, value: int) -> None:
+                    self.value = value
+                    self.children: List["Node"] = []
+
+                def add(self, value: int) -> "Node":
+                    child = Node(value)
+                    self.children.append(child)
+                    return child
+
+                def values(self):
+                    yield self.value
+                    for c in self.children:
+                        yield c.value * 10
+
+
+            class Counter:
+                def __init__(self, limit: int) -> None:
+                    self.limit = limit
+                    self.calls = 0
+
+                def bump(self) -> int:
+                    self.calls += 1
+                    return self.calls
+
+                def count(self, step: int):
+                    i = 0
+                    while i < self.limit:
+                        yield i + self.bump()
+                        i += step
+
+
+            class Sub(Counter):
+                pass
+
+
+            def g() -> str:
+                root = Node(1)
+                root.add(2)
+                root.add(3)
+                out = str([v for v in root.values()]) + "|"
+                c = Counter(7)
+                t = 0
+                for v in c.count(2):
+                    t += v
+                out += str(t) + "," + str(c.calls) + "|"
+                g = c.count(3)
+                out += str(next(g)) + str(next(g)) + "|"
+                s = Sub(4)
+                out += str(sum([v for v in s.count(1)])) + "|"
+                for a, b in zip([1, 2], Counter(5).count(1)):
+                    out += str(a * b)
+                return out
+        "#,
+            &[("g", Want::Str("[1, 20, 30]|22,4|59|16|16"))],
         );
     }
 
@@ -3228,23 +3930,60 @@ mod generators {
         );
     }
 
-    /// zip() with a generator after its first argument (refused today)
+    /// zip() with a generator or iterator after its first argument, pulled one value per round in CPython's order
     #[test]
-    #[ignore = "open on the board"]
     fn zip_generator_later() {
         check(
             r#"
-            def gen():
-                yield 1
-                yield 2
+            from typing import List
 
-            def f() -> int:
+            pulled: List[int] = []
+
+
+            def gen(n: int):
+                for i in range(n):
+                    pulled.append(i)
+                    yield i * 10
+
+
+            class Count:
+                def __init__(self, n: int) -> None:
+                    self.i = 0
+                    self.n = n
+
+                def __iter__(self) -> "Count":
+                    return self
+
+                def __next__(self) -> int:
+                    if self.i >= self.n:
+                        raise StopIteration
+                    self.i += 1
+                    return self.i
+
+
+            def f() -> str:
+                a = 0
+                b = 0
+                for a, b in zip([1, 2, 3], [9]):
+                    pass
+                out = str(a * 100 + b) + "|"
                 t = 0
-                for a, b in zip([1, 2], gen()):
-                    t += a * b
-                return t
+                for x, y in zip([1, 2, 3], gen(5)):
+                    t += x * y
+                out += str(t) + str(pulled) + "|"
+                t = 0
+                for x, y, z in zip(gen(2), [7, 8, 9], Count(9)):
+                    t += x + y * z
+                out += str(t) + str(pulled) + "|"
+                for x, y in zip(gen(4), gen(1)):
+                    t += x + y
+                out += str(t) + str(pulled)
+                return out
         "#,
-            &[("f", Want::Int(5))],
+            &[(
+                "f",
+                Want::Str("109|80[0, 1, 2]|33[0, 1, 2, 0, 1]|33[0, 1, 2, 0, 1, 0, 0, 1]"),
+            )],
         );
     }
 }
@@ -3406,19 +4145,175 @@ mod error_handling {
         );
     }
 
-    /// Exception objects: the message in raise ValueError("...") is kept and except ... as e binds the exception (e can only be re-raised today; any other use is refused)
+    /// Exception objects: raise E(args) raises an instance and except ... as e binds it; str(e), repr(e), e.args, user exception classes with __init__ and fields, super().__init__, raise X from Y with __cause__, and CPython's messages for the runtime's own faults
     #[test]
-    #[ignore = "open on the board"]
     fn exception_objects() {
         check(
             r#"
-            def f() -> int:
+            from typing import Dict
+
+
+            class AppError(Exception):
+                pass
+
+
+            class NotFound(AppError):
+                def __init__(self, key: str, code: int):
+                    super().__init__("missing " + key)
+                    self.key = key
+                    self.code = code
+
+
+            def find(d: Dict[str, int], k: str) -> int:
+                if k not in d:
+                    raise NotFound(k, 404)
+                return d[k]
+
+
+            def g() -> str:
+                out = ""
                 try:
-                    raise ValueError("boom")
+                    find({"a": 1}, "b")
+                except NotFound as e:
+                    out += str(e) + "|" + repr(e) + "|" + str(e.code) + e.key + "|"
+                try:
+                    raise ValueError("bad", 3)
                 except ValueError as e:
-                    return len(str(e))
+                    out += str(e) + "|" + repr(e) + "|"
+                try:
+                    int("x1")
+                except ValueError as e:
+                    out += str(e) + "|"
+                try:
+                    {}["k"]
+                except KeyError as e:
+                    out += str(e) + "|" + repr(e) + "|"
+                try:
+                    raise TypeError("t")
+                except (KeyError, TypeError) as e:
+                    out += repr(e) + "|" + str(e.args) + "|"
+                try:
+                    raise RuntimeError("outer") from ValueError("cause")
+                except RuntimeError as e:
+                    out += str(e) + "<-" + str(e.__cause__)
+                return out
         "#,
-            &[("f", Want::Int(4))],
+            &[("g", Want::Str("missing b|NotFound('missing b')|404b|('bad', 3)|ValueError('bad', 3)|invalid literal for int() with base 10: 'x1'|'k'|KeyError('k')|TypeError('t')|('t',)|outer<-cause"))],
+        );
+    }
+
+    /// An exception the __main__ block does not catch writes the last line of CPython's report to stderr (Name: str(e)) and exits with status 1
+    #[test]
+    fn uncaught_exception_reports() {
+        let src = dedent(
+            r#"
+                class Boom(Exception):
+                    def __str__(self) -> str:
+                        return "custom boom"
+
+                def main() -> None:
+                    print("before")
+                    n = int(input())
+                    if n == 1:
+                        raise Boom()
+                    if n == 2:
+                        raise ValueError("bad value", 2)
+                    if n == 3:
+                        raise KeyError("k")
+                    if n == 4:
+                        raise RuntimeError
+                    print([1][n])
+
+                if __name__ == "__main__":
+                    main()
+        "#,
+        );
+        let run = run_main(&src, "1\n", &[]);
+        assert_eq!(run.stdout, "before\n");
+        assert_eq!(run.stderr, "Boom: custom boom\n");
+        assert_eq!(run.exit, 1);
+        let run = run_main(&src, "2\n", &[]);
+        assert_eq!(run.stdout, "before\n");
+        assert_eq!(run.stderr, "ValueError: ('bad value', 2)\n");
+        assert_eq!(run.exit, 1);
+        let run = run_main(&src, "3\n", &[]);
+        assert_eq!(run.stdout, "before\n");
+        assert_eq!(run.stderr, "KeyError: 'k'\n");
+        assert_eq!(run.exit, 1);
+        let run = run_main(&src, "9\n", &[]);
+        assert_eq!(run.stdout, "before\n");
+        assert_eq!(run.stderr, "IndexError: list index out of range\n");
+        assert_eq!(run.exit, 1);
+    }
+
+    /// __exit__ receives the exception leaving a with block and suppresses it by answering true; an exception __exit__ raises replaces it, and return / break leave through __exit__(None, None, None)
+    #[test]
+    fn exit_suppresses() {
+        check(
+            r#"
+            from typing import List
+
+            log: List[str] = []
+
+
+            class Suppress:
+                def __init__(self, name: str):
+                    self.name = name
+
+                def __enter__(self) -> "Suppress":
+                    log.append("enter " + self.name)
+                    return self
+
+                def __exit__(self, exc_type, exc, tb) -> bool:
+                    if exc_type is None:
+                        log.append("exit " + self.name + " clean")
+                        return False
+                    log.append("exit " + self.name + " " + repr(exc))
+                    return isinstance(exc, ValueError)
+
+
+            class Boom:
+                def __enter__(self) -> int:
+                    return 1
+
+                def __exit__(self, exc_type, exc, tb) -> None:
+                    log.append("boom exit " + str(exc is None))
+                    raise RuntimeError("from exit")
+
+
+            def body(n: int) -> int:
+                with Suppress("a"):
+                    if n == 0:
+                        raise ValueError("v")
+                    if n == 1:
+                        raise KeyError("k")
+                    if n == 2:
+                        return 7
+                return 1
+
+
+            def g() -> str:
+                out = ""
+                for n in range(4):
+                    try:
+                        out += str(body(n)) + ";"
+                    except KeyError as e:
+                        out += "caught " + repr(e) + ";"
+                with Suppress("outer"):
+                    with Suppress("inner"):
+                        raise ValueError("deep")
+                for i in range(3):
+                    with Suppress("loop"):
+                        if i == 1:
+                            break
+                try:
+                    with Boom():
+                        raise TypeError("t")
+                except RuntimeError as e:
+                    out += "exit raised " + str(e) + ";"
+                return out + "|".join(log)
+        "#,
+            &[("g", Want::Str("1;caught KeyError('k');7;1;exit raised from exit;enter a|exit a ValueError('v')|enter a|exit a KeyError('k')|enter a|exit a clean|enter a|exit a clean|enter outer|enter inner|exit inner ValueError('deep')|exit outer clean|enter loop|exit loop clean|enter loop|exit loop clean|boom exit False"))],
         );
     }
 
@@ -3443,25 +4338,51 @@ mod error_handling {
         );
     }
 
-    /// Subclass matching: except MyBase does not catch a subclass of it (Exception / BaseException catch everything)
+    /// Subclass matching: except Base catches its subclasses, along user classes and CPython's builtin hierarchy (LookupError over IndexError and KeyError, ArithmeticError over ZeroDivisionError, RuntimeError over NotImplementedError)
     #[test]
-    #[ignore = "open on the board"]
     fn subclass_matching() {
         check(
             r#"
             class AppError(Exception):
                 pass
 
+
             class DbError(AppError):
                 pass
 
-            def f() -> int:
+
+            def g() -> str:
+                out = ""
                 try:
                     raise DbError("x")
-                except AppError:
-                    return 1
+                except AppError as e:
+                    out += "app:" + str(isinstance(e, DbError)) + "|"
+                for i in range(4):
+                    try:
+                        if i == 0:
+                            [1][2]
+                        elif i == 1:
+                            {}[0]
+                        elif i == 2:
+                            1 // 0
+                        else:
+                            raise NotImplementedError("n")
+                    except LookupError as e:
+                        out += "lookup:" + str(e) + "|"
+                    except ArithmeticError as e:
+                        out += "arith:" + str(e) + "|"
+                    except RuntimeError as e:
+                        out += "runtime:" + repr(e) + "|"
+                try:
+                    try:
+                        raise KeyError("k")
+                    except ValueError:
+                        out += "wrong"
+                except Exception as e:
+                    out += "exception:" + repr(e)
+                return out
         "#,
-            &[("f", Want::Int(1))],
+            &[("g", Want::Str("app:True|lookup:list index out of range|lookup:0|arith:integer division or modulo by zero|runtime:NotImplementedError('n')|exception:KeyError('k')"))],
         );
     }
 
@@ -3642,6 +4563,64 @@ mod advanced_types {
         );
     }
 
+    /// The rest of the set API: the update forms and in-place operators, copy, pop, clear, set(iterable), and methods taking any iterable
+    #[test]
+    fn rest_of_set_api() {
+        check(
+            r#"
+            from typing import List, Set
+
+            def order(s: Set[int]) -> str:
+                parts: List[str] = []
+                for x in s:
+                    parts.append(str(x))
+                return ",".join(parts)
+
+            def f() -> str:
+                a = {5, 1, 9}
+                a.update([40, 8, 1])
+                b = a.copy()
+                b.difference_update({1, 9})
+                c = a.union([100, 2], (3, 4))
+                c.intersection_update({1, 2, 3, 100, 40})
+                a.symmetric_difference_update([9, 70])
+                a |= {3}
+                a -= {5}
+                p = a.pop()
+                d = set([3, 1, 2, 3, 17])
+                d.clear()
+                return order(a) + ";" + order(b) + ";" + order(c) + ";" + str(p) + ";" + str(len(d))
+        "#,
+            &[("f", Want::Str("3,70,40,8;5,40,8;1,2,3,100,40;1;0"))],
+        );
+    }
+
+    /// Iterating a set visits its members in CPython's order (ints, floats, and tuples of them)
+    #[test]
+    fn set_iteration_order() {
+        check(
+            r#"
+            from typing import List, Set
+
+            def order(s: Set[int]) -> str:
+                parts: List[str] = []
+                for x in s:
+                    parts.append(str(x))
+                return ",".join(parts)
+
+            def f() -> str:
+                s = {33, 1, 65, 97, 2}
+                t = {x * 7 % 13 for x in range(20)}
+                u = {1, 2, 3, 9, 17, 33} ^ {2, 3, 4, 65, 129}
+                return order(s) + ";" + order(t) + ";" + order(u) + ";" + str(sum({4, 5}))
+        "#,
+            &[(
+                "f",
+                Want::Str("65,2,97,1,33;0,1,2,3,4,5,6,7,8,9,10,11,12;65,129,17,33,4,1,9;9"),
+            )],
+        );
+    }
+
     /// Tuple literals with variable expressions (a, b, c)
     #[test]
     fn tuple_literals() {
@@ -3773,6 +4752,26 @@ mod advanced_types {
             &[("g", Want::Str("3.147-877"))],
         );
     }
+
+    /// String formatting: the full format spec (width, alignment, sign, grouping, types), named .format() fields, !r / !a, runtime %
+    #[test]
+    fn full_format_spec() {
+        check(
+            r#"
+            def f(v: float) -> str:
+                return f"{v:0=+12,.3f}|{v:<12g}|{v:^#12.0e}|{v:_.1%}|{v:G}"
+
+            def g() -> str:
+                return f(-12345.6789) + ";" + f(1e-7) + ";" + f(2.5)
+        "#,
+            &[(
+                "g",
+                Want::Str(
+                    r#"-012,345.679|-12345.7    |  -1.e+04   |-1_234_567.9%|-12345.7;+000,000.000|1e-07       |   1.e-07   |0.0%|1E-07;+000,002.500|2.5         |   2.e+00   |250.0%|2.5"#,
+                ),
+            )],
+        );
+    }
 }
 
 mod advanced_o_o_p {
@@ -3828,27 +4827,192 @@ mod advanced_o_o_p {
         );
     }
 
-    /// Multiple inheritance & method resolution
+    /// Metaclasses: class M(type) with metaclass=M (inherited by subclasses), M.__new__ and M.__init__ run once as each class is created, attributes they give the class, M.__call__ replacing instantiation, M's methods and class variables reached through the class; type(x), x.__class__, and __name__
     #[test]
-    #[ignore = "open on the board"]
+    fn metaclasses() {
+        check(
+            r##"
+            from typing import List
+
+            registry: List[str] = []
+
+
+            class PluginMeta(type):
+                count = 0
+
+                def __new__(mcs, name, bases, namespace):
+                    cls = super().__new__(mcs, name, bases, namespace)
+                    registry.append(name)
+                    return cls
+
+                def __init__(cls, name, bases, namespace):
+                    super().__init__(name, bases, namespace)
+                    cls.plugin_id = len(registry)
+                    cls.label = name.lower() + "!"
+                    PluginMeta.count += 1
+
+                def describe(cls) -> str:
+                    return cls.__name__ + "#" + str(cls.plugin_id)
+
+
+            class Plugin(metaclass=PluginMeta):
+                def run(self) -> str:
+                    return "base"
+
+
+            class Audio(Plugin):
+                def run(self) -> str:
+                    return "audio"
+
+
+            class Video(Plugin):
+                pass
+
+
+            class Counted(type):
+                def __call__(cls, *args, **kwargs):
+                    instance = super().__call__(*args, **kwargs)
+                    instance.serial = 7
+                    return instance
+
+
+            class Point(metaclass=Counted):
+                def __init__(self, x: int, y: int = 0) -> None:
+                    self.x = x
+                    self.y = y
+                    self.serial = 0
+
+
+            def f() -> str:
+                out = ",".join(registry) + "|" + str(PluginMeta.count) + "|"
+                out += Audio.describe() + Video.describe() + Plugin.describe() + "|"
+                out += Audio.label + str(Video.plugin_id) + "|"
+                out += str(Plugin.count) + Audio().run() + Video().run() + "|"
+                p = Point(3, y=4)
+                out += str(p.x + p.y) + str(p.serial)
+                return out
+        "##,
+            &[(
+                "f",
+                Want::Str("Plugin,Audio,Video|3|Audio#2Video#3Plugin#1|audio!3|3audiobase|77"),
+            )],
+        );
+        check(
+            r##"
+            from typing import Dict, Optional
+
+
+            class Singleton(type):
+                def __init__(cls, name, bases, namespace):
+                    cls.instance: Optional["Config"] = None
+
+                def __call__(cls, *args, **kwargs):
+                    if cls.instance is None:
+                        cls.instance = super().__call__(*args, **kwargs)
+                    return cls.instance
+
+
+            class Config(metaclass=Singleton):
+                def __init__(self, level: int) -> None:
+                    self.level = level
+
+
+            def f() -> str:
+                a = Config(3)
+                b = Config(9)
+                return str(a is b) + str(b.level)
+        "##,
+            &[("f", Want::Str("True3"))],
+        );
+    }
+
+    /// Multiple inheritance with CPython's C3 method resolution order: methods and fields from every base, cooperative super() following the instance's MRO, isinstance against every base, and an inconsistent order refused as CPython's TypeError
+    #[test]
     fn multiple_inheritance() {
         check(
             r#"
-            class A:
-                def who(self) -> int:
-                    return 1
+            from typing import List
 
-            class B:
-                def who(self) -> int:
-                    return 2
+            trace: List[str] = []
 
-            class C(A, B):
-                pass
 
-            def f() -> int:
-                return C().who()
+            class Base:
+                def __init__(self) -> None:
+                    trace.append("Base")
+                    self.tag = "b"
+
+                def hello(self) -> str:
+                    return "Base.hello"
+
+                def who(self) -> str:
+                    return "base"
+
+
+            class Left(Base):
+                def __init__(self) -> None:
+                    trace.append("Left")
+                    super().__init__()
+                    self.left = 1
+
+                def hello(self) -> str:
+                    return "Left>" + super().hello()
+
+
+            class Right(Base):
+                def __init__(self) -> None:
+                    trace.append("Right")
+                    super().__init__()
+                    self.right = 2
+
+                def hello(self) -> str:
+                    return "Right>" + super().hello()
+
+                def who(self) -> str:
+                    return "right"
+
+
+            class Diamond(Left, Right):
+                def __init__(self) -> None:
+                    trace.append("Diamond")
+                    super().__init__()
+
+                def hello(self) -> str:
+                    return "Diamond>" + super().hello()
+
+
+            class JsonMixin:
+                def to_json(self) -> str:
+                    return "{" + self.describe() + "}"
+
+                def describe(self) -> str:
+                    return "mixin"
+
+
+            class Named:
+                def __init__(self, name: str) -> None:
+                    self.name = name
+
+                def describe(self) -> str:
+                    return "name=" + self.name
+
+
+            class Item(Named, JsonMixin):
+                def __init__(self, name: str, qty: int) -> None:
+                    super().__init__(name)
+                    self.qty = qty
+
+
+            def g() -> str:
+                d = Diamond()
+                out = d.hello() + "|" + d.who() + "|" + str(d.left + d.right) + d.tag + "|" + ",".join(trace) + "|"
+                out += str(isinstance(d, Left)) + str(isinstance(d, Right)) + str(isinstance(d, Base)) + "|"
+                r = Right()
+                out += r.hello() + "|"
+                it = Item("pen", 3)
+                out += it.to_json() + "|" + str(it.qty) + str(isinstance(it, JsonMixin))
+                return out
         "#,
-            &[("f", Want::Int(1))],
+            &[("g", Want::Str("Diamond>Left>Right>Base.hello|right|3b|Diamond,Left,Right,Base|TrueTrueTrue|Right>Base.hello|{name=pen}|3True"))],
         );
     }
 }
@@ -4137,6 +5301,7 @@ mod optimization {
         let options = waspy::CompilerOptions {
             optimize: false,
             verbosity: waspy::Verbosity::Quiet,
+            ..waspy::CompilerOptions::default()
         };
         let wasm =
             waspy::compile_python_to_wasm_with_options("def f() -> int:\n    return 3\n", &options)
@@ -4154,8 +5319,8 @@ mod optimization {
         let err =
             try_compile("def f() -> int:\n    return undefined_name(1)\n").expect_err("refused");
         assert!(err.contains("in function 'f'"), "names the function: {err}");
-        let err =
-            try_compile("def f(n: int) -> str:\n    return \"%d!\" % n\n").expect_err("refused");
+        let err = try_compile("def f(n: int) -> str:\n    return \"%*d!\" % (3, n)\n")
+            .expect_err("refused");
         assert!(err.contains("Hint:"), "carries a hint: {err}");
     }
 
@@ -4283,7 +5448,7 @@ def read_some() -> int:
     return len(s)
 "#;
 
-    /// open(path, mode) via the documented waspy_host import interface (r, w, a, b, + modes folded to flags)
+    /// open(path, mode) through WASI: path_open on the preopened directories (r, w, a, b, + modes); the waspy_host imports under the deprecated waspy_host_file_io option
     #[test]
     fn open_with_modes() {
         let (instance, mut store) = instantiate_with_host_fs(FILE_SRC);
@@ -4319,7 +5484,7 @@ def read_some() -> int:
         assert_eq!(call_host_fs_i32(&instance, &mut store, "read_all"), 7);
     }
 
-    /// Import section emitted only when open() is used - other modules keep zero imports
+    /// File imports emitted only when open() is used - other modules keep zero imports
     #[test]
     fn imports_only_with_open() {
         let engine = wasmi::Engine::default();
@@ -4330,6 +5495,47 @@ def read_some() -> int:
         .unwrap();
         assert_eq!(plain.imports().count(), 0);
         let io = wasmi::Module::new(&engine, &compile_with(FILE_SRC, false)[..]).unwrap();
-        assert!(io.imports().count() > 0 && io.imports().all(|i| i.module() == "waspy_host"));
+        assert!(io.imports().any(|i| i.name() == "path_open"));
+        assert!(io.imports().all(|i| i.module() == "wasi_snapshot_preview1"));
+        // The deprecated option keeps the `waspy_host` interface.
+        let options = waspy::CompilerOptions {
+            optimize: false,
+            waspy_host_file_io: true,
+            ..waspy::CompilerOptions::default()
+        };
+        let legacy = waspy::compile_python_to_wasm_with_options(FILE_SRC, &options).unwrap();
+        let legacy = wasmi::Module::new(&engine, &legacy[..]).unwrap();
+        assert!(
+            legacy.imports().count() > 0 && legacy.imports().all(|i| i.module() == "waspy_host")
+        );
+    }
+
+    /// A file open() cannot open raises CPython's exception (FileNotFoundError: [Errno 2] No such file or directory: 'x', PermissionError, IsADirectoryError, ...)
+    #[test]
+    fn open_errors_raise() {
+        check(
+            r#"
+            def f() -> str:
+                try:
+                    open("missing.txt")
+                    return "opened"
+                except FileNotFoundError as e:
+                    return str(e)
+
+            def g() -> str:
+                try:
+                    with open("missing.txt") as fh:
+                        return fh.read()
+                except OSError as e:
+                    return type(e).__name__
+        "#,
+            &[
+                (
+                    "f",
+                    Want::Str("[Errno 2] No such file or directory: 'missing.txt'"),
+                ),
+                ("g", Want::Str("FileNotFoundError")),
+            ],
+        );
     }
 }

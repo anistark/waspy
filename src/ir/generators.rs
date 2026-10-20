@@ -79,6 +79,37 @@ struct IterFacts {
     synthetic: bool,
 }
 
+/// The zip sequence a statement checks the length of, when it is one round's
+/// `if counter >= len(seq): break` (see the zip lowering in `ir::converter`).
+fn zip_length_check(stmt: &IRStatement) -> Option<&str> {
+    let IRStatement::If {
+        condition:
+            IRExpr::CompareOp {
+                right,
+                op: IRCompareOp::GtE,
+                ..
+            },
+        then_body,
+        else_body: None,
+    } = stmt
+    else {
+        return None;
+    };
+    if !matches!(then_body.statements.as_slice(), [IRStatement::Break]) {
+        return None;
+    }
+    match &**right {
+        IRExpr::FunctionCall {
+            function_name,
+            arguments,
+        } if function_name == "len" => match arguments.as_slice() {
+            [IRExpr::Variable(seq)] if seq.starts_with(crate::ir::ZIP_SEQ_PREFIX) => Some(seq),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn int_const(v: i32) -> IRExpr {
     IRExpr::Const(IRConstant::Int(v))
 }
@@ -106,6 +137,7 @@ fn set_pc(block: i32) -> IRStatement {
 fn raise_stop_iteration() -> IRStatement {
     IRStatement::Raise {
         exception: Some(IRExpr::Variable("StopIteration".to_string())),
+        cause: None,
     }
 }
 
@@ -128,7 +160,7 @@ fn body_of(statements: Vec<IRStatement>) -> Box<IRBody> {
 }
 
 /// Does this body contain a `yield` at any statement depth?
-fn body_has_yield(body: &IRBody) -> bool {
+pub(crate) fn body_has_yield(body: &IRBody) -> bool {
     body.statements.iter().any(stmt_has_yield)
 }
 
@@ -183,17 +215,12 @@ fn any_sub_body(stmt: &IRStatement, pred: &mut impl FnMut(&IRStatement) -> bool)
 /// Entry point: rewrite generators and desugar iterator-protocol consumption
 /// across the whole module.
 pub fn transform_generators(module: &mut IRModule) -> Result<()> {
-    for class in &module.classes {
-        for method in &class.methods {
-            if body_has_yield(&method.body) {
-                return Err(anyhow!(
-                    "generator methods are not supported: '{}.{}' contains yield",
-                    class.name,
-                    method.name
-                ));
-            }
-        }
-    }
+    let gen_methods = lift_generator_methods(module)?;
+    let class_bases: HashMap<String, Vec<String>> = module
+        .classes
+        .iter()
+        .map(|c| (c.name.clone(), c.bases.clone()))
+        .collect();
 
     // Generator functions and the state class each will get.
     let gen_classes: HashMap<String, String> = module
@@ -248,6 +275,7 @@ pub fn transform_generators(module: &mut IRModule) -> Result<()> {
     if gen_classes.is_empty() && !iter_facts.values().any(|f| f.has_next) {
         return Ok(());
     }
+    module.memory_layout.add_string(IGNORED_GENERATOR_EXIT);
 
     // Desugar iteration and iterator method calls in every body (generator
     // bodies included, so a generator can consume another generator).
@@ -262,15 +290,25 @@ pub fn transform_generators(module: &mut IRModule) -> Result<()> {
             drains: &mut drains,
             errors: &mut errors,
             current: String::new(),
+            gen_methods: &gen_methods,
+            class_bases: &class_bases,
+            instances: HashMap::new(),
         };
         for func in &mut module.functions {
             desugarer.current = func.name.clone();
+            desugarer.instances = certain_instances(&func.params, &func.body, None, &class_bases);
             let mut vars = desugarer.seed_params(&func.params);
             desugarer.rewrite_body(&mut func.body, &mut vars);
         }
         for class in &mut module.classes {
             for method in &mut class.methods {
                 desugarer.current = format!("{}.{}", class.name, method.name);
+                desugarer.instances = certain_instances(
+                    &method.params,
+                    &method.body,
+                    Some(&class.name),
+                    &class_bases,
+                );
                 let mut vars = desugarer.seed_params(&method.params);
                 desugarer.rewrite_body(&mut method.body, &mut vars);
             }
@@ -334,6 +372,7 @@ fn drain_function(class: &str, element: IRType) -> IRFunction {
             param_type: IRType::Class(class.to_string()),
             default_value: None,
             keyword_only: false,
+            star: crate::ir::ParamStar::None,
         }],
         body: IRBody {
             statements: vec![
@@ -387,6 +426,11 @@ struct Desugarer<'a> {
     errors: &'a mut Vec<String>,
     /// The function or method being rewritten, for error messages.
     current: String,
+    /// `(class, method)` of each generator method, to its generator function.
+    gen_methods: &'a HashMap<(String, String), String>,
+    class_bases: &'a HashMap<String, Vec<String>>,
+    /// The locals of the function being rewritten whose class is certain.
+    instances: HashMap<String, String>,
 }
 
 impl Desugarer<'_> {
@@ -423,8 +467,46 @@ impl Desugarer<'_> {
                 let class = self.iterator_class(object, vars)?;
                 self.facts.get(&class)?.iter_returns.clone()
             }
+            // A generator method called on a receiver whose class is certain.
+            IRExpr::MethodCall {
+                object,
+                method_name,
+                ..
+            } => {
+                let receiver = match &**object {
+                    IRExpr::Variable(n) | IRExpr::Param(n) => self.instances.get(n)?.clone(),
+                    IRExpr::FunctionCall { function_name, .. }
+                        if self.class_bases.contains_key(function_name) =>
+                    {
+                        function_name.clone()
+                    }
+                    _ => return None,
+                };
+                let function = self.method_generator(&receiver, method_name)?;
+                self.gen_fns.get(&function).cloned()
+            }
             _ => None,
         }
+    }
+
+    /// The generator function behind `class.method`, found on the class or
+    /// a base. A generator method is defined by one class of its hierarchy
+    /// only (`lift_generator_methods`), so the first found is the one.
+    fn method_generator(&self, class: &str, method: &str) -> Option<String> {
+        let mut pending = vec![class.to_string()];
+        let mut seen = HashSet::new();
+        while let Some(c) = pending.pop() {
+            if !seen.insert(c.clone()) {
+                continue;
+            }
+            if let Some(f) = self.gen_methods.get(&(c.clone(), method.to_string())) {
+                return Some(f.clone());
+            }
+            if let Some(bases) = self.class_bases.get(&c) {
+                pending.extend(bases.iter().rev().cloned());
+            }
+        }
+        None
     }
 
     /// What iterating `iterable`, an iterator of class `class`, drives, and its
@@ -490,6 +572,42 @@ impl Desugarer<'_> {
         let stmts = std::mem::take(&mut body.statements);
         let mut out = Vec::with_capacity(stmts.len());
         for mut stmt in stmts {
+            // One round of a `for ... in zip(...)` whose later argument is an
+            // iterator: its length check goes, and its indexing becomes a
+            // pull, ending the loop when the iterator is exhausted.
+            if let Some(seq) = zip_length_check(&stmt) {
+                if vars.contains_key(seq) {
+                    continue;
+                }
+            }
+            if let IRStatement::Assign {
+                target,
+                value: IRExpr::Indexing { container, .. },
+                ..
+            } = &stmt
+            {
+                if let IRExpr::Variable(seq) = &**container {
+                    if seq.starts_with(crate::ir::ZIP_SEQ_PREFIX) {
+                        if let Some(class) = vars.get(seq) {
+                            out.push(IRStatement::Expression(stop_check()));
+                            out.push(IRStatement::Assign {
+                                target: target.clone(),
+                                value: IRExpr::FunctionCall {
+                                    function_name: format!("{class}::__next__"),
+                                    arguments: vec![IRExpr::Variable(seq.clone())],
+                                },
+                                var_type: None,
+                            });
+                            out.push(IRStatement::If {
+                                condition: stop_check(),
+                                then_body: body_of(vec![IRStatement::Break]),
+                                else_body: None,
+                            });
+                            continue;
+                        }
+                    }
+                }
+            }
             self.rewrite_stmt_exprs(&mut stmt, vars);
             match stmt {
                 IRStatement::For {
@@ -561,19 +679,25 @@ impl Desugarer<'_> {
                     var_type,
                 } => {
                     match self.iterator_class(&value, vars) {
-                        // A later zip() argument is read with len() and an
-                        // index (see the zip lowering in `ir::converter`),
-                        // which an iterator has neither of (#133). Draining
-                        // it first would pull every value up front, where
-                        // zip pulls one per round.
-                        Some(_) if target.starts_with(crate::ir::ZIP_SEQ_PREFIX) => {
-                            self.errors.push(format!(
-                                "'{}' passes a generator or iterator to zip() after its first \
-                                 argument, which is not supported yet. Hint: pass it as the \
-                                 first argument, or collect it into a list with a \
-                                 comprehension first",
-                                self.current
-                            ));
+                        // A later zip() argument that is an iterator is pulled
+                        // one value per round (above), as zip pulls it; the
+                        // iterator `__iter__` gives is what is pulled.
+                        Some(class) if target.starts_with(crate::ir::ZIP_SEQ_PREFIX) => {
+                            let (it_expr, it_class) = self.iteration_source(value, class);
+                            if !self.facts.get(&it_class).is_some_and(|f| f.has_next) {
+                                self.errors.push(format!(
+                                    "'{}' passes zip() an iterable whose __iter__ returns no \
+                                     iterator this module defines",
+                                    self.current
+                                ));
+                            }
+                            vars.insert(target.clone(), it_class);
+                            out.push(IRStatement::Assign {
+                                target,
+                                value: it_expr,
+                                var_type,
+                            });
+                            continue;
                         }
                         Some(class) => {
                             vars.insert(target.clone(), class);
@@ -652,7 +776,9 @@ impl Desugarer<'_> {
         match stmt {
             IRStatement::Return(Some(e))
             | IRStatement::Yield { value: Some(e) }
-            | IRStatement::Raise { exception: Some(e) }
+            | IRStatement::Raise {
+                exception: Some(e), ..
+            }
             | IRStatement::Expression(e)
             | IRStatement::Assign { value: e, .. }
             | IRStatement::AugAssign { value: e, .. }
@@ -838,8 +964,6 @@ fn build_state_class(
     class_name: &str,
     counter: &mut u32,
 ) -> Result<IRClass> {
-    reject_unsupported(&func.body, false, &func.name)?;
-
     let mut body = std::mem::replace(
         &mut func.body,
         IRBody {
@@ -848,6 +972,7 @@ fn build_state_class(
     );
     desugar_suspending_fors(&mut body, counter);
     split_literal_unpacks(&mut body, counter);
+    unique_handler_names(&mut body, counter);
 
     // Resolved before the lift below rewrites parameter references into
     // `self.<name>` attribute reads.
@@ -855,32 +980,53 @@ fn build_state_class(
 
     // Every parameter and assigned local moves into a state-class field so it
     // survives suspension; the targets of tuple unpacking and of yield-free
-    // `for` loops stay WASM locals (their loop machinery binds locals).
-    let mut lift: HashSet<String> = func.params.iter().map(|p| p.name.clone()).collect();
-    lift.insert(GEN_SENT_FIELD.to_string());
-    collect_assigned_names(&body, &mut lift);
-    let mut exempt = HashSet::new();
-    collect_exempt_names(&body, &mut exempt);
-    for name in &exempt {
-        lift.remove(name);
-    }
-    lift_body(&mut body, &lift);
-
-    let mut flattener = Flattener {
-        blocks: vec![Vec::new()],
-        current: 0,
-        loops: Vec::new(),
+    // `for` loops stay WASM locals (their loop machinery binds locals). One
+    // of those read after a `yield` is bound through a temporary instead and
+    // copied into an ordinary variable, which is a field.
+    let flatten = |body: IRBody| -> Result<(Flattener, BTreeSet<String>)> {
+        let mut body = body;
+        let mut lift: HashSet<String> = func.params.iter().map(|p| p.name.clone()).collect();
+        lift.insert(GEN_SENT_FIELD.to_string());
+        collect_assigned_names(&body, &mut lift);
+        collect_handler_names(&body, &mut lift);
+        let mut exempt = HashSet::new();
+        collect_exempt_names(&body, &mut exempt);
+        for name in &exempt {
+            lift.remove(name);
+        }
+        lift_body(&mut body, &lift);
+        let mut flattener = Flattener::new();
+        flattener.flatten_body(body.statements, &func.name)?;
+        flattener.jump(EXHAUSTED);
+        let stale = locals_read_across_yields(&flattener.blocks, &exempt);
+        Ok((flattener, stale))
     };
-    flattener.flatten_body(body.statements, &func.name)?;
-    flattener.jump(EXHAUSTED);
-    check_locals_across_yields(&flattener.blocks, &exempt, &func.name)?;
+    let (mut flattener, stale) = flatten(body.clone())?;
+    if !stale.is_empty() {
+        bind_through_temporaries(&mut body, &stale, counter);
+        let (retried, still) = flatten(body)?;
+        if let Some(name) = still.iter().next() {
+            return Err(crate::core::errors::unsupported_feature(
+                format!(
+                    "generator '{}' reads '{name}' after a 'yield', but '{name}' is bound by a \
+                     loop or by unpacking, which does not survive the 'yield'. Hint: copy it \
+                     into an ordinary variable first ('x = {name}')",
+                    func.name
+                ),
+                None,
+            )
+            .into());
+        }
+        flattener = retried;
+    }
+    let throw_points = std::mem::take(&mut flattener.throw_points);
 
     // __step: `while True` trampoline dispatching on the stored block id.
     // Every block ends in a `return` (yield) or a `continue` after storing
     // the next id, so the sequential `if`s never fall through into each
     // other; an unmatched id (-1 included) raises StopIteration.
-    let mut dispatch: Vec<IRStatement> = flattener
-        .blocks
+    let blocks = std::mem::take(&mut flattener.blocks);
+    let mut dispatch: Vec<IRStatement> = blocks
         .into_iter()
         .enumerate()
         .map(|(id, statements)| IRStatement::If {
@@ -889,7 +1035,7 @@ fn build_state_class(
                 right: Box::new(int_const(id as i32)),
                 op: IRCompareOp::Eq,
             },
-            then_body: body_of(statements),
+            then_body: body_of(flattener.wrap_block(id, statements)),
             else_body: None,
         })
         .collect();
@@ -901,6 +1047,7 @@ fn build_state_class(
         param_type: IRType::Class(class_name.to_string()),
         default_value: None,
         keyword_only: false,
+        star: crate::ir::ParamStar::None,
     };
     let method =
         |name: &str, params: Vec<IRParam>, statements: Vec<IRStatement>, ret: IRType| IRFunction {
@@ -924,10 +1071,15 @@ fn build_state_class(
     // at the right width (the first concrete assignment fixes a field's type).
     let sent_zero = || match elem_type {
         IRType::Float => IRExpr::Const(IRConstant::Float(0.0)),
+        IRType::String => IRExpr::Const(IRConstant::String(String::new())),
         _ => int_const(0),
     };
 
-    let mut init_statements = vec![set_pc(0), set_sent(sent_zero())];
+    let mut init_statements = vec![
+        set_pc(0),
+        set_sent(sent_zero()),
+        set_field(GEN_THROW_FIELD, int_const(0)),
+    ];
     for param in &func.params {
         init_statements.push(IRStatement::AttributeAssign {
             object: self_var(),
@@ -966,6 +1118,7 @@ fn build_state_class(
                     param_type: elem_type.clone(),
                     default_value: None,
                     keyword_only: false,
+                    star: crate::ir::ParamStar::None,
                 },
             ],
             vec![
@@ -977,7 +1130,7 @@ fn build_state_class(
         method(
             "close",
             vec![self_param()],
-            vec![set_pc(EXHAUSTED), IRStatement::Return(Some(int_const(0)))],
+            close_body(class_name, &throw_points),
             IRType::Int,
         ),
         method(
@@ -993,56 +1146,328 @@ fn build_state_class(
         bases: Vec::new(),
         methods,
         class_vars: Vec::new(),
+        metaclass: None,
+        position: 0,
+        deferred_vars: Vec::new(),
     })
 }
 
-/// Suspension cannot cross a `try` or `with` frame — the trampoline would
-/// have to re-enter the middle of the protected region.
-fn reject_unsupported(body: &IRBody, protected: bool, func_name: &str) -> Result<()> {
-    for stmt in &body.statements {
-        match stmt {
-            IRStatement::Yield { .. } | IRStatement::Return(_) if protected => {
-                return Err(anyhow!(
-                    "generator '{func_name}': yield/return inside try/with is not supported"
+/// The prefix of the generator functions generator methods are lifted to.
+pub const GEN_METHOD_PREFIX: &str = "__genmethod_";
+
+/// A method containing `yield` becomes a generator function taking the
+/// receiver as its first argument, so the generator it makes holds the
+/// receiver like any parameter, and the method returns that generator.
+/// Iteration finds the generator's class from the receiver's, statically, so
+/// a generator method another class of its hierarchy also defines (which
+/// would make the answer depend on the instance) is refused, as are the
+/// static, class, and property kinds and `super()` inside one.
+fn lift_generator_methods(module: &mut IRModule) -> Result<HashMap<(String, String), String>> {
+    let related = |a: &str, b: &str, classes: &[IRClass]| {
+        let ancestors = |start: &str| {
+            let mut out = HashSet::new();
+            let mut pending = vec![start.to_string()];
+            while let Some(c) = pending.pop() {
+                if out.insert(c.clone()) {
+                    if let Some(class) = classes.iter().find(|k| k.name == c) {
+                        pending.extend(class.bases.iter().cloned());
+                    }
+                }
+            }
+            out
+        };
+        ancestors(a).contains(b) || ancestors(b).contains(a)
+    };
+    let mut lifted = HashMap::new();
+    let mut functions = Vec::new();
+    for c in 0..module.classes.len() {
+        let class_name = module.classes[c].name.clone();
+        for m in 0..module.classes[c].methods.len() {
+            if !body_has_yield(&module.classes[c].methods[m].body) {
+                continue;
+            }
+            let method = module.classes[c].methods[m].clone();
+            let refuse = |why: &str| -> anyhow::Error {
+                crate::core::errors::unsupported_feature(
+                    format!("the generator method '{class_name}.{}' {why}", method.name),
+                    None,
+                )
+                .into()
+            };
+            if !method.decorators.is_empty() {
+                return Err(refuse(
+                    "has a decorator, which a generator method cannot have here",
                 ));
             }
+            if let Some(other) = module.classes.iter().find(|k| {
+                k.name != class_name
+                    && k.methods.iter().any(|x| x.name == method.name)
+                    && related(&k.name, &class_name, &module.classes)
+            }) {
+                return Err(refuse(&format!(
+                    "is also defined by '{}' in the same hierarchy, so which generator a call \
+                     makes would depend on the instance",
+                    other.name
+                )));
+            }
+            let mut uses_super = false;
+            for stmt in &method.body.statements {
+                any_sub_body(stmt, &mut |s| {
+                    let mut probe = IRBody {
+                        statements: vec![s.clone()],
+                    };
+                    let _ = crate::ir::visit_body(&mut probe, &mut |e: &mut IRExpr| {
+                        if matches!(e, IRExpr::FunctionCall { function_name, .. } if function_name == "super")
+                            || matches!(e, IRExpr::MethodCall { object, .. } if matches!(&**object, IRExpr::FunctionCall { function_name, .. } if function_name == "super"))
+                        {
+                            uses_super = true;
+                        }
+                        Ok(())
+                    });
+                    false
+                });
+            }
+            if uses_super {
+                return Err(refuse(
+                    "calls super(), which is not supported in a generator method",
+                ));
+            }
+            let Some(receiver) = method.params.first().map(|p| p.name.clone()) else {
+                return Err(refuse("takes no parameters, so it has no instance"));
+            };
+            let function = format!("{GEN_METHOD_PREFIX}{class_name}_{}", method.name);
+            let renamed = "__gen_self".to_string();
+            let mut body = method.body.clone();
+            crate::ir::rename_body(
+                &mut body,
+                &HashMap::from([(receiver.clone(), renamed.clone())]),
+            );
+            let mut params = method.params.clone();
+            params[0].name = renamed;
+            params[0].param_type = IRType::Class(class_name.clone());
+            let arguments = method
+                .params
+                .iter()
+                .map(|p| IRExpr::Variable(p.name.clone()))
+                .collect();
+            functions.push(IRFunction {
+                name: function.clone(),
+                params,
+                body,
+                return_type: IRType::Unknown,
+                decorators: Vec::new(),
+            });
+            let target = &mut module.classes[c].methods[m];
+            target.body = IRBody {
+                statements: vec![IRStatement::Return(Some(IRExpr::FunctionCall {
+                    function_name: function.clone(),
+                    arguments,
+                }))],
+            };
+            target.return_type = IRType::Class(format!("__Gen_{function}"));
+            lifted.insert((class_name.clone(), method.name.clone()), function);
+        }
+    }
+    module.functions.extend(functions);
+    Ok(lifted)
+}
+
+/// The locals whose class is certain throughout a body: a parameter
+/// annotated with a class (the receiver of a method, `owner`'s), or a
+/// variable every assignment of which constructs the same class.
+fn certain_instances(
+    params: &[IRParam],
+    body: &IRBody,
+    owner: Option<&str>,
+    classes: &HashMap<String, Vec<String>>,
+) -> HashMap<String, String> {
+    let mut seen: HashMap<String, Option<String>> = HashMap::new();
+    for (k, p) in params.iter().enumerate() {
+        match (&p.param_type, owner) {
+            (IRType::Class(c), _) => {
+                seen.insert(p.name.clone(), Some(c.clone()));
+            }
+            (_, Some(owner)) if k == 0 => {
+                seen.insert(p.name.clone(), Some(owner.to_string()));
+            }
+            _ => {}
+        }
+    }
+    fn record(seen: &mut HashMap<String, Option<String>>, name: &str, class: Option<String>) {
+        let entry = seen
+            .entry(name.to_string())
+            .or_insert_with(|| class.clone());
+        if *entry != class {
+            *entry = None;
+        }
+    }
+    fn walk(
+        body: &IRBody,
+        seen: &mut HashMap<String, Option<String>>,
+        classes: &HashMap<String, Vec<String>>,
+    ) {
+        for stmt in &body.statements {
+            match stmt {
+                IRStatement::Assign { target, value, .. } => {
+                    let class = match value {
+                        IRExpr::FunctionCall { function_name, .. }
+                            if classes.contains_key(function_name) =>
+                        {
+                            Some(function_name.clone())
+                        }
+                        _ => None,
+                    };
+                    record(seen, target, class);
+                }
+                IRStatement::AugAssign { target, .. } | IRStatement::For { target, .. } => {
+                    record(seen, target, None)
+                }
+                IRStatement::TupleUnpack { targets, .. } => {
+                    for t in targets {
+                        record(seen, t, None);
+                    }
+                }
+                IRStatement::With {
+                    optional_vars: Some(v),
+                    ..
+                } => record(seen, v, None),
+                IRStatement::TryExcept {
+                    except_handlers, ..
+                } => {
+                    for h in except_handlers {
+                        if let Some(n) = &h.name {
+                            record(seen, n, None);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            for sub in sub_bodies(stmt) {
+                walk(sub, seen, classes);
+            }
+        }
+    }
+    walk(body, &mut seen, classes);
+    seen.into_iter()
+        .filter_map(|(name, class)| class.map(|c| (name, c)))
+        .collect()
+}
+
+/// `close()`: suspended at a `yield` inside a `try`, the generator resumes
+/// with GeneratorExit raised there, so its handlers and `finally` blocks run;
+/// it then has to stop, by letting GeneratorExit (or StopIteration) out, and
+/// yielding instead is CPython's RuntimeError. Anywhere else nothing would
+/// run, so it is only marked exhausted.
+fn close_body(class_name: &str, throw_points: &[i32]) -> Vec<IRStatement> {
+    let finish = vec![set_pc(EXHAUSTED), IRStatement::Return(Some(int_const(0)))];
+    let Some(suspended) = throw_points
+        .iter()
+        .map(|&block| IRExpr::CompareOp {
+            left: Box::new(self_attr(GEN_PC_FIELD)),
+            right: Box::new(int_const(block)),
+            op: IRCompareOp::Eq,
+        })
+        .reduce(|left, right| IRExpr::BoolOp {
+            left: Box::new(left),
+            right: Box::new(right),
+            op: IRBoolOp::Or,
+        })
+    else {
+        return finish;
+    };
+    let mut statements = vec![IRStatement::If {
+        condition: suspended,
+        then_body: body_of(vec![
+            set_field(GEN_THROW_FIELD, int_const(1)),
+            IRStatement::Expression(stop_check()),
+            IRStatement::TryExcept {
+                try_body: body_of(vec![IRStatement::Expression(IRExpr::FunctionCall {
+                    function_name: format!("{class_name}::__step"),
+                    arguments: vec![self_var()],
+                })]),
+                except_handlers: vec![crate::ir::IRExceptHandler {
+                    exception_types: vec!["GeneratorExit".to_string()],
+                    name: None,
+                    body: IRBody {
+                        statements: finish.clone(),
+                    },
+                }],
+                finally_body: None,
+            },
+            IRStatement::If {
+                condition: stop_check(),
+                then_body: body_of(finish.clone()),
+                else_body: None,
+            },
+            IRStatement::Raise {
+                exception: Some(IRExpr::FunctionCall {
+                    function_name: "RuntimeError".to_string(),
+                    arguments: vec![IRExpr::Const(IRConstant::String(
+                        IGNORED_GENERATOR_EXIT.to_string(),
+                    ))],
+                }),
+                cause: None,
+            },
+        ]),
+        else_body: None,
+    }];
+    statements.extend(finish);
+    statements
+}
+
+/// CPython's message when a generator yields from `close()`.
+pub const IGNORED_GENERATOR_EXIT: &str = "generator ignored GeneratorExit";
+
+/// Give each handler's `as` name a name of its own. The names become fields,
+/// typed once per class, so two handlers both binding `e` to different
+/// exception classes would share a field of their common base and lose what
+/// each class adds; Python unbinds the name at the handler's end, so nothing
+/// outside the handler reads it.
+fn unique_handler_names(body: &mut IRBody, counter: &mut u32) {
+    for stmt in &mut body.statements {
+        match stmt {
             IRStatement::TryExcept {
                 try_body,
                 except_handlers,
                 finally_body,
             } => {
-                reject_unsupported(try_body, true, func_name)?;
+                unique_handler_names(try_body, counter);
                 for handler in except_handlers {
-                    reject_unsupported(&handler.body, true, func_name)?;
+                    unique_handler_names(&mut handler.body, counter);
+                    if let Some(name) = handler.name.clone() {
+                        *counter += 1;
+                        let unique = format!("{name}__exc{counter}");
+                        let map = HashMap::from([(name, unique.clone())]);
+                        crate::ir::rename_body(&mut handler.body, &map);
+                        handler.name = Some(unique);
+                    }
                 }
                 if let Some(finally_body) = finally_body {
-                    reject_unsupported(finally_body, true, func_name)?;
+                    unique_handler_names(finally_body, counter);
                 }
             }
-            IRStatement::With { body, .. } => reject_unsupported(body, true, func_name)?,
-            IRStatement::If {
-                then_body,
-                else_body,
-                ..
-            } => {
-                reject_unsupported(then_body, protected, func_name)?;
-                if let Some(else_body) = else_body {
-                    reject_unsupported(else_body, protected, func_name)?;
+            other => {
+                for sub in sub_bodies_mut(other) {
+                    unique_handler_names(sub, counter);
                 }
             }
-            IRStatement::While { body, .. } => reject_unsupported(body, protected, func_name)?,
-            IRStatement::For {
-                body, else_body, ..
-            } => {
-                reject_unsupported(body, protected, func_name)?;
-                if let Some(else_body) = else_body {
-                    reject_unsupported(else_body, protected, func_name)?;
-                }
-            }
-            _ => {}
         }
     }
-    Ok(())
+}
+
+/// The `as` names of every handler in the body.
+fn collect_handler_names(body: &IRBody, out: &mut HashSet<String>) {
+    for stmt in &body.statements {
+        if let IRStatement::TryExcept {
+            except_handlers, ..
+        } = stmt
+        {
+            out.extend(except_handlers.iter().filter_map(|h| h.name.clone()));
+        }
+        for sub in sub_bodies(stmt) {
+            collect_handler_names(sub, out);
+        }
+    }
 }
 
 /// Rewrite each `for` loop whose body suspends into an equivalent `while`
@@ -1328,7 +1753,9 @@ fn collect_stmt_names(
         IRStatement::Return(Some(e))
         | IRStatement::Expression(e)
         | IRStatement::Yield { value: Some(e) }
-        | IRStatement::Raise { exception: Some(e) }
+        | IRStatement::Raise {
+            exception: Some(e), ..
+        }
         | IRStatement::If { condition: e, .. }
         | IRStatement::While { condition: e, .. } => exprs.push(e.clone()),
         IRStatement::AttributeAssign { object, value, .. }
@@ -1355,37 +1782,60 @@ fn collect_stmt_names(
     }
 }
 
-/// Refuse a generator whose unpacking or loop target, a WASM local of
-/// `__step`, is read in a different resumption from the one that set it: the
-/// local does not survive the `yield` between them.
-fn check_locals_across_yields(
+/// The unpacking and loop targets (WASM locals of `__step`) read in a
+/// different resumption from the one that set them: the local does not
+/// survive the `yield` between them.
+fn locals_read_across_yields(
     blocks: &[Vec<IRStatement>],
     exempt: &HashSet<String>,
-    func_name: &str,
-) -> Result<()> {
+) -> BTreeSet<String> {
+    let mut stale = BTreeSet::new();
     for block in blocks {
         let mut reads = HashSet::new();
         let mut writes = HashSet::new();
         for stmt in block {
             collect_stmt_names(stmt, &mut reads, &mut writes);
         }
-        if let Some(name) = reads
-            .iter()
-            .filter(|n| exempt.contains(*n) && !writes.contains(*n))
-            .min()
-        {
-            return Err(crate::core::errors::unsupported_feature(
-                format!(
-                    "generator '{func_name}' reads '{name}' after a 'yield', but '{name}' is \
-                     bound by a loop or by unpacking, which does not survive the 'yield'. Hint: \
-                     copy it into an ordinary variable first ('x = {name}')"
-                ),
-                None,
-            )
-            .into());
-        }
+        stale.extend(
+            reads
+                .into_iter()
+                .filter(|n| exempt.contains(n) && !writes.contains(n)),
+        );
     }
-    Ok(())
+    stale
+}
+
+/// Bind each of `names` where a loop or an unpacking binds it through a
+/// temporary, copied into the name right after, so the name is an ordinary
+/// assigned variable (a field) and the temporary is the loop's local.
+fn bind_through_temporaries(body: &mut IRBody, names: &BTreeSet<String>, counter: &mut u32) {
+    let statements = std::mem::take(&mut body.statements);
+    for mut stmt in statements {
+        for sub in sub_bodies_mut(&mut stmt) {
+            bind_through_temporaries(sub, names, counter);
+        }
+        let mut after = Vec::new();
+        match &mut stmt {
+            IRStatement::For { target, body, .. } if names.contains(target) => {
+                *counter += 1;
+                let temp = format!("__glt_{counter}");
+                let name = std::mem::replace(target, temp.clone());
+                body.statements
+                    .insert(0, assign(&name, IRExpr::Variable(temp)));
+            }
+            IRStatement::TupleUnpack { targets, .. } => {
+                for target in targets.iter_mut().filter(|t| names.contains(*t)) {
+                    *counter += 1;
+                    let temp = format!("__glt_{counter}");
+                    let name = std::mem::replace(target, temp.clone());
+                    after.push(assign(&name, IRExpr::Variable(temp)));
+                }
+            }
+            _ => {}
+        }
+        body.statements.push(stmt);
+        body.statements.append(&mut after);
+    }
 }
 
 /// Names that must stay WASM locals: yield-free `for` targets (the loop
@@ -1447,14 +1897,14 @@ fn lift_stmt(stmt: &mut IRStatement, lift: &HashSet<String>) {
         IRStatement::Assign {
             target,
             value,
-            var_type: _,
+            var_type,
         } if lift.contains(target) => {
             lift_expr(value, lift);
             let replacement = IRStatement::AttributeAssign {
                 object: self_var(),
                 attribute: target.clone(),
                 value: value.clone(),
-                annotation: None,
+                annotation: var_type.clone(),
             };
             *stmt = replacement;
         }
@@ -1475,7 +1925,9 @@ fn lift_stmt(stmt: &mut IRStatement, lift: &HashSet<String>) {
         | IRStatement::AugAssign { value: e, .. }
         | IRStatement::TupleUnpack { value: e, .. }
         | IRStatement::DynamicImport { module_name: e, .. }
-        | IRStatement::Raise { exception: Some(e) } => lift_expr(e, lift),
+        | IRStatement::Raise {
+            exception: Some(e), ..
+        } => lift_expr(e, lift),
         IRStatement::If {
             condition,
             then_body,
@@ -1520,6 +1972,18 @@ fn lift_stmt(stmt: &mut IRStatement, lift: &HashSet<String>) {
             lift_body(try_body, lift);
             for handler in except_handlers {
                 lift_body(&mut handler.body, lift);
+                // The handler binds a local; the body reads the field.
+                if let Some(name) = handler.name.as_ref().filter(|n| lift.contains(*n)) {
+                    handler.body.statements.insert(
+                        0,
+                        IRStatement::AttributeAssign {
+                            object: self_var(),
+                            attribute: name.clone(),
+                            value: IRExpr::Variable(name.clone()),
+                            annotation: None,
+                        },
+                    );
+                }
             }
             if let Some(finally_body) = finally_body {
                 lift_body(finally_body, lift);
@@ -1553,26 +2017,70 @@ fn lift_expr(expr: &mut IRExpr, lift: &HashSet<String>) {
 }
 
 /// Element type the generator yields: f64 when any yield expression involves
-/// a float constant or a float-typed parameter, i32 otherwise (the general
-/// slot type). Best-effort — deeper float inference (e.g. through plain
-/// locals) is a follow-up.
+/// a float constant or a float-typed parameter, str when one is text, i32
+/// otherwise (the general slot type). Best-effort, through plain locals; a
+/// generator yielding both text and numbers is refused where its value is
+/// returned, since one slot cannot hold both.
 fn yielded_type(body: &IRBody, params: &[IRParam]) -> IRType {
-    let mut float_params: HashSet<String> = params
+    #[derive(Clone, Copy, PartialEq)]
+    enum Kind {
+        Float,
+        Text,
+    }
+    let mut kinds: HashMap<String, Kind> = params
         .iter()
-        .filter(|p| p.param_type == IRType::Float)
-        .map(|p| p.name.clone())
+        .filter_map(|p| match p.param_type {
+            IRType::Float => Some((p.name.clone(), Kind::Float)),
+            IRType::String => Some((p.name.clone(), Kind::Text)),
+            _ => None,
+        })
         .collect();
-    // A local assigned a float value is a float too (`x = i / 4; yield x`),
+    fn kind_of(expr: &IRExpr, kinds: &HashMap<String, Kind>) -> Option<Kind> {
+        match expr {
+            IRExpr::Const(IRConstant::Float(_)) => Some(Kind::Float),
+            IRExpr::Const(IRConstant::String(_)) => Some(Kind::Text),
+            IRExpr::Variable(name) | IRExpr::Param(name) => kinds.get(name).copied(),
+            // True division is a float whatever its operands are; `yield i / 2`
+            // was inferred as an int and truncated every value.
+            IRExpr::BinaryOp { op: IROp::Div, .. } => Some(Kind::Float),
+            IRExpr::BinaryOp { left, right, .. } => {
+                let (l, r) = (kind_of(left, kinds), kind_of(right, kinds));
+                if l == Some(Kind::Text) || r == Some(Kind::Text) {
+                    Some(Kind::Text)
+                } else {
+                    l.or(r)
+                }
+            }
+            IRExpr::UnaryOp { operand, .. } => kind_of(operand, kinds),
+            IRExpr::Conditional { body, orelse, .. } => {
+                kind_of(body, kinds).or_else(|| kind_of(orelse, kinds))
+            }
+            IRExpr::Attribute { object, .. } => kind_of(object, kinds),
+            IRExpr::FunctionCall { function_name, .. } => match function_name.as_str() {
+                "float" => Some(Kind::Float),
+                "str" | "repr" | "format" | "ascii" | "chr" | "input" => Some(Kind::Text),
+                _ => None,
+            },
+            IRExpr::MethodCall { method_name, .. } => match method_name.as_str() {
+                "upper" | "lower" | "strip" | "lstrip" | "rstrip" | "join" | "replace"
+                | "title" | "capitalize" | "format" | "casefold" | "swapcase" | "center"
+                | "ljust" | "rjust" | "zfill" => Some(Kind::Text),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    // A local assigned a float or a string is one too (`x = i / 4; yield x`),
     // which may in turn make another one, so this runs to a fixpoint.
     loop {
         let mut found = Vec::new();
         for stmt in &body.statements {
             any_sub_body(stmt, &mut |s: &IRStatement| {
                 if let IRStatement::Assign { target, value, .. } = s {
-                    if !float_params.contains(target.as_str())
-                        && expr_has_float(value, &float_params)
-                    {
-                        found.push(target.clone());
+                    if !kinds.contains_key(target.as_str()) {
+                        if let Some(kind) = kind_of(value, &kinds) {
+                            found.push((target.clone(), kind));
+                        }
                     }
                 }
                 false
@@ -1581,43 +2089,21 @@ fn yielded_type(body: &IRBody, params: &[IRParam]) -> IRType {
         if found.is_empty() {
             break;
         }
-        float_params.extend(found);
+        kinds.extend(found);
     }
-    fn expr_has_float(expr: &IRExpr, float_params: &HashSet<String>) -> bool {
-        match expr {
-            IRExpr::Const(IRConstant::Float(_)) => true,
-            IRExpr::Variable(name) | IRExpr::Param(name) => float_params.contains(name),
-            // True division is a float whatever its operands are; `yield i / 2`
-            // was inferred as an int and truncated every value.
-            IRExpr::BinaryOp { op: IROp::Div, .. } => true,
-            IRExpr::BinaryOp { left, right, .. } => {
-                expr_has_float(left, float_params) || expr_has_float(right, float_params)
-            }
-            IRExpr::UnaryOp { operand, .. } => expr_has_float(operand, float_params),
-            IRExpr::Conditional { body, orelse, .. } => {
-                expr_has_float(body, float_params) || expr_has_float(orelse, float_params)
-            }
-            IRExpr::Attribute { object, .. } => expr_has_float(object, float_params),
-            IRExpr::FunctionCall { function_name, .. } if function_name == "float" => true,
-            _ => false,
-        }
-    }
-    let mut float = false;
+    let mut yielded = None;
     for stmt in &body.statements {
-        let mut check = |s: &IRStatement| {
+        any_sub_body(stmt, &mut |s: &IRStatement| {
             if let IRStatement::Yield { value: Some(value) } = s {
-                if expr_has_float(value, &float_params) {
-                    float = true;
-                }
+                yielded = yielded.or(kind_of(value, &kinds));
             }
             false
-        };
-        any_sub_body(stmt, &mut check);
+        });
     }
-    if float {
-        IRType::Float
-    } else {
-        IRType::Int
+    match yielded {
+        Some(Kind::Float) => IRType::Float,
+        Some(Kind::Text) => IRType::String,
+        None => IRType::Int,
     }
 }
 
@@ -1625,17 +2111,110 @@ fn yielded_type(body: &IRBody, params: &[IRParam]) -> IRType {
 /// Statements that neither suspend nor transfer control out of a flattened
 /// frame are kept whole (nested control flow included); everything else is
 /// split at the suspension/branch points.
+///
+/// A `try` whose region suspends or jumps is flattened too, which is how a
+/// `yield` inside one works: each block records the `try` regions around it,
+/// and `wrap_block` puts the block's statements back inside those regions'
+/// handlers when the dispatch is built. A handler there only stores the
+/// exception and jumps to the region's flattened handler body (or its
+/// `finally`). A `finally` is a block of its own entered with a continuation
+/// in a field: the block to go on to, [`RERAISE`] after an exception, or
+/// [`EXHAUSTED`] after a `return`. Every jump out of a region (`break`,
+/// `continue`, `return`) goes through each `finally` it leaves.
 struct Flattener {
     blocks: Vec<Vec<IRStatement>>,
+    /// Per block, the regions around it, outermost first.
+    block_regions: Vec<Vec<usize>>,
     current: usize,
-    /// Innermost-last (head, exit) block ids of flattened loops, targeted by
-    /// flattened `continue`/`break`.
-    loops: Vec<(i32, i32)>,
+    /// Innermost-last (head, exit, open regions) of flattened loops,
+    /// targeted by flattened `continue`/`break`.
+    loops: Vec<(i32, i32, usize)>,
+    regions: Vec<Region>,
+    /// The regions open where the flattener is, outermost first.
+    open: Vec<usize>,
+    /// Resume points inside a region, where `close()` raises GeneratorExit.
+    throw_points: Vec<i32>,
+}
+
+/// A flattened `try`'s protected region.
+enum Region {
+    /// `try ... except`: each handler's types, `as` name, and block.
+    Except {
+        handlers: Vec<(Vec<String>, Option<String>, i32)>,
+    },
+    /// `try ... finally`: the `finally` block.
+    Finally { entry: i32 },
+}
+
+/// Field holding the exception a region caught.
+fn region_exc_field(region: usize) -> String {
+    format!("__gen_exc_{region}")
+}
+
+/// Field holding where a region's `finally` goes on to.
+fn region_fin_field(region: usize) -> String {
+    format!("__gen_fin_{region}")
+}
+
+/// Field `close()` sets to have the resumed generator raise GeneratorExit.
+const GEN_THROW_FIELD: &str = "__gen_throw";
+
+/// A `finally` continuation: re-raise the exception its region caught.
+const RERAISE: i32 = -2;
+
+fn set_field(name: &str, value: IRExpr) -> IRStatement {
+    IRStatement::AttributeAssign {
+        object: self_var(),
+        attribute: name.to_string(),
+        value,
+        annotation: None,
+    }
+}
+
+/// Bare `raise` statements in a handler body, re-raising what `field` holds.
+/// A nested handler's body re-raises its own exception, so it is left alone.
+fn reraise_from(body: &mut [IRStatement], field: &str) {
+    for stmt in body {
+        match stmt {
+            IRStatement::Raise {
+                exception: exception @ None,
+                ..
+            } => *exception = Some(self_attr(field)),
+            IRStatement::TryExcept {
+                try_body,
+                finally_body,
+                ..
+            } => {
+                reraise_from(&mut try_body.statements, field);
+                if let Some(b) = finally_body {
+                    reraise_from(&mut b.statements, field);
+                }
+            }
+            other => {
+                for sub in sub_bodies_mut(other) {
+                    reraise_from(&mut sub.statements, field);
+                }
+            }
+        }
+    }
 }
 
 impl Flattener {
+    fn new() -> Self {
+        Flattener {
+            blocks: vec![Vec::new()],
+            block_regions: vec![Vec::new()],
+            current: 0,
+            loops: Vec::new(),
+            regions: Vec::new(),
+            open: Vec::new(),
+            throw_points: Vec::new(),
+        }
+    }
+
     fn new_block(&mut self) -> i32 {
         self.blocks.push(Vec::new());
+        self.block_regions.push(self.open.clone());
         (self.blocks.len() - 1) as i32
     }
 
@@ -1649,12 +2228,79 @@ impl Flattener {
         self.push(IRStatement::Continue);
     }
 
+    /// Jump to `target`, which lies outside every region past the first
+    /// `depth`, through the `finally` of each region left on the way.
+    fn route(&mut self, target: i32, depth: usize) {
+        let mut destination = target;
+        let left: Vec<usize> = self.open[depth..].to_vec();
+        for region in left {
+            if let Region::Finally { entry } = self.regions[region] {
+                self.push(set_field(&region_fin_field(region), int_const(destination)));
+                destination = entry;
+            }
+        }
+        self.jump(destination);
+    }
+
     /// Continue emitting into a fresh block that nothing jumps to; used after
     /// an unconditional transfer so trailing unreachable statements stay
     /// syntactically valid without executing.
     fn dead_block(&mut self) {
         let dead = self.new_block();
         self.current = dead as usize;
+    }
+
+    /// Block `id`'s statements inside the handlers of the regions around it,
+    /// innermost first, each handler storing what it caught and jumping.
+    fn wrap_block(&self, id: usize, statements: Vec<IRStatement>) -> Vec<IRStatement> {
+        let mut statements = statements;
+        for &region in self.block_regions[id].iter().rev() {
+            let caught = |k: usize| format!("__gen_caught_{region}_{k}");
+            let handlers = match &self.regions[region] {
+                Region::Except { handlers } => handlers
+                    .iter()
+                    .enumerate()
+                    .map(|(k, (types, name, block))| {
+                        let mut body = vec![set_field(
+                            &region_exc_field(region),
+                            IRExpr::Variable(caught(k)),
+                        )];
+                        if let Some(name) = name {
+                            body.push(set_field(name, IRExpr::Variable(caught(k))));
+                        }
+                        body.push(set_pc(*block));
+                        body.push(IRStatement::Continue);
+                        crate::ir::IRExceptHandler {
+                            exception_types: if types.is_empty() {
+                                vec!["BaseException".to_string()]
+                            } else {
+                                types.clone()
+                            },
+                            name: Some(caught(k)),
+                            body: IRBody { statements: body },
+                        }
+                    })
+                    .collect(),
+                Region::Finally { entry } => vec![crate::ir::IRExceptHandler {
+                    exception_types: vec!["BaseException".to_string()],
+                    name: Some(caught(0)),
+                    body: IRBody {
+                        statements: vec![
+                            set_field(&region_exc_field(region), IRExpr::Variable(caught(0))),
+                            set_field(&region_fin_field(region), int_const(RERAISE)),
+                            set_pc(*entry),
+                            IRStatement::Continue,
+                        ],
+                    },
+                }],
+            };
+            statements = vec![IRStatement::TryExcept {
+                try_body: body_of(statements),
+                except_handlers: handlers,
+                finally_body: None,
+            }];
+        }
+        statements
     }
 
     fn flatten_body(&mut self, stmts: Vec<IRStatement>, func_name: &str) -> Result<()> {
@@ -1677,28 +2323,43 @@ impl Flattener {
                     value.unwrap_or_else(|| int_const(0)),
                 )));
                 self.current = resume as usize;
+                // `close()` raises GeneratorExit here, inside the regions,
+                // so their handlers and `finally` blocks see it.
+                if !self.open.is_empty() {
+                    self.throw_points.push(resume);
+                    self.push(IRStatement::If {
+                        condition: self_attr(GEN_THROW_FIELD),
+                        then_body: body_of(vec![
+                            set_field(GEN_THROW_FIELD, int_const(0)),
+                            IRStatement::Raise {
+                                exception: Some(IRExpr::Variable("GeneratorExit".to_string())),
+                                cause: None,
+                            },
+                        ]),
+                        else_body: None,
+                    });
+                }
             }
             // `return` in a generator ends iteration (the value is ignored in
-            // this subset).
+            // this subset), after the `finally` blocks it leaves.
             IRStatement::Return(_) => {
-                self.push(set_pc(EXHAUSTED));
-                self.push(raise_stop_iteration());
+                self.route(EXHAUSTED, 0);
                 self.dead_block();
             }
             IRStatement::Break => {
-                let (_, exit) = *self
+                let (_, exit, depth) = *self
                     .loops
                     .last()
                     .ok_or_else(|| anyhow!("generator '{func_name}': break outside a loop"))?;
-                self.jump(exit);
+                self.route(exit, depth);
                 self.dead_block();
             }
             IRStatement::Continue => {
-                let (head, _) = *self
+                let (head, _, depth) = *self
                     .loops
                     .last()
                     .ok_or_else(|| anyhow!("generator '{func_name}': continue outside a loop"))?;
-                self.jump(head);
+                self.route(head, depth);
                 self.dead_block();
             }
             IRStatement::While { condition, body } => {
@@ -1714,7 +2375,7 @@ impl Flattener {
                     then_body: body_of(vec![set_pc(exit), IRStatement::Continue]),
                     else_body: None,
                 });
-                self.loops.push((head, exit));
+                self.loops.push((head, exit, self.open.len()));
                 self.flatten_body(body.statements, func_name)?;
                 self.loops.pop();
                 self.jump(head);
@@ -1745,6 +2406,96 @@ impl Flattener {
                     self.jump(join);
                 }
                 self.current = join as usize;
+            }
+            IRStatement::TryExcept {
+                try_body,
+                except_handlers,
+                finally_body: Some(finally_body),
+            } => {
+                // `try/except/finally` is `try: (try/except) finally`.
+                let after = self.new_block();
+                let region = self.regions.len();
+                let entry = self.new_block();
+                self.regions.push(Region::Finally { entry });
+                self.open.push(region);
+                let start = self.new_block();
+                self.jump(start);
+                self.current = start as usize;
+                if except_handlers.is_empty() {
+                    self.flatten_body(try_body.statements, func_name)?;
+                } else {
+                    self.flatten_stmt(
+                        IRStatement::TryExcept {
+                            try_body,
+                            except_handlers,
+                            finally_body: None,
+                        },
+                        func_name,
+                    )?;
+                }
+                self.push(set_field(&region_fin_field(region), int_const(after)));
+                self.jump(entry);
+                self.open.pop();
+                self.current = entry as usize;
+                self.flatten_body(finally_body.statements, func_name)?;
+                self.push(IRStatement::If {
+                    condition: IRExpr::CompareOp {
+                        left: Box::new(self_attr(&region_fin_field(region))),
+                        right: Box::new(int_const(RERAISE)),
+                        op: IRCompareOp::Eq,
+                    },
+                    then_body: body_of(vec![IRStatement::Raise {
+                        exception: Some(self_attr(&region_exc_field(region))),
+                        cause: None,
+                    }]),
+                    else_body: None,
+                });
+                self.push(set_field(
+                    GEN_PC_FIELD,
+                    self_attr(&region_fin_field(region)),
+                ));
+                self.push(IRStatement::Continue);
+                self.current = after as usize;
+            }
+            IRStatement::TryExcept {
+                try_body,
+                except_handlers,
+                finally_body: None,
+            } => {
+                let after = self.new_block();
+                let region = self.regions.len();
+                let handler_blocks: Vec<i32> =
+                    except_handlers.iter().map(|_| self.new_block()).collect();
+                self.regions.push(Region::Except {
+                    handlers: except_handlers
+                        .iter()
+                        .zip(&handler_blocks)
+                        .map(|(h, b)| (h.exception_types.clone(), h.name.clone(), *b))
+                        .collect(),
+                });
+                self.open.push(region);
+                let start = self.new_block();
+                self.jump(start);
+                self.current = start as usize;
+                self.flatten_body(try_body.statements, func_name)?;
+                self.jump(after);
+                self.open.pop();
+                for (handler, block) in except_handlers.into_iter().zip(handler_blocks) {
+                    self.current = block as usize;
+                    let mut statements = handler.body.statements;
+                    // The `as` name is stored where the exception is caught.
+                    if let (Some(name), Some(IRStatement::AttributeAssign { attribute, .. })) =
+                        (&handler.name, statements.first())
+                    {
+                        if attribute == name {
+                            statements.remove(0);
+                        }
+                    }
+                    reraise_from(&mut statements, &region_exc_field(region));
+                    self.flatten_body(statements, func_name)?;
+                    self.jump(after);
+                }
+                self.current = after as usize;
             }
             other => {
                 return Err(anyhow!(
@@ -1778,6 +2529,14 @@ fn needs_flatten(stmt: &IRStatement) -> bool {
                     .is_some_and(|b| b.statements.iter().any(needs_flatten))
         }
         IRStatement::While { body, .. } | IRStatement::For { body, .. } => body_suspends(body),
+        IRStatement::TryExcept {
+            try_body,
+            except_handlers,
+            finally_body,
+        } => std::iter::once(try_body.as_ref())
+            .chain(except_handlers.iter().map(|h| &h.body))
+            .chain(finally_body.as_deref())
+            .any(|b| b.statements.iter().any(needs_flatten)),
         _ => false,
     }
 }

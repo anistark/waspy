@@ -66,6 +66,29 @@ def main() -> int:
                 failures.append(f"{label}: {name} answered {got!r}, expected {expect}")
         print(f"  {label}: {len(module['checks'])} checks")
 
+    # The WASI commands: `wasmtime run` with the fixture's input and arguments
+    # must write exactly what CPython wrote, and exit as it did.
+    for command in manifest.get("commands", []):
+        kind = "optimized" if command["optimized"] else "unoptimized"
+        label = f"{command['program']} ({kind}, command)"
+        result = subprocess.run(
+            ["wasmtime", "run", command["wasm"], *command["args"]],
+            input=Path(command["stdin"]).read_bytes(),
+            capture_output=True,
+            check=False,
+        )
+        want_out = Path(command["stdout"]).read_bytes()
+        want_err = Path(command["stderr"]).read_bytes()
+        if result.stdout != want_out:
+            failures.append(f"{label}: stdout differs from CPython's")
+        elif result.stderr != want_err:
+            failures.append(f"{label}: stderr differs from CPython's")
+        elif result.returncode != command["exit"]:
+            failures.append(f"{label}: exited {result.returncode}, CPython {command['exit']}")
+        else:
+            passed += 1
+        print(f"  {label}: output compared")
+
     if failures:
         print(f"\nwasmtime: {len(failures)} failed, {passed} passed", file=sys.stderr)
         for failure in failures:

@@ -16,15 +16,11 @@
 use crate::compiler::context::{
     CompilationContext, COLLECTION_CAP, COLLECTION_HEADER, COLLECTION_SLOT, DICT_ENTRY,
 };
-use crate::compiler::expression::emit_expr;
 use crate::compiler::expression::{
-    byte_arg, emit_data_base, emit_set_base, emit_set_hash, emit_slot_eq_needle,
-    emit_stashed_set_insert, mem_off, operator_symbol, slot_arg, store_runtime_data_ptr,
-    store_set_data_ptr, SET_BUCKET, SET_BUCKET_VALUE, SET_CAP, SET_HEADER, SET_LIVE, SET_USED,
+    byte_arg, emit_data_base, emit_slot_eq_needle, mem_off, operator_symbol, slot_arg,
+    store_runtime_data_ptr,
 };
-use crate::ir::{
-    IRCompareOp, IRConstant, IRExpr, IROp, IRType, IRUnaryOp, MemoryLayout, STRING_LEN_PREFIX,
-};
+use crate::ir::{IRCompareOp, IRConstant, IRExpr, IROp, IRType, IRUnaryOp, STRING_LEN_PREFIX};
 use wasm_encoder::{BlockType, Function, Instruction};
 
 /// The name CPython gives a value of this type in a `TypeError` message.
@@ -36,12 +32,13 @@ pub(crate) fn python_type_name(ty: &IRType) -> String {
         IRType::String => "str".into(),
         IRType::Bytes => "bytes".into(),
         IRType::List(_) => "list".into(),
-        IRType::Tuple(_) => "tuple".into(),
+        IRType::Tuple(_) | IRType::VarTuple(_) => "tuple".into(),
         IRType::Set(_) => "set".into(),
         IRType::Dict(_, _) => "dict".into(),
         IRType::None => "NoneType".into(),
         IRType::Range => "range".into(),
         IRType::Class(name) => name.clone(),
+        IRType::ClassRef(_) => "type".into(),
         IRType::Generator(_) => "generator".into(),
         IRType::Callable { .. } => "function".into(),
         other => crate::type_to_string(other),
@@ -138,6 +135,28 @@ pub(crate) fn emit_non_numeric_binop(
         (IROp::Add, IRType::Tuple(a), IRType::Tuple(b)) => {
             emit_sequence_concat(func, ctx);
             Some(IRType::Tuple(a.iter().chain(b.iter()).cloned().collect()))
+        }
+        // A tuple of any length joins another, or a fixed tuple whose members
+        // are its member type; both share the list layout.
+        (IROp::Add, IRType::VarTuple(m), IRType::VarTuple(n)) if m == n => {
+            emit_sequence_concat(func, ctx);
+            Some(left_ty.clone())
+        }
+        (IROp::Add, IRType::VarTuple(m), IRType::Tuple(ms))
+        | (IROp::Add, IRType::Tuple(ms), IRType::VarTuple(m))
+            if ms.iter().all(|t| t == m.as_ref()) =>
+        {
+            emit_sequence_concat(func, ctx);
+            Some(IRType::VarTuple(m.clone()))
+        }
+        (IROp::Mul, IRType::VarTuple(_), n) if is_count(n) => {
+            emit_sequence_repeat(func, ctx);
+            Some(left_ty.clone())
+        }
+        (IROp::Mul, n, IRType::VarTuple(_)) if is_count(n) => {
+            swap_words(func, ctx);
+            emit_sequence_repeat(func, ctx);
+            Some(right_ty.clone())
         }
         (IROp::Mul, IRType::List(_), n) if is_count(n) => {
             emit_sequence_repeat(func, ctx);
@@ -463,81 +482,6 @@ fn emit_sequence_repeat(func: &mut Function, ctx: &CompilationContext) {
     emit_repeated_copy(func, dst_data, src_data, bytes, n, i);
     func.instruction(&Instruction::LocalGet(region));
 }
-
-/// The set methods that mirror the operators and comparisons, with one set
-/// argument: `a.union(b)` is `a | b`, `a.issubset(b)` is `a <= b`, and
-/// `a.isdisjoint(b)` is `not (a & b)`. Entry stack: (a). `None` leaves any
-/// other method to the caller. CPython also takes any iterable here; a
-/// non-set argument is refused.
-pub(crate) fn emit_set_method(
-    func: &mut Function,
-    ctx: &CompilationContext,
-    memory_layout: &MemoryLayout,
-    method_name: &str,
-    arguments: &[IRExpr],
-    set_type: &IRType,
-) -> Option<IRType> {
-    let operator = match method_name {
-        "union" => Some(IROp::BitOr),
-        "intersection" => Some(IROp::BitAnd),
-        "difference" => Some(IROp::Sub),
-        "symmetric_difference" => Some(IROp::BitXor),
-        "issubset" | "issuperset" | "isdisjoint" => None,
-        _ => return None,
-    };
-    let IRType::Set(a) = set_type else {
-        return None;
-    };
-    let [argument] = arguments else {
-        ctx.report(format!(
-            "set.{method_name}() takes exactly one argument here, got {}",
-            arguments.len()
-        ));
-        func.instruction(&Instruction::Drop);
-        func.instruction(&Instruction::I32Const(0));
-        return Some(IRType::Unknown);
-    };
-    let arg_type = emit_expr(argument, func, ctx, memory_layout, None);
-    let IRType::Set(b) = &arg_type else {
-        ctx.report(format!(
-            "set.{method_name}() of a {} is not supported: only a set argument is. Hint: build \
-             a set from it first",
-            python_type_name(&arg_type)
-        ));
-        for _ in 0..stack_width(&arg_type) + 1 {
-            func.instruction(&Instruction::Drop);
-        }
-        func.instruction(&Instruction::I32Const(0));
-        return Some(IRType::Unknown);
-    };
-    Some(match (operator, method_name) {
-        (Some(op), _) => emit_non_numeric_binop(
-            func,
-            ctx,
-            &op,
-            &IRExpr::Const(IRConstant::None),
-            argument,
-            set_type,
-            &arg_type,
-        )
-        .expect("two sets are never a pair of numbers"),
-        (None, "issubset") => emit_set_comparison(func, ctx, &IRCompareOp::LtE, a, b),
-        (None, "issuperset") => emit_set_comparison(func, ctx, &IRCompareOp::GtE, a, b),
-        _ => {
-            // Disjoint: the intersection is empty.
-            match unify_elements(a, b) {
-                Some(elem) => {
-                    emit_set_operator(func, ctx, &IROp::BitAnd, &elem);
-                    func.instruction(&Instruction::I32Load(slot_arg()));
-                    func.instruction(&Instruction::I32Eqz);
-                    IRType::Bool
-                }
-                None => refuse_set_comparison(func, ctx, set_type, &arg_type),
-            }
-        }
-    })
-}
-
 /// `a OP b` for two sets on the stack, OP one of `== != < <= > >=`: subset and
 /// equality by membership, the way CPython compares sets.
 pub(crate) fn emit_set_comparison(
@@ -555,59 +499,27 @@ pub(crate) fn emit_set_comparison(
             &IRType::Set(Box::new(b.clone())),
         );
     };
-    let l = SetLocals {
-        b: ctx.temp_local + 20,
-        a: ctx.temp_local + 21,
-        result: ctx.temp_local + 22,
-        index: ctx.temp_local + 23,
-        cap: ctx.temp_local + 24,
-        bucket: ctx.temp_local + 25,
-        mask: ctx.temp_local + 26,
-        hidx: ctx.temp_local + 27,
-        probe_bkt: ctx.temp_local + 28,
-        found: ctx.temp_local + 29,
-        probes: ctx.temp_local + 30,
-        other_mask: ctx.temp_local + 31,
-    };
-    let subset = ctx.temp_local + 32;
-    func.instruction(&Instruction::LocalSet(l.b));
-    func.instruction(&Instruction::LocalSet(l.a));
-    // Which set must lie inside which, and how the sizes must compare.
-    let (inner, outer, size) = match op {
-        IRCompareOp::LtE => (l.a, l.b, None),
-        IRCompareOp::Lt => (l.a, l.b, Some(Instruction::I32LtS)),
-        IRCompareOp::GtE => (l.b, l.a, None),
-        IRCompareOp::Gt => (l.b, l.a, Some(Instruction::I32LtS)),
-        IRCompareOp::Eq | IRCompareOp::NotEq => (l.a, l.b, Some(Instruction::I32Eq)),
-        other => {
-            ctx.report(format!("'{other:?}' between two sets is not supported"));
-            func.instruction(&Instruction::I32Const(0));
-            return IRType::Bool;
-        }
-    };
-    // subset = every member of inner is in outer
-    func.instruction(&Instruction::I32Const(1));
-    func.instruction(&Instruction::LocalSet(subset));
-    emit_for_each_member(func, ctx, &l, inner, &elem, |func| {
-        emit_set_contains_needle(func, ctx, &l, outer, &elem);
-        func.instruction(&Instruction::I32Eqz);
-        func.instruction(&Instruction::If(BlockType::Empty));
+    if !matches!(
+        op,
+        IRCompareOp::Eq
+            | IRCompareOp::NotEq
+            | IRCompareOp::Lt
+            | IRCompareOp::LtE
+            | IRCompareOp::Gt
+            | IRCompareOp::GtE
+    ) {
+        ctx.report(format!("'{op:?}' between two sets is not supported"));
+        func.instruction(&Instruction::Drop);
+        func.instruction(&Instruction::Drop);
         func.instruction(&Instruction::I32Const(0));
-        func.instruction(&Instruction::LocalSet(subset));
-        func.instruction(&Instruction::End);
-    });
-    func.instruction(&Instruction::LocalGet(subset));
-    if let Some(size) = size {
-        func.instruction(&Instruction::LocalGet(inner));
-        func.instruction(&Instruction::I32Load(slot_arg()));
-        func.instruction(&Instruction::LocalGet(outer));
-        func.instruction(&Instruction::I32Load(slot_arg()));
-        func.instruction(&size);
-        func.instruction(&Instruction::I32And);
+        return IRType::Bool;
     }
-    if matches!(op, IRCompareOp::NotEq) {
-        func.instruction(&Instruction::I32Eqz);
-    }
+    let sb = crate::compiler::equality::hold(ctx);
+    let sa = crate::compiler::equality::hold(ctx);
+    func.instruction(&Instruction::LocalSet(sb));
+    func.instruction(&Instruction::LocalSet(sa));
+    crate::compiler::sets::emit_comparison(func, ctx, op, &elem, sa, sb);
+    crate::compiler::equality::release(ctx, 2);
     IRType::Bool
 }
 
@@ -629,244 +541,15 @@ fn refuse_set_comparison(
     IRType::Bool
 }
 
-/// Locals for the set operator sequence.
-struct SetLocals {
-    a: u32,
-    b: u32,
-    result: u32,
-    index: u32,
-    cap: u32,
-    bucket: u32,
-    mask: u32,
-    hidx: u32,
-    probe_bkt: u32,
-    found: u32,
-    probes: u32,
-    other_mask: u32,
-}
-
 /// `a | b`, `a & b`, `a - b`, `a ^ b` on two sets: `(a, b)` becomes a fresh
-/// set. The result table is sized for every member either operand could
-/// contribute, so it never needs to grow while it is filled.
+/// set, built the way CPython builds each (see `sets::emit_operator`).
 fn emit_set_operator(func: &mut Function, ctx: &CompilationContext, op: &IROp, elem: &IRType) {
-    let l = SetLocals {
-        b: ctx.temp_local + 20,
-        a: ctx.temp_local + 21,
-        result: ctx.temp_local + 22,
-        index: ctx.temp_local + 23,
-        cap: ctx.temp_local + 24,
-        bucket: ctx.temp_local + 25,
-        mask: ctx.temp_local + 26,
-        hidx: ctx.temp_local + 27,
-        probe_bkt: ctx.temp_local + 28,
-        found: ctx.temp_local + 29,
-        probes: ctx.temp_local + 30,
-        other_mask: ctx.temp_local + 31,
-    };
-    func.instruction(&Instruction::LocalSet(l.b));
-    func.instruction(&Instruction::LocalSet(l.a));
-
-    // cap = the smallest power of two >= 2 * (members that can be added), at
-    // least 2, keeping the load factor at or under 1/2 as every set does.
-    func.instruction(&Instruction::LocalGet(l.a));
-    func.instruction(&Instruction::I32Load(slot_arg()));
-    if matches!(op, IROp::BitOr | IROp::BitXor) {
-        func.instruction(&Instruction::LocalGet(l.b));
-        func.instruction(&Instruction::I32Load(slot_arg()));
-        func.instruction(&Instruction::I32Add);
-    }
-    func.instruction(&Instruction::I32Const(2));
-    func.instruction(&Instruction::I32Mul);
-    func.instruction(&Instruction::LocalTee(l.cap));
-    func.instruction(&Instruction::I32Const(2));
-    func.instruction(&Instruction::LocalGet(l.cap));
-    func.instruction(&Instruction::I32Const(2));
-    func.instruction(&Instruction::I32GtS);
-    func.instruction(&Instruction::Select);
-    func.instruction(&Instruction::LocalSet(l.cap));
-    // 1 << (32 - clz(cap - 1))
-    func.instruction(&Instruction::I32Const(1));
-    func.instruction(&Instruction::I32Const(32));
-    func.instruction(&Instruction::LocalGet(l.cap));
-    func.instruction(&Instruction::I32Const(1));
-    func.instruction(&Instruction::I32Sub);
-    func.instruction(&Instruction::I32Clz);
-    func.instruction(&Instruction::I32Sub);
-    func.instruction(&Instruction::I32Shl);
-    func.instruction(&Instruction::LocalSet(l.cap));
-
-    // One zeroed block: the header, then the buckets right after it.
-    func.instruction(&Instruction::LocalGet(l.cap));
-    func.instruction(&Instruction::I32Const(SET_BUCKET as i32));
-    func.instruction(&Instruction::I32Mul);
-    func.instruction(&Instruction::I32Const(SET_HEADER as i32));
-    func.instruction(&Instruction::I32Add);
-    func.instruction(&Instruction::LocalTee(l.index));
-    func.instruction(&Instruction::Call(ctx.alloc_func_index));
-    func.instruction(&Instruction::LocalTee(l.result));
-    func.instruction(&Instruction::I32Const(0));
-    func.instruction(&Instruction::LocalGet(l.index));
-    func.instruction(&Instruction::MemoryFill(0));
-    func.instruction(&Instruction::LocalGet(l.result));
-    func.instruction(&Instruction::LocalGet(l.cap));
-    func.instruction(&Instruction::I32Store(mem_off(SET_CAP as u64)));
-    store_set_data_ptr(func, l.result);
-    func.instruction(&Instruction::LocalGet(l.cap));
-    func.instruction(&Instruction::I32Const(1));
-    func.instruction(&Instruction::I32Sub);
-    func.instruction(&Instruction::LocalSet(l.mask));
-
-    // Which members of the source go in: all of them (`None`), or only those
-    // the other set does (`Some(true)`) or does not (`Some(false)`) hold.
-    let passes: Vec<(u32, u32, Option<bool>)> = match op {
-        IROp::BitOr => vec![(l.a, l.b, None), (l.b, l.a, None)],
-        IROp::BitAnd => vec![(l.a, l.b, Some(true))],
-        IROp::Sub => vec![(l.a, l.b, Some(false))],
-        _ => vec![(l.a, l.b, Some(false)), (l.b, l.a, Some(false))],
-    };
-    for (source, other, filter) in passes {
-        emit_for_each_member(func, ctx, &l, source, elem, |func| match filter {
-            None => emit_stashed_set_insert(func, ctx, elem, l.result, l.mask, l.hidx, l.probe_bkt),
-            Some(want) => {
-                emit_set_contains_needle(func, ctx, &l, other, elem);
-                if !want {
-                    func.instruction(&Instruction::I32Eqz);
-                }
-                func.instruction(&Instruction::If(BlockType::Empty));
-                emit_stashed_set_insert(func, ctx, elem, l.result, l.mask, l.hidx, l.probe_bkt);
-                func.instruction(&Instruction::End);
-            }
-        });
-    }
-    // `used` counts occupied buckets; with no tombstones it is the count.
-    func.instruction(&Instruction::LocalGet(l.result));
-    func.instruction(&Instruction::LocalGet(l.result));
-    func.instruction(&Instruction::I32Load(slot_arg()));
-    func.instruction(&Instruction::I32Store(mem_off(SET_USED as u64)));
-    func.instruction(&Instruction::LocalGet(l.result));
-}
-
-/// Run `body` once per live member of the set in `source`, with the member
-/// stashed as the search needle (`temp_local_f64` for a float, otherwise
-/// `temp_local + 1`), where the insert and probe helpers read it.
-fn emit_for_each_member(
-    func: &mut Function,
-    ctx: &CompilationContext,
-    l: &SetLocals,
-    source: u32,
-    elem: &IRType,
-    body: impl FnOnce(&mut Function),
-) {
-    func.instruction(&Instruction::I32Const(0));
-    func.instruction(&Instruction::LocalSet(l.index));
-    func.instruction(&Instruction::Block(BlockType::Empty));
-    func.instruction(&Instruction::Loop(BlockType::Empty));
-    func.instruction(&Instruction::LocalGet(l.index));
-    func.instruction(&Instruction::LocalGet(source));
-    func.instruction(&Instruction::I32Load(mem_off(SET_CAP as u64)));
-    func.instruction(&Instruction::I32GeS);
-    func.instruction(&Instruction::BrIf(1));
-
-    func.instruction(&Instruction::LocalGet(source));
-    emit_set_base(func);
-    func.instruction(&Instruction::LocalGet(l.index));
-    func.instruction(&Instruction::I32Const(SET_BUCKET as i32));
-    func.instruction(&Instruction::I32Mul);
-    func.instruction(&Instruction::I32Add);
-    func.instruction(&Instruction::LocalTee(l.bucket));
-    func.instruction(&Instruction::I32Load(slot_arg()));
-    func.instruction(&Instruction::I32Const(SET_LIVE));
-    func.instruction(&Instruction::I32Eq);
-    func.instruction(&Instruction::If(BlockType::Empty));
-    func.instruction(&Instruction::LocalGet(l.bucket));
-    if matches!(elem, IRType::Float) {
-        func.instruction(&Instruction::F64Load(mem_off(SET_BUCKET_VALUE as u64)));
-        func.instruction(&Instruction::LocalSet(ctx.temp_local_f64));
-    } else {
-        func.instruction(&Instruction::I32Load(mem_off(SET_BUCKET_VALUE as u64)));
-        func.instruction(&Instruction::LocalSet(ctx.temp_local + 1));
-    }
-    body(func);
-    func.instruction(&Instruction::End);
-
-    func.instruction(&Instruction::LocalGet(l.index));
-    func.instruction(&Instruction::I32Const(1));
-    func.instruction(&Instruction::I32Add);
-    func.instruction(&Instruction::LocalSet(l.index));
-    func.instruction(&Instruction::Br(0));
-    func.instruction(&Instruction::End);
-    func.instruction(&Instruction::End);
-}
-
-/// Push whether the set in `set` holds the stashed needle: the same probe
-/// `in` runs, stopping at the needle or an empty bucket.
-fn emit_set_contains_needle(
-    func: &mut Function,
-    ctx: &CompilationContext,
-    l: &SetLocals,
-    set: u32,
-    elem: &IRType,
-) {
-    let needle = ctx.temp_local + 1;
-    let mask = l.other_mask;
-    func.instruction(&Instruction::LocalGet(set));
-    func.instruction(&Instruction::I32Load(mem_off(SET_CAP as u64)));
-    func.instruction(&Instruction::I32Const(1));
-    func.instruction(&Instruction::I32Sub);
-    func.instruction(&Instruction::LocalSet(mask));
-    emit_set_hash(func, ctx, elem, needle);
-    func.instruction(&Instruction::LocalGet(mask));
-    func.instruction(&Instruction::I32And);
-    func.instruction(&Instruction::LocalSet(l.hidx));
-    func.instruction(&Instruction::I32Const(0));
-    func.instruction(&Instruction::LocalSet(l.probes));
-    func.instruction(&Instruction::I32Const(0));
-    func.instruction(&Instruction::LocalSet(l.found));
-
-    func.instruction(&Instruction::Block(BlockType::Empty));
-    func.instruction(&Instruction::Loop(BlockType::Empty));
-    func.instruction(&Instruction::LocalGet(l.probes));
-    func.instruction(&Instruction::LocalGet(mask));
-    func.instruction(&Instruction::I32GtU);
-    func.instruction(&Instruction::BrIf(1));
-    func.instruction(&Instruction::LocalGet(set));
-    emit_set_base(func);
-    func.instruction(&Instruction::LocalGet(l.hidx));
-    func.instruction(&Instruction::I32Const(SET_BUCKET as i32));
-    func.instruction(&Instruction::I32Mul);
-    func.instruction(&Instruction::I32Add);
-    func.instruction(&Instruction::LocalTee(l.probe_bkt));
-    func.instruction(&Instruction::I32Load(slot_arg()));
-    func.instruction(&Instruction::I32Eqz);
-    func.instruction(&Instruction::BrIf(1));
-    func.instruction(&Instruction::LocalGet(l.probe_bkt));
-    func.instruction(&Instruction::I32Load(slot_arg()));
-    func.instruction(&Instruction::I32Const(SET_LIVE));
-    func.instruction(&Instruction::I32Eq);
-    func.instruction(&Instruction::LocalGet(l.probe_bkt));
-    func.instruction(&Instruction::I32Const(SET_BUCKET_VALUE as i32));
-    func.instruction(&Instruction::I32Add);
-    emit_slot_eq_needle(func, ctx, elem, needle);
-    func.instruction(&Instruction::I32And);
-    func.instruction(&Instruction::If(BlockType::Empty));
-    func.instruction(&Instruction::I32Const(1));
-    func.instruction(&Instruction::LocalSet(l.found));
-    func.instruction(&Instruction::Br(2));
-    func.instruction(&Instruction::End);
-    func.instruction(&Instruction::LocalGet(l.hidx));
-    func.instruction(&Instruction::I32Const(1));
-    func.instruction(&Instruction::I32Add);
-    func.instruction(&Instruction::LocalGet(mask));
-    func.instruction(&Instruction::I32And);
-    func.instruction(&Instruction::LocalSet(l.hidx));
-    func.instruction(&Instruction::LocalGet(l.probes));
-    func.instruction(&Instruction::I32Const(1));
-    func.instruction(&Instruction::I32Add);
-    func.instruction(&Instruction::LocalSet(l.probes));
-    func.instruction(&Instruction::Br(0));
-    func.instruction(&Instruction::End);
-    func.instruction(&Instruction::End);
-    func.instruction(&Instruction::LocalGet(l.found));
+    let sb = crate::compiler::equality::hold(ctx);
+    let sa = crate::compiler::equality::hold(ctx);
+    func.instruction(&Instruction::LocalSet(sb));
+    func.instruction(&Instruction::LocalSet(sa));
+    crate::compiler::sets::emit_operator(func, ctx, op, elem, sa, sb);
+    crate::compiler::equality::release(ctx, 2);
 }
 
 /// `a | b` on two dicts: `(a, b)` becomes a fresh dict holding a's entries in

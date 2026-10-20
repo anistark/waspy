@@ -2,7 +2,7 @@
 //!
 //! [`parse_python`] turns source text into a rustpython AST and then runs a
 //! quick validation sweep that rejects Python constructs Waspy does not
-//! compile (`async`, `match`, `nonlocal`, `del` of a name, star parameters,
+//! compile (`async`, `match`, `del` of a name,
 //! and the like) with a located error and a hint,
 //! instead of letting them fail deep inside IR conversion or codegen (or,
 //! worse, compile to silently wrong code).
@@ -238,9 +238,8 @@ fn validate_stmt(stmt: &Stmt, source: &str, function: Option<&str>) -> Result<()
             stmt.range.start().into(),
             function,
         )),
-        Stmt::Nonlocal(stmt) => Err(unsupported(
-            "the 'nonlocal' statement is not supported, since nested functions are not. \
-             Hint: return the new value from the inner function",
+        Stmt::Nonlocal(stmt) if function.is_none() => Err(unsupported(
+            "nonlocal declaration not allowed at module level",
             source,
             stmt.range.start().into(),
             function,
@@ -278,40 +277,17 @@ fn validate_stmt(stmt: &Stmt, source: &str, function: Option<&str>) -> Result<()
             }
             Ok(())
         }
-        Stmt::FunctionDef(def) => {
-            let args = &def.args;
-            if let Some(vararg) = &args.vararg {
-                return Err(unsupported(
-                    format!(
-                        "'*{}' — star parameters (*args) are not supported. \
-                         Hint: declare explicit parameters",
-                        vararg.arg
-                    ),
-                    source,
-                    def.range.start().into(),
-                    Some(def.name.as_str()),
-                ));
-            }
-            if let Some(kwarg) = &args.kwarg {
-                return Err(unsupported(
-                    format!(
-                        "'**{}' — keyword parameter dicts (**kwargs) are not supported. \
-                         Hint: declare explicit parameters",
-                        kwarg.arg
-                    ),
-                    source,
-                    def.range.start().into(),
-                    Some(def.name.as_str()),
-                ));
-            }
-            validate_body(&def.body, source, Some(def.name.as_str()))
-        }
+        Stmt::FunctionDef(def) => validate_body(&def.body, source, Some(def.name.as_str())),
         Stmt::ClassDef(def) => {
-            if !def.keywords.is_empty() {
+            // `metaclass=Name` is the one class keyword with a meaning here.
+            let only_metaclass = def.keywords.len() == 1
+                && def.keywords[0].arg.as_deref() == Some("metaclass")
+                && matches!(def.keywords[0].value, Expr::Name(_));
+            if !def.keywords.is_empty() && !only_metaclass {
                 return Err(unsupported(
                     format!(
-                        "class '{}' uses class keywords (e.g. metaclass=...), which are \
-                         not supported",
+                        "class '{}' uses class keywords other than 'metaclass=Name' \
+                         (e.g. __init_subclass__ arguments), which are not supported",
                         def.name
                     ),
                     source,
@@ -364,27 +340,6 @@ fn validate_expr(expr: &Expr, source: &str, function: Option<&str>) -> Result<()
             function,
         )),
         Expr::Call(call) => {
-            // min(xs) / max(xs) over a single iterable argument compile to a
-            // stub that always yields 0 — reject them until implemented.
-            if let Expr::Name(name) = call.func.as_ref() {
-                let callee = name.id.as_str();
-                if (callee == "min" || callee == "max")
-                    && call.args.len() == 1
-                    && call.keywords.is_empty()
-                    && !matches!(call.args[0], Expr::Starred(_))
-                {
-                    return Err(unsupported(
-                        format!(
-                            "{callee}() over a single iterable argument is not supported. \
-                             Hint: pass the values as separate arguments \
-                             ({callee}(a, b, ...)) or reduce with a loop"
-                        ),
-                        source,
-                        call.range.start().into(),
-                        function,
-                    ));
-                }
-            }
             for arg in &call.args {
                 validate_expr(arg, source, function)?;
             }

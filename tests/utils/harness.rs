@@ -2,11 +2,14 @@
 //!
 //! These drive the public API exactly as a downstream user would: compile a
 //! Python source string (or a bundled `examples/*.py` file) to WASM, validate
-//! it, instantiate it with `wasmi`, and call exported functions. Compiled
-//! waspy modules have no host imports — except programs using file I/O, which
-//! import the four `waspy_host` functions — so the broad-sweep linker defines
-//! no-op stubs for those (unused definitions are ignored) and instantiation
-//! also exercises the start and data sections.
+//! it, instantiate it with `wasmi`, and call exported functions. A module
+//! imports only what its program uses: the four `waspy_host` file functions
+//! for `open()`, and WASI preview 1 for `print`, the standard streams,
+//! `input`, `sys.argv`, and the `__main__` block. Every instance here is
+//! linked against one `Host`: an in-memory filesystem and an in-process WASI
+//! that captures standard output and error and serves standard input and
+//! arguments, so a test can assert what a program prints. Unused definitions
+//! are ignored, and instantiation also exercises the start and data sections.
 //!
 //! The panicking helpers (`compile`, `instantiate`, `call_i32`, …) mirror the
 //! in-crate test helpers in `src/lib.rs` and are for assertions with a known
@@ -71,25 +74,13 @@ pub fn try_compile(source: &str) -> Result<Vec<u8>, String> {
 /// Validate the bytes as a WASM module and instantiate them, returning the
 /// error as a string on failure. Validation checks structure, types, and
 /// stack balance; instantiation then runs the start function and materializes
-/// the data section. The linker carries no-op stubs for the `waspy_host` file
-/// I/O imports (open -> -1, read -> 0, write -> its length, close -> 0) so
-/// examples using `open()` instantiate too; modules without file I/O import
-/// nothing and ignore the stubs.
+/// the data section, against the in-memory `Host`.
 pub fn try_instantiate(wasm: &[u8]) -> Result<(), String> {
     let engine = Engine::default();
     let module = wasmi::Module::new(&engine, wasm).map_err(|e| format!("validate: {e}"))?;
-    let mut store = Store::new(&engine, ());
-    let mut linker = Linker::<()>::new(&engine);
-    linker
-        .func_wrap("waspy_host", "open", |_: i32, _: i32, _: i32| -> i32 { -1 })
-        .and_then(|l| l.func_wrap("waspy_host", "read", |_: i32, _: i32, _: i32| -> i32 { 0 }))
-        .and_then(|l| {
-            l.func_wrap("waspy_host", "write", |_: i32, _: i32, len: i32| -> i32 {
-                len
-            })
-        })
-        .and_then(|l| l.func_wrap("waspy_host", "close", |_: i32| -> i32 { 0 }))
-        .map_err(|e| format!("linker: {e}"))?;
+    let mut store = Store::new(&engine, Host::default());
+    let mut linker = Linker::<Host>::new(&engine);
+    link_host(&mut linker);
     linker
         .instantiate(&mut store, &module)
         .map_err(|e| format!("instantiate: {e}"))?
@@ -119,11 +110,19 @@ pub fn compile(source: &str) -> Vec<u8> {
 
 /// Instantiate already-built WASM bytes, asserting validation and start
 /// succeed. Returns the live instance and store so a test can call exports.
-pub fn instantiate_wasm(wasm: &[u8]) -> (Instance, Store<()>) {
+pub fn instantiate_wasm(wasm: &[u8]) -> (Instance, Store<Host>) {
+    instantiate_wasm_with(wasm, Host::default())
+}
+
+/// `instantiate_wasm` with a host of the test's choosing (its standard
+/// input, its arguments, files already in place).
+pub fn instantiate_wasm_with(wasm: &[u8], host: Host) -> (Instance, Store<Host>) {
     let engine = Engine::default();
     let module = wasmi::Module::new(&engine, wasm).expect("valid wasm module");
-    let mut store = Store::new(&engine, ());
-    let instance = Linker::<()>::new(&engine)
+    let mut store = Store::new(&engine, host);
+    let mut linker = Linker::<Host>::new(&engine);
+    link_host(&mut linker);
+    let instance = linker
         .instantiate(&mut store, &module)
         .expect("instantiation")
         .start(&mut store)
@@ -133,7 +132,7 @@ pub fn instantiate_wasm(wasm: &[u8]) -> (Instance, Store<()>) {
 
 /// Compile + instantiate a source string, returning the live instance and
 /// store so a test can call exported functions.
-pub fn instantiate(source: &str) -> (Instance, Store<()>) {
+pub fn instantiate(source: &str) -> (Instance, Store<Host>) {
     instantiate_wasm(&compile(source))
 }
 
@@ -251,7 +250,7 @@ pub fn call_untyped_i32(source: &str, func: &str, args: &[Value]) -> i32 {
 /// runtime (`STRING_LEN_PREFIX` in `src/ir/types.rs`). Reading the length
 /// rather than scanning to a NUL means a wrong length fails the assertion
 /// instead of being papered over.
-pub fn read_str(instance: &Instance, store: &Store<()>, offset: i32) -> String {
+pub fn read_str(instance: &Instance, store: &Store<Host>, offset: i32) -> String {
     let memory = instance
         .get_memory(store, "memory")
         .expect("exported `memory`");
@@ -302,7 +301,7 @@ pub fn call_str_2(source: &str, func: &str, a: i32, b: i32) -> String {
 
 /// Compile an entry `.py` file from disk (unoptimized), resolving its user
 /// module imports like `waspy::compile_python_file` does, and instantiate it.
-pub fn instantiate_file(entry: &Path) -> (Instance, Store<()>) {
+pub fn instantiate_file(entry: &Path) -> (Instance, Store<Host>) {
     let options = CompilerOptions {
         optimize: false,
         ..CompilerOptions::default()
@@ -313,7 +312,7 @@ pub fn instantiate_file(entry: &Path) -> (Instance, Store<()>) {
 
 /// Call an exported zero-argument `i32` function on an already-instantiated
 /// module (so several calls can share one live instance and memory).
-pub fn call_instance_i32(instance: &Instance, store: &mut Store<()>, func: &str) -> i32 {
+pub fn call_instance_i32(instance: &Instance, store: &mut Store<Host>, func: &str) -> i32 {
     instance
         .get_typed_func::<(), i32>(&mut *store, func)
         .unwrap_or_else(|_| panic!("exported i32 fn `{func}`"))
@@ -321,42 +320,336 @@ pub fn call_instance_i32(instance: &Instance, store: &mut Store<()>, func: &str)
         .expect("call")
 }
 
-/// In-memory filesystem backing the `waspy_host` imports, mirroring the
-/// reference host in `src/lib.rs`'s file I/O tests. It lets integration tests
-/// drive `examples/file_io.py` end to end: files persist across calls within
-/// one store, so a write in one exported function is visible to a read in the
-/// next.
+/// The host every test instance runs against: an in-memory filesystem
+/// backing the `waspy_host` imports (mirroring the reference host in
+/// `src/lib.rs`'s file I/O tests, so files persist across calls within one
+/// store), and an in-process WASI preview 1 that captures what the program
+/// writes to standard output and error and serves it standard input and
+/// arguments.
 #[derive(Default)]
-pub struct HostFs {
+pub struct Host {
     pub files: HashMap<String, Vec<u8>>,
     /// fd -> (file name, read cursor, readable, writable); a closed fd is None.
     handles: Vec<Option<(String, usize, bool, bool)>>,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub stdin: Vec<u8>,
+    stdin_pos: usize,
+    /// `sys.argv`, the program's name first.
+    pub args: Vec<String>,
 }
+
+/// The name file I/O tests know the host by.
+pub type HostFs = Host;
+
+impl Host {
+    /// A host whose standard input is `stdin` and whose arguments, after the
+    /// program name, are `args`.
+    pub fn with_input(stdin: &str, args: &[&str]) -> Host {
+        let mut all = vec!["main.py".to_string()];
+        all.extend(args.iter().map(|a| a.to_string()));
+        Host {
+            stdin: stdin.as_bytes().to_vec(),
+            args: all,
+            ..Host::default()
+        }
+    }
+}
+
+/// The WASI host's one preopened directory, and its first file descriptor.
+const PREOPEN_FD: i32 = 3;
+const FIRST_FILE_FD: i32 = 4;
 
 const FLAG_READ: i32 = 1;
 const FLAG_WRITE: i32 = 2;
 const FLAG_APPEND: i32 = 4;
 const FLAG_UPDATE: i32 = 16;
 
-fn memory_of(caller: &mut Caller<'_, HostFs>) -> wasmi::Memory {
+fn memory_of(caller: &mut Caller<'_, Host>) -> wasmi::Memory {
     caller
         .get_export("memory")
         .and_then(Extern::into_memory)
         .expect("exported memory")
 }
 
+fn word(data: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(data[at..at + 4].try_into().expect("a word"))
+}
+
+fn put_word(data: &mut [u8], at: usize, value: u32) {
+    data[at..at + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+/// Define the host's imports: `waspy_host` and `wasi_snapshot_preview1`.
+pub fn link_host(linker: &mut Linker<Host>) {
+    link_host_fs(linker);
+    let wasi = "wasi_snapshot_preview1";
+    linker
+        .func_wrap(
+            wasi,
+            "fd_write",
+            |mut caller: Caller<'_, Host>, fd: i32, iovs: i32, n: i32, done: i32| -> i32 {
+                let memory = memory_of(&mut caller);
+                let (data, host) = memory.data_and_store_mut(&mut caller);
+                let mut bytes = Vec::new();
+                for k in 0..n as usize {
+                    let base = word(data, iovs as usize + 8 * k) as usize;
+                    let len = word(data, iovs as usize + 8 * k + 4) as usize;
+                    bytes.extend_from_slice(&data[base..base + len]);
+                }
+                match fd {
+                    1 => host.stdout.extend_from_slice(&bytes),
+                    2 => host.stderr.extend_from_slice(&bytes),
+                    fd if fd >= FIRST_FILE_FD => {
+                        let Some(Some((name, _, _, true))) =
+                            host.handles.get((fd - FIRST_FILE_FD) as usize)
+                        else {
+                            return 8;
+                        };
+                        let name = name.clone();
+                        host.files
+                            .entry(name)
+                            .or_default()
+                            .extend_from_slice(&bytes);
+                    }
+                    _ => return 8, // EBADF
+                }
+                put_word(data, done as usize, bytes.len() as u32);
+                0
+            },
+        )
+        .expect("link fd_write");
+    linker
+        .func_wrap(
+            wasi,
+            "fd_read",
+            |mut caller: Caller<'_, Host>, fd: i32, iovs: i32, n: i32, done: i32| -> i32 {
+                let memory = memory_of(&mut caller);
+                let (data, host) = memory.data_and_store_mut(&mut caller);
+                if fd >= FIRST_FILE_FD {
+                    let Some(Some((name, pos, true, _))) =
+                        host.handles.get_mut((fd - FIRST_FILE_FD) as usize)
+                    else {
+                        return 8;
+                    };
+                    let contents = host.files.get(name.as_str()).cloned().unwrap_or_default();
+                    let mut total = 0;
+                    for k in 0..n as usize {
+                        let base = word(data, iovs as usize + 8 * k) as usize;
+                        let len = word(data, iovs as usize + 8 * k + 4) as usize;
+                        let take = contents.len().saturating_sub(*pos).min(len);
+                        data[base..base + take].copy_from_slice(&contents[*pos..*pos + take]);
+                        *pos += take;
+                        total += take;
+                    }
+                    put_word(data, done as usize, total as u32);
+                    return 0;
+                }
+                if fd != 0 {
+                    return 8;
+                }
+                let mut total = 0;
+                for k in 0..n as usize {
+                    let base = word(data, iovs as usize + 8 * k) as usize;
+                    let len = word(data, iovs as usize + 8 * k + 4) as usize;
+                    let left = &host.stdin[host.stdin_pos..];
+                    let take = left.len().min(len);
+                    data[base..base + take].copy_from_slice(&left[..take]);
+                    host.stdin_pos += take;
+                    total += take;
+                }
+                put_word(data, done as usize, total as u32);
+                0
+            },
+        )
+        .expect("link fd_read");
+    linker
+        .func_wrap(
+            wasi,
+            "args_sizes_get",
+            |mut caller: Caller<'_, Host>, argc: i32, size: i32| -> i32 {
+                let memory = memory_of(&mut caller);
+                let (data, host) = memory.data_and_store_mut(&mut caller);
+                let bytes: usize = host.args.iter().map(|a| a.len() + 1).sum();
+                put_word(data, argc as usize, host.args.len() as u32);
+                put_word(data, size as usize, bytes as u32);
+                0
+            },
+        )
+        .expect("link args_sizes_get");
+    linker
+        .func_wrap(
+            wasi,
+            "args_get",
+            |mut caller: Caller<'_, Host>, argv: i32, buf: i32| -> i32 {
+                let memory = memory_of(&mut caller);
+                let (data, host) = memory.data_and_store_mut(&mut caller);
+                let mut at = buf as usize;
+                for (k, arg) in host.args.iter().enumerate() {
+                    put_word(data, argv as usize + 4 * k, at as u32);
+                    data[at..at + arg.len()].copy_from_slice(arg.as_bytes());
+                    data[at + arg.len()] = 0;
+                    at += arg.len() + 1;
+                }
+                0
+            },
+        )
+        .expect("link args_get");
+    // Files: one preopened directory, `.`, at fd 3, and each open file from
+    // fd 4 up, over the same in-memory map the `waspy_host` imports use.
+    linker
+        .func_wrap(
+            wasi,
+            "fd_prestat_get",
+            |mut caller: Caller<'_, Host>, fd: i32, buf: i32| -> i32 {
+                if fd != PREOPEN_FD {
+                    return 8;
+                }
+                let memory = memory_of(&mut caller);
+                let data = memory.data_mut(&mut caller);
+                data[buf as usize] = 0; // a directory
+                put_word(data, buf as usize + 4, 1);
+                0
+            },
+        )
+        .expect("link fd_prestat_get");
+    linker
+        .func_wrap(
+            wasi,
+            "fd_prestat_dir_name",
+            |mut caller: Caller<'_, Host>, fd: i32, path: i32, _len: i32| -> i32 {
+                if fd != PREOPEN_FD {
+                    return 8;
+                }
+                let memory = memory_of(&mut caller);
+                memory.data_mut(&mut caller)[path as usize] = b'.';
+                0
+            },
+        )
+        .expect("link fd_prestat_dir_name");
+    linker
+        .func_wrap(
+            wasi,
+            "path_open",
+            |mut caller: Caller<'_, Host>,
+             dir: i32,
+             _lookup: i32,
+             path: i32,
+             len: i32,
+             oflags: i32,
+             _rights: i64,
+             _inheriting: i64,
+             fdflags: i32,
+             fd_out: i32|
+             -> i32 {
+                if dir != PREOPEN_FD {
+                    return 8;
+                }
+                let memory = memory_of(&mut caller);
+                let (data, host) = memory.data_and_store_mut(&mut caller);
+                let start = path as usize;
+                let name = String::from_utf8_lossy(&data[start..start + len as usize]).to_string();
+                let (create, truncate, append) =
+                    (oflags & 1 != 0, oflags & 8 != 0, fdflags & 1 != 0);
+                if truncate {
+                    host.files.insert(name.clone(), Vec::new());
+                } else if create {
+                    host.files.entry(name.clone()).or_default();
+                } else if !host.files.contains_key(&name) {
+                    return 44; // ENOENT
+                }
+                let writable = create || truncate || append;
+                host.handles.push(Some((name, 0, !writable, writable)));
+                let fd = FIRST_FILE_FD + host.handles.len() as i32 - 1;
+                put_word(data, fd_out as usize, fd as u32);
+                0
+            },
+        )
+        .expect("link path_open");
+    linker
+        .func_wrap(
+            wasi,
+            "fd_close",
+            |mut caller: Caller<'_, Host>, fd: i32| -> i32 {
+                match caller
+                    .data_mut()
+                    .handles
+                    .get_mut((fd - FIRST_FILE_FD).max(-1) as usize)
+                {
+                    Some(handle) if fd >= FIRST_FILE_FD => {
+                        *handle = None;
+                        0
+                    }
+                    _ => 8,
+                }
+            },
+        )
+        .expect("link fd_close");
+    linker
+        .func_wrap(
+            wasi,
+            "proc_exit",
+            |code: i32| -> Result<(), wasmi::core::Trap> { Err(wasmi::core::Trap::i32_exit(code)) },
+        )
+        .expect("link proc_exit");
+}
+
+/// What running a program's `__main__` block (`_start`) did.
+#[derive(Debug, PartialEq)]
+pub struct Run {
+    pub stdout: String,
+    pub stderr: String,
+    /// The status it exited with: 0 when `_start` returned.
+    pub exit: i32,
+}
+
+/// Compile a program, give it `stdin` and `args`, and run its `__main__`
+/// block, as `wasmtime run` would.
+pub fn run_main(source: &str, stdin: &str, args: &[&str]) -> Run {
+    let wasm = compile(source);
+    let (instance, mut store) = instantiate_wasm_with(&wasm, Host::with_input(stdin, args));
+    let start = instance
+        .get_typed_func::<(), ()>(&store, "_start")
+        .expect("an exported _start");
+    let exit = match start.call(&mut store, ()) {
+        Ok(()) => 0,
+        Err(trap) => trap
+            .i32_exit_status()
+            .unwrap_or_else(|| panic!("_start trapped: {trap}")),
+    };
+    let host = store.data();
+    Run {
+        stdout: String::from_utf8(host.stdout.clone()).expect("utf-8 stdout"),
+        stderr: String::from_utf8(host.stderr.clone()).expect("utf-8 stderr"),
+        exit,
+    }
+}
+
+/// Call an exported zero-argument `i32` function and return its answer with
+/// what it printed to standard output.
+pub fn call_i32_printing(source: &str, func: &str) -> (i32, String) {
+    let (instance, mut store) = instantiate(source);
+    let value = instance
+        .get_typed_func::<(), i32>(&store, func)
+        .unwrap_or_else(|_| panic!("exported i32 fn `{func}`"))
+        .call(&mut store, ())
+        .expect("call");
+    let out = String::from_utf8(store.data().stdout.clone()).expect("utf-8 stdout");
+    (value, out)
+}
+
 /// Compile (unoptimized) and instantiate with the in-memory host filesystem.
-pub fn instantiate_with_host_fs(source: &str) -> (Instance, Store<HostFs>) {
+pub fn instantiate_with_host_fs(source: &str) -> (Instance, Store<Host>) {
     let wasm = try_compile(source).expect("compilation");
-    let engine = Engine::default();
-    let module = wasmi::Module::new(&engine, &wasm[..]).expect("valid wasm module");
-    let mut store = Store::new(&engine, HostFs::default());
-    let mut linker = Linker::<HostFs>::new(&engine);
+    instantiate_wasm(&wasm)
+}
+
+fn link_host_fs(linker: &mut Linker<Host>) {
     linker
         .func_wrap(
             "waspy_host",
             "open",
-            |mut caller: Caller<'_, HostFs>, path_ptr: i32, path_len: i32, flags: i32| -> i32 {
+            |mut caller: Caller<'_, Host>, path_ptr: i32, path_len: i32, flags: i32| -> i32 {
                 let memory = memory_of(&mut caller);
                 let (data, fs) = memory.data_and_store_mut(&mut caller);
                 let start = path_ptr as usize;
@@ -380,7 +673,7 @@ pub fn instantiate_with_host_fs(source: &str) -> (Instance, Store<HostFs>) {
         .func_wrap(
             "waspy_host",
             "read",
-            |mut caller: Caller<'_, HostFs>, fd: i32, buf: i32, len: i32| -> i32 {
+            |mut caller: Caller<'_, Host>, fd: i32, buf: i32, len: i32| -> i32 {
                 let memory = memory_of(&mut caller);
                 let (data, fs) = memory.data_and_store_mut(&mut caller);
                 let Some(Some((name, pos, readable, _))) = fs.handles.get_mut(fd as usize) else {
@@ -406,7 +699,7 @@ pub fn instantiate_with_host_fs(source: &str) -> (Instance, Store<HostFs>) {
         .func_wrap(
             "waspy_host",
             "write",
-            |mut caller: Caller<'_, HostFs>, fd: i32, buf: i32, len: i32| -> i32 {
+            |mut caller: Caller<'_, Host>, fd: i32, buf: i32, len: i32| -> i32 {
                 let memory = memory_of(&mut caller);
                 let (data, fs) = memory.data_and_store_mut(&mut caller);
                 let Some(Some((name, _, _, writable))) = fs.handles.get(fd as usize) else {
@@ -429,7 +722,7 @@ pub fn instantiate_with_host_fs(source: &str) -> (Instance, Store<HostFs>) {
         .func_wrap(
             "waspy_host",
             "close",
-            |mut caller: Caller<'_, HostFs>, fd: i32| -> i32 {
+            |mut caller: Caller<'_, Host>, fd: i32| -> i32 {
                 if let Some(handle) = caller.data_mut().handles.get_mut(fd as usize) {
                     *handle = None;
                     0
@@ -439,16 +732,10 @@ pub fn instantiate_with_host_fs(source: &str) -> (Instance, Store<HostFs>) {
             },
         )
         .expect("link close");
-    let instance = linker
-        .instantiate(&mut store, &module)
-        .expect("instantiation")
-        .start(&mut store)
-        .expect("start");
-    (instance, store)
 }
 
 /// Call an exported zero-argument `i32` function on a host-fs instance.
-pub fn call_host_fs_i32(instance: &Instance, store: &mut Store<HostFs>, func: &str) -> i32 {
+pub fn call_host_fs_i32(instance: &Instance, store: &mut Store<Host>, func: &str) -> i32 {
     instance
         .get_typed_func::<(), i32>(&mut *store, func)
         .unwrap_or_else(|_| panic!("exported i32 fn `{func}`"))

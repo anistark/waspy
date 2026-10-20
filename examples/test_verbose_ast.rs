@@ -22,6 +22,7 @@ def multiply(x: int, y: int) -> int:
     let options = CompilerOptions {
         optimize: false,
         verbosity: Verbosity::Verbose,
+        ..CompilerOptions::default()
     };
 
     println!("Compiling with verbose mode enabled...\n");

@@ -1,7 +1,7 @@
 use crate::compiler::context::FileIoImports;
 use crate::compiler::context::{
-    common_class_base, ClassInfo, CompilationContext, COLLECTION_HEAP_BASE, EXC_TYPE_GLOBAL,
-    FIRST_MODULE_GLOBAL, MODULE_INIT_FN,
+    common_class_base, ClassInfo, CompilationContext, EXC_TYPE_GLOBAL, FIRST_MODULE_GLOBAL,
+    MODULE_INIT_FN,
 };
 use crate::compiler::function::{compile_function, resolve_return_type};
 use crate::core::errors::ChakraError;
@@ -100,6 +100,29 @@ fn infer_field_value_type(
             .get(&format!("self.{attribute}"))
             .cloned()
             .unwrap_or(IRType::Unknown),
+        // An element (a suspending `for` in a generator walks its sequence
+        // by index into a field).
+        IRExpr::Indexing { container, .. } => {
+            match infer_field_value_type(container, params, classes) {
+                IRType::List(element) | IRType::VarTuple(element) | IRType::Set(element) => {
+                    *element
+                }
+                IRType::Dict(_, value) => *value,
+                IRType::String => IRType::String,
+                _ => IRType::Unknown,
+            }
+        }
+        // A field of an instance of a class laid out already (`self.n.children`
+        // in a generator, whose parameter `n` is a field of its own).
+        IRExpr::Attribute { object, attribute } => {
+            match infer_field_value_type(object, params, classes) {
+                IRType::Class(class) => params
+                    .get(&format!("{FIELD_OF}{class}.{attribute}"))
+                    .cloned()
+                    .unwrap_or(IRType::Unknown),
+                _ => IRType::Unknown,
+            }
+        }
         // A dict loop's key or value (see the dict loops in `ir::converter`).
         IRExpr::FunctionCall {
             function_name,
@@ -265,12 +288,14 @@ fn functions_that_can_raise(ir_module: &IRModule) -> HashSet<String> {
     // A called name -> the registry keys it could reach.
     let mut by_name: HashMap<String, Vec<String>> = HashMap::new();
 
+    let sources = OptionalSources::of(ir_module);
     let record = |facts: &mut HashMap<String, (bool, HashSet<String>)>,
                   by_name: &mut HashMap<String, Vec<String>>,
                   key: String,
                   body: &IRBody,
+                  params: &[crate::ir::IRParam],
                   call_name: &str| {
-        let mut raises = false;
+        let mut raises = may_unbox_none(body, params, &sources);
         let mut calls = HashSet::new();
         scan_raise_and_calls(body, &mut raises, &mut calls);
         by_name
@@ -286,17 +311,28 @@ fn functions_that_can_raise(ir_module: &IRModule) -> HashSet<String> {
             &mut by_name,
             func.name.clone(),
             &func.body,
+            &func.params,
             &func.name,
         );
     }
+    let nothing = IRBody {
+        statements: Vec::new(),
+    };
     for cls in &ir_module.classes {
         for method in &cls.methods {
             let key = method_registry_key(&cls.name, method);
+            // A builtin exception's own methods cannot raise.
+            let body = if crate::compiler::exceptions::is_builtin_exception(&cls.name) {
+                &nothing
+            } else {
+                &method.body
+            };
             record(
                 &mut facts,
                 &mut by_name,
                 key.clone(),
-                &method.body,
+                body,
+                &method.params,
                 &method.name,
             );
             // `ClassName(...)` runs `__init__`.
@@ -337,10 +373,64 @@ fn functions_that_can_raise(ir_module: &IRModule) -> HashSet<String> {
     raisers
 }
 
+/// Whether any body in the module has a `try` or a `raise`.
+fn module_handles_exceptions(ir_module: &IRModule) -> bool {
+    fn body_has(body: &IRBody) -> bool {
+        body.statements.iter().any(|stmt| {
+            matches!(
+                stmt,
+                IRStatement::TryExcept { .. } | IRStatement::Raise { .. }
+            ) || nested_bodies(stmt).into_iter().any(body_has)
+        })
+    }
+    ir_module
+        .functions
+        .iter()
+        .chain(ir_module.classes.iter().flat_map(|c| c.methods.iter()))
+        .any(|f| body_has(&f.body))
+}
+
+/// The positions of the module's lifted closures, each after the closure
+/// that creates it (when one does), so its creator is always compiled first.
+pub(crate) fn closures_outermost_first(ir_module: &IRModule) -> Vec<usize> {
+    let mut creator: HashMap<String, String> = HashMap::new();
+    for func in &ir_module.functions {
+        let mut raises = false;
+        let mut calls = HashSet::new();
+        scan_raise_and_calls(&func.body, &mut raises, &mut calls);
+        for name in calls {
+            if name.starts_with("__lambda_") && name != func.name {
+                creator.insert(name, func.name.clone());
+            }
+        }
+    }
+    let depth = |name: &str| {
+        let mut depth = 0;
+        let mut current = name.to_string();
+        while let Some(parent) = creator.get(&current) {
+            depth += 1;
+            if depth > ir_module.functions.len() {
+                break;
+            }
+            current = parent.clone();
+        }
+        depth
+    };
+    let mut closures: Vec<(usize, usize)> = ir_module
+        .functions
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.name.starts_with("__lambda_"))
+        .map(|(i, f)| (depth(&f.name), i))
+        .collect();
+    closures.sort();
+    closures.into_iter().map(|(_, i)| i).collect()
+}
+
 /// Collect whether a body raises, and every name it calls.
 fn scan_raise_and_calls(body: &IRBody, raises: &mut bool, calls: &mut HashSet<String>) {
     for stmt in &body.statements {
-        if let IRStatement::Raise { exception } = stmt {
+        if let IRStatement::Raise { exception, .. } = stmt {
             // `raise StopIteration` is the generator protocol's own signal and
             // travels on its own global, not the exception path.
             let name = match exception {
@@ -349,6 +439,16 @@ fn scan_raise_and_calls(body: &IRBody, raises: &mut bool, calls: &mut HashSet<St
                 _ => None,
             };
             if name != Some("StopIteration") {
+                *raises = true;
+            }
+        }
+        if let IRStatement::For {
+            iterable: IRExpr::Attribute { attribute, .. },
+            ..
+        } = stmt
+        {
+            // `for line in sys.stdin` reads, and decodes, standard input.
+            if attribute == "stdin" {
                 *raises = true;
             }
         }
@@ -389,6 +489,113 @@ fn scan_raise_and_calls(body: &IRBody, raises: &mut bool, calls: &mut HashSet<St
 /// contains anything that can raise on its own. Indexing is the one that does:
 /// an out-of-range index raises `IndexError` and a missing key `KeyError`, and
 /// the container's type is not known here, so any indexing counts.
+/// What can hold an optional number: functions returning one and fields
+/// annotated as one, across the module.
+struct OptionalSources {
+    functions: HashSet<String>,
+    fields: HashSet<String>,
+}
+
+fn optional_number(t: &IRType) -> bool {
+    matches!(t, IRType::Optional(inner) if matches!(**inner, IRType::Int | IRType::Bool | IRType::Float))
+}
+
+impl OptionalSources {
+    fn of(module: &IRModule) -> Self {
+        let functions = module
+            .functions
+            .iter()
+            .filter(|f| optional_number(&f.return_type))
+            .map(|f| f.name.clone())
+            .collect();
+        let mut fields = HashSet::new();
+        for class in &module.classes {
+            for var in &class.class_vars {
+                if var.var_type.as_ref().is_some_and(optional_number) {
+                    fields.insert(var.name.clone());
+                }
+            }
+            for method in &class.methods {
+                let mut annotated = Vec::new();
+                collect_annotated_self_fields(&method.body, &mut annotated);
+                fields.extend(
+                    annotated
+                        .into_iter()
+                        .filter(|(_, t)| optional_number(t))
+                        .map(|(n, _)| n),
+                );
+            }
+        }
+        OptionalSources { functions, fields }
+    }
+}
+
+/// Whether a body may unbox an optional number that is None, which raises
+/// TypeError: it reads one (a parameter, local, field, or call result
+/// declared optional, or a one-argument `dict.get`) and does arithmetic, an
+/// ordering, or a negation. Types are not known yet here, so this is the
+/// conservative reading.
+fn may_unbox_none(body: &IRBody, params: &[crate::ir::IRParam], sources: &OptionalSources) -> bool {
+    let mut locals: HashSet<String> = params
+        .iter()
+        .filter(|p| optional_number(&p.param_type))
+        .map(|p| p.name.clone())
+        .collect();
+    fn annotated(body: &IRBody, out: &mut HashSet<String>) {
+        for stmt in &body.statements {
+            if let IRStatement::Assign {
+                target,
+                var_type: Some(t),
+                ..
+            } = stmt
+            {
+                if optional_number(t) {
+                    out.insert(target.clone());
+                }
+            }
+            for nested in nested_bodies(stmt) {
+                annotated(nested, out);
+            }
+        }
+    }
+    annotated(body, &mut locals);
+    let mut reads = !locals.is_empty();
+    let mut operates = false;
+    let mut probe = body.clone();
+    let _ = crate::ir::visit_body(&mut probe, &mut |e: &mut IRExpr| {
+        match e {
+            IRExpr::FunctionCall { function_name, .. }
+                if sources.functions.contains(function_name) =>
+            {
+                reads = true
+            }
+            IRExpr::Attribute { attribute, .. } if sources.fields.contains(attribute) => {
+                reads = true
+            }
+            IRExpr::MethodCall {
+                method_name,
+                arguments,
+                ..
+            } if method_name == "get" && arguments.len() == 1 => reads = true,
+            IRExpr::BinaryOp { .. } => operates = true,
+            IRExpr::CompareOp {
+                op:
+                    crate::ir::IRCompareOp::Lt
+                    | crate::ir::IRCompareOp::LtE
+                    | crate::ir::IRCompareOp::Gt
+                    | crate::ir::IRCompareOp::GtE,
+                ..
+            } => operates = true,
+            IRExpr::UnaryOp { op, .. } if !matches!(op, crate::ir::IRUnaryOp::Not) => {
+                operates = true
+            }
+            _ => {}
+        }
+        Ok(())
+    });
+    reads && operates
+}
+
 fn scan_expr_calls(expr: &IRExpr, raises: &mut bool, calls: &mut HashSet<String>) {
     match expr {
         IRExpr::FunctionCall {
@@ -400,7 +607,13 @@ fn scan_expr_calls(expr: &IRExpr, raises: &mut bool, calls: &mut HashSet<String>
             // spell an integer. Types are not known yet here, so anything but a
             // plainly numeric argument counts: an extra check after a call costs
             // a load and a branch, and a missing one strands the exception.
-            if function_name == "int" {
+            // `float(s)` likewise, for a string that does not spell a float.
+            // `input()` raises EOFError at the end of input.
+            // `input()` and `open()` (a missing file is FileNotFoundError).
+            if function_name == "input" || function_name == "open" {
+                *raises = true;
+            }
+            if function_name == "int" || function_name == "float" {
                 let plainly_numeric = matches!(
                     arguments.first(),
                     Some(
@@ -432,6 +645,16 @@ fn scan_expr_calls(expr: &IRExpr, raises: &mut bool, calls: &mut HashSet<String>
                 method_name.as_str(),
                 "index" | "remove" | "pop" | crate::ir::DEL_ITEM_METHOD
             ) {
+                *raises = true;
+            }
+            // Reading standard input raises UnicodeDecodeError on bytes that
+            // are not UTF-8.
+            if matches!(method_name.as_str(), "read" | "readline" | "readlines") {
+                *raises = true;
+            }
+            // `sys.exit()` raises SystemExit.
+            if method_name == "exit" && matches!(object.as_ref(), IRExpr::Variable(m) if m == "sys")
+            {
                 *raises = true;
             }
             scan_expr_calls(object, raises, calls);
@@ -529,7 +752,7 @@ fn scan_expr_calls(expr: &IRExpr, raises: &mut bool, calls: &mut HashSet<String>
 fn statement_exprs(stmt: &IRStatement) -> Vec<&IRExpr> {
     match stmt {
         IRStatement::Return(expr) | IRStatement::Yield { value: expr } => expr.iter().collect(),
-        IRStatement::Raise { exception } => exception.iter().collect(),
+        IRStatement::Raise { exception, cause } => exception.iter().chain(cause.iter()).collect(),
         IRStatement::Assign { value, .. }
         | IRStatement::AugAssign { value, .. }
         | IRStatement::Expression(value)
@@ -582,6 +805,10 @@ fn nested_bodies(stmt: &IRStatement) -> Vec<&IRBody> {
         _ => Vec::new(),
     }
 }
+
+/// The prefix of the entries giving field inference the fields of the
+/// classes laid out before the one being laid out (`#Class.field`).
+const FIELD_OF: &str = "#";
 
 /// Every `self.x: T = v` in a method body, recursing into nested blocks, with
 /// its annotated type.
@@ -652,10 +879,119 @@ fn collect_self_fields(
                 }
             }
             IRStatement::While { body, .. } => collect_self_fields(body, params, classes, out),
-            IRStatement::For { body, .. } => collect_self_fields(body, params, classes, out),
+            IRStatement::For {
+                target,
+                iterable,
+                body,
+                ..
+            } => {
+                // The loop variable holds an element, which a field copied
+                // from it holds too.
+                let element = match iterable {
+                    IRExpr::RangeCall { .. } => IRType::Int,
+                    other => match infer_field_value_type(other, params, classes) {
+                        IRType::List(e) | IRType::VarTuple(e) | IRType::Set(e) => *e,
+                        IRType::Dict(k, _) => *k,
+                        IRType::String => IRType::String,
+                        _ => IRType::Unknown,
+                    },
+                };
+                params.insert(target.clone(), element);
+                collect_self_fields(body, params, classes, out)
+            }
+            IRStatement::TupleUnpack { targets, value, .. } => {
+                let members = match infer_field_value_type(value, params, classes) {
+                    IRType::Tuple(members) => members,
+                    IRType::List(e) | IRType::VarTuple(e) => vec![*e; targets.len()],
+                    _ => Vec::new(),
+                };
+                for (k, target) in targets.iter().enumerate() {
+                    params.insert(
+                        target.clone(),
+                        members.get(k).cloned().unwrap_or(IRType::Unknown),
+                    );
+                }
+            }
+            IRStatement::TryExcept {
+                try_body,
+                except_handlers,
+                finally_body,
+            } => {
+                collect_self_fields(try_body, params, classes, out);
+                for handler in except_handlers {
+                    // The `as` name holds the handler's class, or the
+                    // nearest base of several, which for a tuple of builtin
+                    // exceptions can only be said as BaseException here.
+                    if let Some(name) = &handler.name {
+                        let class = match handler.exception_types.as_slice() {
+                            [one] => one.clone(),
+                            _ => "BaseException".to_string(),
+                        };
+                        params.insert(name.clone(), IRType::Class(class));
+                    }
+                    collect_self_fields(&handler.body, params, classes, out);
+                }
+                if let Some(finally_body) = finally_body {
+                    collect_self_fields(finally_body, params, classes, out);
+                }
+            }
             _ => {}
         }
     }
+}
+
+/// The class variables some function assigns through its class's name
+/// (`Counter.count += 1`), as `Owner.var` keys. Each lives in a global even
+/// when it starts as a constant, which every read would otherwise inline.
+fn written_class_vars(module: &IRModule) -> HashSet<String> {
+    let owner_of = |class: &str, var: &str| -> Option<String> {
+        let mut pending = vec![class.to_string()];
+        let mut seen = HashSet::new();
+        while let Some(c) = pending.pop() {
+            if !seen.insert(c.clone()) {
+                continue;
+            }
+            let cls = module.classes.iter().find(|k| k.name == c)?;
+            if cls.class_vars.iter().any(|v| v.name == var) {
+                return Some(c);
+            }
+            pending.extend(cls.bases.iter().rev().cloned());
+        }
+        None
+    };
+    let mut out = HashSet::new();
+    fn walk(body: &IRBody, found: &mut Vec<(String, String)>) {
+        for stmt in &body.statements {
+            if let IRStatement::AttributeAssign {
+                object, attribute, ..
+            }
+            | IRStatement::AttributeAugAssign {
+                object, attribute, ..
+            } = stmt
+            {
+                if let IRExpr::Variable(name) = object {
+                    found.push((name.clone(), attribute.clone()));
+                }
+            }
+            for nested in nested_bodies(stmt) {
+                walk(nested, found);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    for f in module
+        .functions
+        .iter()
+        .chain(module.classes.iter().flat_map(|c| c.methods.iter()))
+    {
+        walk(&f.body, &mut found);
+    }
+    for (class, var) in found {
+        if let Some(owner) = owner_of(&class, &var) {
+            out.insert(format!("{owner}.{var}"));
+        }
+    }
+    out
 }
 
 /// Build the runtime bump allocator `__alloc(size: i32) -> i32`.
@@ -993,13 +1329,18 @@ fn body_uses_open(body: &IRBody) -> bool {
             value,
         } => expr_uses_open(container) || expr_uses_open(index) || expr_uses_open(value),
         IRStatement::TupleUnpack { value, .. } => expr_uses_open(value),
-        IRStatement::Raise { exception } => exception.as_ref().is_some_and(expr_uses_open),
+        IRStatement::Raise { exception, cause } => {
+            exception.as_ref().is_some_and(expr_uses_open)
+                || cause.as_ref().is_some_and(expr_uses_open)
+        }
         IRStatement::Yield { value } => value.as_ref().is_some_and(expr_uses_open),
         IRStatement::DynamicImport { module_name, .. } => expr_uses_open(module_name),
         IRStatement::ImportModule { .. }
         | IRStatement::Break
         | IRStatement::Continue
-        | IRStatement::Global(_) => false,
+        | IRStatement::Global(_)
+        | IRStatement::Nonlocal(_) => false,
+        IRStatement::FunctionDef(def) => body_uses_open(&def.body),
     })
 }
 
@@ -1007,7 +1348,7 @@ fn body_uses_open(body: &IRBody) -> bool {
 /// method, or module-variable initializer)? Only then is the `waspy_host`
 /// import section emitted, so programs without file I/O keep instantiating
 /// with no imports at all.
-fn module_uses_file_io(ir_module: &IRModule) -> bool {
+pub(crate) fn module_uses_file_io(ir_module: &IRModule) -> bool {
     ir_module.functions.iter().any(|f| body_uses_open(&f.body))
         || ir_module
             .classes
@@ -1060,6 +1401,18 @@ fn is_pure_constant(
 /// instance wherever it was mentioned. Arbitrary module-level statements stay
 /// refused; this covers definitions, which is what Python runs at import.
 pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, ChakraError> {
+    // A module that can raise carries the builtin exception classes, ahead of
+    // its own, so every exception is an object of one.
+    let with_exceptions;
+    let ir_module = if crate::compiler::exceptions::module_needs_exceptions(
+        ir_module,
+        !functions_that_can_raise(ir_module).is_empty() || module_handles_exceptions(ir_module),
+    ) {
+        with_exceptions = crate::compiler::exceptions::with_builtin_exceptions(ir_module);
+        &with_exceptions
+    } else {
+        ir_module
+    };
     // A definition some function declares `global` is a global even when it
     // is a plain constant, since that function rebinds it; so is anything
     // computed from one, which reads its import-time value.
@@ -1068,6 +1421,12 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, ChakraError> {
         .iter()
         .chain(ir_module.classes.iter().flat_map(|c| c.methods.iter()))
         .flat_map(|f| crate::compiler::function::global_declarations(&f.body))
+        // A metaclass's class attributes are written through the class.
+        .chain(ir_module.classes.iter().flat_map(|c| {
+            c.deferred_vars
+                .iter()
+                .map(move |v| format!("{}.{v}", c.name))
+        }))
         .collect();
     let vars: std::collections::HashMap<&str, &IRExpr> = ir_module
         .variables
@@ -1079,10 +1438,12 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, ChakraError> {
     // then `C.items.append(1)` read back an empty list, since every mention of
     // `C.items` rebuilt it. They come first, because a module definition such
     // as `C = Counter()` runs class code that may read them.
+    let written = written_class_vars(ir_module);
     let mut globals: Vec<crate::ir::IRVariable> = Vec::new();
     for cls in &ir_module.classes {
         for var in &cls.class_vars {
-            if !is_pure_constant(&var.value, &vars, 0) {
+            let key = format!("{}.{}", cls.name, var.name);
+            if written.contains(&key) || !is_pure_constant(&var.value, &vars, 0) {
                 globals.push(crate::ir::IRVariable {
                     name: format!("{}.{}", cls.name, var.name),
                     value: var.value.clone(),
@@ -1123,8 +1484,13 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, ChakraError> {
 }
 
 fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec<u8>, ChakraError> {
+    // Unannotated closure parameters are typed from their calls, and captured
+    // cells from their stores, before any signature is fixed.
+    let (typed, capture_types) = crate::compiler::closures::type_closures(ir_module);
+    let ir_module = &typed;
     let mut module = Module::new();
     let mut ctx = CompilationContext::new();
+    ctx.capture_types = capture_types.clone();
     for (i, name) in module_globals.iter().enumerate() {
         ctx.module_global_index
             .insert(name.clone(), FIRST_MODULE_GLOBAL + i as u32);
@@ -1167,6 +1533,11 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
         }
     }
 
+    for (key, module) in &ir_module.metadata {
+        if let Some(class) = key.strip_prefix(crate::ir::CLASS_MODULE_KEY) {
+            ctx.class_modules.insert(class.to_string(), module.clone());
+        }
+    }
     for table in &ir_module.dispatch_tables {
         ctx.dispatch_tables
             .insert(table.base.clone(), table.arms.clone());
@@ -1176,9 +1547,27 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
     // imports the four `waspy_host` functions. Imported functions occupy the
     // lowest indices of the function index space, so every defined function's
     // index shifts up by the import count.
+    // File I/O is WASI (helpers over its imports), or with the deprecated
+    // option the four `waspy_host` imports.
     let uses_file_io = module_uses_file_io(ir_module);
-    let import_count: u32 = if uses_file_io { 4 } else { 0 };
-    if uses_file_io {
+    let legacy_file_io = uses_file_io && crate::compiler::host::legacy_file_io(ir_module);
+    let file_io_count: u32 = if legacy_file_io { 4 } else { 0 };
+    // The WASI imports after them: whatever the program prints, reads, or
+    // asks of the host, and what the `__main__` block needs to report an
+    // exception it does not catch.
+    let main_can_raise = ir_module.functions.iter().any(|f| f.name == "main")
+        && ir_module
+            .metadata
+            .get("has_entry_point")
+            .map(String::as_str)
+            == Some("true")
+        && functions_that_can_raise(ir_module).contains("main");
+    let wasi_imports = crate::compiler::host::wasi_needed(ir_module, main_can_raise);
+    for (k, import) in wasi_imports.iter().enumerate() {
+        ctx.wasi.insert(*import, file_io_count + k as u32);
+    }
+    let import_count: u32 = file_io_count + wasi_imports.len() as u32;
+    if legacy_file_io {
         ctx.file_io = Some(FileIoImports {
             open: 0,
             read: 1,
@@ -1193,14 +1582,29 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
     // let a function's inferred return type depend on a callee resolved later in
     // the first pass.
     let mut resolved_returns: HashMap<String, IRType> = HashMap::new();
-    for _ in 0..2 {
+    let function_params: HashMap<String, Vec<IRType>> = ir_module
+        .functions
+        .iter()
+        .map(|f| {
+            let params = f.params.iter().map(|p| p.param_type.clone()).collect();
+            (f.name.clone(), params)
+        })
+        .collect();
+    // A third pass lets a function returning a closure see the closure's
+    // result type, which is resolved in the pass before.
+    for _ in 0..3 {
         for func in &ir_module.functions {
-            let rt = resolve_return_type(func, &resolved_returns);
+            let rt = resolve_return_type(func, &resolved_returns, &function_params, &capture_types);
             resolved_returns.insert(func.name.clone(), rt);
         }
         for cls in &ir_module.classes {
             for method in &cls.methods {
-                let rt = resolve_return_type(method, &resolved_returns);
+                let rt = resolve_return_type(
+                    method,
+                    &resolved_returns,
+                    &function_params,
+                    &capture_types,
+                );
                 resolved_returns.insert(method_registry_key(&cls.name, method), rt);
             }
         }
@@ -1250,6 +1654,22 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
 
         // Add the type to the type section
         types.ty().function(params, results);
+    }
+
+    // The signature of every module function, whose type index is its own
+    // position (defined function `i` has type `i`). A call through a typed
+    // closure value looks its signature up here; closures are always module
+    // functions.
+    for (i, func) in ir_module.functions.iter().enumerate() {
+        let params = func
+            .params
+            .iter()
+            .map(|param| ir_type_to_wasm_type(&param.param_type))
+            .collect();
+        let result = ir_type_to_wasm_type(&module_return(func));
+        ctx.signature_types
+            .entry((params, result))
+            .or_insert(i as u32);
     }
 
     // Create function types for class methods
@@ -1308,7 +1728,7 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
     // untouched. `open`/`read`/`write` share the 3-arg shape; `close` takes
     // one argument.
     let mut host_imports = ImportSection::new();
-    if uses_file_io {
+    if legacy_file_io {
         let closure_type_count = ctx
             .closure_type_base
             .map(|_| ctx.closure_max_arity + 1)
@@ -1327,6 +1747,16 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
         host_imports.import("waspy_host", "write", EntityType::Function(host3_type));
         host_imports.import("waspy_host", "close", EntityType::Function(host1_type));
     }
+    for import in &wasi_imports {
+        let (params, results) = import.signature();
+        let type_index = types.len();
+        types.ty().function(params, results);
+        host_imports.import(
+            crate::compiler::host::Wasi::MODULE,
+            import.name(),
+            EntityType::Function(type_index),
+        );
+    }
 
     // The start function's `() -> ()` type, after every other type so the
     // existing "defined function i has type i" mapping is untouched.
@@ -1337,12 +1767,6 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
         types.ty().function([], []);
         Some(index)
     };
-
-    module.section(&types);
-    // The import section must sit between the type and function sections.
-    if uses_file_io {
-        module.section(&host_imports);
-    }
 
     // Build function section (one entry per user function/method, referencing
     // the matching type, plus trailing entries for `__alloc` / `__alloc_obj`).
@@ -1356,7 +1780,18 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
     if let Some(start_type) = start_type_index {
         functions.function(start_type); // the start wrapper
     }
-    module.section(&functions);
+    // The runtime helpers code generation asks for come after all of these.
+    ctx.helper_base =
+        import_count + total_function_count as u32 + 3 + u32::from(start_type_index.is_some());
+    if uses_file_io && !legacy_file_io {
+        use crate::compiler::runtime::Helper;
+        ctx.file_io = Some(FileIoImports {
+            open: ctx.helper(Helper::FileOpen),
+            read: ctx.helper(Helper::FileRead),
+            write: ctx.helper(Helper::FileWrite),
+            close: ctx.helper(Helper::FileClose),
+        });
+    }
 
     // Export section - export both functions and memory
     let mut exports = ExportSection::new();
@@ -1373,7 +1808,7 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
         // Export the function. Lifted lambdas are internal — they are only
         // reachable through the funcref table.
         if !func.name.starts_with("__lambda_")
-            && !func.name.starts_with(crate::ir::DRAIN_FN_PREFIX)
+            && !crate::ir::is_internal_function(&func.name)
             && func.name != MODULE_INIT_FN
         {
             exports.export(&func.name, wasm_encoder::ExportKind::Func, func_idx);
@@ -1399,19 +1834,89 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
         })
         .collect();
 
-    for (class_id, cls) in (1i32..).zip(ir_module.classes.iter()) {
-        // Single inheritance: resolve the (at most one, enforced during IR
-        // conversion) base class. `object` is the implicit root, not a base.
-        let base = cls
+    // The classes connected by inheritance where some class has several
+    // bases. Their fields cannot all be laid out as a prefix of each base, so
+    // in such a group each field name has one slot every class shares, which
+    // is the one attribute per name Python's instances have anyway.
+    let mut group_of: HashMap<String, String> = HashMap::new();
+    fn root_of(group_of: &HashMap<String, String>, name: &str) -> String {
+        let mut current = name.to_string();
+        while let Some(parent) = group_of.get(&current) {
+            if *parent == current {
+                break;
+            }
+            current = parent.clone();
+        }
+        current
+    }
+    let mut multiple_groups: HashSet<String> = HashSet::new();
+    for cls in &ir_module.classes {
+        group_of
+            .entry(cls.name.clone())
+            .or_insert_with(|| cls.name.clone());
+        let known: Vec<&String> = cls
             .bases
             .iter()
-            .find(|b| b.as_str() != "object" && ctx.get_class_info(b).is_some())
-            .cloned();
+            .filter(|b| class_names.contains(*b))
+            .collect();
+        for b in &known {
+            let (ra, rb) = (root_of(&group_of, &cls.name), root_of(&group_of, b));
+            if ra != rb {
+                group_of.insert(ra, rb);
+            }
+        }
+        if known.len() > 1 {
+            multiple_groups.insert(cls.name.clone());
+        }
+    }
+    let multiple_groups: HashSet<String> = multiple_groups
+        .iter()
+        .map(|c| root_of(&group_of, c))
+        .collect();
+    // Per such group, each field name's offset and the next free one.
+    let mut group_slots: HashMap<String, (HashMap<String, u64>, u64)> = HashMap::new();
+
+    for (class_id, cls) in (1i32..).zip(ir_module.classes.iter()) {
+        // The bases, then the method resolution order (C3, as CPython's).
+        // `object` is the implicit root, not a base.
+        let bases: Vec<String> = cls
+            .bases
+            .iter()
+            .filter(|b| b.as_str() != "object" && ctx.get_class_info(b).is_some())
+            .cloned()
+            .collect();
+        let base = bases.first().cloned();
+        let linearized: Vec<(String, Vec<String>)> = bases
+            .iter()
+            .map(|b| {
+                (
+                    b.clone(),
+                    ctx.get_class_info(b)
+                        .map(|i| i.mro.clone())
+                        .unwrap_or_default(),
+                )
+            })
+            .collect();
+        let mro = match crate::compiler::context::c3_linearization(&cls.name, &linearized) {
+            Some(mro) => mro,
+            None => {
+                ctx.report(format!(
+                    "class {} raises TypeError: Cannot create a consistent method resolution \
+                     order (MRO) for bases {}",
+                    cls.name,
+                    bases.join(", ")
+                ));
+                vec![cls.name.clone()]
+            }
+        };
+        let group = root_of(&group_of, &cls.name);
+        let in_multiple = multiple_groups.contains(&group);
 
         let mut class_info = ClassInfo {
             name: cls.name.clone(),
             base: base.clone(),
             class_id,
+            mro: mro.clone(),
             methods: HashMap::new(),
             method_owner: HashMap::new(),
             method_kinds: HashMap::new(),
@@ -1419,6 +1924,7 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
             field_offsets: HashMap::new(),
             field_types: HashMap::new(),
             class_var_values: HashMap::new(),
+            class_var_owner: HashMap::new(),
             instance_size: 0,
         };
 
@@ -1438,17 +1944,100 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
         if let Some(base_info) = base.as_deref().and_then(|b| ctx.get_class_info(b)) {
             class_info.field_offsets = base_info.field_offsets.clone();
             class_info.field_types = base_info.field_types.clone();
-            class_info.class_var_values = base_info.class_var_values.clone();
-            class_info.methods = base_info.methods.clone();
-            class_info.method_owner = base_info.method_owner.clone();
-            class_info.method_kinds = base_info.method_kinds.clone();
-            class_info.property_setters = base_info.property_setters.clone();
             current_offset = base_info.instance_size as u64;
         }
+        // Methods, class variables, and properties come from the classes of
+        // the MRO, a nearer one's own definition winning: for one base that
+        // is the base's table, for several CPython's order.
+        for ancestor in mro.iter().skip(1).rev() {
+            let Some(info) = ctx.get_class_info(ancestor) else {
+                continue;
+            };
+            for (name, index) in &info.methods {
+                if info.method_owner.get(name) == Some(ancestor) {
+                    class_info.methods.insert(name.clone(), *index);
+                    class_info
+                        .method_owner
+                        .insert(name.clone(), ancestor.clone());
+                    if let Some(kind) = info.method_kinds.get(name) {
+                        class_info.method_kinds.insert(name.clone(), *kind);
+                    }
+                }
+            }
+            for (name, setter) in &info.property_setters {
+                if setter.1 == *ancestor {
+                    class_info
+                        .property_setters
+                        .insert(name.clone(), setter.clone());
+                }
+            }
+            for (name, value) in &info.class_var_values {
+                if info.class_var_owner.get(name) == Some(ancestor) {
+                    class_info
+                        .class_var_values
+                        .insert(name.clone(), value.clone());
+                    class_info
+                        .class_var_owner
+                        .insert(name.clone(), ancestor.clone());
+                }
+            }
+        }
+        // In a group with multiple inheritance, every base's fields, at the
+        // group's slots.
+        if in_multiple {
+            for b in &bases {
+                let Some(info) = ctx.get_class_info(b) else {
+                    continue;
+                };
+                for (name, offset) in &info.field_offsets {
+                    class_info.field_offsets.insert(name.clone(), *offset);
+                }
+                for (name, ty) in &info.field_types {
+                    match class_info.field_types.get(name) {
+                        Some(seen)
+                            if seen != ty
+                                && !matches!(seen, IRType::Unknown)
+                                && !matches!(ty, IRType::Unknown) =>
+                        {
+                            ctx.report(format!(
+                                "class {}: its bases give the field '{name}' two types ({} and \
+                                 {}), which one instance cannot hold",
+                                cls.name,
+                                crate::type_to_string(seen),
+                                crate::type_to_string(ty)
+                            ));
+                        }
+                        Some(seen) if !matches!(seen, IRType::Unknown) => {}
+                        _ => {
+                            class_info.field_types.insert(name.clone(), ty.clone());
+                        }
+                    }
+                }
+            }
+        }
+        let slots = in_multiple.then(|| {
+            group_slots
+                .entry(group.clone())
+                .or_insert((HashMap::new(), 4))
+        });
+        let slots = std::cell::RefCell::new(slots);
         let add_field = |info: &mut ClassInfo, name: &str, ty: IRType, current_offset: &mut u64| {
             if !info.field_offsets.contains_key(name) {
-                info.field_offsets.insert(name.to_string(), *current_offset);
-                *current_offset += 8;
+                let mut slots = slots.borrow_mut();
+                match slots.as_mut() {
+                    Some((by_name, next)) => {
+                        let offset = *by_name.entry(name.to_string()).or_insert_with(|| {
+                            let offset = *next;
+                            *next += 8;
+                            offset
+                        });
+                        info.field_offsets.insert(name.to_string(), offset);
+                    }
+                    None => {
+                        info.field_offsets.insert(name.to_string(), *current_offset);
+                        *current_offset += 8;
+                    }
+                }
             }
             // Prefer a concrete type over an earlier `Unknown` inference.
             let entry = info
@@ -1468,16 +2057,60 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
             }
         };
 
+        // `SystemExit` keeps the status it exits with, and whether its
+        // argument is printed.
+        if cls.name == "SystemExit" {
+            for name in ["__exit_code", "__exit_print"] {
+                add_field(&mut class_info, name, IRType::Int, &mut current_offset);
+            }
+        }
+        // `BaseException` holds what every exception keeps of its arguments.
+        if cls.name == "BaseException" {
+            for name in crate::compiler::exceptions::EXC_FIELDS {
+                add_field(
+                    &mut class_info,
+                    name,
+                    crate::compiler::exceptions::exc_field_type(name),
+                    &mut current_offset,
+                );
+            }
+        }
+
         // Class-level variables occupy instance slots and are also accessible as
         // `ClassName.var`; keep their initializers for that read path.
+        // A class variable is read through an instance from the class
+        // (`self.label`), unless some method gives the instance an attribute
+        // of that name, which then needs a field.
+        let mut self_assigned = Vec::new();
+        for method in &cls.methods {
+            collect_self_fields(
+                &method.body,
+                &mut HashMap::new(),
+                &class_names,
+                &mut self_assigned,
+            );
+        }
         for var in &cls.class_vars {
-            let ty = var.var_type.clone().unwrap_or_else(|| {
-                infer_field_value_type(&var.value, &HashMap::new(), &class_names)
-            });
-            add_field(&mut class_info, &var.name, ty, &mut current_offset);
+            if self_assigned.iter().any(|(name, _)| *name == var.name) {
+                let ty = var.var_type.clone().unwrap_or_else(|| {
+                    infer_field_value_type(&var.value, &HashMap::new(), &class_names)
+                });
+                add_field(&mut class_info, &var.name, ty, &mut current_offset);
+            }
             class_info
                 .class_var_values
                 .insert(var.name.clone(), var.value.clone());
+            class_info
+                .class_var_owner
+                .insert(var.name.clone(), cls.name.clone());
+        }
+        // The attributes its metaclass gives it, whose globals the module
+        // definitions `Class.attr` hold.
+        for name in &cls.deferred_vars {
+            class_info.class_var_values.remove(name);
+            class_info
+                .class_var_owner
+                .insert(name.clone(), cls.name.clone());
         }
 
         // Instance fields are discovered from `self.<field> = ...` assignments in
@@ -1516,12 +2149,31 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
                 }
             }
         }
+        let laid_out: Vec<(String, IRType)> = ctx
+            .class_map
+            .values()
+            .flat_map(|info| {
+                info.field_types
+                    .iter()
+                    .map(move |(f, t)| (format!("{FIELD_OF}{}.{f}", info.name), t.clone()))
+            })
+            .collect();
         for method in &cls.methods {
-            let params: HashMap<String, IRType> = method
-                .params
-                .iter()
-                .map(|p| (p.name.clone(), p.param_type.clone()))
-                .collect();
+            let mut params: HashMap<String, IRType> = laid_out.iter().cloned().collect();
+            // The fields earlier methods (`__init__` first) gave this class.
+            params.extend(
+                class_info
+                    .field_types
+                    .iter()
+                    .filter(|(_, t)| !matches!(t, IRType::Unknown))
+                    .map(|(f, t)| (format!("self.{f}"), t.clone())),
+            );
+            params.extend(
+                method
+                    .params
+                    .iter()
+                    .map(|p| (p.name.clone(), p.param_type.clone())),
+            );
             let mut fields = Vec::new();
             collect_self_fields(&method.body, &mut params.clone(), &class_names, &mut fields);
             for (name, ty) in fields {
@@ -1554,7 +2206,12 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
             }
         }
 
-        class_info.instance_size = current_offset as u32;
+        class_info.instance_size = match slots.borrow().as_ref() {
+            // Every slot the group has handed out so far, which covers every
+            // field this class has.
+            Some((_, next)) => *next as u32,
+            None => current_offset as u32,
+        };
 
         // Register methods. A property setter is registered under its own
         // `Class::name::setter` key (its getter owns the plain name in the
@@ -1586,8 +2243,11 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
                 }
             }
 
-            // Export method with qualified name
-            exports.export(&qualified_name, wasm_encoder::ExportKind::Func, func_idx);
+            // Export method with qualified name; a builtin exception's are
+            // the runtime's own.
+            if !crate::compiler::exceptions::is_builtin_exception(&cls.name) {
+                exports.export(&qualified_name, wasm_encoder::ExportKind::Func, func_idx);
+            }
             func_idx += 1;
         }
 
@@ -1611,8 +2271,10 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
     // ops: row `class_id - 1` (ids start at 1), column per method name.
     let mut virtual_names: Vec<String> = Vec::new();
     for cls in &ir_module.classes {
-        for method in &cls.methods {
-            let name = &method.name;
+        let Some(info) = ctx.get_class_info(&cls.name) else {
+            continue;
+        };
+        for (name, owner) in &info.method_owner {
             // `__init__` is only ever reached from an instantiation site, whose
             // class is known exactly, and `super().__init__()`, which Python
             // defines as non-virtual. Property accessors and the static and
@@ -1620,27 +2282,24 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
             if name == "__init__" || virtual_names.contains(name) {
                 continue;
             }
-            // A plain method and a `@property` getter both dispatch on an
-            // instance, so both can be overridden out from under a base
-            // method. The static and class kinds never see an instance.
-            let dispatches_on_instance = ctx
-                .get_class_info(&cls.name)
-                .and_then(|ci| ci.method_kinds.get(name).copied())
+            let dispatches_on_instance = info
+                .method_kinds
+                .get(name)
                 .is_some_and(|k| matches!(k, MethodKind::Instance | MethodKind::PropertyGetter));
             if !dispatches_on_instance {
                 continue;
             }
-            // Overriding means some ancestor also defines the name textually.
-            let mut ancestor = ctx.get_class_info(&cls.name).and_then(|ci| ci.base.clone());
-            while let Some(base) = ancestor {
-                let Some(base_info) = ctx.get_class_info(&base) else {
-                    break;
-                };
-                if base_info.method_owner.get(name) == Some(&base) {
-                    virtual_names.push(name.clone());
-                    break;
-                }
-                ancestor = base_info.base.clone();
+            // Virtual when another class of this one's MRO defines the name
+            // too: an ancestor this class overrides, or (with several bases)
+            // a sibling whose own methods call it on an instance of this one.
+            let other_definer = info.mro.iter().any(|ancestor| {
+                ancestor != owner
+                    && ctx
+                        .get_class_info(ancestor)
+                        .is_some_and(|a| a.method_owner.get(name) == Some(ancestor))
+            });
+            if other_definer {
+                virtual_names.push(name.clone());
             }
         }
     }
@@ -1736,6 +2395,18 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
         ctx.vtable_entries = vtable_entries.clone();
     }
 
+    // A program with a `__main__` block is a WASI command: `_start` runs it.
+    if ir_module
+        .metadata
+        .get("has_entry_point")
+        .map(String::as_str)
+        == Some("true")
+        && ctx.get_function_info("main").is_some()
+    {
+        let start = ctx.helper(crate::compiler::runtime::Helper::Start);
+        exports.export("_start", wasm_encoder::ExportKind::Func, start);
+    }
+
     // Export memory
     exports.export("memory", wasm_encoder::ExportKind::Memory, 0);
 
@@ -1829,31 +2500,62 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
             compiled
         });
 
-    for func_ir in &ir_module.functions {
+    // A lifted closure reads its captured cells at the types the function
+    // creating it stored, so it is compiled after that function: every other
+    // function and method first, then the closures, outermost first. The code
+    // section is still written in index order.
+    let mut compiled_functions: Vec<Option<Function>> =
+        (0..ir_module.functions.len()).map(|_| None).collect();
+    let mut compiled_init = compiled_init;
+    for (i, func_ir) in ir_module.functions.iter().enumerate() {
         if func_ir.name == MODULE_INIT_FN {
-            if let Some(compiled) = &compiled_init {
-                codes.function(compiled);
-            }
+            compiled_functions[i] = compiled_init.take();
+            continue;
+        }
+        if func_ir.name.starts_with("__lambda_") {
             continue;
         }
         let return_type = module_return(func_ir);
-        let compiled_func = compile_function(func_ir, &mut ctx, &memory_layout, &return_type, None);
-        codes.function(&compiled_func);
+        compiled_functions[i] = Some(compile_function(
+            func_ir,
+            &mut ctx,
+            &memory_layout,
+            &return_type,
+            None,
+        ));
     }
 
-    // Compile class methods
+    let mut compiled_methods = Vec::new();
     for cls in &ir_module.classes {
         for method in &cls.methods {
             let return_type = method_return(&cls.name, method);
-            let compiled_method = compile_function(
+            compiled_methods.push(compile_function(
                 method,
                 &mut ctx,
                 &memory_layout,
                 &return_type,
                 Some(&cls.name),
-            );
-            codes.function(&compiled_method);
+            ));
         }
+    }
+
+    for i in closures_outermost_first(ir_module) {
+        let func_ir = &ir_module.functions[i];
+        let return_type = module_return(func_ir);
+        compiled_functions[i] = Some(compile_function(
+            func_ir,
+            &mut ctx,
+            &memory_layout,
+            &return_type,
+            None,
+        ));
+    }
+
+    for compiled in compiled_functions.iter().flatten() {
+        codes.function(compiled);
+    }
+    for compiled in &compiled_methods {
+        codes.function(compiled);
     }
 
     // Runtime helpers, last so their indices match `ctx.alloc_func_index`,
@@ -1881,12 +2583,38 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
         import_count + total_function_count as u32 + 3
     });
 
+    // The runtime helpers the code called, each built once; a helper may call
+    // others, which join the end of the list.
+    let mut built = 0;
+    while built < ctx.helpers.borrow().len() {
+        let helper = ctx.helpers.borrow()[built].clone();
+        let (params, results) = crate::compiler::runtime::signature(&helper);
+        let type_index = types.len();
+        types.ty().function(params, results);
+        functions.function(type_index);
+        codes.function(&crate::compiler::runtime::build(&helper, &ctx));
+        built += 1;
+    }
+
+    module.section(&types);
+    // The import section must sit between the type and function sections.
+    if import_count > 0 {
+        module.section(&host_imports);
+    }
+    module.section(&functions);
+
     // Memory holds the static data (strings and bytes) below
     // COLLECTION_HEAP_BASE, and the runtime bump allocator starts there and
     // grows memory on demand. Collection literals used to be carved out of a
     // static region above the base at compile time; every one is a runtime
     // allocation now, so nothing sits between the data and the heap.
-    let runtime_heap_base = COLLECTION_HEAP_BASE;
+    // The Unicode tables the helpers read sit at the start of the heap, and
+    // the allocator starts past them.
+    let (unicode_segments, runtime_heap_base) =
+        crate::compiler::unicode::data_for(&ctx.helpers.borrow());
+    for (at, bytes) in unicode_segments {
+        data.active(0, &ConstExpr::i32_const(at as i32), bytes);
+    }
     let min_pages = (((runtime_heap_base as u64) + 65535) / 65536).max(2);
     let mut memories = MemorySection::new();
     memories.memory(MemoryType {
@@ -1940,6 +2668,16 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
     // an exception with nothing below it is the outermost one, so the
     // exception has escaped the program: it traps there instead of handing the
     // host a default value as if nothing happened.
+    globals.global(
+        GlobalType {
+            val_type: ValType::I32,
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::i32_const(0),
+    );
+
+    // Global 4: the pending exception's object (0 = none).
     globals.global(
         GlobalType {
             val_type: ValType::I32,
