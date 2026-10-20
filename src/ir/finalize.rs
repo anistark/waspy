@@ -479,7 +479,7 @@ struct NestedDef {
     owner: String,
 }
 
-/// Lift every nested `def` into a module function (#141).
+/// Lift every nested `def` into a module function.
 ///
 /// Runs after the decorator and metaclass passes (which read a decorator's
 /// nested wrapper as written) and before every other module pass, so the
