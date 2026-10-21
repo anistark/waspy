@@ -1,0 +1,193 @@
+---
+layout: layouts/base.njk
+title: Development board
+description: Module development status for Waspy, the Python to WebAssembly compiler, from Python parsing to WASM output.
+permalink: /modules/
+wide: true
+scripts: ["/modules/modules.js"]
+head: |
+  <noscript><style>[data-card-body]{grid-template-rows:1fr!important}[data-chevron]{display:none}</style></noscript>
+---
+{% from "partials/icons.njk" import icon %}
+
+{#- Per-status styling, spelled out so Tailwind sees every class. -#}
+{% set tone = {
+    done: { accent: "[--accent:var(--c-green)]", text: "text-green", bg: "bg-green", chip: "chip-done", label: "Completed" },
+    progress: { accent: "[--accent:var(--c-amber)]", text: "text-amber", bg: "bg-amber", chip: "chip-progress", label: "In progress" },
+    todo: { accent: "[--accent:var(--c-teal)]", text: "text-teal", bg: "bg-teal", chip: "border-teal/30 bg-teal/10 text-teal", label: "Todo" }
+} %}
+
+{#- Status and issue icons: drawn once in the sprite below, used by reference. -#}
+{% macro statusIcon(status, cls="size-4") -%}
+<svg class="{{ cls }} {{ tone[status].text if tone[status] else 'text-ink-2' }}" aria-hidden="true"><use href="#board-{{ status if tone[status] else 'todo' }}"/></svg>
+{%- endmacro %}
+
+{% macro issueIcon(cls="size-3.5") -%}
+<svg class="{{ cls }}" aria-hidden="true"><use href="#board-issue"/></svg>
+{%- endmacro %}
+
+<div data-board-export class="shell-wide pt-12 pb-4 sm:pt-16">
+    {# Inside the exported block, so the PNG copy carries the symbols. #}
+    <svg class="hidden" aria-hidden="true">
+        <symbol id="board-done" viewBox="0 0 20 20"><circle cx="10" cy="10" r="9" fill="currentColor" opacity="0.18"/><circle cx="10" cy="10" r="8.25" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="m6.2 10.3 2.5 2.5 5.1-5.4" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+        <symbol id="board-progress" viewBox="0 0 20 20"><circle cx="10" cy="10" r="8.25" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M10 4.5a5.5 5.5 0 0 1 0 11Z" fill="currentColor"/></symbol>
+        <symbol id="board-todo" viewBox="0 0 20 20"><circle cx="10" cy="10" r="8.25" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="3.2 2.6"/></symbol>
+        <symbol id="board-issue" viewBox="0 0 16 16"><path fill="currentColor" d="M8 9.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z"/><path fill="currentColor" d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Z"/></symbol>
+        <symbol id="board-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    </svg>
+
+    {# Hero #}
+    {# Title on the left, what the board is on the right #}
+    <p class="eyebrow">Modules</p>
+    <div class="mt-4 grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,38rem)] lg:items-start lg:gap-12">
+        <h1 class="text-4xl font-extrabold sm:text-5xl">Development <span class="text-gradient">board</span></h1>
+        <p class="text-base leading-relaxed text-ink-1 sm:text-lg lg:pt-2">Module development status, from Python parsing to WASM output. Every completed feature is backed by a passing test that checks the compiled program against CPython's answer.</p>
+    </div>
+
+    {# Stats #}
+    {% set s = board.stats %}
+    <dl class="mt-10 grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
+        <div class="glass p-5 sm:p-6">
+            <dt class="font-mono text-[0.7rem] font-semibold tracking-[0.12em] text-ink-2 uppercase">Completed</dt>
+            <dd class="mt-2 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                <span data-count="{{ s.done }}" class="font-display text-4xl font-extrabold text-green tabular-nums sm:text-5xl">{{ s.done }}</span>
+                <span class="text-sm text-ink-2">of {{ s.cards }} modules</span>
+            </dd>
+        </div>
+        <div class="glass p-5 sm:p-6">
+            <dt class="font-mono text-[0.7rem] font-semibold tracking-[0.12em] text-ink-2 uppercase">In progress</dt>
+            <dd class="mt-2 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                <span data-count="{{ s.progress }}" class="font-display text-4xl font-extrabold text-amber tabular-nums sm:text-5xl">{{ s.progress }}</span>
+                <span class="text-sm text-ink-2">modules</span>
+            </dd>
+        </div>
+        <div class="glass p-5 sm:p-6">
+            <dt class="font-mono text-[0.7rem] font-semibold tracking-[0.12em] text-ink-2 uppercase">Todo</dt>
+            <dd class="mt-2 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                <span data-count="{{ s.todo }}" class="font-display text-4xl font-extrabold text-teal tabular-nums sm:text-5xl">{{ s.todo }}</span>
+                <span class="text-sm text-ink-2">modules</span>
+            </dd>
+        </div>
+        <div class="glass p-5 sm:p-6">
+            <dt class="font-mono text-[0.7rem] font-semibold tracking-[0.12em] text-ink-2 uppercase" title="Done features, with in-progress ones counted as half">Features complete</dt>
+            <dd class="mt-2 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                <span data-count="{{ s.completion }}" data-suffix="%" class="text-gradient font-display text-4xl font-extrabold tabular-nums sm:text-5xl">{{ s.completion }}%</span>
+                <span class="text-sm whitespace-nowrap text-ink-2">{{ s.featuresDone }} of {{ s.features }}</span>
+            </dd>
+        </div>
+    </dl>
+
+    {# Legend #}
+    <div class="mt-6 flex flex-wrap items-center justify-between gap-x-6 gap-y-4">
+        <ul class="flex flex-wrap items-center gap-x-5 gap-y-2.5 text-[0.8rem] text-ink-2" aria-label="Legend">
+            <li class="flex items-center gap-1.5">{{ statusIcon("done") }} Done</li>
+            <li class="flex items-center gap-1.5">{{ statusIcon("progress") }} In progress</li>
+            <li class="flex items-center gap-1.5">{{ statusIcon("todo") }} Todo</li>
+            <li class="flex items-center gap-1.5"><span class="chip border-teal/30 bg-teal/10 text-teal">0.14.0</span> release that shipped it</li>
+            <li class="flex items-center gap-1.5"><span class="chip chip-progress">upcoming</span> merged, not yet released</li>
+            <li class="flex items-center gap-1.5"><span class="inline-flex items-center gap-1 font-mono text-[0.72rem] text-ink-1">{{ issueIcon() }}#5</span> tracking issue</li>
+        </ul>
+        <div data-export-exclude class="flex items-center gap-3">
+            <button type="button" data-export-png class="btn-ghost btn-sm">
+                {{ icon("download", "size-4") }}
+                <span data-export-label>Export as PNG</span>
+            </button>
+            <p data-export-status class="sr-only" aria-live="polite"></p>
+        </div>
+    </div>
+
+    {# Board #}
+    <div data-board class="mt-10 grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,2fr)] xl:gap-5">
+        {% for column in board.columns %}
+        {% set t = tone[column.status] %}
+        <section data-column="{{ column.status }}" aria-labelledby="column-{{ column.status }}" class="rounded-[1.6rem] border border-line bg-bg-1/45 p-2.5 sm:p-3">
+            <header class="flex items-start justify-between gap-3 px-2.5 pt-2.5 pb-4">
+                <div>
+                    <h2 id="column-{{ column.status }}" class="flex items-center gap-2.5 text-lg font-bold">
+                        <span class="hex size-3 {{ t.bg }}" aria-hidden="true"></span>{{ column.label }}
+                    </h2>
+                    <p class="mt-1 text-sm text-ink-2">{{ column.subtitle }}</p>
+                </div>
+                <span class="chip {{ t.chip }} mt-0.5 text-[0.75rem]"><span class="sr-only">{{ column.cards | length }} modules</span><span aria-hidden="true">{{ column.cards | length }}</span></span>
+            </header>
+
+            <div data-column-cards class="grid items-start gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-1 {{ '2xl:grid-cols-2' if column.status == 'done' }}">
+                {% for card in column.cards %}
+                <article data-card="{{ card.key }}" class="group/card glass {{ t.accent }} overflow-hidden transition-[border-color,box-shadow] duration-300 hover:border-line-strong">
+                    <h3 class="text-base">
+                        <button type="button" data-card-toggle aria-expanded="false" aria-controls="card-{{ card.key }}" class="flex w-full cursor-pointer items-center gap-3 rounded-[var(--radius-card)] px-4 pt-4 pb-3 text-left focus-visible:outline-offset-[-3px]">
+                            <span class="min-w-0 flex-1 font-display text-[0.95rem] font-bold tracking-[0.03em] text-ink">{{ card.title }}</span>
+                            <span class="font-mono text-xs text-ink-2 tabular-nums"><span class="sr-only">{{ t.label }}, {{ card.done }} of {{ card.total }} features done</span><span aria-hidden="true">{{ card.done }}/{{ card.total }}</span></span>
+                            <svg data-chevron class="size-4 shrink-0 text-ink-2 transition-transform duration-300 group-data-open/card:rotate-180 group-data-open/card:text-[var(--accent)]" aria-hidden="true"><use href="#board-chevron"/></svg>
+                        </button>
+                    </h3>
+                    <div class="flex items-center gap-3 px-4 pb-4" title="{{ card.progress }}% complete">
+                        <div class="h-1.5 flex-1 overflow-hidden rounded-full bg-ink-2/15" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ card.progress }}" aria-label="{{ card.title }} progress">
+                            <div class="board-fill h-full rounded-full" style="width: {{ card.progress }}%"></div>
+                        </div>
+                        <span class="w-9 text-right font-mono text-[0.7rem] text-ink-2 tabular-nums" aria-hidden="true">{{ card.progress }}%</span>
+                    </div>
+                    <div id="card-{{ card.key }}" data-card-body class="grid grid-rows-[0fr] transition-[grid-template-rows] duration-300 ease-out group-data-open/card:grid-rows-[1fr]">
+                        <div class="min-h-0 overflow-hidden">
+                            <ul class="border-t border-line px-4 py-1.5">
+                                {% for feature in card.features %}
+                                <li class="flex items-start gap-2.5 border-b border-line/60 py-2.5 last:border-b-0">
+                                    <span class="mt-0.5 shrink-0">{{ statusIcon(feature.status) }}</span>
+                                    <span class="min-w-0 flex-1 text-[0.84rem] leading-relaxed text-ink-1"><span class="sr-only">{{ tone[feature.status].label }}: </span>{{ feature.name }}</span>
+                                    {% if feature.issue or (feature.version and feature.version != "todo") %}
+                                    <span class="flex shrink-0 items-center gap-1.5 pt-0.5">
+                                        {% if feature.issue %}
+                                        <a href="{{ site.issues }}/{{ feature.issue }}" target="_blank" rel="noopener" class="inline-flex items-center gap-1 rounded-full px-1 font-mono text-[0.7rem] text-ink-2 transition hover:text-honey" aria-label="Issue #{{ feature.issue }} on GitHub" title="Open issue #{{ feature.issue }} on GitHub">{{ issueIcon() }}#{{ feature.issue }}</a>
+                                        {% endif %}
+                                        {% if feature.version and feature.version != "todo" %}
+                                        {% if feature.version == "upcoming" %}
+                                        <span class="chip chip-progress" title="Merged, not yet in a published release">upcoming</span>
+                                        {% else %}
+                                        <span class="chip border-teal/30 bg-teal/10 text-teal" title="Released in {{ feature.version }}">{{ feature.version }}</span>
+                                        {% endif %}
+                                        {% endif %}
+                                    </span>
+                                    {% endif %}
+                                </li>
+                                {% endfor %}
+                            </ul>
+                        </div>
+                    </div>
+                </article>
+                {% endfor %}
+            </div>
+        </section>
+        {% endfor %}
+    </div>
+</div>
+
+<style>
+    .board-fill {
+        background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 65%, var(--c-honey)), var(--accent));
+        transform-origin: left center;
+        animation: board-fill 1s cubic-bezier(0.22, 0.61, 0.36, 1) 0.2s both;
+    }
+
+    @keyframes board-fill {
+        from { transform: scaleX(0); }
+    }
+
+    /* The PNG export: an off-screen copy of the board, laid out wide with
+       every card open (modules.js adds the class to the copy only). */
+    .board-snapshot {
+        width: 2000px;
+        max-width: none;
+        padding: 48px;
+        background: var(--c-bg);
+    }
+    .board-snapshot [data-board] { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 3fr); }
+    .board-snapshot [data-column-cards] { grid-template-columns: minmax(0, 1fr); }
+    .board-snapshot [data-column="done"] [data-column-cards] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .board-snapshot [data-card-body] { grid-template-rows: 1fr; }
+    .board-snapshot [data-chevron],
+    .board-snapshot [data-export-exclude] { display: none; }
+    .board-snapshot dl { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .board-snapshot *,
+    .board-snapshot *::before,
+    .board-snapshot *::after { transition: none !important; animation: none !important; }
+</style>

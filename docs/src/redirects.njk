@@ -1,0 +1,31 @@
+---
+# Pages that moved keep working at their old address. GitHub Pages has no
+# server redirects, so each old path gets a small page that forwards.
+pagination:
+    data: redirects
+    size: 1
+    alias: redirect
+redirects:
+    - from: /programs/
+      to: /docs/programs/
+    - from: /changelog/
+      to: /docs/changelog/
+    - from: /reference/
+      to: /docs/
+permalink: "{{ redirect.from }}index.html"
+eleventyExcludeFromCollections: true
+---
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Moved</title>
+    <meta name="robots" content="noindex">
+    <link rel="canonical" href="{{ site.url }}{{ redirect.to }}">
+    <meta http-equiv="refresh" content="0; url={{ redirect.to }}">
+    <script>location.replace({{ (redirect.to | url) | dump | safe }} + location.hash);</script>
+</head>
+<body>
+    <p>This page moved to <a href="{{ redirect.to }}">{{ site.url }}{{ redirect.to }}</a>.</p>
+</body>
+</html>

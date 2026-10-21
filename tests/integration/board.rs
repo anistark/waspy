@@ -1,12 +1,13 @@
 //! The development board's features, one test each (`just board-check`).
 //!
-//! Every feature on `docs/modules/index.html` names the test here that backs
-//! it, as `card::test`. A feature marked done must have one that passes; one
-//! still open may have one, marked `#[ignore]`, asserting what the feature will
-//! answer once it lands, and `just board-check` fails the moment such a test
-//! starts passing, so the board is moved in the same change. Expected values
-//! are CPython's for the same source, except where the board documents the
-//! difference (an `int` is 32 bits and wraps).
+//! Every feature on the development board (`docs/src/_data/modules.json`)
+//! names the test here that backs it, as `card::test`. A feature marked done
+//! must have one that passes; one still open may have one, marked `#[ignore]`,
+//! asserting what the feature will answer once it lands, and `just
+//! board-check` fails the moment such a test starts passing, so the board is
+//! moved in the same change. Expected values are CPython's for the same
+//! source, except where the board documents the difference (an `int` is 32
+//! bits and wraps).
 
 #[path = "../utils/harness.rs"]
 mod harness;

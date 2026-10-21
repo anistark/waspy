@@ -33,9 +33,10 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-  # The docs site in docs/, plus the playground's compiler: waspy built to
-  # wasm32 by playground/ and placed in docs/playground/compiler/. Built on
-  # every PR so a change that breaks the in-browser build fails here.
+  # The website: Eleventy + Tailwind sources in docs/src/, built into
+  # docs/_site/, plus the playground's compiler: waspy built to wasm32 by
+  # playground/ and placed in docs/src/playground/compiler/. Built on every
+  # PR so a change that breaks the site or the in-browser build fails here.
   site:
     name: Build Docs Site
     runs-on: ubuntu-latest
@@ -57,8 +58,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
 
       - uses: extractions/setup-just@v2
+
+      - name: Install website dependencies
+        working-directory: docs
+        run: npm ci
 
       # Pinned to a released asset with a checksum, and to the version
       # playground/Cargo.toml pins the wasm-bindgen crate to: the CLI and the
@@ -89,10 +96,14 @@ jobs:
       - name: Check the playground examples against CPython
         run: just playground-verify
 
+      - name: Build the website
+        working-directory: docs
+        run: npm run build
+
       - name: Upload the site
         uses: actions/upload-pages-artifact@v5
         with:
-          path: docs
+          path: docs/_site
 
   deploy:
     name: Deploy Docs Site

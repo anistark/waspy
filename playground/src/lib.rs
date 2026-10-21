@@ -1,5 +1,5 @@
 //! Waspy compiled to WebAssembly for the docs-site playground
-//! (`docs/playground/`). Build it with `just playground`.
+//! (`docs/src/playground/`). Build it with `just playground`.
 
 use std::sync::Mutex;
 

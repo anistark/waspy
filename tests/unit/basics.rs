@@ -301,8 +301,8 @@ fn str_of_an_int_renders_its_digits() {
 /// `int` is a 32-bit two's-complement integer, so arithmetic that leaves its
 /// range wraps rather than growing the way CPython's arbitrary-precision `int`
 /// does. This is the one documented place where a compiled program answers
-/// differently without saying so (see the "Numbers" section of `README.md`),
-/// and these assertions are here to keep it deliberate: if the representation
+/// differently without saying so (see `docs/src/docs/numbers.md`), and
+/// these assertions are here to keep it deliberate: if the representation
 /// ever changes, they should be updated on purpose, not discovered.
 #[test]
 fn integers_are_32_bit_and_wrap() {

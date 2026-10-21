@@ -1,0 +1,102 @@
+---
+layout: layouts/base.njk
+---
+{% from "partials/icons.njk" import icon %}
+{# A documentation page: sidebar, the page's prose, and "On this page". #}
+{% set flat = [] %}
+{% for group in docsNav %}{% for item in group.items %}{% set flat = (flat.push(item), flat) %}{% endfor %}{% endfor %}
+{% set index = -1 %}
+{% for item in flat %}{% if item.href == page.url %}{% set index = loop.index0 %}{% endif %}{% endfor %}
+{% set prev = flat[index - 1] if index > 0 else null %}
+{% set next = flat[index + 1] if index >= 0 and index + 1 < flat.length else null %}
+{% set headings = content | toc(tocDepth or 3) %}
+
+<div class="shell-wide grid gap-x-10 pt-6 pb-10 lg:grid-cols-[15rem_minmax(0,1fr)] xl:grid-cols-[15rem_minmax(0,1fr)_13rem]">
+
+    {# Sidebar: a collapsible menu on small screens #}
+    <aside class="lg:sticky lg:top-20 lg:max-h-[calc(100dvh-6rem)] lg:self-start lg:overflow-y-auto lg:pb-8 scrollbar-thin">
+        <details class="group glass mb-6 lg:hidden">
+            <summary class="flex cursor-pointer list-none items-center justify-between px-4 py-3 text-sm font-semibold">
+                <span>Documentation{% if index >= 0 %}<span class="font-normal text-ink-2"> / {{ flat[index].label }}</span>{% endif %}</span>
+                <span class="text-ink-2 transition group-open:rotate-90">{{ icon("arrow-right", "size-4") }}</span>
+            </summary>
+            <div class="border-t border-line px-2 py-3">{% include "partials/docs-nav.njk" %}</div>
+        </details>
+        <div class="hidden lg:block">{% include "partials/docs-nav.njk" %}</div>
+    </aside>
+
+    <article class="min-w-0">
+        <header class="border-b border-line pb-6">
+            {% if eyebrow %}<p class="eyebrow">{{ eyebrow }}</p>{% endif %}
+            <h1 class="mt-2 text-4xl font-extrabold tracking-tight sm:text-5xl">{{ title }}</h1>
+            {% if description %}<p class="mt-4 max-w-2xl text-lg leading-relaxed text-ink-1">{{ description }}</p>{% endif %}
+        </header>
+
+        {% if headings.length > 2 %}
+        <details class="glass mt-6 xl:hidden">
+            <summary class="cursor-pointer px-4 py-3 text-sm font-semibold">On this page</summary>
+            <ul class="space-y-1.5 border-t border-line px-4 py-3 text-sm">
+                {% for h in headings %}<li class="{{ 'pl-4' if h.level == 3 }}"><a class="text-ink-1 hover:text-honey" href="#{{ h.id }}">{{ h.text | safe }}</a></li>{% endfor %}
+            </ul>
+        </details>
+        {% endif %}
+
+        <div class="prose-waspy mt-8" data-copy-code>
+            {{ content | safe }}
+        </div>
+
+        <footer class="mt-16 space-y-8">
+            {% if prev or next %}
+            <nav class="grid gap-4 sm:grid-cols-2" aria-label="Previous and next pages">
+                {% if prev %}
+                <a href="{{ prev.href }}" class="card-link group">
+                    <span class="flex items-center gap-1.5 text-xs text-ink-2">{{ icon("arrow-left", "size-3.5") }} Previous</span>
+                    <span class="mt-1 block font-display font-semibold group-hover:text-honey">{{ prev.label }}</span>
+                </a>
+                {% else %}<span></span>{% endif %}
+                {% if next %}
+                <a href="{{ next.href }}" class="card-link group text-right">
+                    <span class="flex items-center justify-end gap-1.5 text-xs text-ink-2">Next {{ icon("arrow-right", "size-3.5") }}</span>
+                    <span class="mt-1 block font-display font-semibold group-hover:text-honey">{{ next.label }}</span>
+                </a>
+                {% endif %}
+            </nav>
+            {% endif %}
+            {% if not noEdit %}
+            <p class="text-sm">
+                <a class="inline-flex items-center gap-1.5 text-ink-2 hover:text-honey" href="{{ editUrl or (site.editBase + page.inputPath | replace('./', '')) }}">{{ icon("edit", "size-3.5") }} Edit this page on GitHub</a>
+            </p>
+            {% endif %}
+        </footer>
+    </article>
+
+    {# On this page #}
+    <aside class="hidden xl:sticky xl:top-20 xl:block xl:max-h-[calc(100dvh-6rem)] xl:self-start xl:overflow-y-auto scrollbar-thin" aria-label="On this page">
+        {% if headings.length %}
+        <p class="text-xs font-semibold tracking-[0.14em] text-ink-2 uppercase">On this page</p>
+        <ul class="mt-3 space-y-2 border-l border-line text-sm" data-toc>
+            {% for h in headings %}
+            <li><a href="#{{ h.id }}" class="-ml-px block border-l border-transparent py-0.5 text-ink-2 transition hover:border-ink-2 hover:text-ink aria-[current=true]:border-amber aria-[current=true]:text-honey {{ 'pl-7' if h.level == 3 else 'pl-4' }}">{{ h.text | safe }}</a></li>
+            {% endfor %}
+        </ul>
+        {% endif %}
+    </aside>
+</div>
+
+<script type="module">
+    // Mark the heading in view in "On this page".
+    const links = [...document.querySelectorAll("[data-toc] a")];
+    const targets = links.map((a) => document.getElementById(decodeURIComponent(a.hash.slice(1)))).filter(Boolean);
+    if (targets.length && "IntersectionObserver" in window) {
+        const visible = new Set();
+        const mark = () => {
+            const first = targets.find((t) => visible.has(t)) ?? null;
+            links.forEach((a) => a.setAttribute("aria-current", String(first !== null && a.hash === "#" + first.id)));
+        };
+        const io = new IntersectionObserver((entries) => {
+            entries.forEach((e) => (e.isIntersecting ? visible.add(e.target) : visible.delete(e.target)));
+            mark();
+        }, { rootMargin: "-80px 0px -65% 0px" });
+        targets.forEach((t) => io.observe(t));
+    }
+</script>

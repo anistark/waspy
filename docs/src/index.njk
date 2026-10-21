@@ -1,0 +1,621 @@
+---
+layout: layouts/base.njk
+homepage: true
+permalink: /
+scripts: ["/assets/js/home.js"]
+---
+{% from "partials/icons.njk" import icon %}
+
+{#- ------------------------------------------------------------------
+    Page data. Kept here so each list is written once and rendered in
+    markup (and, for the architecture steps, in both the desktop
+    flowchart and the narrow-screen list).
+------------------------------------------------------------------- #}
+
+{% set pipeline = [
+    { n: "01", title: "Python AST", text: "Parsed with RustPython's parser", accent: "--c-teal" },
+    { n: "02", title: "Typed IR", text: "Lowered to Waspy's own intermediate representation", accent: "--c-honey" },
+    { n: "03", title: "WASM binary", text: "Emitted with wasm-encoder, then validated", accent: "--c-amber" },
+    { n: "04", title: "Optimized", text: "Shrunk by Binaryen, when you ask for it", accent: "--c-ember" }
+] %}
+
+{% set features = [
+    { title: "Ahead-of-time compilation", text: "Python compiles to a WASM binary before it runs, with no interpreter or VM in the output.", tag: "no runtime VM", accent: "--c-amber" },
+    { title: "Typed code generation", text: "Type annotations map to WASM value types (i32 for ints and bools, f64 for floats), checked at compile time.", tag: "annotations", accent: "--c-teal" },
+    { title: "CPython's answer, or an error", text: "A construct either gives the answer CPython gives or is refused at compile time with a located error. Nothing unsupported is silently accepted.", tag: "correctness first", accent: "--c-green" },
+    { title: "Binaryen optimization", text: "The binary can run through Binaryen passes: dead-code elimination, inlining, constant folding. The unoptimized module is already valid and correct.", tag: "optimizer", accent: "--c-ember" },
+    { title: "Standard WASM output", text: "Emits plain .wasm modules that load in browsers, Node.js, wasmtime, and edge runtimes. A program with a __main__ block is a WASI command.", tag: ".wasm", accent: "--c-honey" },
+    { title: "Language coverage", text: "Classes with multiple inheritance, closures, lambdas, generators, comprehensions, exceptions, f-strings, and decorators.", tag: "python 3 syntax", accent: "--c-teal" },
+    { title: "Small Rust API", text: "compile_python_to_wasm() for one source, compile_python_file() for an entry file and its imports, compile_python_project() for a directory.", tag: "rust crate", accent: "--c-green" },
+    { title: "Project compilation", text: "Multi-file input with import resolution, __main__.py entry detection, and pyproject.toml config, linked into one .wasm. User modules resolve from disk, each compiled once.", tag: "one .wasm out", accent: "--c-amber" },
+    { title: "Standard library", text: "Module constants, sys streams, argv and exit, re.sub and re.escape folded over constant arguments, and the functools decorators. Every other stdlib call is refused at compile time.", tag: "stdlib subset", accent: "--c-red" }
+] %}
+
+{% set implementations = ["Waspy", "CPython", "MicroPython", "PyPy", "HPy"] %}
+{% set comparison = [
+    { label: "Target", cells: [["WebAssembly"], ["Native / VM"], ["Microcontrollers"], ["JIT compilation"], ["C extensions"]] },
+    { label: "Performance", cells: [["Compiled WASM", "yes"], ["Interpreted", "partial"], ["Optimized for size", "partial"], ["JIT optimized", "yes"], ["Native speed", "yes"]] },
+    { label: "Type safety", cells: [["Compile-time", "yes"], ["Runtime only", "no"], ["Runtime only", "no"], ["JIT inference", "partial"], ["Runtime only", "no"]] },
+    { label: "Universal runtime", cells: [["Browser, server, edge", "yes"], ["OS dependent", "partial"], ["Hardware specific", "no"], ["OS dependent", "partial"], ["OS dependent", "partial"]] },
+    { label: "Startup time", cells: [["Instant", "yes"], ["Module loading", "partial"], ["Fast", "yes"], ["JIT warmup", "no"], ["Import overhead", "partial"]] },
+    { label: "Memory usage", cells: [["Minimal", "yes"], ["Standard", "partial"], ["Ultra-low", "yes"], ["Higher (JIT)", "no"], ["Standard", "partial"]] },
+    { label: "Standard library", cells: [["Small subset", "partial"], ["Complete", "yes"], ["Subset", "partial"], ["Complete", "yes"], ["Complete", "yes"]] },
+    { label: "Security", cells: [["Sandboxed WASM", "yes"], ["Full system access", "no"], ["Hardware limited", "partial"], ["Full system access", "no"], ["Full system access", "no"]] },
+    { label: "Use case", cells: [["Web apps, serverless"], ["General purpose"], ["IoT, embedded"], ["CPU-intensive apps"], ["C extension API"]] }
+] %}
+
+{% set flow = [
+    { name: "Project directory", sub: "compile_python_project", accent: "--c-amber",
+      info: "The input: a directory of Python modules. compile_python_file starts from a single entry file instead and follows its imports." },
+    { name: "Project config + file list", sub: "core::config::load_project_config", accent: "--c-green",
+      info: "Reads pyproject.toml, setup.py, and __version__.py or __about__.py for the project's name and version, and collects the Python files to compile." },
+    { name: "Modules + entry point", sub: "imports resolved, each module once", accent: "--c-ember",
+      info: "Every module is gathered once, however many import paths reach it (from an entry file, sibling imports resolve from disk, transitively). The __main__ entry point is looked for in __main__.py first, then in the other files." },
+    { name: "Source → AST → IRModule", sub: "parse_python, lower_ast_to_ir", accent: "--c-ember",
+      info: "For each file: RustPython's parser turns the source into an AST, which is lowered to a typed IRModule. Module passes then desugar user decorators, metaclasses, nested functions, keyword arguments, with, and generators." },
+    { name: "Merged IRModule", sub: "memory_layout.merge_from", accent: "--c-amber",
+      info: "The per-file modules merge into one IRModule with one flat namespace: functions, classes, variables, and dispatch tables combine and the memory layouts merge. Two files defining the same function name is a compile error, never a silent pick." },
+    { name: "Decorators + entry points", sub: "DecoratorRegistry, add_entry_point_to_module", accent: "--c-amber",
+      info: "The built-in decorators are applied and a detected __main__ block becomes the entry point, which makes the program a WASI command exporting _start." },
+    { name: "Compilation context", sub: "compile_ir_module", accent: "--c-green",
+      info: "Lays out classes (their MRO and fields), module globals, and the module init, then generates each function through the compilation context (type tables, function indices, memory layout) with wasm-encoder. Only the runtime helpers and WASI imports the program uses are added." },
+    { name: "WASM", sub: "validated, functions exported", accent: "--c-teal",
+      info: "A standalone WebAssembly module, validated before it is returned, with every top-level function exported. It is already correct: nothing depends on the optimizer." },
+    { name: "Optimized WASM", sub: "optimize_wasm", accent: "--c-ember",
+      info: "When optimization is on, Binaryen applies its passes (dead-code elimination, constant folding, inlining, and more) for a smaller, faster binary." }
+] %}
+
+{% set talks = [
+    { event: "IICT 2026", date: "2026-10-03", dateLabel: "3 Oct 2026", accent: "--c-ember",
+      title: "Direct Ahead-of-Time Compilation of Typed Python to Compact WebAssembly",
+      speakers: "Kumar Anirudha, Farhaan Bukhsh",
+      text: "Innovations in Compiler Technology, IISc Bengaluru. How Waspy maps typed Python onto WebAssembly's static types and linear memory with no embedded interpreter, producing modules of a few kilobytes.",
+      links: [
+        { label: "Slides", href: "https://anistark.github.io/talks/waspy-iict.pdf", external: true },
+        { label: "Paper", href: "/paper/" },
+        { label: "Event page", href: "https://compilertech.org/", external: true }
+      ] },
+    { event: "PyCon India 2025", date: "2025-09-13", dateLabel: "13 Sep 2025", accent: "--c-amber",
+      title: "Compiling Python to WASM",
+      speakers: "Kumar Anirudha, Farhaan Bukhsh",
+      text: "Why Python still lags behind in the browser, what Pyodide, PyScript, and RustPython trade away to get there, and how a native ahead-of-time compiler like Waspy closes the gap.",
+      links: [
+        { label: "Slides", href: "https://drive.google.com/drive/folders/1e10UWWDN_6TVN3EgzbfvkcS6iDOnLNBV?usp=sharing", external: true },
+        { label: "Event page", href: "https://cfp.in.pycon.org/2025/talk/T3QYZX/", external: true }
+      ] },
+    { event: "EuroPython 2025", date: "2025-07-16", dateLabel: "16 Jul 2025", accent: "--c-teal",
+      title: "WASM and Python: The Future of Serverless Computing",
+      speakers: "Kumar Anirudha, Farhaan Bukhsh",
+      video: "https://www.youtube.com/watch?v=qes-hzyVIGU",
+      thumb: "https://img.youtube.com/vi/qes-hzyVIGU/maxresdefault.jpg",
+      text: "EuroPython 2025, Prague. WebAssembly against containers for serverless workloads, what makes Python hard to run in WASM, and a FastAPI function deployed in a WASM runtime and benchmarked against a traditional server.",
+      links: [
+        { label: "Watch", href: "https://www.youtube.com/watch?v=qes-hzyVIGU", external: true, primary: true },
+        { label: "Event page", href: "https://ep2025.europython.eu/session/wasm-and-python-the-future-of-serverless-computing/", external: true }
+      ] }
+] %}
+
+<style>
+    /* Hero: slow float for the logo composition */
+    @keyframes home-float {
+        0%, 100% { transform: translateY(0); }
+        50% { transform: translateY(-10px); }
+    }
+    .home-float { animation: home-float 9s ease-in-out infinite; }
+    .home-float-delay { animation-delay: -4.5s; }
+
+    /* Talk cards: the event over a honeycomb, or a video thumbnail */
+    .talk-media {
+        background:
+            url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='28' height='50' viewBox='0 0 56 100'%3E%3Cpath d='M28 66L0 50L0 16L28 0L56 16L56 50L28 66L28 100' fill='none' stroke='%23f2a83b' stroke-opacity='0.22' stroke-width='2'/%3E%3Cpath d='M28 0L28 34L0 50L0 84L28 100L56 84L56 50L28 34' fill='none' stroke='%23f2a83b' stroke-opacity='0.22' stroke-width='2'/%3E%3C/svg%3E"),
+            linear-gradient(150deg, color-mix(in srgb, var(--accent) 26%, transparent), color-mix(in srgb, var(--accent) 6%, transparent));
+    }
+
+    /* Architecture flowchart. Colors come from the theme tokens, so the
+       diagram follows the light and dark themes. */
+    .fc-svg { display: block; width: 100%; height: auto; overflow: visible; }
+    .fc-node { cursor: pointer; outline: none; }
+    .fc-box {
+        fill: color-mix(in srgb, var(--accent) 7%, var(--c-bg));
+        stroke: var(--accent);
+        stroke-width: 2;
+        transition: stroke-width 0.2s, fill 0.2s;
+    }
+    .fc-inner { fill: color-mix(in srgb, var(--accent) 9%, var(--c-bg)); stroke: var(--accent); stroke-width: 1.75; }
+    .fc-loop { fill: color-mix(in srgb, var(--c-ember) 5%, transparent); stroke-dasharray: 8 5; }
+    .fc-node:hover .fc-box,
+    .fc-node.is-active .fc-box { stroke-width: 3; fill: color-mix(in srgb, var(--accent) 16%, var(--c-bg)); }
+    .fc-node:focus-visible .fc-box { stroke-width: 3.5; stroke: var(--c-honey); fill: color-mix(in srgb, var(--accent) 16%, var(--c-bg)); }
+    .fc-title { fill: var(--c-ink); font-size: 18px; font-weight: 650; }
+    .fc-title-sm { fill: var(--c-ink); font-size: 15px; font-weight: 650; }
+    .fc-sub { fill: var(--c-ink-2); font-size: 11.5px; }
+    .fc-label { fill: var(--c-ink-2); font-size: 12px; }
+    .fc-label-ember { fill: var(--c-ember); font-size: 12px; font-style: italic; }
+    .fc-line { fill: none; stroke: var(--c-teal); stroke-width: 2; opacity: 0.75; }
+    .fc-line-ember { stroke: var(--c-ember); stroke-dasharray: 6 4; }
+    .fc-head-teal { fill: var(--c-teal); }
+    .fc-head-ember { fill: var(--c-ember); }
+    .fc-flood { flood-color: var(--accent); flood-opacity: 0.45; }
+    [data-theme="light"] .fc-flood { flood-opacity: 0.22; }
+    .fc-pulse { fill: var(--c-honey); filter: drop-shadow(0 0 6px var(--c-honey)); }
+    .fc-tooltip[data-show] { animation: fade-up 0.2s ease both; }
+</style>
+
+{# ======================================================================
+   Hero
+   ====================================================================== #}
+<section class="relative">
+    <div class="shell grid items-center gap-12 pt-12 pb-16 sm:pt-20 lg:grid-cols-[1.1fr_0.9fr] lg:gap-8 lg:pt-24 lg:pb-24">
+        <div class="min-w-0">
+            <a href="/modules/" class="group inline-flex animate-fade-up flex-wrap items-center gap-x-2.5 gap-y-1 rounded-full border border-line bg-surface py-1.5 pr-3.5 pl-2.5 text-xs font-medium text-ink-1 backdrop-blur transition hover:border-line-strong">
+                <span class="relative flex size-2" aria-hidden="true">
+                    <span class="absolute inline-flex size-full animate-ping rounded-full bg-green opacity-60"></span>
+                    <span class="relative inline-flex size-2 rounded-full bg-green"></span>
+                </span>
+                <span class="font-mono text-ink">v{{ site.version }}</span>
+                <span class="text-ink-2" aria-hidden="true">/</span>
+                <span>Actively developed</span>
+                <span class="inline-flex items-center gap-1 text-honey light:text-amber">View modules {{ icon("arrow-right", "size-3.5 transition group-hover:translate-x-0.5") }}</span>
+            </a>
+
+            <h1 class="mt-6 animate-fade-up text-[2.75rem] leading-[1.02] font-extrabold tracking-tight sm:text-6xl lg:text-7xl" style="animation-delay: 80ms">
+                Python <span class="text-amber" aria-hidden="true">→</span><span class="sr-only"> to </span><br>
+                <span class="text-gradient">WebAssembly</span>
+            </h1>
+
+            <p class="mt-6 max-w-xl animate-fade-up text-lg leading-relaxed text-ink-1 sm:text-xl" style="animation-delay: 160ms">
+                Waspy compiles typed Python ahead of time into a standalone WebAssembly module, with no interpreter inside. Built in Rust for performance and reliability.
+            </p>
+
+            <div class="mt-8 max-w-xl animate-fade-up overflow-hidden rounded-2xl glass-strong" style="animation-delay: 240ms">
+                <div class="code-window-bar">
+                    <div class="dots" aria-hidden="true"><span></span><span></span><span></span></div>
+                    <span>~/your-rust-project</span>
+                </div>
+                <div class="flex items-center gap-3 px-4 py-3.5">
+                    <div class="min-w-0 flex-1 font-mono text-sm sm:text-[0.95rem]">
+                        <p class="truncate"><span class="text-amber select-none" aria-hidden="true">$ </span><span class="text-ink">cargo add waspy</span></p>
+                        <p class="mt-1 truncate text-xs text-ink-2 sm:text-[0.8rem]"><span class="text-green">Adding</span> waspy v{{ site.version }} to dependencies</p>
+                    </div>
+                    <button type="button" data-copy="cargo add waspy" class="btn-ghost btn-sm shrink-0" aria-label="Copy the install command">Copy</button>
+                </div>
+            </div>
+
+            <div class="mt-8 flex animate-fade-up flex-wrap items-center gap-3" style="animation-delay: 320ms">
+                <a href="/docs/" class="btn-primary px-6 py-3 text-base">Get started {{ icon("arrow-right", "size-4") }}</a>
+                <a href="/playground/" class="btn-ghost px-6 py-3 text-base">{{ icon("play", "size-4") }} Try the playground</a>
+            </div>
+
+            <p class="mt-5 max-w-xl animate-fade-up text-sm text-ink-2" style="animation-delay: 400ms">
+                Waspy is a Rust library: add it to your project and compile Python to WebAssembly from your own code, or try it in the browser first.
+            </p>
+        </div>
+
+        {# Logo composition, decorative #}
+        <div class="relative mx-auto hidden aspect-square w-full max-w-[26rem] animate-fade-up lg:block" style="animation-delay: 200ms" aria-hidden="true">
+            <div class="hex absolute inset-0 bg-linear-to-br from-honey/45 via-amber/10 to-teal/40"></div>
+            <div class="hex absolute inset-[2px] bg-bg"></div>
+            <div class="hex absolute inset-[2px] bg-linear-to-br from-amber/10 via-transparent to-teal/10"></div>
+            <div class="hex absolute inset-[14%] bg-linear-to-br from-amber/40 to-ember/25"></div>
+            <div class="hex absolute inset-[calc(14%+2px)] bg-bg-1"></div>
+            <div class="absolute inset-0 grid place-items-center">
+                <img src="/assets/img/logo.png" alt="" width="200" height="200" class="home-float size-44 drop-shadow-[0_10px_40px_rgba(67,174,188,0.45)]">
+            </div>
+
+            <div class="home-float glass absolute top-[9%] -left-4 rounded-xl px-3.5 py-2.5 font-mono text-xs shadow-deep">
+                <span class="text-ember">def</span> <span class="text-honey">fib</span>(n: <span class="text-teal">int</span>) -&gt; <span class="text-teal">int</span>:
+            </div>
+            <div class="home-float home-float-delay glass absolute top-[46%] -right-2 rounded-xl px-3.5 py-2.5 text-xs font-semibold text-ink-1 shadow-deep">
+                no interpreter inside
+            </div>
+            <div class="home-float glass absolute bottom-[8%] left-[6%] flex items-center gap-2 rounded-xl px-3.5 py-2.5 font-mono text-xs shadow-deep" style="animation-delay: -2s">
+                <span class="grid size-5 place-items-center rounded-full bg-green/15 text-green">{{ icon("check", "size-3.5") }}</span>
+                fib.wasm <span class="text-ink-2">validated</span>
+            </div>
+        </div>
+    </div>
+
+    {# Three facts, under the fold line #}
+    <div class="shell">
+        <ul class="grid gap-3 sm:grid-cols-3">
+            <li class="reveal glass flex items-start gap-3 p-4">
+                <span class="hex grid size-9 shrink-0 place-items-center bg-amber/15 font-mono text-xs font-bold text-amber">AOT</span>
+                <p class="text-sm leading-relaxed text-ink-1"><strong class="block font-semibold text-ink">Compiled ahead of time</strong>No interpreter or VM in the module you ship.</p>
+            </li>
+            <li class="reveal glass flex items-start gap-3 p-4" style="transition-delay: 80ms">
+                <span class="hex grid size-9 shrink-0 place-items-center bg-teal/15 font-mono text-xs font-bold text-teal">=</span>
+                <p class="text-sm leading-relaxed text-ink-1"><strong class="block font-semibold text-ink">CPython's answer</strong>Or a located compile error, never a silent wrong one.</p>
+            </li>
+            <li class="reveal glass flex items-start gap-3 p-4" style="transition-delay: 160ms">
+                <span class="hex grid size-9 shrink-0 place-items-center bg-ember/15 font-mono text-xs font-bold text-ember">.w</span>
+                <p class="text-sm leading-relaxed text-ink-1"><strong class="block font-semibold text-ink">Standard .wasm</strong>Runs in browsers, Node.js, wasmtime, and at the edge.</p>
+            </li>
+        </ul>
+    </div>
+</section>
+
+{# ======================================================================
+   How it works
+   ====================================================================== #}
+<section id="how-it-works" class="pt-24 sm:pt-32">
+    <div class="shell">
+        <div class="reveal max-w-2xl">
+            <p class="eyebrow">Pipeline</p>
+            <h2 class="section-title mt-3">How Waspy works</h2>
+            <p class="section-lead">From Python source to optimized WebAssembly in four steps.</p>
+        </div>
+
+        <div class="relative mt-12">
+        <div class="pointer-events-none absolute top-11 right-[12%] left-[12%] hidden h-px bg-linear-to-r from-teal/50 via-amber/50 to-ember/50 lg:block" aria-hidden="true"></div>
+        <ol class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 lg:gap-5">
+            {% for step in pipeline %}
+            <li class="reveal relative glass p-5 sm:p-6" style="--accent: var({{ step.accent }}); transition-delay: {{ loop.index0 * 90 }}ms">
+                <div class="hex grid size-12 place-items-center bg-(--accent)/15 font-mono text-sm font-bold text-(--accent)">{{ step.n }}</div>
+                <h3 class="mt-4 text-lg font-bold">{{ step.title }}</h3>
+                <p class="mt-1 text-sm leading-relaxed text-ink-1">{{ step.text }}</p>
+            </li>
+            {% endfor %}
+        </ol>
+        </div>
+    </div>
+
+    {# The same pipeline, in code #}
+    <div class="mx-auto mt-24 w-full max-w-7xl px-4 sm:px-6">
+        <div class="reveal max-w-2xl">
+            <h3 class="text-2xl font-bold sm:text-3xl">The same pipeline, in code</h3>
+            <p class="section-lead">Write Python, compile it from Rust, run it from JavaScript or TypeScript.</p>
+        </div>
+
+        <div class="mt-10 grid gap-8 xl:grid-cols-3 xl:gap-5 [&_pre]:text-[0.8rem] [&_pre]:[font-variant-ligatures:none]" data-copy-code>
+            <div class="reveal flex min-w-0 flex-col">
+                <span class="chip self-start border-teal/30 bg-teal/10 text-teal">1 · Write Python</span>
+                <div class="code-window mt-3">
+                    <div class="code-window-bar"><div class="dots" aria-hidden="true"><span></span><span></span><span></span></div><span>fibonacci.py</span></div>
+{% highlight "python" %}
+def fibonacci(n: int) -> int:
+    if n <= 1:
+        return n
+    a, b = 0, 1
+    for i in range(2, n + 1):
+        a, b = b, a + b
+    return b
+
+def factorial(n: int) -> int:
+    result = 1
+    for i in range(1, n + 1):
+        result *= i
+    return result
+{% endhighlight %}
+                </div>
+                <p class="mt-4 text-sm leading-relaxed text-ink-1">Ordinary, type-annotated Python is the compiler's input. Annotations pick the WASM value types: <code class="text-ink">int</code> and <code class="text-ink">bool</code> become <code class="text-ink">i32</code>, <code class="text-ink">float</code> becomes <code class="text-ink">f64</code>.</p>
+            </div>
+
+            <div class="reveal flex min-w-0 flex-col" style="transition-delay: 90ms">
+                <span class="chip self-start border-amber/30 bg-amber/10 text-amber">2 · Compile from Rust</span>
+                <div class="code-window mt-3">
+                    <div class="code-window-bar"><div class="dots" aria-hidden="true"><span></span><span></span><span></span></div><span>main.rs</span></div>
+{% highlight "rust" %}
+// in your Rust project,
+// after `cargo add waspy`
+use waspy::compile_python_file;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // parse → typed IR → codegen → Binaryen
+    let wasm =
+        compile_python_file("fibonacci.py", true)?;
+
+    // a standalone module,
+    // no Python interpreter inside
+    std::fs::write("fibonacci.wasm", &wasm)?;
+    Ok(())
+}
+{% endhighlight %}
+                </div>
+                <p class="mt-4 text-sm leading-relaxed text-ink-1"><code class="text-ink">cargo run</code> turns fibonacci.py into <code class="text-ink">fibonacci.wasm</code>. Every top-level Python function becomes a WASM export, and imports of sibling .py files link in automatically.</p>
+            </div>
+
+            <div class="reveal flex min-w-0 flex-col" style="transition-delay: 180ms">
+                <span class="chip self-start border-ember/30 bg-ember/10 text-ember">3 · Run from JS or TS</span>
+                <div class="code-window mt-3">
+                    <div class="code-window-bar"><div class="dots" aria-hidden="true"><span></span><span></span><span></span></div><span>run.mjs</span></div>
+{% highlight "javascript" %}
+// Node 18+
+// (TypeScript works the same)
+import { readFile } from "node:fs/promises";
+
+const wasm = await readFile("./fibonacci.wasm");
+const { instance } =
+    await WebAssembly.instantiate(wasm);
+
+console.log(instance.exports.fibonacci(10));
+// 55
+console.log(instance.exports.factorial(5));
+// 120
+{% endhighlight %}
+                </div>
+                <p class="mt-4 text-sm leading-relaxed text-ink-1"><code class="text-ink">node run.mjs</code> prints <code class="text-ink">55</code> and <code class="text-ink">120</code>: your Python, running as WebAssembly. In a browser, swap <code class="text-ink">readFile</code> for <code class="text-ink">fetch</code> and <code class="text-ink">WebAssembly.instantiateStreaming</code>.</p>
+            </div>
+        </div>
+
+        <div class="mt-8 grid gap-4 md:grid-cols-2">
+            <div class="reveal min-w-0 glass p-5 sm:p-6">
+                <span class="chip">From a source string</span>
+                <code class="mt-3 block rounded-lg border border-line bg-code px-3 py-2.5 font-mono text-[0.8rem] [overflow-wrap:anywhere] text-ink">let wasm = waspy::compile_python_to_wasm(&amp;source)?;</code>
+                <p class="mt-3 text-sm leading-relaxed text-ink-1">Compile Python you already hold in memory, no files involved.</p>
+            </div>
+            <div class="reveal min-w-0 glass p-5 sm:p-6" style="transition-delay: 90ms">
+                <span class="chip">From a project directory</span>
+                <code class="mt-3 block rounded-lg border border-line bg-code px-3 py-2.5 font-mono text-[0.8rem] [overflow-wrap:anywhere] text-ink">let wasm = waspy::compile_python_project("./my_project", true)?;</code>
+                <p class="mt-3 text-sm leading-relaxed text-ink-1">Compile a project directory into one module, with __main__.py entry detection and pyproject.toml config.</p>
+            </div>
+        </div>
+        <p class="reveal mt-6 text-sm text-ink-2">More in the <a href="/docs/library/" class="link">library guide</a> and on <a href="{{ site.apiDocs }}" class="link">docs.rs</a>.</p>
+    </div>
+
+    {# Comparison #}
+    <div class="shell mt-24">
+        <div class="reveal max-w-2xl">
+            <h3 class="text-2xl font-bold sm:text-3xl">Waspy vs other Python implementations</h3>
+            <p class="section-lead">How Waspy compares across performance, safety, and portability.</p>
+        </div>
+
+        <div class="reveal mt-10 overflow-hidden glass">
+            <div class="scrollbar-thin overflow-x-auto" tabindex="0" role="region" aria-label="Comparison of Python implementations, scrolls sideways">
+                <table class="w-full min-w-[46rem] border-collapse text-left text-sm">
+                    <caption class="sr-only">Waspy compared with CPython, MicroPython, PyPy, and HPy</caption>
+                    <thead>
+                        <tr class="border-b border-line">
+                            <th scope="col" class="sticky left-0 z-10 bg-bg-1 px-4 py-3.5 font-mono text-[0.7rem] font-semibold tracking-wider text-ink-2 uppercase">Feature</th>
+                            {% for impl in implementations %}
+                            <th scope="col" class="px-4 py-3.5 font-display text-base font-bold {{ 'bg-amber/10 text-honey' if loop.first else 'text-ink' }}">{{ impl }}</th>
+                            {% endfor %}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in comparison %}
+                        <tr class="border-b border-line last:border-0">
+                            <th scope="row" class="sticky left-0 z-10 bg-bg-1 px-4 py-3 font-semibold whitespace-nowrap text-ink">{{ row.label }}</th>
+                            {% for cell in row.cells %}
+                            <td class="px-4 py-3 {{ 'bg-amber/10 font-medium text-ink' if loop.first else 'text-ink-1' }}">
+                                {% if cell[1] %}
+                                <span class="inline-flex items-center gap-2">
+                                    <span class="size-2 shrink-0 rounded-full {{ 'bg-green' if cell[1] == 'yes' else ('bg-amber' if cell[1] == 'partial' else 'bg-ink-2/50') }}" aria-hidden="true"></span>
+                                    {{ cell[0] }}<span class="sr-only"> ({{ 'full support' if cell[1] == 'yes' else ('partial support' if cell[1] == 'partial' else 'limited or none') }})</span>
+                                </span>
+                                {% else %}{{ cell[0] }}{% endif %}
+                            </td>
+                            {% endfor %}
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <ul class="mt-4 flex flex-wrap gap-x-5 gap-y-2 text-xs text-ink-2" aria-label="Legend">
+            <li class="inline-flex items-center gap-2"><span class="size-2 rounded-full bg-green"></span> Full support</li>
+            <li class="inline-flex items-center gap-2"><span class="size-2 rounded-full bg-amber"></span> Partial support</li>
+            <li class="inline-flex items-center gap-2"><span class="size-2 rounded-full bg-ink-2/50"></span> Limited or none</li>
+        </ul>
+    </div>
+</section>
+
+{# ======================================================================
+   Features
+   ====================================================================== #}
+<section id="features" class="pt-24 sm:pt-32">
+    <div class="shell">
+        <div class="reveal max-w-2xl">
+            <p class="eyebrow">Features</p>
+            <h2 class="section-title mt-3">What Waspy does</h2>
+            <p class="section-lead">What the compiler supports today, from parser to binary. The <a href="/docs/python-subset/" class="link">Python subset</a> lists it in full, and per-feature status lives on the <a href="/modules/" class="link">modules board</a>.</p>
+        </div>
+
+        <ul class="mt-12 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {% for f in features %}
+            <li class="reveal group relative overflow-hidden glass p-6 transition duration-300 hover:-translate-y-0.5 hover:border-(--accent)/40" style="--accent: var({{ f.accent }}); transition-delay: {{ (loop.index0 % 3) * 80 }}ms">
+                <div class="pointer-events-none absolute -top-16 -right-16 size-40 rounded-full bg-(--accent)/10 blur-2xl transition group-hover:bg-(--accent)/20" aria-hidden="true"></div>
+                <div class="hex size-3 bg-(--accent)" aria-hidden="true"></div>
+                <h3 class="mt-4 text-lg font-bold">{{ f.title }}</h3>
+                <p class="mt-2 text-sm leading-relaxed text-ink-1">{{ f.text }}</p>
+                <span class="chip mt-4 border-(--accent)/30 bg-(--accent)/10 text-(--accent)">{{ f.tag }}</span>
+            </li>
+            {% endfor %}
+        </ul>
+    </div>
+</section>
+
+{# ======================================================================
+   Architecture
+   ====================================================================== #}
+<section id="architecture" class="pt-24 sm:pt-32">
+    <div class="shell">
+        <div class="reveal max-w-2xl">
+            <p class="eyebrow">Under the hood</p>
+            <h2 class="section-title mt-3">Architecture</h2>
+            <p class="section-lead">How a project becomes one module. <span class="hidden md:inline">Hover or focus any node to see what happens at that stage.</span></p>
+        </div>
+
+        {# Narrow screens: the same steps as a list #}
+        <ol class="mt-10 space-y-3 md:hidden">
+            {% for s in flow %}
+            <li class="reveal glass flex gap-4 p-4" style="--accent: var({{ s.accent }})">
+                <span class="hex grid size-9 shrink-0 place-items-center bg-(--accent)/15 font-mono text-xs font-bold text-(--accent)">{{ loop.index }}</span>
+                <div class="min-w-0">
+                    <h3 class="text-base font-bold">{{ s.name }}</h3>
+                    <p class="mt-0.5 font-mono text-[0.7rem] break-words text-ink-2">{{ s.sub }}</p>
+                    <p class="mt-2 text-sm leading-relaxed text-ink-1">{{ s.info }}</p>
+                </div>
+            </li>
+            {% endfor %}
+        </ol>
+
+        {# Wider screens: the interactive flowchart #}
+        <div class="reveal relative mt-10 hidden overflow-hidden glass-strong md:block">
+            <div class="pointer-events-none absolute inset-0 opacity-[0.05]" style="background-image: url(&quot;data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='100' viewBox='0 0 56 100'%3E%3Cpath d='M28 66L0 50L0 16L28 0L56 16L56 50L28 66L28 100' fill='none' stroke='%23f2a83b' stroke-width='1'/%3E%3Cpath d='M28 0L28 34L0 50L0 84L28 100L56 84L56 50L28 34' fill='none' stroke='%23f2a83b' stroke-width='1'/%3E%3C/svg%3E&quot;); background-size: 56px 100px" aria-hidden="true"></div>
+            <div class="relative mx-auto max-w-[900px] px-4 py-10" data-flowchart>
+                <svg class="fc-svg" viewBox="0 0 900 1030" role="group" aria-label="Waspy's compilation flowchart, from a project directory to optimized WebAssembly">
+                    <defs>
+                        {% for c in ["amber", "green", "ember", "teal"] %}
+                        <filter id="fc-glow-{{ c }}" x="-30%" y="-30%" width="160%" height="160%" style="--accent: var(--c-{{ c }})">
+                            <feGaussianBlur in="SourceAlpha" stdDeviation="6" result="blur"/>
+                            <feFlood class="fc-flood" result="color"/>
+                            <feComposite in="color" in2="blur" operator="in" result="shadow"/>
+                            <feMerge><feMergeNode in="shadow"/><feMergeNode in="SourceGraphic"/></feMerge>
+                        </filter>
+                        {% endfor %}
+                        <marker id="fc-arrow-teal" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon class="fc-head-teal" points="0 0, 10 3.5, 0 7"/></marker>
+                        <marker id="fc-arrow-ember" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon class="fc-head-ember" points="0 0, 10 3.5, 0 7"/></marker>
+                    </defs>
+
+                    {# Connectors #}
+                    <g aria-hidden="true">
+                        <line class="fc-line" x1="450" y1="72" x2="450" y2="126" marker-end="url(#fc-arrow-teal)"/>
+                        <line class="fc-line" x1="450" y1="202" x2="450" y2="248" marker-end="url(#fc-arrow-teal)"/>
+                        <line class="fc-line fc-line-ember" x1="450" y1="324" x2="450" y2="368" marker-end="url(#fc-arrow-ember)"/>
+                        <text class="fc-label-ember font-sans" x="462" y="352">for each Python file</text>
+                        <line class="fc-line" x1="308" y1="441" x2="354" y2="441" marker-end="url(#fc-arrow-teal)"/>
+                        <line class="fc-line" x1="544" y1="441" x2="590" y2="441" marker-end="url(#fc-arrow-teal)"/>
+                        <line class="fc-line fc-line-ember" x1="450" y1="506" x2="450" y2="550" marker-end="url(#fc-arrow-ember)"/>
+                        <text class="fc-label-ember font-sans" x="462" y="534">merge every IRModule</text>
+                        <line class="fc-line" x1="450" y1="626" x2="450" y2="670" marker-end="url(#fc-arrow-teal)"/>
+                        <text class="fc-label font-sans" x="462" y="654">same as a single file from here</text>
+                        <path class="fc-line" d="M 450 746 C 450 784, 250 768, 250 804" marker-end="url(#fc-arrow-teal)"/>
+                        <line class="fc-line" x1="390" y1="843" x2="508" y2="843" marker-end="url(#fc-arrow-teal)"/>
+                        <text class="fc-label font-mono" x="449" y="832" text-anchor="middle">wasm-encoder</text>
+                        <line class="fc-line" x1="650" y1="880" x2="650" y2="938" marker-end="url(#fc-arrow-teal)"/>
+                        <text class="fc-label font-mono" x="662" y="914">Binaryen, optional</text>
+                    </g>
+
+                    {# Nodes: [x, y, w, h, rx] per step #}
+                    {% set boxes = [
+                        [300, 16, 300, 56, 28],
+                        [215, 128, 470, 74, 14],
+                        [195, 250, 510, 74, 14],
+                        [90, 370, 720, 136, 16],
+                        [195, 552, 510, 74, 14],
+                        [215, 672, 470, 74, 14],
+                        [110, 806, 280, 74, 14],
+                        [510, 806, 280, 74, 14],
+                        [510, 940, 280, 74, 14]
+                    ] %}
+                    {% set glows = ["amber", "green", "ember", "ember", "amber", "amber", "green", "teal", "ember"] %}
+                    {% for s in flow %}
+                    {% set b = boxes[loop.index0] %}
+                    {% set cx = b[0] + b[2] / 2 %}
+                    <g class="fc-node" tabindex="0" role="button" data-step="{{ loop.index }}" data-name="{{ s.name | escape }}" data-info="{{ s.info | escape }}" aria-label="Step {{ loop.index }}: {{ s.name | escape }}" style="--accent: var({{ s.accent }})">
+                        <rect class="fc-box{{ ' fc-loop' if loop.index == 4 }}" x="{{ b[0] }}" y="{{ b[1] }}" width="{{ b[2] }}" height="{{ b[3] }}" rx="{{ b[4] }}" filter="url(#fc-glow-{{ glows[loop.index0] }})"/>
+                        {% if loop.index == 1 %}
+                        <text class="fc-title font-display" x="{{ cx }}" y="{{ b[1] + 34 }}" text-anchor="middle">{{ s.name }}</text>
+                        {% elif loop.index == 4 %}
+                        {# The per-file loop: three boxes inside the dashed group #}
+                        <text class="fc-sub font-mono" x="{{ b[0] + 20 }}" y="{{ b[1] + 22 }}">{{ s.sub }}</text>
+                        {% set inner = [[118, "Python source", "file.py", "--c-teal"], [356, "AST", "rustpython-parser", "--c-green"], [592, "IRModule", "lower + module passes", "--c-ember"]] %}
+                        {% for i in inner %}
+                        <rect class="fc-inner" x="{{ i[0] }}" y="402" width="{{ 188 if loop.index == 2 else 190 }}" height="78" rx="11" style="--accent: var({{ i[3] }})"/>
+                        <text class="fc-title-sm font-display" x="{{ i[0] + 95 }}" y="436" text-anchor="middle">{{ i[1] }}</text>
+                        <text class="fc-sub font-mono" x="{{ i[0] + 95 }}" y="459" text-anchor="middle">{{ i[2] }}</text>
+                        {% endfor %}
+                        {% else %}
+                        <text class="fc-title font-display" x="{{ cx }}" y="{{ b[1] + 33 }}" text-anchor="middle">{{ s.name }}</text>
+                        <text class="fc-sub font-mono" x="{{ cx }}" y="{{ b[1] + 55 }}" text-anchor="middle">{{ s.sub }}</text>
+                        {% endif %}
+                    </g>
+                    {% endfor %}
+
+                    {# A dot that runs the pipeline once, when the chart scrolls into view #}
+                    <circle class="fc-pulse" r="4.5" opacity="0" aria-hidden="true">
+                        <animateMotion id="fc-motion" dur="7s" begin="indefinite" fill="freeze" path="M 450 72 L 450 746 C 450 784 250 768 250 806 L 250 843 L 650 843 L 650 1014"/>
+                        <set attributeName="opacity" to="0.95" begin="fc-motion.begin"/>
+                        <animate attributeName="opacity" begin="fc-motion.end" dur="0.6s" from="0.95" to="0" fill="freeze"/>
+                    </circle>
+                </svg>
+
+                <div class="fc-tooltip glass-strong pointer-events-none absolute top-0 left-0 z-20 hidden w-[min(22rem,calc(100%-2rem))] rounded-xl px-4 py-3 text-sm leading-relaxed text-ink" id="fc-tooltip" role="tooltip">
+                    <p class="font-mono text-[0.7rem] font-bold tracking-wider text-honey uppercase" data-tooltip-label></p>
+                    <p class="mt-1.5 text-ink-1" data-tooltip-text></p>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+{# ======================================================================
+   Talks
+   ====================================================================== #}
+<section id="talks" class="pt-24 sm:pt-32">
+    <div class="shell">
+        <div class="reveal max-w-2xl">
+            <p class="eyebrow">On stage</p>
+            <h2 class="section-title mt-3">Talks</h2>
+            <p class="section-lead">Where Waspy has been presented, with recordings and slides where they exist.</p>
+        </div>
+
+        <div class="mt-12 grid gap-5 md:grid-cols-2 lg:grid-cols-3">
+            {% for t in talks %}
+            <article class="reveal flex flex-col overflow-hidden glass transition duration-300 hover:-translate-y-0.5 hover:border-line-strong" style="--accent: var({{ t.accent }}); transition-delay: {{ loop.index0 * 90 }}ms">
+                {% if t.video %}
+                <a href="{{ t.video }}" target="_blank" rel="noopener" class="group relative grid aspect-video place-items-center overflow-hidden border-b border-line bg-bg-1" aria-label="Watch {{ t.title }} on YouTube">
+                    <img src="{{ t.thumb }}" alt="" loading="lazy" width="1280" height="720" class="absolute inset-0 size-full object-cover transition duration-500 group-hover:scale-105">
+                    <span class="absolute inset-0 bg-linear-to-t from-black/50 to-transparent" aria-hidden="true"></span>
+                    <span class="relative grid size-14 place-items-center rounded-full bg-linear-to-br from-amber to-ember text-on-accent shadow-deep transition group-hover:scale-110" aria-hidden="true">{{ icon("play", "size-6 translate-x-0.5 fill-current") }}</span>
+                </a>
+                {% else %}
+                <div class="talk-media flex aspect-video items-end border-b border-(--accent)/20 px-5 py-4">
+                    <span class="font-display text-2xl font-bold text-(--accent)">{{ t.event }}</span>
+                </div>
+                {% endif %}
+                <div class="flex flex-1 flex-col p-5 sm:p-6">
+                    <div class="flex items-center gap-2.5 text-xs text-ink-2">
+                        <span class="chip border-(--accent)/30 bg-(--accent)/10 text-(--accent)">talk</span>
+                        <time datetime="{{ t.date }}">{{ t.dateLabel }}</time>
+                    </div>
+                    <h3 class="mt-3 text-lg leading-snug font-bold">{{ t.title }}</h3>
+                    <p class="mt-1.5 text-sm font-medium text-honey light:text-amber">{{ t.speakers }}</p>
+                    <p class="mt-3 flex-1 text-sm leading-relaxed text-ink-1">{{ t.text }}</p>
+                    <div class="mt-5 flex flex-wrap gap-2">
+                        {% for l in t.links %}
+                        <a href="{{ l.href }}" class="{{ 'btn-primary' if l.primary else 'btn-ghost' }} btn-sm"{% if l.external %} target="_blank" rel="noopener"{% endif %}>{{ l.label }}{% if l.external %} {{ icon("external", "size-3") }}{% endif %}</a>
+                        {% endfor %}
+                    </div>
+                </div>
+            </article>
+            {% endfor %}
+        </div>
+
+        <p class="reveal mt-8 text-sm text-ink-2">Spoke about Waspy somewhere? <a href="{{ site.editBase }}src/index.njk" class="link">Add your talk</a> to this page.</p>
+    </div>
+</section>
+
+{# ======================================================================
+   Contributors
+   ====================================================================== #}
+<section id="contributors" class="pt-24 sm:pt-32">
+    <div class="shell">
+        <div class="reveal max-w-2xl">
+            <p class="eyebrow">The people</p>
+            <h2 class="section-title mt-3">Contributors</h2>
+            <p class="section-lead">Waspy is built in the open by everyone who has sent a patch, an issue, or an idea.</p>
+        </div>
+
+        <div class="reveal mt-10 glass p-4 sm:p-6">
+            <div class="flex min-h-28 flex-wrap items-start justify-center gap-1 sm:gap-2" data-contributors data-fallback="{{ site.repo }}/graphs/contributors" aria-live="polite" aria-busy="true">
+                <p class="self-center text-sm text-ink-2">Loading contributors from GitHub…</p>
+            </div>
+        </div>
+
+        <div class="reveal relative mt-8 overflow-hidden glass-strong p-6 sm:p-10">
+            <div class="pointer-events-none absolute -top-24 -right-24 size-72 rounded-full bg-amber/15 blur-3xl" aria-hidden="true"></div>
+            <div class="pointer-events-none absolute -bottom-24 -left-24 size-72 rounded-full bg-teal/10 blur-3xl" aria-hidden="true"></div>
+            <div class="relative max-w-3xl">
+                <h3 class="text-2xl font-bold sm:text-3xl">Wanna contribute to <span class="text-gradient">Waspy</span>?</h3>
+                <p class="mt-4 leading-relaxed text-ink-1">Waspy is free and open source under the MIT license, and it gets better every time someone new pokes at it. A compiler is a big surface: the parser, the IR, codegen, the runtime, the docs you are reading right now. There is room for a first commit at almost any level of experience.</p>
+                <p class="mt-3 leading-relaxed text-ink-1">Pick up a good first issue, report a Python snippet that miscompiles, teach the compiler one more builtin, or just tell us what you tried to build and where it broke. Every one of those genuinely moves the project forward, and we would love to work on it together.</p>
+                <div class="mt-7 flex flex-wrap gap-3">
+                    <a href="{{ site.contributing }}" class="btn-primary">Read the contributing guide {{ icon("arrow-right", "size-4") }}</a>
+                    <a href="{{ site.issues }}" class="btn-ghost">Browse open issues</a>
+                    {% if site.discord %}<a href="{{ site.discord }}" class="btn-ghost">Join us on Discord</a>{% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</section>

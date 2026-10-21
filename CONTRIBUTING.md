@@ -12,6 +12,7 @@ Thank you for your interest in contributing to Waspy! This document provides gui
 - [Building and Running Examples](#building-and-running-examples)
   - [Building the Project](#building-the-project)
   - [Running Examples](#running-examples)
+  - [The Playground](#the-playground)
   - [Creating and Running Your Own Examples](#creating-and-running-your-own-examples)
 - [Development Workflow](#development-workflow)
   - [Making Changes](#making-changes)
@@ -81,12 +82,13 @@ waspy/
 │   │   ├── logging.rs   - Logging utilities
 │   │   └── paths.rs     - Path utilities
 │   └── lib.rs           - Main library entry point
+├── docs/                - The website (Eleventy + Tailwind; `just docs` serves it)
 ├── tests/               - Test suite
 │   ├── integration/     - Integration tests
 │   └── unit/            - Unit tests
 ├── Cargo.toml           - Project configuration
 ├── justfile             - Command runner configuration
-└── README.md            - Project documentation
+└── README.md            - Installation, quick start, and links to the docs site
 ```
 
 ## Building and Running Examples
@@ -133,6 +135,23 @@ just compile-project examples/calculator_project
 
 ```sh
 just run-typed-demo
+```
+
+#### Verify and Benchmark
+
+```sh
+just verify-examples   # compile every bundled example through the real drivers
+just benchmark         # time compilation (release build)
+```
+
+### The Playground
+
+The website's playground (`docs/src/playground/`) is built from `playground/`, a small wasm-bindgen wrapper crate. It needs the `wasm32-unknown-unknown` target and the wasm-bindgen CLI at the version `playground/Cargo.toml` pins:
+
+```sh
+just playground          # build docs/src/playground/compiler/
+just playground-verify   # compile every playground example, check against CPython
+just playground-serve    # build, then serve the site at localhost:8000/waspy/playground/
 ```
 
 ### Creating and Running Your Own Examples
@@ -273,7 +292,8 @@ Waspy follows Rust's standard coding conventions:
 3. **Documentation**
    - Add documentation comments to public APIs
    - Follow the [rustdoc conventions](https://doc.rust-lang.org/rustdoc/what-is-rustdoc.html)
-   - If your change adds or completes a user-facing feature, update the development board (`docs/modules/index.html`). Tag the feature's version as `upcoming`; version tags on the board only ever name published releases, and maintainers swap `upcoming` for the real version number at release time
+   - If your change adds or completes a user-facing feature, update the development board (`docs/src/_data/modules.json`). Tag the feature's version as `upcoming`; version tags on the board only ever name published releases, and maintainers swap `upcoming` for the real version number at release time
+   - If it changes what compiles, a limitation, the library API, or the host interface, update the documentation pages (`docs/src/docs/`)
 
 4. **Commit Messages**
    - Write clear, concise commit messages
@@ -293,7 +313,7 @@ Releases are handled by the maintainers. The process is:
    - Update version in `Cargo.toml`
 
 2. **Docs Sync**
-   - In `docs/modules/index.html`, replace the `upcoming` version tags of features shipping in this release with the new version number. Features merged but not part of the release stay labeled `upcoming`; the board never shows a version that hasn't been published
+   - In `docs/src/_data/modules.json`, replace the `upcoming` version tags of features shipping in this release with the new version number. Features merged but not part of the release stay labeled `upcoming`; the board never shows a version that hasn't been published
 
 3. **Publish**
    - Run `just publish` to publish to crates.io and create a GitHub release
@@ -334,6 +354,6 @@ To verify the generated WebAssembly, you can use:
 ## Community
 
 - **Issues**: Use [GitHub Issues](https://github.com/anistark/waspy/issues) for bug reports and feature requests
-- **Discussions**: For questions and general discussion, use [GitHub Discussions](https://github.com/anistark/waspy/discussions)
+- **Discord**: For questions and general discussion, join us on [Discord](https://discord.gg/AJMEeFXxXy)
 
 Thank you for contributing to Waspy! 👋

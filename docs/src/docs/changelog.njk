@@ -1,0 +1,31 @@
+---
+title: Changelog
+eyebrow: Project
+description: Every release of waspy, and what is merged on main since the last one. Rendered from CHANGELOG.md in the repository.
+permalink: /docs/changelog/
+tocDepth: 2
+editUrl: https://github.com/anistark/waspy/edit/main/CHANGELOG.md
+---
+<style>
+    .changelog h2 { margin-bottom: 0.25rem; }
+    .changelog .release-meta { margin-top: 0; font-size: 0.85rem; color: var(--c-ink-2); }
+    .changelog .release-meta a { color: var(--c-ink-2); }
+    .changelog .release-meta a:hover { color: var(--c-honey); }
+    .changelog h3 {
+        display: inline-flex;
+        margin-top: 1.75rem;
+        border-radius: 9999px;
+        padding: 0.1rem 0.7rem;
+        font-family: var(--font-mono);
+        font-size: 0.72rem;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        background: color-mix(in srgb, var(--c-amber) 12%, transparent);
+        color: var(--c-amber);
+    }
+    .changelog h3 .header-anchor { display: none; }
+</style>
+<div class="changelog">
+{{ changelog.html | safe }}
+</div>

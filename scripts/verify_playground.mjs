@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Verify the docs-site playground build (`just playground`) end to end.
 //
-// Loads the wasm-bindgen bundle from docs/playground/compiler/ under Node,
-// compiles every example the page ships (docs/playground/examples.js), calls
+// Loads the wasm-bindgen bundle from docs/src/playground/compiler/ under Node,
+// compiles every example the page ships (docs/src/playground/examples.js), calls
 // the functions listed below, and requires the answer CPython gives for the
 // same source. The refused example must fail to compile.
 //
@@ -12,7 +12,7 @@ import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { exit } from "node:process";
 
-const root = new URL("../docs/playground/", import.meta.url);
+const root = new URL("../docs/src/playground/", import.meta.url);
 const compiler = await import(new URL("compiler/waspy.js", root));
 await compiler.default({ module_or_path: await readFile(new URL("compiler/waspy_bg.wasm", root)) });
 const { EXAMPLES } = await import(new URL("examples.js", root));
