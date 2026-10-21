@@ -1,0 +1,288 @@
+---
+title: What a program looks like
+eyebrow: Running
+description: One complete working program, and a plain list of the shapes that do not compile. Read it in a minute and you will know whether your code is in scope.
+permalink: /docs/programs/
+---
+{% from "partials/icons.njk" import icon %}
+{# Inline code inside the not-prose components, matching the prose style. #}
+{% set codecls = "[&_code]:rounded-md [&_code]:border [&_code]:border-line [&_code]:bg-surface [&_code]:px-1.5 [&_code]:py-px [&_code]:font-mono [&_code]:text-[0.84em] [&_code]:font-medium [&_code]:text-ink" %}
+
+{% macro tag(kind) %}
+{%- if kind == "refused" -%}<span class="chip chip-progress">refused</span>
+{%- elif kind == "traps" -%}<span class="chip border-ember/30 bg-ember/10 text-ember">traps</span>
+{%- elif kind == "differs" -%}<span class="chip border-red/30 bg-red/10 text-red">differs</span>
+{%- elif kind == "workaround" -%}<span class="chip border-teal/30 bg-teal/10 text-teal">workaround</span>
+{%- endif -%}
+{% endmacro %}
+
+{% macro shape(title, tags) %}
+<li class="py-5 first:pt-1 last:pb-1">
+    <div class="flex flex-wrap items-baseline gap-x-3 gap-y-2">
+        <h3 class="font-display text-base font-semibold text-ink">{{ title | safe }}</h3>
+        <span class="flex flex-wrap gap-1.5">{% for t in tags %}{{ tag(t) }}{% endfor %}</span>
+    </div>
+    <p class="mt-2 text-[0.94rem] leading-relaxed text-ink-1">{{ caller() }}</p>
+</li>
+{% endmacro %}
+
+<div class="not-prose grid gap-4 sm:grid-cols-3 {{ codecls }}">
+    <div class="glass p-5">
+        <div class="flex items-center gap-3">
+            <span class="hex grid size-8 shrink-0 place-items-center bg-green/15 text-green" aria-hidden="true">{{ icon("check", "size-4") }}</span>
+            <h3 class="font-display text-base font-semibold">Compiles and runs</h3>
+        </div>
+        <p class="mt-3 text-sm leading-relaxed text-ink-1">Classes holding collections of instances, inheritance with virtual dispatch, methods calling methods, string and dict work, comprehensions, f-strings, exceptions as objects, generators, closures, printing and file I/O through WASI, and imports across your own files.</p>
+    </div>
+    <div class="glass p-5">
+        <div class="flex items-center gap-3">
+            <span class="hex grid size-8 shrink-0 place-items-center bg-amber/15 font-mono text-sm font-bold text-amber" aria-hidden="true">!</span>
+            <h3 class="font-display text-base font-semibold">Refused, loudly</h3>
+        </div>
+        <p class="mt-3 text-sm leading-relaxed text-ink-1">Everything not implemented is a compile error naming the construct, its line, the enclosing function, and a workaround. A refusal is the design, not a bug.</p>
+    </div>
+    <div class="glass p-5">
+        <div class="flex items-center gap-3">
+            <span class="hex grid size-8 shrink-0 place-items-center bg-red/15 font-mono text-sm font-bold text-red" aria-hidden="true">&ne;</span>
+            <h3 class="font-display text-base font-semibold">Answers differently</h3>
+        </div>
+        <p class="mt-3 text-sm leading-relaxed text-ink-1">Two documented cases: <code>int</code> is 32 bits and wraps instead of growing, and a NaN inside a collection does not equal itself. Everywhere else the rule is Python's answer or a loud failure.</p>
+    </div>
+</div>
+
+<h2 id="a-whole-program">A whole program</h2>
+
+<p>This is the code of <a href="https://github.com/anistark/waspy/blob/main/examples/shopping_cart.py"><code>examples/shopping_cart.py</code></a> from the repository, as it is apart from its module docstring. Nothing in it was chosen to show off a compiler feature, and its results are asserted against what CPython answers for the same source, under three WebAssembly runtimes.</p>
+
+<div class="not-prose my-6 code-window">
+    <div class="code-window-bar">
+        <div class="dots" aria-hidden="true"><span></span><span></span><span></span></div>
+        <span>shopping_cart.py</span>
+    </div>
+{% highlight "python" %}
+class Item:
+    def __init__(self, name: str, price: float, qty: int):
+        self.name = name
+        self.price = price
+        self.qty = qty
+
+    def subtotal(self) -> float:
+        return self.price * self.qty
+
+
+class Cart:
+    def __init__(self):
+        self.items = []
+        self.count = 0
+
+    def add(self, name: str, price: float, qty: int):
+        item = Item(name, price, qty)
+        self.items.append(item)
+        self.count = self.count + 1
+
+    def total(self) -> float:
+        out: float = 0.0
+        for it in self.items:
+            out = out + it.subtotal()
+        return out
+
+    def units(self) -> int:
+        n: int = 0
+        for it in self.items:
+            n = n + it.qty
+        return n
+
+
+def discount_rate(total: float) -> float:
+    if total >= 100.0:
+        return 0.10
+    if total >= 50.0:
+        return 0.05
+    return 0.0
+
+
+def checkout() -> float:
+    cart = Cart()
+    cart.add("widget", 9.99, 3)
+    cart.add("gadget", 24.50, 2)
+    cart.add("doohickey", 5.00, 4)
+    subtotal = cart.total()
+    rate = discount_rate(subtotal)
+    return subtotal - subtotal * rate
+
+
+def item_count() -> int:
+    cart = Cart()
+    cart.add("a", 1.0, 2)
+    cart.add("b", 2.0, 3)
+    return cart.count * 100 + cart.units()
+
+
+def empty_cart_total() -> float:
+    cart = Cart()
+    return cart.total()
+{% endhighlight %}
+</div>
+
+<p>Compiled, every function above is an export a host can call: <code>checkout()</code> answers <code>94.0215</code>, <code>item_count()</code> answers <code>205</code>, and <code>empty_cart_total()</code> answers <code>0.0</code>, as CPython does. What you need to know to write the same:</p>
+
+<div class="not-prose glass my-6 p-5 sm:p-6 {{ codecls }}">
+    <dl class="grid gap-x-8 gap-y-5 sm:grid-cols-[8.5rem_minmax(0,1fr)]">
+        <dt class="font-mono text-xs font-semibold tracking-wider text-amber uppercase sm:pt-0.5">Annotations</dt>
+        <dd class="-mt-3.5 text-[0.94rem] leading-relaxed text-ink-1 sm:mt-0">Parameter and return annotations pick the WebAssembly value types. A collection passed into or out of a function needs the parameterised form, <code>List[str]</code> rather than a bare <code>list</code>: the parameterised form is what gives the compiler an element type. Calls may pass arguments by keyword, and functions and <code>__init__</code> collect extras with <code>*args: T</code> and <code>**kwargs: T</code>.</dd>
+
+        <dt class="font-mono text-xs font-semibold tracking-wider text-amber uppercase sm:pt-0.5">Entry points</dt>
+        <dd class="-mt-3.5 text-[0.94rem] leading-relaxed text-ink-1 sm:mt-0">Every module-level <code>def</code> is exported. There is no top-level run step, so module level holds definitions only; put the code that runs in a function, or under <code>if __name__ == "__main__":</code>, which makes the module a WASI command that <code>wasmtime run</code> runs like <code>python3</code>.</dd>
+
+        <dt class="font-mono text-xs font-semibold tracking-wider text-amber uppercase sm:pt-0.5">Imports</dt>
+        <dd class="-mt-3.5 text-[0.94rem] leading-relaxed text-ink-1 sm:mt-0"><code>import mod</code> and <code>from mod import f</code> resolve sibling <code>.py</code> files (and <code>pkg/mod.py</code> packages) from disk and link them into the one output module, each compiled once. No PyPI packages: beyond your own modules, the supported subset is standard-library only.</dd>
+
+        <dt class="font-mono text-xs font-semibold tracking-wider text-amber uppercase sm:pt-0.5">Side effects</dt>
+        <dd class="-mt-3.5 text-[0.94rem] leading-relaxed text-ink-1 sm:mt-0"><code>print()</code>, <code>input()</code>, <code>sys.argv</code>, and <code>open()</code> go through WASI, and a module imports only the WASI functions it uses, so the program above imports nothing at all. See <a class="link" href="/docs/running/">Running compiled modules</a>.</dd>
+    </dl>
+</div>
+
+<h2 id="what-it-costs">What it costs</h2>
+
+<p>Median of nine release-build compilations on an Apple M1 Pro, via <code>just benchmark</code>. Wall-clock numbers from one machine, so read them for orders of magnitude, not percentages.</p>
+
+<div class="not-prose glass my-6 overflow-x-auto scrollbar-thin" role="region" aria-label="Compile time and module size per program" tabindex="0">
+    <table class="w-full min-w-[36rem] text-sm">
+        <thead>
+            <tr class="border-b border-line-strong text-[0.7rem] tracking-wider text-ink-2 uppercase">
+                <th scope="col" class="px-4 py-3 text-left font-semibold">Program</th>
+                <th scope="col" class="px-4 py-3 text-right font-semibold">Source</th>
+                <th scope="col" class="px-4 py-3 text-right font-semibold">Compile</th>
+                <th scope="col" class="px-4 py-3 text-right font-semibold">Module</th>
+                <th scope="col" class="px-4 py-3 text-right font-semibold">Compile (opt)</th>
+                <th scope="col" class="px-4 py-3 text-right font-semibold">Module (opt)</th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-line font-mono text-[0.82rem] text-ink-1">
+            <tr><th scope="row" class="px-4 py-2.5 text-left font-medium text-ink">shopping_cart</th><td class="px-4 py-2.5 text-right">2.0 KiB</td><td class="px-4 py-2.5 text-right">0.5 ms</td><td class="px-4 py-2.5 text-right">1.4 KiB</td><td class="px-4 py-2.5 text-right">1.8 ms</td><td class="px-4 py-2.5 text-right text-ink">1013 B</td></tr>
+            <tr><th scope="row" class="px-4 py-2.5 text-left font-medium text-ink">text_report</th><td class="px-4 py-2.5 text-right">3.4 KiB</td><td class="px-4 py-2.5 text-right">1.9 ms</td><td class="px-4 py-2.5 text-right">33.7 KiB</td><td class="px-4 py-2.5 text-right">14.4 ms</td><td class="px-4 py-2.5 text-right text-ink">31.8 KiB</td></tr>
+            <tr><th scope="row" class="px-4 py-2.5 text-left font-medium text-ink">library_project</th><td class="px-4 py-2.5 text-right">3.3 KiB</td><td class="px-4 py-2.5 text-right">2.9 ms</td><td class="px-4 py-2.5 text-right">14.1 KiB</td><td class="px-4 py-2.5 text-right">11.1 ms</td><td class="px-4 py-2.5 text-right text-ink">6.6 KiB</td></tr>
+            <tr><th scope="row" class="px-4 py-2.5 text-left font-medium text-ink">nested_collections</th><td class="px-4 py-2.5 text-right">4.7 KiB</td><td class="px-4 py-2.5 text-right">2.2 ms</td><td class="px-4 py-2.5 text-right">60.8 KiB</td><td class="px-4 py-2.5 text-right">30.5 ms</td><td class="px-4 py-2.5 text-right text-ink">55.5 KiB</td></tr>
+        </tbody>
+    </table>
+</div>
+
+<p>A whole program compiles in a few milliseconds into a module of one to a few tens of kilobytes, with no interpreter bundled in: the module is the program, plus the runtime helpers it calls (float formatting, string case mapping, and the like), each built only when a program uses it. Optimization is where the time goes. Binaryen costs 4 to 14 times the rest of the pipeline and takes 6 to 54% off the module, so it is worth running for something you ship and worth skipping in a fast edit loop, which is what <code>CompilerOptions { optimize: false, ..CompilerOptions::default() }</code> is for. The first three rows are end-to-end programs from the repository; <code>nested_collections</code> is the feature example with the largest module, as a second data point at a different shape.</p>
+
+<div class="callout">
+    <p><strong>The rule the compiler holds itself to:</strong> a construct either produces Python's answer or fails loudly. It never quietly produces a different one.</p>
+    <p>There are two documented exceptions. Integer width is the first: <code>int</code> is a 32-bit two's-complement value, so <code>1000000 * 1000000</code> wraps to <code>-727379968</code> where CPython answers <code>1000000000000</code>. If your arithmetic can exceed 32 bits, your program is not in the supported subset. The second is a NaN inside a collection, which does not equal itself (see the list below). Both are explained under <a href="/docs/numbers/">Numbers</a>.</p>
+</div>
+
+<h2 id="shapes">Shapes that do not compile</h2>
+
+<p>Tagged by what happens when you try. <span class="not-prose">{{ tag("refused") }}</span> is a compile error you will see immediately; <span class="not-prose">{{ tag("traps") }}</span> stops the module at run time instead of answering; <span class="not-prose">{{ tag("differs") }}</span> is a case where the answer is not Python's; <span class="not-prose">{{ tag("workaround") }}</span> means there is a supported way to write the same thing.</p>
+
+<div class="not-prose my-6 {{ codecls }}">
+<ul class="divide-y divide-line">
+
+{% call shape("Module-level statements other than definitions", ["refused", "workaround"]) %}
+A loop, <code>if</code>, <code>try</code>, bare call, augmented assignment, tuple unpacking, or write through a subscript or attribute at module level. A WebAssembly module has no top-level run step, so the statement would be compiled away. <code>X = 1</code>, <code>X = helper()</code>, <code>X = ClassName()</code>, <code>def</code>, <code>class</code>, and imports (a <code>try</code>/<code>except ImportError</code> guarded import included) do work, and a definition that is not a plain constant is evaluated once, at instantiation, in source order, so every function shares the same list or instance. Move the rest into a function, or under <code>if __name__ == "__main__":</code>.
+{% endcall %}
+
+{% call shape("<code>async def</code>, <code>await</code>, <code>async for</code>, <code>async with</code>", ["refused"]) %}
+There is no event loop in the output.
+{% endcall %}
+
+{% call shape("Starred parameters on methods, <code>**</code> unpacking in a call, positional-only parameters", ["refused"]) %}
+Functions and <code>__init__</code> take <code>*args: T</code> (a tuple of <code>T</code>), <code>**kwargs: T</code> (a <code>dict[str, T]</code>), and keyword-only parameters, <code>f(*xs)</code> passes a list or tuple on as <code>*args</code>, and keyword arguments work in every call. Other methods take neither starred nor keyword-only parameters, a call cannot unpack a dict with <code>**</code>, and <code>/</code> is refused. Every call to one of the module's own functions is checked against its signature, so a surplus or missing argument is a compile-time <code>TypeError</code>.
+{% endcall %}
+
+{% call shape("<code>match</code>, <code>del name</code>, <code>except*</code>, <code>type</code> aliases, <code>from x import *</code>", ["refused"]) %}
+Not implemented. Each is reported by name with its location, and so is <code>del</code> of an attribute or a stepped slice. <code>global</code>, <code>nonlocal</code>, nested <code>def</code>, <code>assert</code>, conditional expressions, and <code>del</code> of a list index, list slice, or dict key do work.
+{% endcall %}
+
+{% call shape("Metaclass shapes beyond <code>__new__</code>, <code>__init__</code>, and <code>__call__</code>", ["refused"]) %}
+Multiple inheritance works, along CPython's C3 method resolution order with cooperative <code>super()</code>, and so do metaclasses: a metaclass's <code>__new__</code> and <code>__init__</code> run once for each class it makes, specialized at compile time, and its <code>__call__</code> replaces instantiation. The class <code>namespace</code> argument, <code>__prepare__</code>, creating a class by calling the metaclass, and class keywords other than <code>metaclass=</code> are refused.
+{% endcall %}
+
+{% call shape("An override that changes the signature", ["refused", "workaround"]) %}
+Every implementation of an overridden method is reached through one indirect call, which names a single WebAssembly signature, so <code>def m(self)</code> in the base and <code>def m(self, k: int)</code> in the subclass is refused. Give the override the same parameters and return type.
+{% endcall %}
+
+{% call shape("Indexing, measuring, or calling a method on a parameter nothing types", ["refused", "workaround"]) %}
+A lambda's parameters, and a nested function's unannotated ones, take their types from the calls in their scope when those agree, and a <code>sorted()</code> key's from the elements it is given, so <code>sorted(pairs, key=lambda kv: kv[1])</code> works. A parameter nothing types (a lambda only passed on to an unannotated parameter, or called with an int in one place and a str in another) holds an untyped word, so <code>kv[1]</code> or <code>len(w)</code> on it is refused rather than answering from that word. Use a named <code>def</code>, whose parameters can be annotated.
+{% endcall %}
+
+{% call shape("A decorator the compiler cannot apply", ["refused", "workaround"]) %}
+The method kinds, <code>@dataclass</code>, <code>@abstractmethod</code>, <code>@functools.total_ordering</code>, <code>@functools.singledispatch</code> with <code>@f.register</code>, the caching decorators (accepted, no effect), and decorators the program writes itself all work on module functions: a user decorator is applied at compile time and specialized for each function it wraps, factories and stacks included. A user decorator on a method or a class, a wrapper that uses <code>*args</code> other than to pass it on, <code>@cached_property</code>, <code>@singledispatchmethod</code>, and a decorator name the program never defines are refused, and so are calls to <code>functools.partial</code>, <code>reduce</code>, and <code>cmp_to_key</code>. Write the wrapper's work inline, or use <code>@property</code>.
+{% endcall %}
+
+{% call shape("Comparing collections whose element types differ or are unknown", ["refused", "workaround"]) %}
+Tuples and lists compare by value, and a tuple works as a set member or a dict key. Comparing two with different element types (<code>(1, 2) == (1.0, 2)</code>, True in CPython) or with element types the compiler cannot see is refused rather than read at the wrong width, and so are equality between dicts and a list, dict, or set used as a set member or dict key (unhashable in CPython). Annotate the collections (<code>List[Tuple[int, int]]</code>) so both sides are known.
+{% endcall %}
+
+{% call shape("Mixing types in one collection", ["refused", "workaround"]) %}
+Every slot in a collection is read at one width, so a literal mixing types no one type holds (<code>[1, "a"]</code>, <code>[1, True]</code>) is refused; use a class or a tuple for a record. An int written into a float collection is widened for you (<code>xs.append(3)</code> on a <code>List[float]</code>). The other direction is refused, because storing <code>2.5</code> where the slot is read as an integer would truncate it. Make the elements one type.
+{% endcall %}
+
+{% call shape("Reading a field through an unannotated parameter", ["refused", "workaround"]) %}
+<code>def total(cart): return cart.count</code> has no type for <code>cart</code>, so the read is refused with a hint rather than answering 0. Annotate the parameter (<code>cart: Cart</code>). The rich comparison methods are the exception: an unannotated <code>other</code> in <code>__eq__</code>, <code>__lt__</code>, and the rest is typed as the class.
+{% endcall %}
+
+{% call shape("A string, float, collection, or instance through an untyped place", ["refused", "workaround"]) %}
+An unannotated parameter or return, and the elements of a bare <code>list</code>, <code>set</code>, or <code>dict</code> parameter or return, hold one word read back as an int. Ints, bools, <code>None</code>, and functions pass through; anything else is refused, since a string would lose its length and a float its width. Annotate the parameter, or write <code>List[str]</code> and <code>Dict[str, int]</code>. A bare annotation on a variable is fine: its elements take the type of the value assigned.
+{% endcall %}
+
+{% call shape("<code>x is None</code> on an untyped value, and <code>dict.get(key)</code> without a default", ["refused", "workaround"]) %}
+<code>None</code> is the word 0, which an untyped value can also be, so the test cannot be answered there. An <code>Optional[int]</code>, <code>Optional[bool]</code>, or <code>Optional[float]</code> is boxed, so <code>is None</code>, <code>==</code>, and truthiness on one give CPython's answer; arithmetic between two optional numbers is refused. <code>dict.get(key)</code> with no default is refused where the values are ints, floats, or strings, which have no distinct word for the <code>None</code> a missing key answers; pass a default.
+{% endcall %}
+
+{% call shape("<code>str.format</code> or <code>%</code> on a format string built at run time", ["refused"]) %}
+The whole format specification mini-language works in f-strings, <code>format()</code>, <code>.format()</code>, and <code>%</code>, digit for digit with CPython. <code>.format()</code> and <code>%</code> need a literal format string, and a <code>*</code> width or precision in <code>%</code>, or a precision on <code>%d</code>, <code>%x</code>, or <code>%o</code>, is refused. A spec CPython rejects is a compile error carrying CPython's message when it is a literal, and traps when it is built at run time.
+{% endcall %}
+
+{% call shape("<code>**</code> with a fractional or negative exponent", ["traps"]) %}
+Powers are computed by repeated multiplication. <code>2.0 ** 0.5</code> traps, because it needs exp/log this runtime does not carry, and a negative integer exponent traps because Python's answer is a float an int cannot hold. <code>float()</code> and <code>int()</code> of a string with non-ASCII digits or spaces trap too, where CPython would accept them.
+{% endcall %}
+
+{% call shape("Two modules defining the same function name", ["refused", "workaround"]) %}
+Merged modules share one namespace, so <code>utils.format</code> next to <code>report.format</code> is a compile error naming both files. Rename one.
+{% endcall %}
+
+{% call shape("Object lifetime", ["differs"]) %}
+The allocator has no <code>free</code>: every instance lives until the module is torn down, and <code>__del__</code> is never invoked. A long-running program that allocates in a loop will grow its memory, and a generator abandoned mid-iteration does not run its <code>finally</code> blocks until <code>close()</code> is called.
+{% endcall %}
+
+{% call shape("A NaN inside a collection", ["differs"]) %}
+With <code>x = float("nan")</code>, <code>(x,) == (x,)</code> and <code>[x] == [x]</code> are False here, where CPython answers True: floats are unboxed values, so there is no object identity for CPython's same-object shortcut to find. <code>x == x</code> is False in both.
+{% endcall %}
+
+{% call shape("Tracebacks", ["differs"]) %}
+No traceback is kept. An exception a <code>__main__</code> block does not catch writes only the last line of CPython's report (<code>ValueError: boom</code>) to standard error and exits with status 1.
+{% endcall %}
+
+{% call shape("Third-party packages, and most of the standard library", ["refused"]) %}
+No PyPI. Standard-library support is small so far: the module constants (<code>math.pi</code>, <code>os.sep</code>, ...), <code>sys.stdin</code>, <code>sys.stdout</code>, <code>sys.stderr</code>, <code>sys.argv</code>, and <code>sys.exit()</code>, <code>re.sub</code> and <code>re.escape</code> on constant arguments, and the <code>functools</code> decorators. Every other function in <code>sys</code>, <code>os</code>, <code>os.path</code>, <code>math</code>, <code>random</code>, <code>json</code>, <code>re</code>, <code>datetime</code>, <code>logging</code>, <code>collections</code>, <code>itertools</code>, and <code>functools</code> is refused at compile time, and each is tracked on the <a class="link" href="/modules/">modules board</a>.
+{% endcall %}
+
+</ul>
+</div>
+
+<h2 id="where-to-look-next">Where to look next</h2>
+
+<p>The repository's <code>examples/</code> directory holds the programs this page is drawn from, each asserted against CPython in the test suite.</p>
+
+<div class="not-prose my-6 grid gap-4 sm:grid-cols-2">
+    <a class="card-link group" href="https://github.com/anistark/waspy/blob/main/examples/shopping_cart.py">
+        <span class="flex items-center justify-between gap-2 font-mono text-sm font-semibold text-ink group-hover:text-honey">shopping_cart.py {{ icon("external", "size-3.5 text-ink-2") }}</span>
+        <span class="mt-2 block text-sm leading-relaxed text-ink-1">A domain model: classes holding instances, methods calling methods, float money arithmetic.</span>
+    </a>
+    <a class="card-link group" href="https://github.com/anistark/waspy/blob/main/examples/text_report.py">
+        <span class="flex items-center justify-between gap-2 font-mono text-sm font-semibold text-ink group-hover:text-honey">text_report.py {{ icon("external", "size-3.5 text-ink-2") }}</span>
+        <span class="mt-2 block text-sm leading-relaxed text-ink-1">A word-frequency tool: string methods, dict accumulation, sorting, comprehensions, fixed-point output.</span>
+    </a>
+    <a class="card-link group" href="https://github.com/anistark/waspy/tree/main/examples/library_project">
+        <span class="flex items-center justify-between gap-2 font-mono text-sm font-semibold text-ink group-hover:text-honey">library_project/ {{ icon("external", "size-3.5 text-ink-2") }}</span>
+        <span class="mt-2 block text-sm leading-relaxed text-ink-1">Four modules with the domain class shared between them, compiled from the entry file.</span>
+    </a>
+    <a class="card-link group" href="/docs/limitations/">
+        <span class="flex items-center justify-between gap-2 font-display text-sm font-semibold text-ink group-hover:text-honey">Limitations {{ icon("arrow-right", "size-3.5 text-ink-2") }}</span>
+        <span class="mt-2 block text-sm leading-relaxed text-ink-1">The authoritative, exhaustive statement of what the supported subset leaves out, and why.</span>
+    </a>
+</div>

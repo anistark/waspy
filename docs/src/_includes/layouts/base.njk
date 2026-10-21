@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    {% set pageTitle = (title + " · " + site.title) if title and not homepage else (site.title + " · " + site.tagline) %}
+    {% set pageDescription = description or site.description %}
+    <title>{{ pageTitle }}</title>
+    <meta name="description" content="{{ pageDescription }}">
+    <link rel="canonical" href="{{ site.url }}{{ page.url }}">
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="{{ site.title }}">
+    <meta property="og:title" content="{{ pageTitle }}">
+    <meta property="og:description" content="{{ pageDescription }}">
+    <meta property="og:url" content="{{ site.url }}{{ page.url }}">
+    <meta property="og:image" content="{{ site.url }}/assets/img/logo.png">
+    <meta name="twitter:card" content="summary">
+    <meta name="theme-color" content="#15100a" media="(prefers-color-scheme: dark)">
+    <meta name="theme-color" content="#faf5ea" media="(prefers-color-scheme: light)">
+    <link rel="icon" href="/assets/img/logo.png" type="image/png">
+
+    <script>
+        (function () {
+            var t;
+            try { t = localStorage.getItem('theme'); } catch (e) {}
+            if (t !== 'light' && t !== 'dark') {
+                t = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+            }
+            document.documentElement.setAttribute('data-theme', t);
+        })();
+    </script>
+
+    <link rel="preload" href="/assets/fonts/instrument-sans.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="/assets/fonts/bricolage-grotesque.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="stylesheet" href="/assets/css/main.css">
+    {% for href in styles %}<link rel="stylesheet" href="{{ href }}">
+    {% endfor %}
+    {{ head | safe if head }}
+</head>
+<body class="{{ bodyClass }}"{% if critters === false %} data-critters="off"{% endif %}>
+    <a href="#main" class="sr-only z-[60] rounded-full bg-amber px-4 py-2 font-semibold text-on-accent focus:not-sr-only focus:fixed focus:top-3 focus:left-3">Skip to content</a>
+
+    {% include "partials/header.njk" %}
+
+    <main id="main">
+        {{ content | safe }}
+    </main>
+
+    {% if not hideFooter %}{% include "partials/footer.njk" %}{% endif %}
+
+    <script type="module" src="/assets/js/main.js"></script>
+    {% for src in scripts %}<script type="module" src="{{ src }}"></script>
+    {% endfor %}
+</body>
+</html>

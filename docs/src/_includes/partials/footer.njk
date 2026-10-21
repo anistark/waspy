@@ -1,0 +1,64 @@
+{% from "partials/icons.njk" import icon %}
+<footer class="mt-24 border-t border-line">
+    <div class="shell grid gap-10 py-14 sm:grid-cols-2 lg:grid-cols-[1.5fr_1fr_1fr_1fr_1fr]">
+        <div>
+            <a href="/" class="flex items-center gap-2.5">
+                <img src="/assets/img/logo.png" alt="" width="30" height="30" class="size-7.5">
+                <span class="font-display text-lg font-extrabold">waspy</span>
+            </a>
+            <p class="mt-3 max-w-xs text-sm leading-relaxed text-ink-1">{{ site.tagline }}. Written in Rust, open source under the MIT license.</p>
+            <div class="mt-4 flex gap-1">
+                {% for s in site.socials %}
+                <a href="{{ s.href }}" class="grid size-9 place-items-center rounded-full text-ink-2 transition hover:bg-surface hover:text-honey" aria-label="{{ s.label }}">{{ icon(s.icon, "size-4.5") }}</a>
+                {% endfor %}
+            </div>
+        </div>
+
+        <div>
+            <h2 class="font-sans text-xs font-semibold tracking-[0.14em] text-ink-2 uppercase">Learn</h2>
+            <ul class="mt-4 space-y-2.5 text-sm">
+                <li><a class="text-ink-1 hover:text-honey" href="/docs/">Getting started</a></li>
+                <li><a class="text-ink-1 hover:text-honey" href="/docs/python-subset/">The Python subset</a></li>
+                <li><a class="text-ink-1 hover:text-honey" href="/docs/programs/">What a program looks like</a></li>
+                <li><a class="text-ink-1 hover:text-honey" href="/playground/">Playground</a></li>
+                <li><a class="text-ink-1 hover:text-honey" href="{{ site.repo }}/tree/main/examples">Examples</a></li>
+            </ul>
+        </div>
+
+        <div>
+            <h2 class="font-sans text-xs font-semibold tracking-[0.14em] text-ink-2 uppercase">Project</h2>
+            <ul class="mt-4 space-y-2.5 text-sm">
+                <li><a class="text-ink-1 hover:text-honey" href="/modules/">Modules board</a></li>
+                <li><a class="text-ink-1 hover:text-honey" href="/docs/changelog/">Changelog</a></li>
+                <li><a class="text-ink-1 hover:text-honey" href="/paper/">Paper</a></li>
+                <li><a class="text-ink-1 hover:text-honey" href="/#talks">Talks</a></li>
+                <li><a class="text-ink-1 hover:text-honey" href="{{ site.repo }}/releases">Releases</a></li>
+            </ul>
+        </div>
+
+        <div>
+            <h2 class="font-sans text-xs font-semibold tracking-[0.14em] text-ink-2 uppercase">Community</h2>
+            <ul class="mt-4 space-y-2.5 text-sm">
+                <li><a class="text-ink-1 hover:text-honey" href="{{ site.contributing }}">Contributing</a></li>
+                <li><a class="text-ink-1 hover:text-honey" href="{{ site.issues }}">Issues</a></li>
+                {% if site.discord %}<li><a class="text-ink-1 hover:text-honey" href="{{ site.discord }}">Discord</a></li>{% endif %}
+                <li><a class="text-ink-1 hover:text-honey" href="{{ site.crate }}">crates.io</a></li>
+                <li><a class="text-ink-1 hover:text-honey" href="{{ site.apiDocs }}">docs.rs</a></li>
+            </ul>
+        </div>
+
+        <div>
+            <h2 class="font-sans text-xs font-semibold tracking-[0.14em] text-ink-2 uppercase">Related</h2>
+            <ul class="mt-4 space-y-2.5 text-sm">
+                <li><a class="group text-ink-1 hover:text-honey" href="https://github.com/anistark/wasmrun">wasmrun<span class="block text-xs text-ink-2">WASM runtime with debug capabilities</span></a></li>
+                <li><a class="group text-ink-1 hover:text-honey" href="https://anistark.github.io/wasmhub/">wasmhub<span class="block text-xs text-ink-2">Open source hub of WASM language runtimes</span></a></li>
+            </ul>
+        </div>
+    </div>
+    <div class="border-t border-line">
+        <div class="shell flex flex-wrap items-center justify-between gap-2 py-5 text-xs text-ink-2">
+            <p>&copy; {{ "" | year }} Waspy contributors. MIT licensed.</p>
+            <p>Compiled with 💛 for the Python community.</p>
+        </div>
+    </div>
+</footer>

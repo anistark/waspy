@@ -1,8 +1,9 @@
 // `just board-check`: the development board tells the truth.
 //
-// Every feature on docs/modules/index.html names the test in
-// tests/integration/board.rs that backs it (`test: "card::name"`). This runs
-// that suite, ignored tests included, and fails when:
+// The board's data is docs/src/_data/modules.json, which the site renders at
+// /modules/. Every feature in it names the test in tests/integration/board.rs
+// that backs it (`"test": "card::name"`). This runs that suite, ignored tests
+// included, and fails when:
 //
 //   - a done feature names no test, or its test is missing, ignored, or fails;
 //   - an open feature's test passes (the feature is done: move it on the board);
@@ -15,16 +16,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
-const html = readFileSync('docs/modules/index.html', 'utf8');
-const marker = 'const moduleData = ';
-const start = html.indexOf(marker) + marker.length;
-let depth = 0;
-let end = start;
-for (; end < html.length; end++) {
-    if (html[end] === '{') depth++;
-    else if (html[end] === '}' && --depth === 0) break;
-}
-const moduleData = new Function(`return ${html.slice(start, end + 1)}`)();
+const moduleData = JSON.parse(readFileSync('docs/src/_data/modules.json', 'utf8'));
 
 const cargo = (args) =>
     execFileSync('cargo', ['test', '--all-features', '--test', 'integration_board', '--', ...args], {

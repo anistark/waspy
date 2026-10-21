@@ -1,0 +1,16 @@
+---
+layout: layouts/base.njk
+title: Page not found
+permalink: /404.html
+eleventyExcludeFromCollections: true
+---
+{% from "partials/icons.njk" import icon %}
+<section class="shell flex min-h-[60dvh] flex-col items-center justify-center py-20 text-center">
+    <div class="hex grid size-20 place-items-center bg-amber/15 font-mono text-2xl font-bold text-amber">404</div>
+    <h1 class="mt-8 text-4xl font-extrabold sm:text-5xl">This page did not <span class="text-gradient">compile</span></h1>
+    <p class="mt-4 max-w-md text-lg text-ink-1">There is nothing at this address. It may have moved when the documentation did.</p>
+    <div class="mt-8 flex flex-wrap justify-center gap-3">
+        <a href="/" class="btn-primary">Home</a>
+        <a href="/docs/" class="btn-ghost">{{ icon("book", "size-4") }} Documentation</a>
+    </div>
+</section>

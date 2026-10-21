@@ -58,7 +58,7 @@ lint:
     cargo clippy --all-targets --all-features -- -D warnings
 
 # Build the docs-site playground: waspy compiled to wasm32 (without the
-# Binaryen feature) plus its wasm-bindgen glue, into docs/playground/compiler/.
+# Binaryen feature) plus its wasm-bindgen glue, into docs/src/playground/compiler/.
 # Needs `rustup target add wasm32-unknown-unknown` and the wasm-bindgen CLI at
 # the version pinned in playground/Cargo.toml. Not `--locked`: the lock file
 # records waspy's own version and dependencies, so a release bump or a new
@@ -74,14 +74,14 @@ playground:
       exit 1
     fi
     cargo build --release --target wasm32-unknown-unknown --manifest-path playground/Cargo.toml
-    rm -rf docs/playground/compiler
-    wasm-bindgen --target web --no-typescript --out-dir docs/playground/compiler --out-name waspy \
+    rm -rf docs/src/playground/compiler
+    wasm-bindgen --target web --no-typescript --out-dir docs/src/playground/compiler --out-name waspy \
         playground/target/wasm32-unknown-unknown/release/waspy_playground.wasm
-    ls -lh docs/playground/compiler
+    ls -lh docs/src/playground/compiler
 
-# Build the playground and serve the docs site at http://localhost:8000/playground/
+# Build the playground and serve the website at http://localhost:8000/waspy/playground/
 playground-serve port="8000": playground
-    python3 -m http.server {{port}} --directory docs
+    just docs {{port}}
 
 # Compile every playground example with the built bundle and check the
 # answers against CPython
@@ -131,7 +131,7 @@ publish: prepare-release
 # Clean the project
 clean:
     cargo clean
-    rm -rf examples/output || true
+    rm -rf examples/output docs/_site || true
 
 # Deep clean: build artifacts plus every generated example output (.wasm/.html)
 clean-all: clean
@@ -200,9 +200,21 @@ benchmark:
     echo ""
     ./target/release/examples/benchmark
 
-# Serve the docs website locally (set host to 0.0.0.0 or a tailscale IP to share over the network)
-docs port="8000" host="0.0.0.0":
-    python3 -m http.server {{port}} --bind {{host}} --directory docs
+# Install the website's npm dependencies (docs/package-lock.json)
+docs-install:
+    npm --prefix docs ci
+
+# Eleventy + Tailwind; installs the npm dependencies on first run.
+# Serve the website with live reload at http://localhost:8000/waspy/
+docs port="8000":
+    @[ -d docs/node_modules ] || just docs-install
+    npm --prefix docs run dev -- --port={{port}}
+
+# The playground needs its compiler too: run `just playground` first.
+# Build the website into docs/_site/, as CI deploys it
+docs-build:
+    @[ -d docs/node_modules ] || just docs-install
+    npm --prefix docs run build
 
 # Generate rustdoc API documentation and open in browser
 docs-rs:
@@ -221,7 +233,7 @@ ci: format-check lint test board-check
     @echo "CI checks completed successfully!"
 
 # The development board tells the truth: every done feature on
-# docs/modules/index.html is backed by a passing test in
+# docs/src/_data/modules.json is backed by a passing test in
 # tests/integration/board.rs, and no open feature's test passes yet. This is
 # the command the 1.0 gate runs.
 board-check:
@@ -266,4 +278,4 @@ setup-example name:
     @touch examples/{{name}}.rs
     @touch examples/{{name}}.py
     @echo "Created example files:\n- examples/{{name}}.rs\n- examples/{{name}}.py"
-    @echo "Don't forget to update the justfile and README.md with the new example!"
+    @echo "Don't forget to add the new example to the justfile and the integration tests!"

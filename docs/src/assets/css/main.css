@@ -1,0 +1,593 @@
+/* ==========================================================================
+   Waspy — design system (Tailwind CSS v4)
+
+   Warm honey / amber / ember on warm near-black, with the logo's teal as the
+   cool counterpoint. Glass surfaces, a honeycomb signature, dark first.
+
+   Colors are semantic tokens that switch with [data-theme], so a utility
+   like `bg-surface` or `text-ink-1` is right in both themes without a
+   `dark:` variant. Use `dark:` / `light:` only for one-off differences.
+   ========================================================================== */
+
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+@source "../../";
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+@custom-variant light (&:where([data-theme="light"], [data-theme="light"] *));
+
+/* --------------------------------------------------------------------------
+   Fonts (self-hosted, from Fontsource; copied by eleventy.config.js)
+   -------------------------------------------------------------------------- */
+
+@font-face {
+    font-family: "Bricolage Grotesque Variable";
+    font-style: normal;
+    font-display: swap;
+    font-weight: 200 800;
+    font-stretch: 75% 100%;
+    src: url("../fonts/bricolage-grotesque.woff2") format("woff2-variations");
+}
+
+@font-face {
+    font-family: "Instrument Sans Variable";
+    font-style: normal;
+    font-display: swap;
+    font-weight: 400 700;
+    src: url("../fonts/instrument-sans.woff2") format("woff2-variations");
+}
+
+@font-face {
+    font-family: "Instrument Sans Variable";
+    font-style: italic;
+    font-display: swap;
+    font-weight: 400 700;
+    src: url("../fonts/instrument-sans-italic.woff2") format("woff2-variations");
+}
+
+@font-face {
+    font-family: "JetBrains Mono Variable";
+    font-style: normal;
+    font-display: swap;
+    font-weight: 100 800;
+    src: url("../fonts/jetbrains-mono.woff2") format("woff2-variations");
+}
+
+/* --------------------------------------------------------------------------
+   Theme tokens
+   -------------------------------------------------------------------------- */
+
+:root,
+[data-theme="dark"] {
+    color-scheme: dark;
+
+    --c-bg: #15100a;
+    --c-bg-1: #1d1610;
+    --c-bg-2: #261d14;
+    --c-surface: rgba(41, 31, 20, 0.5);
+    --c-surface-strong: rgba(30, 23, 15, 0.78);
+    --c-line: rgba(255, 196, 110, 0.14);
+    --c-line-strong: rgba(255, 196, 110, 0.26);
+    --c-highlight: rgba(255, 255, 255, 0.06);
+
+    --c-ink: #f7efe1;
+    --c-ink-1: #c8b89f;
+    --c-ink-2: #97866d;
+
+    --c-honey: #ffce7a;
+    --c-amber: #f2a83b;
+    --c-ember: #ec6a3f;
+    --c-teal: #43aebc;
+    --c-green: #97c464;
+    --c-red: #e25c4d;
+
+    --c-on-accent: #1b1208;
+    --c-code-bg: #120d08;
+
+    --shadow-soft: 0 8px 24px rgba(8, 5, 2, 0.35);
+    --shadow-deep: 0 18px 48px rgba(8, 5, 2, 0.5);
+    --honeycomb-opacity: 0.05;
+}
+
+[data-theme="light"] {
+    color-scheme: light;
+
+    /* Accents are darkened from the dark theme's so text in them meets
+       WCAG AA (4.5:1) on the light background. */
+
+    --c-bg: #faf5ea;
+    --c-bg-1: #f1e8d6;
+    --c-bg-2: #e9dcc3;
+    --c-surface: rgba(255, 253, 247, 0.62);
+    --c-surface-strong: rgba(255, 252, 244, 0.86);
+    --c-line: rgba(148, 100, 28, 0.18);
+    --c-line-strong: rgba(148, 100, 28, 0.3);
+    --c-highlight: rgba(255, 255, 255, 0.7);
+
+    --c-ink: #2b2113;
+    --c-ink-1: #6d5b42;
+    --c-ink-2: #7d6a4c;
+
+    --c-honey: #9a6408;
+    --c-amber: #8f5c00;
+    --c-ember: #b5431b;
+    --c-teal: #1a6f7c;
+    --c-green: #4a7a1f;
+    --c-red: #c04336;
+
+    --c-on-accent: #fffaf0;
+    --c-code-bg: #fffaf0;
+
+    --shadow-soft: 0 8px 24px rgba(120, 85, 30, 0.12);
+    --shadow-deep: 0 18px 48px rgba(120, 85, 30, 0.18);
+    --honeycomb-opacity: 0.08;
+}
+
+@theme inline {
+    --color-bg: var(--c-bg);
+    --color-bg-1: var(--c-bg-1);
+    --color-bg-2: var(--c-bg-2);
+    --color-surface: var(--c-surface);
+    --color-surface-strong: var(--c-surface-strong);
+    --color-line: var(--c-line);
+    --color-line-strong: var(--c-line-strong);
+    --color-ink: var(--c-ink);
+    --color-ink-1: var(--c-ink-1);
+    --color-ink-2: var(--c-ink-2);
+    --color-honey: var(--c-honey);
+    --color-amber: var(--c-amber);
+    --color-ember: var(--c-ember);
+    --color-teal: var(--c-teal);
+    --color-green: var(--c-green);
+    --color-red: var(--c-red);
+    --color-on-accent: var(--c-on-accent);
+    --color-code: var(--c-code-bg);
+
+    --shadow-soft: var(--shadow-soft);
+    --shadow-deep: var(--shadow-deep);
+}
+
+@theme {
+    --font-display: "Bricolage Grotesque Variable", "Instrument Sans Variable", ui-sans-serif, system-ui, sans-serif;
+    --font-sans: "Instrument Sans Variable", ui-sans-serif, system-ui, -apple-system, sans-serif;
+    --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+    --radius-card: 1.25rem;
+
+    --animate-honey-drift: honey-drift 90s linear infinite;
+    --animate-fade-up: fade-up 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+
+    @keyframes honey-drift {
+        from { background-position: 0 0; }
+        to { background-position: 56px 200px; }
+    }
+
+    @keyframes fade-up {
+        from { opacity: 0; transform: translateY(14px); }
+        to { opacity: 1; transform: none; }
+    }
+}
+
+/* --------------------------------------------------------------------------
+   Base
+   -------------------------------------------------------------------------- */
+
+@layer base {
+    html {
+        scroll-behavior: smooth;
+        scroll-padding-top: 6rem;
+        -webkit-text-size-adjust: 100%;
+    }
+
+    body {
+        @apply bg-bg font-sans text-ink antialiased;
+        position: relative; /* the page-anchored layers below are placed in it */
+        min-height: 100dvh;
+        overflow-x: hidden;
+        transition: background-color 0.4s ease, color 0.4s ease;
+    }
+
+    h1, h2, h3, h4 {
+        @apply font-display text-ink;
+        letter-spacing: -0.015em;
+        text-wrap: balance;
+    }
+
+    p { text-wrap: pretty; }
+
+    ::selection {
+        background: color-mix(in srgb, var(--c-amber) 35%, transparent);
+    }
+
+    :focus-visible {
+        outline: 2px solid var(--c-amber);
+        outline-offset: 3px;
+        border-radius: 6px;
+    }
+
+    /* Links are never underlined; they stand out by color and weight
+       (see .link), and everything clickable shows the pointer. */
+    a {
+        color: inherit;
+        text-decoration: none;
+    }
+
+    a[href], button:not(:disabled), [role="button"], [role="tab"], [role="switch"],
+    summary, select, label[for], input[type="checkbox"], input[type="radio"],
+    input[type="range"], input[type="file"] {
+        cursor: pointer;
+    }
+
+    :disabled, [aria-disabled="true"] { cursor: not-allowed; }
+
+    code, kbd, pre, samp {
+        @apply font-mono;
+        /* No ligatures: `<=` and `->` must read as typed, not as ≤ and →. */
+        font-variant-ligatures: none;
+    }
+
+    /* Ambient warm glows */
+    body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        background:
+            radial-gradient(ellipse 60% 45% at 15% 8%, color-mix(in srgb, var(--c-amber) 9%, transparent) 0%, transparent 70%),
+            radial-gradient(ellipse 50% 40% at 88% 22%, color-mix(in srgb, var(--c-ember) 8%, transparent) 0%, transparent 70%),
+            radial-gradient(ellipse 55% 40% at 45% 100%, color-mix(in srgb, var(--c-teal) 6%, transparent) 0%, transparent 70%);
+        pointer-events: none;
+        z-index: -2;
+    }
+
+    /* Honeycomb signature layer. Part of the page, not the screen: it
+       scrolls with the content, so the background critters (critters.js),
+       which walk its cells, stay on them as the page scrolls. */
+    body::after {
+        content: "";
+        position: absolute;
+        inset: -120px -120px 0 -120px;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='100' viewBox='0 0 56 100'%3E%3Cpath d='M28 66L0 50L0 16L28 0L56 16L56 50L28 66L28 100' fill='none' stroke='%23f2a83b' stroke-width='1'/%3E%3Cpath d='M28 0L28 34L0 50L0 84L28 100L56 84L56 50L28 34' fill='none' stroke='%23f2a83b' stroke-width='1'/%3E%3C/svg%3E");
+        background-size: 56px 100px;
+        opacity: var(--honeycomb-opacity);
+        /* Strongest at the top of the page, fading over about a screen. */
+        mask-image: radial-gradient(ellipse 90% calc(60vh + 144px) at 50% 0%, black 0%, transparent 75%);
+        pointer-events: none;
+        z-index: -1;
+        animation: var(--animate-honey-drift);
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        html { scroll-behavior: auto; }
+        body::after { animation: none; }
+        *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+    }
+}
+
+/* Composable surfaces and buttons, defined as utilities so components
+   and templates can both use (and @apply) them. */
+
+@utility glass {
+    border-radius: var(--radius-card);
+    border: 1px solid var(--c-line);
+    background-color: var(--c-surface);
+    backdrop-filter: blur(16px) saturate(140%);
+    -webkit-backdrop-filter: blur(16px) saturate(140%);
+    box-shadow: var(--shadow-soft), inset 0 1px 0 var(--c-highlight);
+}
+
+@utility glass-strong {
+    border-radius: var(--radius-card);
+    border: 1px solid var(--c-line);
+    background-color: var(--c-surface-strong);
+    backdrop-filter: blur(20px) saturate(150%);
+    -webkit-backdrop-filter: blur(20px) saturate(150%);
+    box-shadow: var(--shadow-deep), inset 0 1px 0 var(--c-highlight);
+}
+
+@utility btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    border-radius: 9999px;
+    padding: 0.625rem 1.25rem;
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+    font-weight: 600;
+    white-space: nowrap;
+    transition: transform 0.2s, filter 0.2s, border-color 0.2s, color 0.2s, background-color 0.2s;
+
+    &:disabled {
+        cursor: not-allowed;
+        opacity: 0.5;
+    }
+}
+
+/* --------------------------------------------------------------------------
+   Components
+   -------------------------------------------------------------------------- */
+
+@layer components {
+    /* Page width: every page uses nearly the whole screen, up to 1560px,
+       so the header, footer, and content always line up. `shell-wide` is
+       the same width (kept as an alias); `shell-narrow` is for a single
+       column of reading text. */
+    .shell, .shell-wide { @apply mx-auto w-full max-w-[1560px] px-4 sm:px-6 lg:px-8; }
+    .shell-narrow { @apply mx-auto w-full max-w-3xl px-4 sm:px-6; }
+
+    /* A card that lifts on hover; use on <a>. */
+    .card-link {
+        @apply glass block p-5 transition duration-300 hover:-translate-y-0.5 hover:border-line-strong;
+    }
+
+    /* An inline link in running text: no underline, warm and semibold,
+       deepening on hover. */
+    .link {
+        @apply font-semibold text-honey transition-colors duration-150 hover:text-amber;
+    }
+
+    /* Small uppercase label above a heading */
+    .eyebrow {
+        @apply inline-flex items-center gap-2 font-mono text-[0.72rem] font-semibold tracking-[0.14em] text-amber uppercase;
+    }
+
+    .eyebrow::before {
+        content: "";
+        width: 0.55rem;
+        height: 0.62rem;
+        background: currentColor;
+        clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%);
+    }
+
+    /* Warm gradient text for one accented word */
+    .text-gradient {
+        background: linear-gradient(120deg, var(--c-honey), var(--c-ember));
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+    }
+
+    .text-gradient-brand {
+        background: linear-gradient(120deg, var(--c-teal), var(--c-amber));
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+    }
+
+    /* Buttons */
+    .btn-primary {
+        @apply btn text-on-accent shadow-soft hover:-translate-y-px hover:brightness-110;
+        background: linear-gradient(120deg, var(--c-honey), var(--c-amber) 55%, var(--c-ember));
+    }
+
+    .btn-ghost {
+        @apply btn glass rounded-full text-ink hover:border-line-strong hover:text-honey;
+    }
+
+    .btn-sm { @apply px-3.5 py-1.5 text-xs; }
+
+    /* Pills and status chips */
+    .chip {
+        @apply inline-flex items-center gap-1.5 rounded-full border border-line bg-surface px-2.5 py-0.5 font-mono text-[0.7rem] font-medium text-ink-1;
+    }
+
+    .chip-done { @apply border-green/30 bg-green/10 text-green; }
+    .chip-progress { @apply border-amber/30 bg-amber/10 text-amber; }
+    .chip-todo { @apply border-ink-2/30 bg-ink-2/10 text-ink-2; }
+
+    /* Section heading block */
+    .section-title { @apply text-3xl font-bold sm:text-4xl; }
+    .section-lead { @apply mt-3 max-w-2xl text-base leading-relaxed text-ink-1 sm:text-lg; }
+
+    /* Code window with title bar and traffic-light dots */
+    .code-window { @apply glass-strong overflow-hidden; }
+    .code-window-bar {
+        @apply flex items-center gap-3 border-b border-line px-4 py-2.5 font-mono text-xs text-ink-2;
+    }
+    .code-window-bar .dots { @apply flex gap-1.5; }
+    .code-window-bar .dots span { @apply size-2.5 rounded-full bg-ink-2/40; }
+    .code-window-bar .dots span:nth-child(1) { @apply bg-ember/80; }
+    .code-window-bar .dots span:nth-child(2) { @apply bg-amber/80; }
+    .code-window-bar .dots span:nth-child(3) { @apply bg-green/80; }
+    .code-window pre { @apply m-0 rounded-none border-0 bg-transparent; }
+
+    /* Header anchors on docs headings */
+    .header-anchor {
+        @apply ml-2 font-normal text-ink-2 no-underline opacity-0 transition hover:text-honey;
+    }
+    :is(h2, h3):hover > .header-anchor,
+    .header-anchor:focus-visible { @apply opacity-100; }
+
+    /* Documentation prose (Tailwind Typography, in the site's palette) */
+    .prose-waspy {
+        @apply prose max-w-none prose-headings:scroll-mt-24 prose-headings:font-display prose-h2:mt-12 prose-h2:text-2xl prose-h3:text-lg prose-a:font-semibold prose-a:no-underline prose-a:transition-colors hover:prose-a:text-amber prose-code:before:content-none prose-code:after:content-none prose-pre:my-5 prose-li:my-1.5 prose-table:text-sm prose-th:text-xs prose-th:tracking-wider prose-th:uppercase;
+
+        --tw-prose-body: var(--c-ink-1);
+        --tw-prose-headings: var(--c-ink);
+        --tw-prose-lead: var(--c-ink-1);
+        --tw-prose-links: var(--c-honey);
+        --tw-prose-bold: var(--c-ink);
+        --tw-prose-counters: var(--c-ink-2);
+        --tw-prose-bullets: var(--c-amber);
+        --tw-prose-hr: var(--c-line);
+        --tw-prose-quotes: var(--c-ink);
+        --tw-prose-quote-borders: var(--c-amber);
+        --tw-prose-captions: var(--c-ink-2);
+        --tw-prose-kbd: var(--c-ink);
+        --tw-prose-code: var(--c-ink);
+        --tw-prose-pre-code: var(--c-ink);
+        --tw-prose-pre-bg: var(--c-code-bg);
+        --tw-prose-th-borders: var(--c-line-strong);
+        --tw-prose-td-borders: var(--c-line);
+    }
+
+    .prose-waspy :where(code):not(:where(pre code)) {
+        @apply rounded-md border border-line bg-surface px-1.5 py-0.5 text-[0.84em] font-medium;
+        overflow-wrap: anywhere;
+    }
+
+    .prose-waspy :where(pre) {
+        @apply rounded-xl border border-line text-[0.85rem] leading-relaxed;
+    }
+
+    .prose-waspy :where(table) { @apply block overflow-x-auto sm:table; }
+    .prose-waspy :where(td code) { overflow-wrap: normal; }
+
+    /* Copy button added by main.js to a <pre> inside [data-copy-code] */
+    .code-block { @apply relative; }
+    .code-copy {
+        @apply absolute top-2.5 right-2.5 rounded-md border border-line bg-surface-strong px-2 py-1 font-sans text-[0.7rem] font-semibold text-ink-1 opacity-0 transition hover:text-honey focus-visible:opacity-100;
+    }
+    .code-block:hover .code-copy { @apply opacity-100; }
+    @media (hover: none) { .code-copy { @apply opacity-100; } }
+
+    /* Callouts in docs: <div class="callout">…</div> */
+    .callout {
+        @apply my-6 rounded-xl border border-amber/30 bg-amber/5 px-5 py-4 text-ink-1;
+    }
+    .callout > :first-child { @apply mt-0; }
+    .callout > :last-child { @apply mb-0; }
+}
+
+/* --------------------------------------------------------------------------
+   Syntax highlighting (Prism token classes, in the site's palette)
+   -------------------------------------------------------------------------- */
+
+@layer components {
+    pre[class*="language-"] {
+        @apply overflow-x-auto bg-code p-4 font-mono text-[0.85rem] leading-relaxed text-ink;
+        tab-size: 4;
+    }
+
+    .code-window pre[class*="language-"] { background: transparent; }
+
+    .token.comment, .token.prolog, .token.doctype, .token.cdata { color: var(--c-ink-2); font-style: italic; }
+    .token.punctuation { color: var(--c-ink-1); }
+    .token.keyword, .token.important, .token.atrule, .token.rule { color: var(--c-ember); }
+    .token.function, .token.class-name, .token.macro { color: var(--c-honey); }
+    .token.string, .token.char, .token.attr-value, .token.regex, .token.inserted { color: var(--c-green); }
+    .token.number, .token.boolean, .token.constant, .token.symbol { color: var(--c-teal); }
+    .token.operator, .token.entity, .token.url { color: var(--c-amber); }
+    .token.builtin, .token.property, .token.tag, .token.selector, .token.attr-name { color: var(--c-amber); }
+    .token.decorator, .token.annotation { color: var(--c-teal); }
+    .token.deleted { color: var(--c-red); }
+    .token.bold { font-weight: 700; }
+    .token.italic { font-style: italic; }
+}
+
+/* --------------------------------------------------------------------------
+   Background critters (assets/js/critters.js): a python and a crab that walk
+   through the honeycomb now and then, lighting the hexagons they pass.
+   -------------------------------------------------------------------------- */
+
+@layer components {
+    /* Covers the whole page and scrolls with it. */
+    .critters {
+        position: absolute;
+        inset: 0;
+        z-index: -1;
+        overflow: hidden;
+        pointer-events: none;
+    }
+
+    .critters svg { display: block; overflow: visible; }
+
+    /* The python: teal with honey blotches (Python's blue and yellow, in
+       the site's palette). The whole snake fades as one, so its parts do
+       not show through each other. */
+    .critter-snake { opacity: 0.32; }
+    .critter-snake .snake-body,
+    .critter-snake .snake-skull {
+        fill: var(--c-teal);
+        stroke: color-mix(in srgb, var(--c-teal) 55%, black);
+        stroke-width: 0.8;
+        stroke-linejoin: round;
+    }
+    .critter-snake .snake-blotches { fill: var(--c-honey); opacity: 0.75; }
+    .critter-snake .snake-eye { fill: var(--c-bg); }
+    .critter-snake .snake-tongue {
+        fill: none;
+        stroke: var(--c-ember);
+        stroke-width: 1.2;
+        stroke-linecap: round;
+        transform-box: fill-box;
+        transform-origin: left center;
+        animation: snake-tongue 2.8s ease-in-out infinite;
+    }
+    .critter-crab { color: var(--c-ember); opacity: 0.22; }
+    [data-theme="light"] .critter-snake { opacity: 0.38; }
+    [data-theme="light"] .critter-crab { opacity: 0.28; }
+
+    /* The hexagons a critter passes light up in honey, then fade. */
+    .critter-trail polygon {
+        fill: color-mix(in srgb, var(--c-honey) 22%, transparent);
+        stroke: none;
+        filter: drop-shadow(0 0 6px color-mix(in srgb, var(--c-honey) 45%, transparent));
+        animation: critter-trail 7s ease-out forwards;
+    }
+
+    .critter-crab .crab-leg { transform-box: fill-box; transform-origin: center top; }
+    .critter-crab.walking .crab-leg-a { animation: crab-leg 0.22s ease-in-out infinite alternate; }
+    .critter-crab.walking .crab-leg-b { animation: crab-leg 0.22s ease-in-out infinite alternate-reverse; }
+    .critter-crab.snapping .crab-claw { animation: crab-snap 0.3s ease-in-out 3 alternate; }
+
+    @keyframes critter-trail {
+        0% { opacity: 0; }
+        10% { opacity: 0.6; }
+        100% { opacity: 0; }
+    }
+
+    @keyframes snake-tongue {
+        0%, 78%, 100% { transform: scaleX(0); }
+        83% { transform: scaleX(1); }
+        88% { transform: scaleX(0.55); }
+        93% { transform: scaleX(1); }
+    }
+
+    @keyframes crab-leg {
+        from { transform: rotate(-14deg); }
+        to { transform: rotate(14deg); }
+    }
+
+    @keyframes crab-snap {
+        from { transform: rotate(0deg); }
+        to { transform: rotate(-22deg); }
+    }
+
+    @media print {
+        .critters { display: none; }
+    }
+}
+
+/* --------------------------------------------------------------------------
+   Utilities
+   -------------------------------------------------------------------------- */
+
+@utility hex {
+    clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%);
+}
+
+@utility reveal {
+    opacity: 0;
+    transform: translateY(14px);
+    transition: opacity 0.7s cubic-bezier(0.2, 0.7, 0.2, 1), transform 0.7s cubic-bezier(0.2, 0.7, 0.2, 1);
+
+    &.in-view {
+        opacity: 1;
+        transform: none;
+    }
+}
+
+@utility scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: var(--c-line-strong) transparent;
+}
+
+/* Prism's TOML `[table]` token shares its class name with Tailwind's
+   `table` utility (display: table), which split it across lines. Unlayered,
+   so it wins over the utilities layer. */
+.token.table {
+    display: inline;
+    color: var(--c-honey);
+}

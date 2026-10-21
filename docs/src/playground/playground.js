@@ -1,5 +1,10 @@
+// The in-browser playground: Waspy (built to WebAssembly) compiles the
+// editor's Python, and the page shows the module as text, as bytes, and
+// runs its exported functions under a small WASI shim.
+
 import { EXAMPLES } from './examples.js';
 import { createWasi, WasiExit } from './wasi.js';
+import { createPythonEditor, createWatViewer } from './editor.js';
 
 const COMPILER_JS = new URL('./compiler/waspy.js', import.meta.url).href;
 const COMPILER_WASM = new URL('./compiler/waspy_bg.wasm', import.meta.url).href;
@@ -9,21 +14,21 @@ const STORAGE_KEY = 'waspy-playground';
 
 const SECTION_NAMES = ['custom', 'type', 'import', 'function', 'table', 'memory', 'global', 'export', 'start', 'element', 'code', 'data', 'datacount', 'tag'];
 const SECTION_COLORS = {
-    header: 'var(--text-2)',
-    type: 'var(--teal)',
-    import: 'var(--red)',
-    function: 'var(--honey)',
-    table: 'var(--green)',
-    memory: 'var(--green)',
-    global: 'var(--teal)',
-    export: 'var(--ember)',
-    start: 'var(--red)',
-    element: 'var(--honey)',
-    code: 'var(--amber)',
-    data: 'var(--green)',
-    datacount: 'var(--text-1)',
-    custom: 'var(--text-2)',
-    tag: 'var(--red)',
+    header: 'var(--c-ink-2)',
+    type: 'var(--c-teal)',
+    import: 'var(--c-red)',
+    function: 'var(--c-honey)',
+    table: 'var(--c-green)',
+    memory: 'var(--c-green)',
+    global: 'var(--c-teal)',
+    export: 'var(--c-ember)',
+    start: 'var(--c-red)',
+    element: 'var(--c-honey)',
+    code: 'var(--c-amber)',
+    data: 'var(--c-green)',
+    datacount: 'var(--c-ink-1)',
+    custom: 'var(--c-ink-2)',
+    tag: 'var(--c-red)',
 };
 
 // What a call prints, collected by the WASI shim and shown with its result.
@@ -40,7 +45,7 @@ function hostImports() {
 }
 
 const $ = (id) => document.getElementById(id);
-const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
+const isMac = /Mac|iPhone|iPad/.test(navigator.userAgentData?.platform || navigator.platform || '');
 
 const state = {
     compiler: null,
@@ -54,7 +59,6 @@ const state = {
     instance: null,
     view: 'wat',
     timer: null,
-    errorMarks: [],
 };
 
 let editor;
@@ -309,9 +313,7 @@ async function renderWat(bytes) {
     } finally {
         if (mod) mod.destroy();
     }
-    const scroll = watViewer.getScrollInfo();
     watViewer.setValue(state.wat);
-    watViewer.scrollTo(scroll.left, scroll.top);
 }
 
 /* ---------- Errors ---------- */
@@ -330,32 +332,32 @@ function locate(message, source) {
 }
 
 function showError(raw, source, { internal = false } = {}) {
-    clearMarks();
     const messages = raw.split('\n').map((m) => m.replace(/^\s*also:\s*/, '').trim()).filter(Boolean);
     const list = $('errorList');
     list.innerHTML = '';
+    const marks = [];
     for (const msg of messages) {
         const li = document.createElement('li');
+        li.className = 'flex items-start gap-3 font-mono text-[0.8rem] leading-relaxed text-ink [overflow-wrap:anywhere]';
         const text = document.createElement('span');
+        text.className = 'flex-1';
         text.textContent = msg;
         li.appendChild(text);
         const loc = locate(msg, source);
         if (loc && loc.line < editor.lineCount()) {
             const jump = document.createElement('button');
-            jump.className = 'pg-jump';
             jump.type = 'button';
+            jump.className = 'shrink-0 rounded-md border border-red/40 px-2 py-0.5 font-mono text-[0.72rem] text-red transition hover:bg-red/15';
             jump.textContent = `Ln ${loc.line + 1}`;
-            jump.addEventListener('click', () => {
-                editor.focus();
-                editor.setCursor(loc);
-                editor.scrollIntoView(loc, 80);
-            });
+            jump.setAttribute('aria-label', `Go to line ${loc.line + 1}`);
+            jump.addEventListener('click', () => editor.jumpTo(loc.line, loc.ch));
             li.appendChild(jump);
-            markLine(loc.line, msg);
+            marks.push({ ...loc, message: msg });
         }
         list.appendChild(li);
     }
-    $('errorBadge').textContent = internal ? 'Internal compiler error' : 'Compile error';
+    editor.setErrors(marks);
+    $('errorBadge').textContent = internal ? 'Internal compiler error' : messages.length > 1 ? `${messages.length} compile errors` : 'Compile error';
     const note = $('errorNote');
     note.textContent = state.bytes ? 'Showing the output of the last successful compile.' : '';
     if (internal) {
@@ -364,6 +366,7 @@ function showError(raw, source, { internal = false } = {}) {
         link.href = issueUrl(raw, source);
         link.target = '_blank';
         link.rel = 'noopener';
+        link.className = 'link';
         link.textContent = 'Report it with this program';
         note.appendChild(link);
     }
@@ -380,26 +383,8 @@ function issueUrl(message, source) {
     return `https://github.com/anistark/waspy/issues/new?${params}`;
 }
 
-function markLine(line, msg) {
-    editor.addLineClass(line, 'background', 'pg-error-line');
-    const marker = document.createElement('span');
-    marker.className = 'pg-error-marker';
-    marker.textContent = '●';
-    marker.title = msg;
-    editor.setGutterMarker(line, 'pg-errors', marker);
-    state.errorMarks.push(line);
-}
-
-function clearMarks() {
-    for (const line of state.errorMarks) {
-        if (line < editor.lineCount()) editor.removeLineClass(line, 'background', 'pg-error-line');
-    }
-    editor.clearGutter('pg-errors');
-    state.errorMarks = [];
-}
-
 function clearError() {
-    clearMarks();
+    editor.clearErrors();
     $('errorPanel').hidden = true;
     $('output').classList.remove('stale');
 }
@@ -444,7 +429,10 @@ function renderBinary(bytes, sections) {
     for (const s of sections) {
         const color = SECTION_COLORS[s.name] || 'var(--text-2)';
         const size = s.end - s.start;
-        const seg = document.createElement('span');
+        const seg = document.createElement('button');
+        seg.type = 'button';
+        seg.tabIndex = -1;
+        seg.setAttribute('aria-hidden', 'true');
         seg.style.flex = `${size} 0 0`;
         seg.style.setProperty('--sec', color);
         seg.title = `${s.name}: ${formatBytes(size)}`;
@@ -456,6 +444,7 @@ function renderBinary(bytes, sections) {
         btn.type = 'button';
         btn.style.setProperty('--sec', color);
         btn.innerHTML = `<i></i>${s.name} <em>${formatBytes(size)} · ${Math.max(0.1, (size / total) * 100).toFixed(1)}%</em>`;
+        btn.setAttribute('aria-label', `Jump to the ${s.name} section, ${formatBytes(size)}`);
         btn.addEventListener('click', () => jumpToOffset(s.start));
         li.appendChild(btn);
         legend.appendChild(li);
@@ -499,7 +488,7 @@ function jumpToOffset(offset) {
     const row = $(`hx-${offset - (offset % 16)}`);
     if (!row) return;
     const view = $('viewBinary');
-    const top = row.offsetTop - view.querySelector('.pg-sections').offsetHeight - 8;
+    const top = row.offsetTop - $('sections').offsetHeight - 8;
     view.scrollTo({ top, behavior: 'smooth' });
     row.classList.add('flash');
     setTimeout(() => row.classList.remove('flash'), 900);
@@ -521,7 +510,7 @@ function renderRun(exportsList) {
     const fns = state.sigs.filter((s) => exported.has(s.name));
 
     if (!fns.length) {
-        list.innerHTML = '<p class="pg-run-empty">This module exports no top-level functions to call.</p>';
+        list.innerHTML = '<p class="px-4 py-6 text-center text-sm text-ink-2">This module exports no top-level functions to call.</p>';
         return;
     }
 
@@ -529,31 +518,33 @@ function renderRun(exportsList) {
         const params = sig.params.map(parseParam);
         const blocked = params.find((p) => !RUNNABLE.has(p.type));
         const card = document.createElement('div');
-        card.className = 'pg-fn';
+        card.className = 'flex flex-wrap items-center gap-3 rounded-xl border border-line bg-surface py-2.5 pr-2.5 pl-4 transition hover:border-line-strong';
 
         const sigEl = document.createElement('div');
-        sigEl.className = 'pg-fn-sig';
-        const paramHtml = params.map((p) => `${escapeHtml(p.name)}: <span class="ty">${escapeHtml(p.type)}</span>`).join(', ');
-        sigEl.innerHTML = `<span class="kw">def</span> <span class="fn">${escapeHtml(sig.name)}</span>(${paramHtml}) → <span class="ty">${escapeHtml(sig.returns)}</span>`;
+        sigEl.className = 'min-w-0 flex-[1_1_12rem] font-mono text-[0.82rem] text-ink-1 [overflow-wrap:anywhere]';
+        const paramHtml = params.map((p) => `${escapeHtml(p.name)}: <span class="text-teal">${escapeHtml(p.type)}</span>`).join(', ');
+        sigEl.innerHTML = `<span class="text-ember">def</span> <span class="font-semibold text-honey">${escapeHtml(sig.name)}</span>(${paramHtml}) <span class="text-ink-2">-&gt;</span> <span class="text-teal">${escapeHtml(sig.returns)}</span>`;
         card.appendChild(sigEl);
 
         const args = document.createElement('div');
-        args.className = 'pg-fn-args';
+        args.className = 'flex flex-wrap items-center gap-2';
         const inputs = params.map((p) => {
             const label = document.createElement('label');
-            label.className = 'pg-arg';
+            label.className = 'inline-flex items-center gap-1.5 font-mono text-[0.74rem] text-ink-2';
             label.textContent = p.name;
             let input;
             if (p.type === 'bool') {
                 input = document.createElement('select');
+                input.className = 'pg-input w-20';
                 input.innerHTML = '<option value="1">True</option><option value="0">False</option>';
             } else {
                 input = document.createElement('input');
                 input.type = 'text';
+                input.className = 'pg-input w-21';
                 input.inputMode = p.type === 'float' ? 'decimal' : 'numeric';
                 input.placeholder = p.type === 'float' ? '0.0' : '0';
                 input.spellcheck = false;
-                input.addEventListener('input', () => input.classList.remove('invalid'));
+                input.addEventListener('input', () => input.removeAttribute('aria-invalid'));
             }
             input.disabled = !!blocked;
             input.setAttribute('aria-label', `${sig.name} ${p.name}`);
@@ -567,8 +558,9 @@ function renderRun(exportsList) {
 
         const btn = document.createElement('button');
         btn.type = 'button';
-        btn.className = 'pg-run-btn';
-        btn.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 4.5v15a1 1 0 0 0 1.5.86l12.5-7.5a1 1 0 0 0 0-1.72L7.5 3.64A1 1 0 0 0 6 4.5z"/></svg>Run';
+        btn.className = 'inline-flex items-center gap-1.5 rounded-lg border border-green/40 bg-green/12 px-3 py-1.5 text-xs font-semibold text-green transition hover:bg-green/22 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-green/12';
+        btn.innerHTML = '<svg class="size-2.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 4.5v15a1 1 0 0 0 1.5.86l12.5-7.5a1 1 0 0 0 0-1.72L7.5 3.64A1 1 0 0 0 6 4.5z"/></svg>Run';
+        btn.setAttribute('aria-label', `Run ${sig.name}`);
         btn.disabled = !!blocked || !state.instance;
         btn.addEventListener('click', () => call(sig, params, inputs));
         args.appendChild(btn);
@@ -576,7 +568,7 @@ function renderRun(exportsList) {
 
         if (blocked) {
             const note = document.createElement('p');
-            note.className = 'pg-fn-note';
+            note.className = 'basis-full text-xs text-ink-2';
             note.textContent = `Takes a ${blocked.type} argument. The playground can pass int, float and bool values.`;
             card.appendChild(note);
         }
@@ -629,7 +621,7 @@ function call(sig, params, inputs) {
         if (p.type === 'bool') return args.push(Number(raw));
         const valid = p.type === 'int' ? /^[+-]?\d+$/.test(raw) : raw !== '' && Number.isFinite(Number(raw));
         if (!valid) {
-            input.classList.add('invalid');
+            input.setAttribute('aria-invalid', 'true');
             ok = false;
         }
         args.push(p.type === 'int' ? Number(raw) | 0 : Number(raw));
@@ -653,16 +645,16 @@ function call(sig, params, inputs) {
 
 function log(callText, result, isError, ms, output = '') {
     const body = $('console');
-    const empty = body.querySelector('.pg-console-empty');
+    const empty = $('consoleEmpty');
     if (empty) empty.remove();
     const row = document.createElement('div');
-    row.className = 'pg-log';
-    row.innerHTML = `<span class="pg-log-call"></span><span class="pg-log-result${isError ? ' err' : ''}"></span><span class="pg-log-time">${ms < 1 ? '<1' : ms.toFixed(1)} ms</span>`;
+    row.className = 'pg-log flex flex-wrap gap-x-3 py-1';
+    row.innerHTML = `<span class="pg-log-call basis-full text-ink-2"></span><span class="pg-log-result whitespace-pre-wrap [overflow-wrap:anywhere] ${isError ? 'text-red' : 'text-ink'}"></span><span class="ml-auto text-[0.7rem] text-ink-2">${ms < 1 ? '&lt;1' : ms.toFixed(1)} ms</span>`;
     row.querySelector('.pg-log-call').textContent = callText;
     row.querySelector('.pg-log-result').textContent = result;
     if (output) {
         const out = document.createElement('pre');
-        out.className = 'pg-log-out';
+        out.className = 'm-0 basis-full whitespace-pre-wrap [font:inherit] text-ink-1 [overflow-wrap:anywhere]';
         out.textContent = output;
         row.insertBefore(out, row.querySelector('.pg-log-result'));
     }
@@ -674,21 +666,22 @@ function log(callText, result, isError, ms, output = '') {
 
 function setView(view) {
     state.view = view;
-    document.querySelectorAll('.pg-tab[data-view]').forEach((t) => {
+    document.querySelectorAll('[role="tab"][data-view]').forEach((t) => {
         const active = t.dataset.view === view;
-        t.classList.toggle('active', active);
         t.setAttribute('aria-selected', String(active));
+        t.tabIndex = active ? 0 : -1;
     });
     document.querySelectorAll('.pg-view').forEach((v) => { v.hidden = v.dataset.view !== view; });
     $('copyBtn').title = view === 'binary' ? 'Copy the bytes as hex' : 'Copy the WebAssembly text';
     $('copyBtn').setAttribute('aria-label', $('copyBtn').title);
+    $('copyBtn').hidden = view === 'run';
     if (view === 'wat') watViewer.refresh();
     savePrefs({ view });
 }
 
 function flashCopied(btn) {
-    btn.classList.add('copied');
-    setTimeout(() => btn.classList.remove('copied'), 1500);
+    btn.dataset.copied = '';
+    setTimeout(() => delete btn.dataset.copied, 1500);
 }
 
 async function copyOutput() {
@@ -733,7 +726,7 @@ async function share() {
     const url = `${location.origin}${location.pathname}#${hash}`;
     history.replaceState(null, '', `#${hash}`);
     const btn = $('shareBtn');
-    const label = btn.querySelector('span');
+    const label = $('shareLabel');
     try {
         await navigator.clipboard.writeText(url);
         label.textContent = 'Link copied';
@@ -768,13 +761,13 @@ function initResize(initial) {
     let current = setSplit(initial || 50);
 
     const refresh = () => {
-        editor.refresh();
+        editor.view.requestMeasure();
         watViewer.refresh();
     };
 
     gutter.addEventListener('pointerdown', (e) => {
         gutter.setPointerCapture(e.pointerId);
-        gutter.classList.add('dragging');
+        gutter.dataset.dragging = '';
         document.body.classList.add('pg-resizing');
         const move = (ev) => {
             const rect = workspace.getBoundingClientRect();
@@ -782,7 +775,7 @@ function initResize(initial) {
         };
         const up = () => {
             gutter.removeEventListener('pointermove', move);
-            gutter.classList.remove('dragging');
+            delete gutter.dataset.dragging;
             document.body.classList.remove('pg-resizing');
             savePrefs({ split: current });
             refresh();
@@ -801,6 +794,8 @@ function initResize(initial) {
         const step = e.shiftKey ? 10 : 2;
         if (e.key === 'ArrowLeft') current = setSplit(current - step);
         else if (e.key === 'ArrowRight') current = setSplit(current + step);
+        else if (e.key === 'Home') current = setSplit(20);
+        else if (e.key === 'End') current = setSplit(80);
         else return;
         e.preventDefault();
         savePrefs({ split: current });
@@ -809,6 +804,26 @@ function initResize(initial) {
 }
 
 /* ---------- Boot ---------- */
+
+const CONSOLE_EMPTY = '<p id="consoleEmpty" class="font-sans text-sm text-ink-2">Call an exported function to see what it returns.</p>';
+
+function initTabs() {
+    const tabs = [...document.querySelectorAll('[role="tab"][data-view]')];
+    tabs.forEach((t, i) => {
+        t.addEventListener('click', () => setView(t.dataset.view));
+        t.addEventListener('keydown', (e) => {
+            let next;
+            if (e.key === 'ArrowRight') next = tabs[(i + 1) % tabs.length];
+            else if (e.key === 'ArrowLeft') next = tabs[(i - 1 + tabs.length) % tabs.length];
+            else if (e.key === 'Home') next = tabs[0];
+            else if (e.key === 'End') next = tabs[tabs.length - 1];
+            if (!next) return;
+            e.preventDefault();
+            next.focus();
+            setView(next.dataset.view);
+        });
+    });
+}
 
 async function init() {
     const prefs = loadPrefs();
@@ -819,42 +834,19 @@ async function init() {
     const example = EXAMPLES.find((e) => e.id === prefs.example) || EXAMPLES[0];
     select.value = example.id;
 
-    editor = CodeMirror($('editor'), {
-        value: shared ?? prefs.source ?? example.code,
-        mode: 'python',
-        lineNumbers: true,
-        indentUnit: 4,
-        tabSize: 4,
-        indentWithTabs: false,
-        matchBrackets: true,
-        autoCloseBrackets: true,
-        styleActiveLine: true,
-        gutters: ['pg-errors', 'CodeMirror-linenumbers'],
-        extraKeys: {
-            Tab: (cm) => (cm.somethingSelected() ? cm.indentSelection('add') : cm.replaceSelection('    ', 'end')),
-            'Shift-Tab': (cm) => cm.indentSelection('subtract'),
-            'Cmd-Enter': () => compile(),
-            'Ctrl-Enter': () => compile(),
+    $('editor').textContent = '';
+    editor = createPythonEditor($('editor'), {
+        doc: shared ?? prefs.source ?? example.code,
+        onChange: () => {
+            if (location.hash) history.replaceState(null, '', location.pathname);
+            scheduleCompile();
         },
+        onCursor: (line, col) => {
+            $('cursorPos').textContent = `Ln ${line}, Col ${col}`;
+        },
+        onRun: () => compile(),
     });
-
-    watViewer = CodeMirror($('viewWat'), {
-        value: '',
-        mode: 'wast',
-        readOnly: true,
-        lineNumbers: true,
-        cursorBlinkRate: -1,
-    });
-
-    editor.on('change', () => {
-        if (state.errorMarks.length) clearMarks();
-        if (location.hash) history.replaceState(null, '', location.pathname);
-        scheduleCompile();
-    });
-    editor.on('cursorActivity', () => {
-        const { line, ch } = editor.getCursor();
-        $('cursorPos').textContent = `Ln ${line + 1}, Col ${ch + 1}`;
-    });
+    watViewer = createWatViewer($('viewWat'));
 
     $('compileKbd').textContent = isMac ? '⌘↵' : 'Ctrl ↵';
     $('compileBtn').title = `Compile (${isMac ? '⌘' : 'Ctrl'}+Enter)`;
@@ -864,14 +856,13 @@ async function init() {
     $('copyBtn').addEventListener('click', copyOutput);
     $('downloadBtn').addEventListener('click', download);
     $('clearConsole').addEventListener('click', () => {
-        $('console').innerHTML = '<p class="pg-console-empty">Call an exported function to see what it returns.</p>';
+        $('console').innerHTML = CONSOLE_EMPTY;
     });
 
     select.addEventListener('change', () => {
         const ex = EXAMPLES.find((e) => e.id === select.value);
         savePrefs({ example: ex.id });
-        editor.setValue(ex.code);
-        editor.clearHistory();
+        editor.setValue(ex.code, { fresh: true });
         compile();
     });
 
@@ -894,7 +885,7 @@ async function init() {
         if (autoToggle.checked) compile();
     });
 
-    document.querySelectorAll('.pg-tab[data-view]').forEach((t) => t.addEventListener('click', () => setView(t.dataset.view)));
+    initTabs();
     document.addEventListener('keydown', (e) => {
         if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && !e.defaultPrevented) {
             e.preventDefault();

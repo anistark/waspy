@@ -441,9 +441,9 @@ pub enum IRType {
     ///
     /// So the rule is documented instead of enforced: a program whose values
     /// stay inside the i32 range gets Python's answers, and one that leaves it
-    /// gets two's-complement wraparound. `README.md` states this next to the
-    /// type list, and `tests/unit/basics.rs` pins the behaviour so it stays
-    /// deliberate.
+    /// gets two's-complement wraparound. The website's Numbers page
+    /// (`docs/src/docs/numbers.md`) states this, and `tests/unit/basics.rs`
+    /// pins the behaviour so it stays deliberate.
     Int,
     Float,
     Bool,

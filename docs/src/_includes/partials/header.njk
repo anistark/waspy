@@ -1,0 +1,47 @@
+{% from "partials/icons.njk" import icon %}
+<header data-site-header class="group/header sticky top-0 z-50 border-b border-transparent transition-colors duration-300 data-scrolled:border-line data-scrolled:bg-bg/70 data-scrolled:backdrop-blur-xl">
+    <nav class="shell grid h-16 grid-cols-[1fr_auto_1fr] items-center gap-4" aria-label="Main">
+        <a href="/" class="flex shrink-0 items-center gap-2.5 justify-self-start rounded-lg" aria-label="Waspy home">
+            <img src="/assets/img/logo.png" alt="" width="34" height="34" class="size-8.5 drop-shadow-[0_2px_10px_rgba(67,174,188,0.35)]">
+            <span class="font-display text-xl font-extrabold tracking-tight">waspy</span>
+        </a>
+
+        <ul class="hidden items-center gap-1 rounded-full border border-line bg-surface/60 p-1 backdrop-blur md:flex">
+            {% for item in site.nav %}
+            {% set active = page.url | startsWith(item.match) %}
+            <li>
+                <a href="{{ item.href }}" {% if active %}aria-current="page"{% endif %}
+                   class="rounded-full px-3.5 py-1.5 text-sm font-medium transition {{ 'bg-amber/12 text-honey' if active else 'text-ink-1 hover:bg-surface hover:text-ink' }}">{{ item.label }}</a>
+            </li>
+            {% endfor %}
+        </ul>
+
+        <div class="col-start-3 flex items-center gap-1.5 justify-self-end">
+            <span class="hidden font-mono text-xs text-ink-2 lg:inline">v{{ site.version }}</span>
+            <a href="{{ site.repo }}" class="grid size-9 place-items-center rounded-full text-ink-1 transition hover:bg-surface hover:text-ink" aria-label="Waspy on GitHub">
+                {{ icon("github", "size-5") }}
+            </a>
+            <button type="button" data-theme-toggle class="grid size-9 place-items-center rounded-full text-ink-1 transition hover:bg-surface hover:text-honey" aria-label="Toggle light and dark theme">
+                <span class="light:hidden">{{ icon("sun", "size-5") }}</span>
+                <span class="hidden light:inline">{{ icon("moon", "size-5") }}</span>
+            </button>
+            <button type="button" data-menu-toggle aria-controls="mobile-menu" aria-expanded="false" class="grid size-9 place-items-center rounded-full text-ink-1 transition hover:bg-surface hover:text-ink md:hidden" aria-label="Open menu">
+                {{ icon("menu", "size-5") }}
+            </button>
+        </div>
+    </nav>
+
+    <div id="mobile-menu" hidden class="md:hidden">
+        <div class="shell pb-4">
+            <ul class="glass-strong flex flex-col p-2">
+                {% for item in site.nav %}
+                {% set active = page.url | startsWith(item.match) %}
+                <li>
+                    <a href="{{ item.href }}" {% if active %}aria-current="page"{% endif %}
+                       class="block rounded-xl px-4 py-2.5 font-medium {{ 'bg-amber/12 text-honey' if active else 'text-ink-1 hover:bg-surface hover:text-ink' }}">{{ item.label }}</a>
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+    </div>
+</header>

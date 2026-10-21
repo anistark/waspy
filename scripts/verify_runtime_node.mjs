@@ -11,7 +11,7 @@
 
 import { readFile } from "node:fs/promises";
 import { argv, exit } from "node:process";
-import { createWasi, WasiExit } from "../docs/playground/wasi.js";
+import { createWasi, WasiExit } from "../docs/src/playground/wasi.js";
 
 const manifestPath = argv[2] ?? "examples/output/runtime/manifest.json";
 

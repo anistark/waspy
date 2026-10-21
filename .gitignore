@@ -16,5 +16,8 @@ examples/*.html
 .pi
 plan
 
-# Playground compiler build (just playground; built and deployed by CI)
-docs/playground/compiler
+# Website: dependencies, build output, and the playground compiler
+# (just playground; built and deployed by CI)
+docs/node_modules
+docs/_site
+docs/src/playground/compiler
