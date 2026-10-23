@@ -371,6 +371,13 @@ fn compile_merged_sources(
     let mut class_files: Vec<(String, String)> = Vec::new();
     let mut main_file: Option<String> = None;
     let mut first_file: Option<String> = None;
+    // The file `__name__` is "__main__" in: the first with an entry point,
+    // else the first. Every other file is named for its path.
+    let main_name = sources
+        .iter()
+        .find(|(f, s)| matches!(ir::detect_entry_points(s, Some(Path::new(f))), Ok(Some(_))))
+        .or(sources.first())
+        .map(|(f, _)| f.to_string());
     for (filename, source) in sources {
         // A module reached through several import paths is merged once (#41).
         if !seen_files.insert(filename.to_string()) {
@@ -412,8 +419,13 @@ fn compile_merged_sources(
         // forbids, and a typo in any imported module reaches it.
         let ast = core::parser::parse_python(source)
             .with_context(|| format!("failed to parse {filename}"))?;
-        let ir_module =
-            ir::lower_ast_to_ir(&ast).with_context(|| format!("failed to compile {filename}"))?;
+        let module_name = if main_name.as_deref() == Some(*filename) {
+            "__main__".to_string()
+        } else {
+            module_name_of(filename)
+        };
+        let ir_module = ir::lower_ast_to_ir_named(&ast, &module_name)
+            .with_context(|| format!("failed to compile {filename}"))?;
 
         // Skip files that contribute nothing (a constants-only module still
         // carries variables worth merging).
@@ -497,10 +509,7 @@ fn compile_merged_sources(
     let main_file = main_file.or(first_file);
     for (class, file) in &class_files {
         if Some(file) != main_file.as_ref() {
-            let module = file
-                .trim_end_matches(".py")
-                .trim_end_matches("/__init__")
-                .replace(['/', '\\'], ".");
+            let module = module_name_of(file);
             combined_module
                 .metadata
                 .insert(format!("{}{class}", ir::CLASS_MODULE_KEY), module);
@@ -1023,6 +1032,14 @@ pub fn get_python_project_metadata<P: AsRef<Path>>(
     }
 
     Ok(all_metadata)
+}
+
+/// The module a merged file is, by its path (`shapes/circle.py` is
+/// `shapes.circle`).
+fn module_name_of(file: &str) -> String {
+    file.trim_end_matches(".py")
+        .trim_end_matches("/__init__")
+        .replace(['/', '\\'], ".")
 }
 
 /// Render an IR type as the Python type name it came from.

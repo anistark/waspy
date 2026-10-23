@@ -158,6 +158,25 @@ pub(crate) fn emit_hash(func: &mut Function, ctx: &CompilationContext, ty: &IRTy
         (IRType::VarTuple(member), Held::Word(local)) => {
             emit_var_tuple_hash(func, ctx, member, local)
         }
+        // A named tuple hashes as the tuple of its fields.
+        (IRType::Class(class), Held::Word(local))
+            if crate::compiler::dunders::is_named_tuple(ctx, class) =>
+        {
+            func.instruction(&Instruction::LocalGet(local));
+            let members = match crate::compiler::dunders::emit_receiver_call(
+                func,
+                ctx,
+                class,
+                crate::ir::VIEW_METHOD,
+            ) {
+                Some(IRType::Tuple(members)) => members,
+                _ => Vec::new(),
+            };
+            let t = word(ctx);
+            func.instruction(&Instruction::LocalSet(t));
+            emit_tuple_hash(func, ctx, &members, t);
+            release(ctx, 1);
+        }
         (_, v) => {
             // An int is its own hash, except that -1 is -2 (-1 is CPython's
             // error return). A bool is 0 or 1, None its word, and an instance

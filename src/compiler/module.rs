@@ -6,8 +6,8 @@ use crate::compiler::context::{
 use crate::compiler::function::{compile_function, resolve_return_type};
 use crate::core::errors::ChakraError;
 use crate::ir::{
-    method_kind, IRBody, IRConstant, IRExpr, IRFunction, IRModule, IROp, IRStatement, IRType,
-    MethodKind, STRING_LEN_PREFIX,
+    method_kind, IRBody, IRCompareOp, IRConstant, IRExpr, IRFunction, IRModule, IROp, IRStatement,
+    IRType, IRUnaryOp, MethodKind, STRING_LEN_PREFIX,
 };
 use std::collections::{HashMap, HashSet};
 use wasm_encoder::{
@@ -69,6 +69,11 @@ fn infer_field_value_type(
         IRExpr::FunctionCall { function_name, .. } if classes.contains(function_name) => {
             IRType::Class(function_name.clone())
         }
+        // `C::method(...)`: what the method is declared to return.
+        IRExpr::FunctionCall { function_name, .. } if function_name.contains("::") => params
+            .get(&format!("{RETURNS_OF}{function_name}"))
+            .cloned()
+            .unwrap_or(IRType::Unknown),
         IRExpr::Const(IRConstant::Float(_)) => IRType::Float,
         IRExpr::Const(IRConstant::Int(_)) => IRType::Int,
         IRExpr::Const(IRConstant::Bool(_)) => IRType::Bool,
@@ -121,6 +126,21 @@ fn infer_field_value_type(
                     .cloned()
                     .unwrap_or(IRType::Unknown),
                 _ => IRType::Unknown,
+            }
+        }
+        // A suspending loop's sequence: a dict's keys, a set's members.
+        IRExpr::FunctionCall {
+            function_name,
+            arguments,
+        } if function_name == crate::ir::ITER_SEQ_FN => {
+            match arguments
+                .first()
+                .map(|x| infer_field_value_type(x, params, classes))
+            {
+                Some(IRType::Dict(k, _)) => IRType::List(k),
+                Some(IRType::Set(e)) => IRType::List(e),
+                Some(other) => other,
+                None => IRType::Unknown,
             }
         }
         // A dict loop's key or value (see the dict loops in `ir::converter`).
@@ -289,13 +309,15 @@ fn functions_that_can_raise(ir_module: &IRModule) -> HashSet<String> {
     let mut by_name: HashMap<String, Vec<String>> = HashMap::new();
 
     let sources = OptionalSources::of(ir_module);
+    let references = OptionalReferences::of(ir_module);
     let record = |facts: &mut HashMap<String, (bool, HashSet<String>)>,
                   by_name: &mut HashMap<String, Vec<String>>,
                   key: String,
                   body: &IRBody,
                   params: &[crate::ir::IRParam],
                   call_name: &str| {
-        let mut raises = may_unbox_none(body, params, &sources);
+        let mut raises =
+            may_unbox_none(body, params, &sources) || may_deref_none(body, params, &references);
         let mut calls = HashSet::new();
         scan_raise_and_calls(body, &mut raises, &mut calls);
         by_name
@@ -340,6 +362,50 @@ fn functions_that_can_raise(ir_module: &IRModule) -> HashSet<String> {
                 by_name.entry(cls.name.clone()).or_default().push(key);
             }
         }
+    }
+
+    // `from math import sqrt`: a call to `sqrt` is a call into the module,
+    // which can raise.
+    for imp in &ir_module.imports {
+        if let (true, Some(name)) = (imp.is_from_import, &imp.name) {
+            // `abc` and `dataclasses` are resolved at compile time and
+            // have no functions to call.
+            if crate::stdlib::is_stdlib_module_path(&imp.module)
+                && !matches!(imp.module.as_str(), "abc" | "dataclasses")
+            {
+                let binding = imp.alias.clone().unwrap_or_else(|| name.clone());
+                let key = format!("{}.{name}", imp.module);
+                by_name.entry(binding).or_default().push(key.clone());
+                facts.insert(key, (true, HashSet::new()));
+            }
+        }
+    }
+
+    // An operator, a truth test, or a builtin may call a special method; one
+    // no class defines is a call of nothing.
+    for name in crate::compiler::dunders::PROTOCOL_METHODS {
+        by_name.entry(name.to_string()).or_default();
+    }
+    // Builtins that run no code of the program but those special methods
+    // (each scanned as a call of the methods it may run) and raise nothing of
+    // their own. A call of `str()` on an instance whose `__str__` can raise
+    // is refused where it is compiled.
+    for name in [
+        "str",
+        "repr",
+        "print",
+        "format",
+        "len",
+        "isinstance",
+        "bool",
+        "id",
+    ] {
+        if !by_name.contains_key(name) {
+            by_name.insert(name.to_string(), Vec::new());
+        }
+    }
+    for name in ["__str__", "__repr__", "__format__"] {
+        by_name.entry(name.to_string()).or_default();
     }
 
     let mut raisers: HashSet<String> = facts
@@ -457,6 +523,20 @@ fn scan_raise_and_calls(body: &IRBody, raises: &mut bool, calls: &mut HashSet<St
             // IndexError, exactly as a read does.
             *raises = true;
         }
+        // Special methods a statement may call on an instance.
+        match stmt {
+            IRStatement::If { .. } | IRStatement::While { .. } => truth_calls(calls),
+            IRStatement::AugAssign { op, .. } | IRStatement::AttributeAugAssign { op, .. } => {
+                let (own, reflected, inplace) = crate::compiler::dunders::binary_methods(op);
+                for name in [own, reflected, inplace] {
+                    calls.insert(name.to_string());
+                }
+            }
+            IRStatement::IndexAssign { .. } => {
+                calls.insert("__setitem__".to_string());
+            }
+            _ => {}
+        }
         // Unpacking a value of the wrong length raises ValueError, unless the
         // value is a literal whose length is visibly right.
         if let IRStatement::TupleUnpack {
@@ -483,6 +563,12 @@ fn scan_raise_and_calls(body: &IRBody, raises: &mut bool, calls: &mut HashSet<St
             scan_raise_and_calls(nested, raises, calls);
         }
     }
+}
+
+/// A truth test calls `__bool__`, or `__len__` without one.
+fn truth_calls(calls: &mut HashSet<String>) {
+    calls.insert("__bool__".to_string());
+    calls.insert("__len__".to_string());
 }
 
 /// Every call name an expression mentions, recursively, and whether it
@@ -528,6 +614,87 @@ impl OptionalSources {
         }
         OptionalSources { functions, fields }
     }
+}
+
+/// An optional string or instance, which a method call or attribute read
+/// raises AttributeError on when it is None.
+fn optional_reference(t: &IRType) -> bool {
+    matches!(t, IRType::Optional(inner)
+        if matches!(**inner, IRType::String | IRType::Bytes | IRType::Class(_)))
+}
+
+/// What can hold an optional string or instance: functions and methods
+/// returning one, and fields declared one.
+struct OptionalReferences {
+    calls: HashSet<String>,
+    fields: HashSet<String>,
+}
+
+impl OptionalReferences {
+    fn of(module: &IRModule) -> Self {
+        let mut calls: HashSet<String> = module
+            .functions
+            .iter()
+            .filter(|f| optional_reference(&f.return_type))
+            .map(|f| f.name.clone())
+            .collect();
+        let mut fields = HashSet::new();
+        for class in &module.classes {
+            for method in &class.methods {
+                if optional_reference(&method.return_type) {
+                    calls.insert(method.name.clone());
+                }
+                let mut annotated = Vec::new();
+                collect_annotated_self_fields(&method.body, &mut annotated);
+                fields.extend(
+                    annotated
+                        .into_iter()
+                        .filter(|(_, t)| optional_reference(t))
+                        .map(|(n, _)| n),
+                );
+            }
+        }
+        OptionalReferences { calls, fields }
+    }
+}
+
+/// Whether a body may call a method on, or read an attribute of, an optional
+/// string or instance that is None: it reads one and calls a method, reads
+/// an attribute, or operates on a value. The conservative reading, as for
+/// numbers.
+fn may_deref_none(body: &IRBody, params: &[crate::ir::IRParam], refs: &OptionalReferences) -> bool {
+    let mut reads = params.iter().any(|p| optional_reference(&p.param_type));
+    let mut uses = false;
+    let mut probe = body.clone();
+    let _ = crate::ir::visit_body(&mut probe, &mut |e: &mut IRExpr| {
+        match e {
+            IRExpr::FunctionCall { function_name, .. } if refs.calls.contains(function_name) => {
+                reads = true
+            }
+            IRExpr::MethodCall { method_name, .. } => {
+                uses = true;
+                if refs.calls.contains(method_name) {
+                    reads = true
+                }
+            }
+            IRExpr::Attribute { attribute, .. } => {
+                uses = true;
+                if refs.fields.contains(attribute) {
+                    reads = true
+                }
+            }
+            IRExpr::BinaryOp { .. } => uses = true,
+            _ => {}
+        }
+        Ok(())
+    });
+    fn annotated(body: &IRBody) -> bool {
+        body.statements.iter().any(|stmt| {
+            matches!(stmt, IRStatement::Assign { var_type: Some(t), .. } if optional_reference(t))
+                || nested_bodies(stmt).into_iter().any(annotated)
+        })
+    }
+    (reads || annotated(body)) && uses
 }
 
 /// Whether a body may unbox an optional number that is None, which raises
@@ -603,6 +770,24 @@ fn scan_expr_calls(expr: &IRExpr, raises: &mut bool, calls: &mut HashSet<String>
             arguments,
         } => {
             calls.insert(function_name.clone());
+            let special = match function_name.as_str() {
+                "len" => Some("__len__"),
+                "abs" => Some("__abs__"),
+                "int" => Some("__int__"),
+                "float" => Some("__float__"),
+                "hash" => Some("__hash__"),
+                "round" => Some("__round__"),
+                "bool" => Some("__bool__"),
+                _ => None,
+            };
+            if let Some(special) = special {
+                calls.insert(special.to_string());
+            }
+            if matches!(function_name.as_str(), "str" | "repr" | "print" | "format") {
+                for name in ["__str__", "__repr__", "__format__"] {
+                    calls.insert(name.to_string());
+                }
+            }
             // `int(s)` raises ValueError when `s` is a string that does not
             // spell an integer. Types are not known yet here, so anything but a
             // plainly numeric argument counts: an extra check after a call costs
@@ -652,8 +837,9 @@ fn scan_expr_calls(expr: &IRExpr, raises: &mut bool, calls: &mut HashSet<String>
             if matches!(method_name.as_str(), "read" | "readline" | "readlines") {
                 *raises = true;
             }
-            // `sys.exit()` raises SystemExit.
-            if method_name == "exit" && matches!(object.as_ref(), IRExpr::Variable(m) if m == "sys")
+            // `sys.exit()` raises SystemExit, and the standard library's
+            // functions raise CPython's errors (`math.sqrt(-1)`).
+            if matches!(object.as_ref(), IRExpr::Variable(m) if crate::stdlib::is_stdlib_module(m))
             {
                 *raises = true;
             }
@@ -663,6 +849,9 @@ fn scan_expr_calls(expr: &IRExpr, raises: &mut bool, calls: &mut HashSet<String>
             }
         }
         IRExpr::BinaryOp { left, right, op } => {
+            let (own, reflected, _) = crate::compiler::dunders::binary_methods(op);
+            calls.insert(own.to_string());
+            calls.insert(reflected.to_string());
             // Division by zero raises ZeroDivisionError, unless the divisor is
             // a nonzero literal and cannot be zero.
             if matches!(op, IROp::Div | IROp::Mod | IROp::FloorDiv)
@@ -670,19 +859,44 @@ fn scan_expr_calls(expr: &IRExpr, raises: &mut bool, calls: &mut HashSet<String>
             {
                 *raises = true;
             }
+            // A float power can overflow, and zero to a negative power is a
+            // ZeroDivisionError.
+            if matches!(op, IROp::Pow) {
+                *raises = true;
+            }
             scan_expr_calls(left, raises, calls);
             scan_expr_calls(right, raises, calls);
         }
-        IRExpr::CompareOp { left, right, .. } | IRExpr::BoolOp { left, right, .. } => {
+        IRExpr::CompareOp { left, right, op } => {
+            if matches!(op, IRCompareOp::In | IRCompareOp::NotIn) {
+                calls.insert("__contains__".to_string());
+            }
             scan_expr_calls(left, raises, calls);
             scan_expr_calls(right, raises, calls);
         }
-        IRExpr::UnaryOp { operand, .. } => scan_expr_calls(operand, raises, calls),
+        IRExpr::BoolOp { left, right, .. } => {
+            truth_calls(calls);
+            scan_expr_calls(left, raises, calls);
+            scan_expr_calls(right, raises, calls);
+        }
+        IRExpr::UnaryOp { operand, op } => {
+            match op {
+                IRUnaryOp::Neg => calls.insert("__neg__".to_string()),
+                IRUnaryOp::UAdd => calls.insert("__pos__".to_string()),
+                IRUnaryOp::Invert => calls.insert("__invert__".to_string()),
+                IRUnaryOp::Not => {
+                    truth_calls(calls);
+                    true
+                }
+            };
+            scan_expr_calls(operand, raises, calls)
+        }
         IRExpr::Conditional {
             condition,
             body,
             orelse,
         } => {
+            truth_calls(calls);
             scan_expr_calls(condition, raises, calls);
             scan_expr_calls(body, raises, calls);
             scan_expr_calls(orelse, raises, calls);
@@ -721,6 +935,7 @@ fn scan_expr_calls(expr: &IRExpr, raises: &mut bool, calls: &mut HashSet<String>
             generators,
             ..
         } => {
+            truth_calls(calls);
             scan_expr_calls(element, raises, calls);
             if let Some(value) = value {
                 scan_expr_calls(value, raises, calls);
@@ -809,6 +1024,11 @@ fn nested_bodies(stmt: &IRStatement) -> Vec<&IRBody> {
 /// The prefix of the entries giving field inference the fields of the
 /// classes laid out before the one being laid out (`#Class.field`).
 const FIELD_OF: &str = "#";
+
+/// The prefix of the entries in that map giving a method's declared result,
+/// keyed `Class::method`, for a field assigned from a qualified call (a
+/// generator's loop over another generator binds `C::__next__(it)`).
+const RETURNS_OF: &str = "->";
 
 /// Every `self.x: T = v` in a method body, recursing into nested blocks, with
 /// its annotated type.
@@ -1510,7 +1730,7 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
     // `mod.f(...)` resolve to the merged `f`), and `from mod import f as g`
     // aliases `g` to the merged `f`.
     for imp in &ir_module.imports {
-        if crate::stdlib::is_stdlib_module(&imp.module) {
+        if crate::stdlib::is_stdlib_module_path(&imp.module) {
             if let (true, Some(name)) = (imp.is_from_import, &imp.name) {
                 let binding = imp.alias.clone().unwrap_or_else(|| name.clone());
                 ctx.stdlib_imports
@@ -1541,6 +1761,25 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
     for table in &ir_module.dispatch_tables {
         ctx.dispatch_tables
             .insert(table.base.clone(), table.arms.clone());
+    }
+    // A class's `@singledispatchmethod` arms, keyed `Class.method`: each arm
+    // registers the type of its parameter after `self`, in source order.
+    for class in &ir_module.classes {
+        for method in &class.methods {
+            for dec in &method.decorators {
+                if let Some(base) = dec.strip_suffix(".register") {
+                    let ty = method
+                        .params
+                        .get(1)
+                        .map(|p| p.param_type.clone())
+                        .unwrap_or(IRType::Unknown);
+                    ctx.dispatch_tables
+                        .entry(format!("{}.{base}", class.name))
+                        .or_default()
+                        .push((ty, method.name.clone()));
+                }
+            }
+        }
     }
 
     // File I/O (#25): when the program calls `open()` anywhere, the module
@@ -2149,7 +2388,7 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
                 }
             }
         }
-        let laid_out: Vec<(String, IRType)> = ctx
+        let mut laid_out: Vec<(String, IRType)> = ctx
             .class_map
             .values()
             .flat_map(|info| {
@@ -2158,6 +2397,17 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
                     .map(move |(f, t)| (format!("{FIELD_OF}{}.{f}", info.name), t.clone()))
             })
             .collect();
+        laid_out.extend(ir_module.classes.iter().flat_map(|c| {
+            c.methods
+                .iter()
+                .filter(|m| !matches!(m.return_type, IRType::Unknown))
+                .map(move |m| {
+                    (
+                        format!("{RETURNS_OF}{}::{}", c.name, m.name),
+                        m.return_type.clone(),
+                    )
+                })
+        }));
         for method in &cls.methods {
             let mut params: HashMap<String, IRType> = laid_out.iter().cloned().collect();
             // The fields earlier methods (`__init__` first) gave this class.
@@ -2220,6 +2470,18 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
         for method in &cls.methods {
             let param_types = method.params.iter().map(|p| p.param_type.clone()).collect();
             let qualified_name = method_registry_key(&cls.name, method);
+            ctx.method_defaults.insert(
+                qualified_name.clone(),
+                method
+                    .params
+                    .iter()
+                    .map(|p| p.default_value.clone())
+                    .collect(),
+            );
+            ctx.method_params.insert(
+                qualified_name.clone(),
+                method.params.iter().map(|p| p.name.clone()).collect(),
+            );
 
             ctx.add_function(
                 &qualified_name,
@@ -2613,6 +2875,9 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
     let (unicode_segments, runtime_heap_base) =
         crate::compiler::unicode::data_for(&ctx.helpers.borrow());
     for (at, bytes) in unicode_segments {
+        data.active(0, &ConstExpr::i32_const(at as i32), bytes);
+    }
+    for (at, bytes) in crate::compiler::libm::data_for(&ctx.helpers.borrow()) {
         data.active(0, &ConstExpr::i32_const(at as i32), bytes);
     }
     let min_pages = (((runtime_heap_base as u64) + 65535) / 65536).max(2);

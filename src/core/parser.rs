@@ -24,6 +24,12 @@ use rustpython_parser::Parse;
 /// and a hint) when it parses but uses a construct outside the supported
 /// subset.
 pub fn parse_python(source: &str) -> Result<Suite> {
+    LINE_STARTS.with(|starts| {
+        let mut starts = starts.borrow_mut();
+        starts.clear();
+        starts.push(0);
+        starts.extend(source.match_indices('\n').map(|(at, _)| at + 1));
+    });
     let ast = Suite::parse(source, "<module>").map_err(|e| {
         let (line, column) = line_col(source, e.offset.into());
         parse_error(e.error.to_string(), Some(line), Some(column))
@@ -38,6 +44,25 @@ pub fn parse_python(source: &str) -> Result<Suite> {
     }
 
     Ok(ast)
+}
+
+thread_local! {
+    /// Where each line of the source most recently parsed on this thread
+    /// starts, so the converter can give a node its line (`logging` records
+    /// carry the line they were logged on).
+    static LINE_STARTS: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The 1-based line of a byte offset into the source most recently parsed
+/// on this thread, when one was.
+pub(crate) fn line_of(offset: usize) -> Option<usize> {
+    LINE_STARTS.with(|starts| {
+        let starts = starts.borrow();
+        if starts.is_empty() {
+            return None;
+        }
+        Some(starts.partition_point(|&s| s <= offset))
+    })
 }
 
 /// Map a byte offset into 1-based (line, column) coordinates.

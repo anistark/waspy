@@ -20,7 +20,7 @@
 //! blocks the caller opened, so a raising `__eq__` reached from inside a
 //! collection is refused rather than miscompiled.
 
-use crate::compiler::context::{CompilationContext, COLLECTION_DATA, COLLECTION_SLOT};
+use crate::compiler::context::{CompilationContext, COLLECTION_DATA, COLLECTION_SLOT, DICT_ENTRY};
 use crate::compiler::expression::{emit_str_content_eq, emit_user_call, emit_virtual_compare};
 use crate::ir::{IRCompareOp, IRType, STRING_LEN_PREFIX};
 use wasm_encoder::{BlockType, Function, Instruction, MemArg};
@@ -79,7 +79,12 @@ pub(crate) fn eq_unsupported(ctx: &CompilationContext, ty: &IRType) -> Option<St
             Some("a tuple whose member types are not known".to_string())
         }
         IRType::Tuple(members) => members.iter().find_map(|m| eq_unsupported(ctx, m)),
-        IRType::Dict(_, _) => Some("a dict".to_string()),
+        IRType::Dict(k, v) => match (k.as_ref(), v.as_ref()) {
+            (IRType::Unknown | IRType::Any, _) | (_, IRType::Unknown | IRType::Any) => {
+                Some("a dict whose key or value type is not known".to_string())
+            }
+            (k, v) => eq_unsupported(ctx, k).or_else(|| eq_unsupported(ctx, v)),
+        },
         IRType::Set(_) => Some("a set".to_string()),
         other => Some(format!(
             "a value of type '{}'",
@@ -115,6 +120,13 @@ pub(crate) fn hash_unsupported(ctx: &CompilationContext, ty: &IRType) -> Option<
         // it does not define `__eq__`. With one, CPython sets `__hash__` to
         // None unless the class defines it too, and calling a user `__hash__`
         // is not supported here.
+        // A named tuple hashes as its tuple of fields.
+        IRType::Class(name) if crate::compiler::dunders::is_named_tuple(ctx, name) => {
+            let fields = ctx
+                .get_function_info(&format!("{name}::{}", crate::ir::VIEW_METHOD))
+                .map(|f| f.return_type.clone())?;
+            hash_unsupported(ctx, &fields)
+        }
         IRType::Class(name) => ctx
             .get_class_info(name)
             .and_then(|ci| ci.methods.get("__eq__"))
@@ -237,6 +249,7 @@ pub(crate) fn emit_values_eq(
         IRType::Tuple(members) => emit_tuple_eq(func, ctx, members, a, b),
         // Laid out as a list, and compared as one.
         IRType::List(elem) | IRType::VarTuple(elem) => emit_list_eq(func, ctx, elem, a, b),
+        IRType::Dict(k, v) => emit_dict_eq(func, ctx, k, v, a, b),
         _ => {
             func.instruction(&Instruction::LocalGet(a));
             func.instruction(&Instruction::LocalGet(b));
@@ -368,6 +381,110 @@ fn emit_list_eq(func: &mut Function, ctx: &CompilationContext, elem: &IRType, a:
     func.instruction(&Instruction::End);
     func.instruction(&Instruction::LocalGet(r));
     release(ctx, 5);
+}
+
+/// Two dicts: the same number of entries, and each key of `a` found in `b`
+/// with an equal value, whatever their order (CPython's `dict_equal`, which
+/// stops at the first difference).
+fn emit_dict_eq(
+    func: &mut Function,
+    ctx: &CompilationContext,
+    k: &IRType,
+    v: &IRType,
+    a: u32,
+    b: u32,
+) {
+    let r = hold(ctx);
+    let n = hold(ctx);
+    let i = hold(ctx);
+    let j = hold(ctx);
+    let found = hold(ctx);
+    let sa = hold(ctx);
+    let sb = hold(ctx);
+    let entry = |func: &mut Function, dict: u32, index: u32, into: u32| {
+        func.instruction(&Instruction::LocalGet(dict));
+        func.instruction(&Instruction::I32Load(mem(COLLECTION_DATA as u64)));
+        func.instruction(&Instruction::LocalGet(index));
+        func.instruction(&Instruction::I32Const(DICT_ENTRY as i32));
+        func.instruction(&Instruction::I32Mul);
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalSet(into));
+    };
+    let step = |func: &mut Function, local: u32, by: i32| {
+        func.instruction(&Instruction::LocalGet(local));
+        func.instruction(&Instruction::I32Const(by));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalSet(local));
+    };
+    func.instruction(&Instruction::I32Const(1));
+    func.instruction(&Instruction::LocalSet(r));
+    func.instruction(&Instruction::LocalGet(a));
+    func.instruction(&Instruction::I32Load(mem(0)));
+    func.instruction(&Instruction::LocalTee(n));
+    func.instruction(&Instruction::LocalGet(b));
+    func.instruction(&Instruction::I32Load(mem(0)));
+    func.instruction(&Instruction::I32Ne);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::LocalSet(r));
+    func.instruction(&Instruction::Else);
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::LocalSet(i));
+    // Each entry of `a` ...
+    func.instruction(&Instruction::Block(BlockType::Empty));
+    func.instruction(&Instruction::Loop(BlockType::Empty));
+    func.instruction(&Instruction::LocalGet(i));
+    func.instruction(&Instruction::LocalGet(n));
+    func.instruction(&Instruction::I32GeS);
+    func.instruction(&Instruction::BrIf(1));
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::LocalSet(found));
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::LocalSet(j));
+    // ... searched for in `b`.
+    func.instruction(&Instruction::Block(BlockType::Empty));
+    func.instruction(&Instruction::Loop(BlockType::Empty));
+    func.instruction(&Instruction::LocalGet(j));
+    func.instruction(&Instruction::LocalGet(n));
+    func.instruction(&Instruction::I32GeS);
+    func.instruction(&Instruction::BrIf(1));
+    entry(func, a, i, sa);
+    entry(func, b, j, sb);
+    emit_slots_eq(func, ctx, k, sa, sb);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    func.instruction(&Instruction::I32Const(1));
+    func.instruction(&Instruction::LocalSet(found));
+    step(func, sa, COLLECTION_SLOT as i32);
+    step(func, sb, COLLECTION_SLOT as i32);
+    emit_slots_eq(func, ctx, v, sa, sb);
+    func.instruction(&Instruction::I32Eqz);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::LocalSet(r));
+    // Out of both loops.
+    func.instruction(&Instruction::Br(5));
+    func.instruction(&Instruction::End);
+    // Out of the search.
+    func.instruction(&Instruction::Br(2));
+    func.instruction(&Instruction::End);
+    step(func, j, 1);
+    func.instruction(&Instruction::Br(0));
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::LocalGet(found));
+    func.instruction(&Instruction::I32Eqz);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::LocalSet(r));
+    func.instruction(&Instruction::Br(2));
+    func.instruction(&Instruction::End);
+    step(func, i, 1);
+    func.instruction(&Instruction::Br(0));
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::LocalGet(r));
+    release(ctx, 7);
 }
 
 /// The i32 comparison instruction for an ordering operator.

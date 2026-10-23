@@ -33,6 +33,11 @@ pub enum Wasi {
     FdPrestatGet,
     FdPrestatDirName,
     FdClose,
+    RandomGet,
+    EnvironSizesGet,
+    EnvironGet,
+    PathFilestatGet,
+    ClockTimeGet,
 }
 
 impl Wasi {
@@ -49,6 +54,11 @@ impl Wasi {
             Wasi::FdPrestatGet => "fd_prestat_get",
             Wasi::FdPrestatDirName => "fd_prestat_dir_name",
             Wasi::FdClose => "fd_close",
+            Wasi::RandomGet => "random_get",
+            Wasi::EnvironSizesGet => "environ_sizes_get",
+            Wasi::EnvironGet => "environ_get",
+            Wasi::PathFilestatGet => "path_filestat_get",
+            Wasi::ClockTimeGet => "clock_time_get",
         }
     }
 
@@ -77,6 +87,11 @@ impl Wasi {
             Wasi::FdPrestatGet => (vec![I32; 2], vec![I32]),
             Wasi::FdPrestatDirName => (vec![I32; 3], vec![I32]),
             Wasi::FdClose => (vec![I32], vec![I32]),
+            Wasi::RandomGet | Wasi::EnvironSizesGet | Wasi::EnvironGet => (vec![I32; 2], vec![I32]),
+            // (fd, lookupflags, path, path_len, filestat_out) -> errno
+            Wasi::PathFilestatGet => (vec![I32; 5], vec![I32]),
+            // (clock id, precision, time_out) -> errno
+            Wasi::ClockTimeGet => (vec![I32, ValType::I64, I32], vec![I32]),
         }
     }
 }
@@ -98,6 +113,12 @@ const ARGV: i32 = HOST + 28;
 /// the descriptor `path_open` answers.
 const PRESTAT: i32 = HOST + 32;
 const FD_OUT: i32 = HOST + 40;
+/// `sys.path`, once built.
+const SYS_PATH: i32 = HOST + 44;
+/// A resolved path: what is left of it past its preopen, `[rest][len]`.
+pub(crate) const RESOLVED: i32 = HOST + 48;
+/// The time `clock_time_get` answers, in nanoseconds.
+pub(crate) const CLOCK_OUT: i32 = HOST + 56;
 const STDIN_CHUNK: i32 = 4096;
 const _: () = assert!(HOST + 64 <= crate::compiler::context::COLLECTION_HEAP_BASE as i32);
 
@@ -126,7 +147,70 @@ pub(crate) fn wasi_needed(module: &IRModule, main_can_raise: bool) -> Vec<Wasi> 
     let mut needed = std::collections::BTreeSet::new();
     let defined: std::collections::HashSet<&str> =
         module.functions.iter().map(|f| f.name.as_str()).collect();
+    // `from os import getenv`: the names bound to stdlib functions.
+    let from_imports: std::collections::HashMap<String, (String, String)> = module
+        .imports
+        .iter()
+        .filter(|i| i.is_from_import && crate::stdlib::is_stdlib_module_path(&i.module))
+        .filter_map(|i| {
+            let name = i.name.clone()?;
+            Some((
+                i.alias.clone().unwrap_or_else(|| name.clone()),
+                (i.module.clone(), name),
+            ))
+        })
+        .collect();
+    // What a use of `module.name` needs from the host.
+    let stdlib_use = |module: &str, name: &str| -> &'static [Wasi] {
+        match (module, name) {
+            // The generator seeds itself from host entropy on its first draw
+            // unless the program seeded it.
+            ("random", _) | ("os", "urandom") => &[Wasi::RandomGet],
+            ("os", "environ" | "getenv") => &[Wasi::EnvironSizesGet, Wasi::EnvironGet],
+            ("os.path", "exists" | "isfile" | "isdir") => &[
+                Wasi::PathFilestatGet,
+                Wasi::FdPrestatGet,
+                Wasi::FdPrestatDirName,
+            ],
+            _ => &[],
+        }
+    };
     let mut visit = |expr: &mut IRExpr| -> anyhow::Result<()> {
+        let dotted = |e: &IRExpr| match e {
+            IRExpr::Variable(m) => Some(m.clone()),
+            IRExpr::Attribute { object, attribute } => match object.as_ref() {
+                IRExpr::Variable(m) => Some(format!("{m}.{attribute}")),
+                _ => None,
+            },
+            _ => None,
+        };
+        match &*expr {
+            IRExpr::MethodCall {
+                object,
+                method_name,
+                ..
+            } => {
+                if let Some(m) = dotted(object) {
+                    needed.extend(stdlib_use(&m, method_name).iter().copied());
+                }
+            }
+            IRExpr::Attribute { object, attribute } => {
+                if let Some(m) = dotted(object) {
+                    needed.extend(stdlib_use(&m, attribute).iter().copied());
+                }
+            }
+            IRExpr::FunctionCall {
+                function_name: n, ..
+            }
+            | IRExpr::Variable(n)
+                if !defined.contains(n.as_str()) =>
+            {
+                if let Some((m, name)) = from_imports.get(n) {
+                    needed.extend(stdlib_use(m, name).iter().copied());
+                }
+            }
+            _ => {}
+        }
         match expr {
             IRExpr::FunctionCall { function_name, .. }
                 if !defined.contains(function_name.as_str()) =>
@@ -134,6 +218,10 @@ pub(crate) fn wasi_needed(module: &IRModule, main_can_raise: bool) -> Vec<Wasi> 
                 match function_name.as_str() {
                     "print" => {
                         needed.insert(Wasi::FdWrite);
+                    }
+                    // `datetime`'s reading of the clock.
+                    crate::ir::DATETIME_CLOCK_FN => {
+                        needed.insert(Wasi::ClockTimeGet);
                     }
                     "input" => {
                         needed.insert(Wasi::FdWrite);
@@ -245,15 +333,18 @@ fn raise_open_error(
 /// CPython's exception pending (`FileNotFoundError: [Errno 2] No such file or
 /// directory: 'x'`) and answers -1. `flags` are the mode bits of
 /// `expression::file_mode_flags`.
-pub(crate) fn build_file_open(ctx: &CompilationContext) -> Function {
+/// `(path, path_len) -> dirfd`: the preopened directory a path resolves
+/// against, as wasi-libc resolves it: an absolute path against the longest
+/// preopen naming a prefix of it, a relative one against the first relative
+/// preopen (`.`), else `/`. What is left of the path is at `RESOLVED`
+/// (`[rest][rest_len]`); -1 when no directory holds it.
+pub(crate) fn build_resolve_path(ctx: &CompilationContext) -> Function {
     let prestat_get = wasi(ctx, Wasi::FdPrestatGet);
     let dir_name = wasi(ctx, Wasi::FdPrestatDirName);
-    let path_open = wasi(ctx, Wasi::PathOpen);
-    let (path, len, flags) = (0, 1, 2);
+    let (path, len) = (0, 1);
     // locals
-    let (fd, best, best_len, root, name, nlen, i, rest, rlen, oflags, fdflags, errno) =
-        (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14);
-    let mut f = function(&[ValType::I32; 12]);
+    let (fd, best, best_len, root, name, nlen, i, rest, rlen) = (2, 3, 4, 5, 6, 7, 8, 9, 10);
+    let mut f = function(&[ValType::I32; 9]);
     let absolute = |f: &mut Function| {
         emit!(
             f,
@@ -452,22 +543,17 @@ pub(crate) fn build_file_open(ctx: &CompilationContext) -> Function {
         I::End,
         I::End
     );
-    // No directory to open it in.
+    // No directory to resolve it in.
     emit!(
         f,
         I::LocalGet(best),
         I::I32Const(0),
         I::I32LtS,
-        I::If(BlockType::Empty)
+        I::If(BlockType::Empty),
+        I::I32Const(-1),
+        I::Return,
+        I::End
     );
-    raise_open_error(
-        &mut f,
-        ctx,
-        "FileNotFoundError",
-        2,
-        "No such file or directory",
-    );
-    emit!(f, I::End);
     // What is left of the path past the preopen's name.
     emit!(
         f,
@@ -522,6 +608,53 @@ pub(crate) fn build_file_open(ctx: &CompilationContext) -> Function {
         I::LocalSet(rlen),
         I::End,
         I::End
+    );
+    emit!(
+        f,
+        I::I32Const(RESOLVED),
+        I::LocalGet(rest),
+        I::I32Store(w32(0)),
+        I::I32Const(RESOLVED),
+        I::LocalGet(rlen),
+        I::I32Store(w32(4)),
+        I::LocalGet(best),
+        I::End
+    );
+    f
+}
+
+pub(crate) fn build_file_open(ctx: &CompilationContext) -> Function {
+    let path_open = wasi(ctx, Wasi::PathOpen);
+    let (path, len, flags) = (0, 1, 2);
+    // locals
+    let (best, rest, rlen, oflags, fdflags, errno) = (3, 4, 5, 6, 7, 8);
+    let mut f = function(&[ValType::I32; 6]);
+    emit!(
+        f,
+        I::LocalGet(path),
+        I::LocalGet(len),
+        I::Call(ctx.helper(Helper::ResolvePath)),
+        I::LocalTee(best),
+        I::I32Const(0),
+        I::I32LtS,
+        I::If(BlockType::Empty)
+    );
+    raise_open_error(
+        &mut f,
+        ctx,
+        "FileNotFoundError",
+        2,
+        "No such file or directory",
+    );
+    emit!(
+        f,
+        I::End,
+        I::I32Const(RESOLVED),
+        I::I32Load(w32(0)),
+        I::LocalSet(rest),
+        I::I32Const(RESOLVED),
+        I::I32Load(w32(4)),
+        I::LocalSet(rlen)
     );
     // The mode: write truncates or creates, append creates and appends.
     let write = crate::compiler::expression::FILE_FLAG_WRITE;
@@ -694,7 +827,7 @@ fn incr(f: &mut Function, local: u32, by: i32) {
     );
 }
 
-fn wasi(ctx: &CompilationContext, import: Wasi) -> u32 {
+pub(crate) fn wasi(ctx: &CompilationContext, import: Wasi) -> u32 {
     *ctx.wasi.get(&import).unwrap_or_else(|| {
         panic!(
             "the {} import was not reserved; the import walk missed a use",
@@ -1536,5 +1669,37 @@ pub(crate) fn build_start(ctx: &CompilationContext) -> Function {
         emit!(f, I::I32Const(1), I::Call(exit));
     }
     emit!(f, I::Unreachable, I::End, I::End);
+    f
+}
+
+/// `() -> list`: `sys.path`, one list for the program's life. It is empty:
+/// a compiled module links every import at compile time, and there is no
+/// directory a running program imports from.
+pub(crate) fn build_sys_path(ctx: &CompilationContext) -> Function {
+    use crate::compiler::context::{COLLECTION_DATA, COLLECTION_HEADER};
+    let mut f = function(&[ValType::I32]);
+    let list = 0;
+    emit!(
+        f,
+        I::I32Const(SYS_PATH),
+        I::I32Load(w32(0)),
+        I::LocalTee(list),
+        I::If(BlockType::Empty),
+        I::LocalGet(list),
+        I::Return,
+        I::End,
+        I::I32Const(COLLECTION_HEADER as i32),
+        I::Call(ctx.alloc_func_index),
+        I::LocalTee(list),
+        I::LocalGet(list),
+        I::I32Const(COLLECTION_HEADER as i32),
+        I::I32Add,
+        I::I32Store(w32(COLLECTION_DATA as u64)),
+        I::I32Const(SYS_PATH),
+        I::LocalGet(list),
+        I::I32Store(w32(0)),
+        I::LocalGet(list),
+        I::End
+    );
     f
 }

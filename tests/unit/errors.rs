@@ -1,4 +1,4 @@
-//! Error-quality coverage for v0.20.0: unsupported Python syntax is rejected
+//! Error-quality coverage: unsupported Python syntax is rejected
 //! up front by the parser's validation pass with a located, actionable
 //! message — instead of failing deep in codegen with an AST debug dump, or
 //! (worse) compiling to silently wrong code.
@@ -6,7 +6,7 @@
 #[path = "../utils/harness.rs"]
 mod harness;
 
-use harness::try_compile;
+use harness::{dedent, try_compile};
 
 /// Compile expecting failure and return the full error chain text.
 fn compile_error(source: &str) -> String {
@@ -394,6 +394,26 @@ fn decorators_that_cannot_be_specialized_are_refused() {
     let err = compile_error("@nothere\ndef k(a: int) -> int:\n    return a\n");
     assert!(
         err.contains("decorator '@nothere' on function 'k' is not supported"),
+        "{err}"
+    );
+}
+
+/// `open()` with its mode in a variable opened the file for reading whatever
+/// the mode said; it is refused.
+#[test]
+fn open_mode_must_be_a_literal() {
+    let err = try_compile(&dedent(
+        r#"
+        def f() -> None:
+            m = "w"
+            fh = open("out.txt", m)
+            fh.write("x")
+            fh.close()
+        "#,
+    ))
+    .expect_err("a mode in a variable");
+    assert!(
+        err.contains("open()'s mode must be written as a string literal"),
         "{err}"
     );
 }

@@ -1272,15 +1272,15 @@ fn unimplemented_decorators_are_refused_and_caching_ones_accepted() {
             "'@functools.partial' on function 'g'",
         ),
         (
-            "from functools import cached_property\n\
+            "import contextlib\n\
              \n\
              class N:\n\
              \x20   def __init__(self, v: int):\n\
              \x20       self.v = v\n\
-             \x20   @cached_property\n\
+             \x20   @contextlib.contextmanager\n\
              \x20   def d(self) -> int:\n\
              \x20       return self.v * 2\n",
-            "'@cached_property' on method 'N.d'",
+            "'@contextlib.contextmanager' on method 'N.d'",
         ),
         (
             "def deco(cls):\n\
@@ -1305,18 +1305,15 @@ fn unimplemented_decorators_are_refused_and_caching_ones_accepted() {
 /// A call to a name that is neither a compiled function nor a builtin the
 /// compiler implements pushed a 0 and reported success, so `reduce(add, xs)`,
 /// `partial(add, 10)`, `divmod(7, 2)`, and a misspelled function name all
-/// answered 0. It names the callee now. (`abs()` was on this list until it was
-/// implemented.)
+/// answered 0. It names the callee now. (`abs()`, `reduce()`, and `partial()`
+/// were on this list until they were implemented.)
 #[test]
 fn a_call_to_an_unknown_function_is_refused() {
     let cases: [&str; 3] = [
-        "from functools import reduce\n\
-         \n\
-         def add(a: int, b: int) -> int:\n\
-         \x20   return a + b\n\
+        "from random import choices\n\
          \n\
          def f() -> int:\n\
-         \x20   return reduce(add, [1, 2, 3])\n",
+         \x20   return choices([1, 2, 3])[0]\n",
         "def f() -> int:\n\
          \x20   return divmod(7, 2)[0]\n",
         "def total(a: int) -> int:\n\
@@ -1328,7 +1325,7 @@ fn a_call_to_an_unknown_function_is_refused() {
     for (src, name) in
         cases
             .iter()
-            .zip(["'functools.reduce()'", "call to 'divmod'", "call to 'totl'"])
+            .zip(["'random.choices()'", "call to 'divmod'", "call to 'totl'"])
     {
         let err = try_compile(src).expect_err("an unknown callee must be refused");
         assert!(
@@ -3844,53 +3841,40 @@ fn len_of_a_range_and_of_a_number() {
 /// The standard library's calls compiled to placeholders: `json.dumps`
 /// answered "{}", `os.getcwd()` "/", `datetime.now()` the moment the module
 /// was compiled, a runtime `re.match` a match whatever the input, and every
-/// `logging` call nothing. They are refused, naming the release that
-/// implements them, as are the host values (`sys.argv` was empty).
+/// `logging` call nothing. A function the compiler does not implement is
+/// refused, naming the call, and no release.
 #[test]
 fn standard_library_placeholders_are_refused() {
     for (source, needle) in [
         (
-            "import json\n\ndef f() -> int:\n    return len(json.dumps([1, 2, 3]))\n",
-            "'json.dumps()'",
+            "import os\n\ndef f() -> int:\n    return os.fork()\n",
+            "'os.fork()'",
         ),
         (
-            "import os\n\ndef f() -> int:\n    return len(os.getcwd())\n",
-            "'os.getcwd()'",
+            "import sys\n\ndef f() -> int:\n    return sys.getrefcount(1)\n",
+            "'sys.getrefcount()'",
         ),
         (
-            "import os\n\ndef f(a: str) -> int:\n    return len(os.path.join(a, \"b\"))\n",
-            "'os.path.join()'",
+            "import random\n\ndef f() -> float:\n    return random.betavariate(1.0, 2.0)\n",
+            "'random.betavariate()'",
         ),
         (
-            "import sys\n\ndef f() -> int:\n    return len(sys.path)\n",
-            "'sys.path'",
-        ),
-        (
-            "import datetime\n\ndef f() -> int:\n    d = datetime.datetime.now()\n    return 1\n",
-            "'datetime.datetime.now()'",
-        ),
-        (
-            "import logging\n\ndef f() -> int:\n    logging.warning(\"x\")\n    return 1\n",
-            "'logging.warning()'",
-        ),
-        (
-            "import re\n\ndef f(s: str) -> int:\n    return len(re.findall(r\"\\d\", s))\n",
-            "'re.findall()'",
-        ),
-        (
-            "import re\n\ndef f() -> bool:\n    return bool(re.match(r\"z\", \"abc\"))\n",
-            "'re.match()'",
+            "import math\n\ndef f() -> float:\n    return math.erf(0.5)\n",
+            "'math.erf()'",
         ),
     ] {
         let err = refused(source, needle);
-        assert!(err.contains("0.20.0"), "expected the release in: {err}");
+        assert!(
+            !err.contains("0.20.0"),
+            "a refusal names no release that will not exist: {err}"
+        );
     }
 }
 
-/// `re.sub` and `re.escape` over constants fold to CPython's string. The fold
-/// used the `regex` crate's replacement syntax and resumed differently after
-/// an empty match, so it is limited to the patterns both engines read alike,
-/// and refuses the rest.
+/// `re.sub` and `re.escape` over constants give CPython's string: folded
+/// where the `regex` crate and CPython provably agree (the fold used the
+/// crate's replacement syntax and resumed differently after an empty match),
+/// matched at run time otherwise.
 #[test]
 fn regex_folds_match_cpython_or_refuse() {
     let src = dedent(
@@ -3904,10 +3888,16 @@ fn regex_folds_match_cpython_or_refuse() {
             return re.sub(r"(\w+)@(\w+)", r"\2 at \1", "me@host")
 
         def flagged() -> str:
-            return re.sub("A", "-", "aA", 0, re.I)
+            return re.sub("A", "-", "aA", flags=re.I)
 
         def counted() -> str:
-            return re.sub(r"\d+", "X", "a1b2c3", 2)
+            return re.sub(r"\d+", "X", "a1b2c3", count=2)
+
+        def empty_matches() -> str:
+            return re.sub("x*", "-", "abxd")
+
+        def backreference() -> str:
+            return re.sub(r"(a)\1", "", "aa")
 
         def dollar() -> str:
             return re.sub("a", "$x", "aa")
@@ -3922,14 +3912,8 @@ fn regex_folds_match_cpython_or_refuse() {
     assert_eq!(call_str(&src, "counted"), "aXbXc3");
     assert_eq!(call_str(&src, "dollar"), "$x$x");
     assert_eq!(call_str(&src, "escaped"), "a\\ b\\.c");
-    refused(
-        "import re\n\ndef f() -> str:\n    return re.sub(\"x*\", \"-\", \"abxd\")\n",
-        "can match the empty string",
-    );
-    refused(
-        "import re\n\ndef f() -> str:\n    return re.sub(r\"(a)\\1\", \"\", \"aa\")\n",
-        "escape '\\1'",
-    );
+    assert_eq!(call_str(&src, "empty_matches"), "-a-b--d-");
+    assert_eq!(call_str(&src, "backreference"), "");
 }
 
 /// The standard library's string constants were never interned, so `os.sep`
@@ -4051,7 +4035,7 @@ fn remaining_placeholders_are_refused() {
     );
     refused(
         "from collections import namedtuple\n\ndef f() -> int:\n    P = namedtuple(\"P\", \"x y\")\n    return 1\n",
-        "namedtuple() is not supported",
+        "namedtuple() is supported as a module-level assignment",
     );
     refused(
         "def f() -> int:\n    __import__(\"os\")\n    return 1\n",
@@ -4215,8 +4199,8 @@ fn from_imported_constants_and_undefined_names() {
         std::f64::consts::PI + std::f64::consts::E
     );
     refused(
-        "from json import dumps\n\ndef f() -> int:\n    return len(dumps([1]))\n",
-        "'json.dumps()'",
+        "from logging import addLevelName\n\ndef f() -> int:\n    addLevelName(5, 'TRACE')\n    return 1\n",
+        "'logging.addLevelName()'",
     );
     refused(
         "def f() -> int:\n    return missing + 1\n",
@@ -4915,5 +4899,173 @@ fn class_variables_through_instances_and_writes() {
     refused(
         "class A:\n    n = 0\n\nclass B(A):\n    pass\n\ndef f() -> int:\n    B.n = 1\n    return 0\n",
         "gives 'B' an attribute of its own that shadows 'A.n'",
+    );
+}
+
+/// `sorted()` of instances compared their addresses, so a list sorted by the
+/// order its members were allocated in: `sorted([P(2), P(1)])` kept P(2)
+/// first. It orders by the class's `__lt__` now, the only comparison
+/// CPython's sort makes.
+#[test]
+fn sorted_instances_order_by_lt() {
+    let src = dedent(
+        r#"
+        class P:
+            def __init__(self, v: int) -> None:
+                self.v = v
+
+            def __lt__(self, other: "P") -> bool:
+                return self.v < other.v
+
+        def f() -> int:
+            a = P(2)
+            b = P(1)
+            c = P(3)
+            xs: list[P] = sorted([a, b, c])
+            ys: list[P] = sorted([a, b, c], reverse=True)
+            return xs[0].v * 100 + xs[2].v * 10 + ys[0].v
+        "#,
+    );
+    assert_eq!(call_i32(&src, "f"), 133);
+}
+
+/// A comprehension over a tuple of floats read each element as an int word
+/// (`[0, 0]`), and one over a list of tuples bound its targets to the tuple's
+/// pointer.
+#[test]
+fn comprehensions_bind_typed_elements() {
+    let src = dedent(
+        r#"
+        def f() -> str:
+            t = (1.5, 2.5)
+            pairs = [(1, "a"), (2, "b")]
+            return str([x * 2 for x in t]) + str([s + str(n) for n, s in pairs]) + str([p for p in pairs])
+        "#,
+    );
+    assert_eq!(
+        call_str(&src, "f"),
+        "[3.0, 5.0]['a1', 'b2'][(1, 'a'), (2, 'b')]"
+    );
+}
+
+/// A method call that leaves out defaulted parameters produced an invalid
+/// module (the call site never filled them in), and a generator walking a
+/// dict or a set by a suspending loop read `d[0]`, `d[1]`, ... instead of its
+/// keys.
+#[test]
+fn method_defaults_and_generators_over_dicts() {
+    let src = dedent(
+        r#"
+        class C:
+            def m(self, n: int = 5, s: str = "x") -> str:
+                return s * n
+
+            @classmethod
+            def make(cls, k: int = 2) -> int:
+                return k * 10
+
+        def keys(d: dict[int, int]):
+            for x in d:
+                yield x
+
+        def members(s: set[str]):
+            for x in s:
+                yield x
+
+        def f() -> str:
+            c = C()
+            return (c.m() + c.m(2) + c.m(1, "y") + str(C.make())
+                    + str([k for k in keys({5: 1, 7: 2})]) + str(sorted(members({"b", "a"}))))
+        "#,
+    );
+    assert_eq!(call_str(&src, "f"), "xxxxxxxy20[5, 7]['a', 'b']");
+}
+
+/// Constructor arguments widen a computed int for a float parameter, a class
+/// variable's call gets its defaults and keywords, `format()` and an f-string
+/// spec call `__format__`, a class variable read through its class is typed,
+/// a negative keyword argument may be written out of order, and a long `+`
+/// chain compiles in linear time (it took time exponential in its length).
+#[test]
+fn constructor_arguments_class_variables_and_format() {
+    let src = dedent(
+        r#"
+        class P:
+            def __init__(self, x: float, y: float = 2.0, label: str = "p") -> None:
+                self.x = x
+                self.y = y
+                self.label = label
+
+            def __format__(self, spec: str) -> str:
+                return spec + ":" + self.label
+
+            def total(self) -> float:
+                return self.x + self.y
+
+
+        class Q:
+            origin = P(1.0)
+            named = P(0.5, label="n")
+
+
+        def f(a: int, b: int) -> int:
+            return a * 10 + b
+
+
+        def g() -> str:
+            p = P(-5)
+            s = "a" + "b" + "c" + "d" + "e" + "f" + "g" + "h" + "i" + "j" + "k" + "l" + "m" + "n" + "o" + "p" + "q" + "r" + "s" + "t" + "u" + "v" + "w" + "x" + "y" + "z" + "0" + "1" + "2" + "3" + "4" + "5"
+            return " ".join([str(p.total()), f"{p:>8}", format(p, "x"), str(Q.origin.total()),
+                             Q.named.label, str(f(b=-1, a=2)), s])
+        "#,
+    );
+    assert_eq!(
+        call_str(&src, "g"),
+        "-3.0 >8:p x:p 3.0 n 19 abcdefghijklmnopqrstuvwxyz012345"
+    );
+}
+
+/// `super().__init__()` gets the defaults and keywords of the method it
+/// reaches (it produced an invalid module when one was left out), an
+/// optional string compares and converts by its text (`x == "ab"` answered
+/// False, and `y: str = x` lost the text), and `__name__` is the module's.
+#[test]
+fn super_defaults_optional_strings_and_name() {
+    let src = dedent(
+        r#"
+        from typing import Optional
+
+
+        class A:
+            def __init__(self, level: int = 7, name: str = "a") -> None:
+                self.level = level
+                self.name = name
+
+
+        class B(A):
+            def __init__(self) -> None:
+                super().__init__()
+
+
+        class C(A):
+            def __init__(self) -> None:
+                super().__init__(name="c")
+
+
+        def same(x: Optional[str]) -> str:
+            if x is None:
+                return "none"
+            y: str = x
+            return y + "!" + str(y == "ab") + str(x == "ab") + str(x != "ab")
+
+
+        def g() -> str:
+            return " ".join([str(B().level), B().name, str(C().level), C().name, same("ab"), same("cd"),
+                             same(None), __name__])
+        "#,
+    );
+    assert_eq!(
+        call_str(&src, "g"),
+        "7 a 7 c ab!TrueTrueFalse cd!FalseFalseTrue none __main__"
     );
 }

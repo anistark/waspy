@@ -3,7 +3,7 @@
 //! [`CompilerOptions`] and [`Verbosity`] are part of Waspy's stable public
 //! API: every `*_with_options` entry point in the crate root takes a
 //! `&CompilerOptions`. Both types are reviewed for the 1.0 freeze — options
-//! that existed before 0.20.0 but were never honored by the pipeline
+//! that existed in 0.18.0 but were never honored by the pipeline
 //! (`debug_info`, `max_memory`, `entry_point`, `generate_html`,
 //! `include_metadata`) have been removed; driver-side concerns like HTML
 //! harness generation belong to the embedding tool, not the compiler.

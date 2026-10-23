@@ -337,6 +337,8 @@ pub struct Host {
     stdin_pos: usize,
     /// `sys.argv`, the program's name first.
     pub args: Vec<String>,
+    /// The environment, as `KEY=value` strings.
+    pub env: Vec<String>,
 }
 
 /// The name file I/O tests know the host by.
@@ -419,6 +421,116 @@ pub fn link_host(linker: &mut Linker<Host>) {
             },
         )
         .expect("link fd_write");
+    linker
+        .func_wrap(
+            wasi,
+            "environ_sizes_get",
+            |mut caller: Caller<'_, Host>, count: i32, size: i32| -> i32 {
+                let memory = memory_of(&mut caller);
+                let (data, host) = memory.data_and_store_mut(&mut caller);
+                let total: usize = host.env.iter().map(|e| e.len() + 1).sum();
+                put_word(data, count as usize, host.env.len() as u32);
+                put_word(data, size as usize, total as u32);
+                0
+            },
+        )
+        .expect("link environ_sizes_get");
+    linker
+        .func_wrap(
+            wasi,
+            "environ_get",
+            |mut caller: Caller<'_, Host>, ptrs: i32, buf: i32| -> i32 {
+                let memory = memory_of(&mut caller);
+                let (data, host) = memory.data_and_store_mut(&mut caller);
+                let mut at = buf as usize;
+                for (k, entry) in host.env.iter().enumerate() {
+                    put_word(data, ptrs as usize + 4 * k, at as u32);
+                    data[at..at + entry.len()].copy_from_slice(entry.as_bytes());
+                    data[at + entry.len()] = 0;
+                    at += entry.len() + 1;
+                }
+                0
+            },
+        )
+        .expect("link environ_get");
+    linker
+        .func_wrap(
+            wasi,
+            "path_filestat_get",
+            |mut caller: Caller<'_, Host>,
+             dir: i32,
+             _flags: i32,
+             path: i32,
+             len: i32,
+             out: i32|
+             -> i32 {
+                let memory = memory_of(&mut caller);
+                let (data, host) = memory.data_and_store_mut(&mut caller);
+                if dir != PREOPEN_FD {
+                    return 8; // EBADF
+                }
+                let name = String::from_utf8_lossy(&data[path as usize..(path + len) as usize])
+                    .trim_start_matches("./")
+                    .to_string();
+                // The preopen is a directory, a file is a regular file, and
+                // a prefix of a file's name is a directory holding it.
+                let filetype = if name == "." || name.is_empty() {
+                    3
+                } else if host.files.contains_key(&name) {
+                    4
+                } else if host
+                    .files
+                    .keys()
+                    .any(|f| f.starts_with(&format!("{}/", name.trim_end_matches('/'))))
+                {
+                    3
+                } else {
+                    return 44; // ENOENT
+                };
+                data[out as usize..out as usize + 64].fill(0);
+                data[out as usize + 16] = filetype;
+                0
+            },
+        )
+        .expect("link path_filestat_get");
+    linker
+        .func_wrap(
+            wasi,
+            "clock_time_get",
+            |mut caller: Caller<'_, Host>, _clock: i32, _precision: i64, out: i32| -> i32 {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos() as u64);
+                let memory = memory_of(&mut caller);
+                let data = memory.data_mut(&mut caller);
+                data[out as usize..out as usize + 8].copy_from_slice(&now.to_le_bytes());
+                0
+            },
+        )
+        .expect("link clock_time_get");
+    linker
+        .func_wrap(
+            wasi,
+            "random_get",
+            |mut caller: Caller<'_, Host>, buf: i32, len: i32| -> i32 {
+                // Entropy, as far as a test can tell: a fresh xorshift stream
+                // per call, seeded from the clock.
+                let memory = memory_of(&mut caller);
+                let data = memory.data_mut(&mut caller);
+                let mut x = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0x9E37_79B9_7F4A_7C15, |d| d.as_nanos() as u64)
+                    | 1;
+                for byte in &mut data[buf as usize..(buf + len) as usize] {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    *byte = x as u8;
+                }
+                0
+            },
+        )
+        .expect("link random_get");
     linker
         .func_wrap(
             wasi,

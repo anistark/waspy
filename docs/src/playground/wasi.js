@@ -1,6 +1,7 @@
 // A small WASI preview 1 host for compiled waspy modules, in the browser and
 // in Node alike: the calls a waspy program can import (fd_write, fd_read,
-// args_sizes_get, args_get, proc_exit, and for open() path_open,
+// args_sizes_get, args_get, environ_sizes_get, environ_get, proc_exit,
+// random_get, and for open() and os.path path_open, path_filestat_get,
 // fd_prestat_get, fd_prestat_dir_name, fd_close), standard output and error
 // handed to callbacks as text, standard input served from bytes, an exit
 // raised as a WasiExit the caller can catch, and files kept in a Map (one
@@ -29,11 +30,13 @@ export function createWasi({
     onStdout = () => {},
     onStderr = () => {},
     files = new Map(),
+    env = {},
 } = {}) {
     let memory = null;
     const input = typeof stdin === 'string' ? new TextEncoder().encode(stdin) : stdin;
     let inputPos = 0;
     const encodedArgs = args.map((a) => new TextEncoder().encode(a));
+    const encodedEnv = Object.entries(env).map(([k, v]) => new TextEncoder().encode(`${k}=${v}`));
     // One decoder per stream, so a character split across two writes decodes.
     const decoders = { 1: new TextDecoder('utf-8'), 2: new TextDecoder('utf-8') };
     const sinks = { 1: onStdout, 2: onStderr };
@@ -126,8 +129,37 @@ export function createWasi({
             });
             return ESUCCESS;
         },
+        environ_sizes_get(count, size) {
+            const dv = view();
+            dv.setUint32(count, encodedEnv.length, true);
+            dv.setUint32(size, encodedEnv.reduce((n, e) => n + e.length + 1, 0), true);
+            return ESUCCESS;
+        },
+        environ_get(ptrs, buf) {
+            const dv = view();
+            let at = buf;
+            encodedEnv.forEach((e, k) => {
+                dv.setUint32(ptrs + 4 * k, at, true);
+                bytes().set(e, at);
+                bytes()[at + e.length] = 0;
+                at += e.length + 1;
+            });
+            return ESUCCESS;
+        },
         proc_exit(code) {
             throw new WasiExit(code);
+        },
+        clock_time_get(clock, precision, out) {
+            // Nanoseconds since the epoch, for datetime.now().
+            view().setBigUint64(out, BigInt(Date.now()) * 1000000n, true);
+            return ESUCCESS;
+        },
+        random_get(buf, len) {
+            // getRandomValues fills at most 65536 bytes per call.
+            for (let at = 0; at < len; at += 65536) {
+                globalThis.crypto.getRandomValues(bytes().subarray(buf + at, buf + Math.min(len, at + 65536)));
+            }
+            return ESUCCESS;
         },
         fd_prestat_get(fd, buf) {
             if (fd !== PREOPEN_FD) return EBADF;
@@ -153,6 +185,21 @@ export function createWasi({
             const writable = create || truncate || append;
             handles.push({ name, pos: 0, readable: !writable, writable });
             view().setUint32(fdOut, FIRST_FILE_FD + handles.length - 1, true);
+            return ESUCCESS;
+        },
+        path_filestat_get(dir, _flags, path, len, out) {
+            if (dir !== PREOPEN_FD) return EBADF;
+            const name = new TextDecoder().decode(bytes().subarray(path, path + len)).replace(/^\.\//, '');
+            // The preopen is a directory, a file a regular file, and a prefix
+            // of a file's name a directory holding it.
+            const dirName = name.replace(/\/+$/, '') + '/';
+            let filetype;
+            if (name === '.' || name === '') filetype = 3;
+            else if (files.has(name)) filetype = 4;
+            else if ([...files.keys()].some((f) => f.startsWith(dirName))) filetype = 3;
+            else return ENOENT;
+            bytes().fill(0, out, out + 64);
+            bytes()[out + 16] = filetype;
             return ESUCCESS;
         },
         fd_close(fd) {

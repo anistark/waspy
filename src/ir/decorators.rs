@@ -68,6 +68,10 @@ pub fn method_kind(
                 .into());
             }
             "abstractmethod" | "abc.abstractmethod" => None,
+            // `@functools.singledispatchmethod` and its `@m.register` arms
+            // are ordinary methods; code generation dispatches among them.
+            "singledispatchmethod" | "functools.singledispatchmethod" => None,
+            d if d.ends_with(".register") => None,
             d if matches!(
                 d.strip_prefix("functools.").unwrap_or(d),
                 "lru_cache" | "lru_cache(...)" | "cache" | "wraps(...)"
@@ -76,11 +80,7 @@ pub fn method_kind(
                 None
             }
             d => {
-                let hint = match d.strip_prefix("functools.").unwrap_or(d) {
-                    "cached_property" => "; use '@property' (the value is recomputed on each read)",
-                    "singledispatchmethod" => "; dispatch on the argument in the method body",
-                    _ => "",
-                };
+                let hint = "";
                 return Err(crate::core::errors::unsupported_feature(
                     format!(
                         "decorator '@{d}' on method '{class_name}.{method_name}' is not \

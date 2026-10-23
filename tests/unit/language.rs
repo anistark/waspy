@@ -9,7 +9,7 @@ mod harness;
 
 use harness::{
     call_f64, call_i32, call_i32_traps, call_instance_i32, call_str, dedent, instantiate_wasm,
-    read_str, try_compile, try_compile_multi,
+    read_str, run_main, try_compile, try_compile_multi,
 };
 
 fn refused(source: &str, needle: &str) {
@@ -745,4 +745,351 @@ fn class_repr_names_its_module() {
         read_str(&instance, &store, offset),
         "<class 'shapes.Square'><class '__main__.Local'>"
     );
+}
+
+/// `__name__` is `"__main__"` in the entry file and the module's own name in
+/// one it imports, so `logging.getLogger(__name__)` names each logger as
+/// CPython does.
+#[test]
+fn name_is_the_modules() {
+    let wasm = try_compile_multi(&[
+        (
+            "main.py",
+            "from util import where\n\ndef f() -> str:\n    return __name__ + ' ' + where()\n",
+        ),
+        ("util.py", "def where() -> str:\n    return __name__\n"),
+    ])
+    .expect("compiles");
+    let (instance, mut store) = instantiate_wasm(&wasm);
+    let offset = call_instance_i32(&instance, &mut store, "f");
+    assert_eq!(read_str(&instance, &store, offset), "__main__ util");
+}
+
+// ---------------------------------------------------------------------------
+// Special methods
+// ---------------------------------------------------------------------------
+
+/// Operators, subscripts, `in`, `len()`, truth, `+=`, and calling an instance
+/// go through the class's special methods: the left operand's own, or the
+/// right one's reflected method. `len()` and truth check `__len__`'s answer.
+#[test]
+fn special_methods_implement_operators() {
+    let run = run_main(
+        &dedent(
+            r#"
+        class V:
+            def __init__(self, x: int) -> None:
+                self.x = x
+
+            def __add__(self, o: "V") -> "V":
+                return V(self.x + o.x)
+
+            def __radd__(self, o: int) -> "V":
+                return V(self.x + o)
+
+            def __mul__(self, k: int) -> "V":
+                return V(self.x * k)
+
+            def __neg__(self) -> "V":
+                return V(-self.x)
+
+            def __len__(self) -> int:
+                return self.x
+
+            def __getitem__(self, i: int) -> int:
+                return self.x * i
+
+            def __contains__(self, i: int) -> bool:
+                return i == self.x
+
+            def __repr__(self) -> str:
+                return f"V({self.x})"
+
+
+        class Box:
+            def __init__(self) -> None:
+                self.d: dict[str, int] = {}
+
+            def __setitem__(self, k: str, v: int) -> None:
+                self.d[k] = v * 10
+
+            def __getitem__(self, k: str) -> int:
+                return self.d[k]
+
+            def __bool__(self) -> bool:
+                return len(self.d) > 0
+
+            def __call__(self, k: str) -> int:
+                return self.d[k] + 1
+
+
+        class Neg:
+            def __len__(self) -> int:
+                return -1
+
+
+        def main() -> None:
+            a = V(2) + V(3)
+            print(a, len(a), a[4], 5 in a, 4 in a, 6 not in a, -a, a * 3, 1 + a)
+            a += V(10)
+            print(a)
+            a *= 2
+            print(a)
+            b = Box()
+            print(bool(b), "yes" if b else "no")
+            b["k"] = 4
+            b["k"] += 1
+            print(b["k"], b("k"), bool(b), not b)
+            try:
+                print(len(Neg()))
+            except ValueError as e:
+                print("ValueError", e)
+            try:
+                if Neg():
+                    print("truthy")
+            except ValueError as e:
+                print("ValueError", e)
+
+
+        if __name__ == "__main__":
+            main()
+    "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(run.stderr, "");
+    assert_eq!(run.stdout, "V(5) 5 20 True False True V(-5) V(15) V(6)\nV(15)\nV(30)\nFalse no\n410 411 True False\nValueError __len__() should return >= 0\nValueError __len__() should return >= 0\n");
+}
+
+/// An operator no special method implements is still a TypeError at compile
+/// time, and `__len__` declared to return something else is refused.
+#[test]
+fn special_methods_refusals() {
+    refused(
+        r#"
+        class A:
+            def __init__(self) -> None:
+                self.x = 1
+
+        def f() -> int:
+            return (A() - A()).x
+        "#,
+        "unsupported operand type(s) for -",
+    );
+    refused(
+        r#"
+        class A:
+            def __len__(self) -> str:
+                return "x"
+
+        def f() -> int:
+            return len(A())
+        "#,
+        "__len__ is declared to return 'str'",
+    );
+}
+
+/// Dicts compare by their entries whatever their order, and an empty literal
+/// compares as the other side's type; comparing two dicts was refused.
+#[test]
+fn dict_equality() {
+    let run = run_main(
+        &dedent(
+            r#"
+            def main() -> None:
+                a = {"x": 1, "y": 2}
+                b = {"y": 2, "x": 1}
+                c = {"x": 1, "y": 3}
+                print(a == b, a != b, a == c, a == {"x": 1}, a == {}, {1.5: "a"} == {1.5: "a"})
+                print([{"k": [1, 2]}] == [{"k": [1, 2]}], {"k": (1, "a")} == {"k": (1, "b")})
+
+
+            if __name__ == "__main__":
+                main()
+        "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(run.stderr, "");
+    assert_eq!(
+        run.stdout,
+        "True False False False False True\nTrue False\n"
+    );
+}
+
+/// `reversed()` where it is walked: a loop, a comprehension, `list()`,
+/// `sorted()`, `str.join`, over lists, strings, dicts (their keys), and
+/// ranges.
+#[test]
+fn reversed_walks() {
+    let run = run_main(
+        &dedent(
+            r#"
+            def main() -> None:
+                xs = [1, 2, 3]
+                s = "abc"
+                d = {"a": 1, "b": 2}
+                for x in reversed(xs):
+                    print(x)
+                print(list(reversed(xs)), "".join(reversed(s)), [k for k in reversed(d)], sorted(reversed(xs)), list(reversed(range(4))))
+
+            if __name__ == "__main__":
+                main()
+        "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(run.stderr, "");
+    assert_eq!(
+        run.stdout,
+        "3\n2\n1\n[3, 2, 1] cba ['b', 'a'] [1, 2, 3] [3, 2, 1, 0]\n"
+    );
+}
+
+/// Keyword arguments on a method of the program's classes, placed by name
+/// (with the defaults of the ones left out), on an instance and through the
+/// class; a builtin value's method still takes none.
+#[test]
+fn method_keyword_arguments() {
+    let run = run_main(
+        &dedent(
+            r#"
+            class Shape:
+                def __init__(self, w: int) -> None:
+                    self.w = w
+
+                def scaled(self, by: int = 2, plus: int = 0) -> int:
+                    return self.w * by + plus
+
+                @classmethod
+                def unit(cls, w: int = 1, h: int = 1) -> int:
+                    return w * h
+
+
+            def main() -> None:
+                s = Shape(3)
+                print(s.scaled(by=4), s.scaled(plus=1), s.scaled(5, plus=2), s.scaled(plus=1, by=3), Shape.unit(h=7))
+
+
+            if __name__ == "__main__":
+                main()
+        "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(run.stderr, "");
+    assert_eq!(run.stdout, "12 7 17 10 7\n");
+    refused(
+        r#"
+        class A:
+            def m(self, x: int) -> int:
+                return x
+
+        def f() -> int:
+            return A().m(y=1)
+        "#,
+        "A.m() got an unexpected keyword argument 'y'",
+    );
+    refused(
+        r#"
+        def f() -> list[str]:
+            return "a,b".split(sep=",")
+        "#,
+        "keyword argument 'sep' is not supported on 'split()'",
+    );
+}
+
+/// Fields and methods read through an optional instance (a linked list's `next`): the instance's, after CPython's AttributeError for None.
+#[test]
+fn optional_instances_linked_list() {
+    let run = run_main(
+        &dedent(
+            r#"
+            from typing import Optional
+
+
+            class Node:
+                def __init__(self, value: int, next: Optional["Node"] = None) -> None:
+                    self.value = value
+                    self.next = next
+
+
+            def total(head: Optional[Node]) -> int:
+                t = 0
+                while head is not None:
+                    t += head.value
+                    head = head.next
+                return t
+
+
+            def main() -> None:
+                lst = Node(1, Node(2, Node(3)))
+                print(total(lst), lst.next.value, lst.next.next.value)
+                try:
+                    print(lst.next.next.next.value)
+                except AttributeError as e:
+                    print("AttributeError:", e)
+
+
+            if __name__ == "__main__":
+                main()
+        "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(run.stderr, "");
+    assert_eq!(
+        run.stdout,
+        "6 2 3\nAttributeError: 'NoneType' object has no attribute 'value'\n"
+    );
+}
+
+/// A method called on an optional field after a None check, and an optional stored into a plain field.
+#[test]
+fn optional_instance_methods() {
+    let run = run_main(
+        &dedent(
+            r#"
+            from typing import Optional
+
+
+            class Z:
+                def __init__(self, n: int) -> None:
+                    self.n = n
+
+                def get(self) -> int:
+                    return self.n
+
+
+            class H:
+                def __init__(self, z: Optional[Z] = None) -> None:
+                    self.z: Optional[Z] = z
+                    self.plain: Z = Z(0)
+                    if z is not None:
+                        self.plain = z
+
+                def value(self) -> int:
+                    if self.z is None:
+                        return -1
+                    return self.z.get()
+
+
+            def main() -> None:
+                print(H().value(), H(Z(5)).value(), H(Z(7)).plain.n, H().z is None)
+
+
+            if __name__ == "__main__":
+                main()
+        "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(run.stderr, "");
+    assert_eq!(run.stdout, "-1 5 7 True\n");
 }

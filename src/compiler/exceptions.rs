@@ -72,6 +72,11 @@ pub(crate) const BUILTIN_EXCEPTIONS: &[(&str, &str)] = &[
     ("UnicodeError", "ValueError"),
     ("UnicodeDecodeError", "UnicodeError"),
     ("UnicodeEncodeError", "UnicodeError"),
+    // `json.decoder.JSONDecodeError`, which `json.loads` raises.
+    ("JSONDecodeError", "ValueError"),
+    // `re.PatternError` (`re.error`), which a bad replacement template
+    // raises.
+    ("PatternError", "Exception"),
 ];
 
 pub(crate) fn is_builtin_exception(name: &str) -> bool {
@@ -517,6 +522,42 @@ pub(crate) fn build_raise_text(ctx: &CompilationContext, class: &str) -> Functio
     f
 }
 
+/// `() -> ()`: leave a new `class(errno, message)` pending, as
+/// `PyErr_SetFromErrno` raises (`OverflowError(34, 'Result too large')`).
+pub(crate) fn build_raise_errno(
+    ctx: &CompilationContext,
+    class: &str,
+    errno: i32,
+    message: &str,
+) -> Function {
+    let mut f = function(&[ValType::I32; 5]);
+    let (obj, code, msg) = (0, 1, 2);
+    if ctx.get_class_info(class).is_none() {
+        emit!(f, I::Unreachable, I::End);
+        return f;
+    }
+    alloc_exception(&mut f, ctx, class, obj);
+    emit!(
+        f,
+        I::I32Const(errno),
+        I::LocalSet(code),
+        I::Call(ctx.helper(Helper::ExcText(message.to_string()))),
+        I::LocalSet(msg)
+    );
+    emit_fill_args(
+        &mut f,
+        ctx,
+        obj,
+        class,
+        &[(code, IRType::Int), (msg, IRType::String)],
+        3,
+        4,
+    );
+    set_pending(&mut f, obj);
+    emit!(f, I::End);
+    f
+}
+
 /// `(value) -> ()`: leave a new `class(value)` pending.
 pub(crate) fn build_raise_value(ctx: &CompilationContext, class: &str, ty: &IRType) -> Function {
     let mut f = function(&[ValType::I32; 3]);
@@ -546,7 +587,29 @@ pub(crate) fn build_class_name(ctx: &CompilationContext, by_id: Option<bool>) ->
             emit!(f, I::I32Load(w32(0)));
         }
         emit!(f, I::I32Const(id), I::I32Eq, I::If(BlockType::Empty));
+        // A specialized `collections` class is the class CPython names.
+        let kind = crate::ir::collections::spec::kind_of_class(name);
         let text = match by_id {
+            Some(true) if kind.is_some() => {
+                format!("<class 'collections.{}'>", kind.expect("checked").name())
+            }
+            _ if kind.is_some() => kind.expect("checked").name().to_string(),
+            // A `datetime` class is named in its module.
+            Some(true) if name.starts_with("datetime.") || name.starts_with("logging.") => {
+                format!("<class '{name}'>")
+            }
+            _ if name.starts_with("datetime.") || name.starts_with("logging.") => name
+                .split_once('.')
+                .map_or(name.as_str(), |(_, n)| n)
+                .to_string(),
+            Some(true) if name == "PatternError" => "<class 're.PatternError'>".to_string(),
+            Some(true) if name.starts_with("re._Pattern") => "<class 're.Pattern'>".to_string(),
+            _ if name.starts_with("re._Pattern") => "Pattern".to_string(),
+            Some(true) if name.starts_with("re.") => format!("<class '{name}'>"),
+            _ if name.starts_with("re.") => name["re.".len()..].to_string(),
+            Some(true) if name == "JSONDecodeError" => {
+                "<class 'json.decoder.JSONDecodeError'>".to_string()
+            }
             Some(true) if is_builtin_exception(name) => format!("<class '{name}'>"),
             Some(true) => format!(
                 "<class '{}.{name}'>",
@@ -610,7 +673,31 @@ pub(crate) fn emit_report_uncaught(
         f,
         I::GlobalGet(EXC_VALUE_GLOBAL),
         I::Call(ctx.helper(Helper::ClassName)),
-        I::LocalSet(line),
+        I::LocalSet(line)
+    );
+    // A class of a standard-library module is reported by its module's name.
+    if ctx.get_class_info("PatternError").is_some() {
+        emit_pending_is(f, ctx, "PatternError");
+        emit!(
+            f,
+            I::If(BlockType::Empty),
+            I::Call(ctx.helper(Helper::ExcText("re.PatternError".to_string()))),
+            I::LocalSet(line),
+            I::End
+        );
+    }
+    if ctx.get_class_info("JSONDecodeError").is_some() {
+        emit_pending_is(f, ctx, "JSONDecodeError");
+        emit!(
+            f,
+            I::If(BlockType::Empty),
+            I::Call(ctx.helper(Helper::ExcText("json.decoder.JSONDecodeError".to_string()))),
+            I::LocalSet(line),
+            I::End
+        );
+    }
+    emit!(
+        f,
         // str(e), dispatched to the instance's own __str__
         I::GlobalGet(EXC_VALUE_GLOBAL),
         I::I32Const(0),

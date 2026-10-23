@@ -1333,3 +1333,105 @@ pub(crate) fn build_str_chars(ctx: &CompilationContext) -> Function {
     emit!(f, I::Br(0), I::End, I::End, I::LocalGet(list), I::End);
     f
 }
+
+/// `(s) -> cp`: the code point of the string's first character, for `ord`.
+pub(crate) fn build_first_code_point() -> Function {
+    let mut f = function(&[ValType::I32; 2]);
+    let (s, cp, w) = (0, 1, 2);
+    decode(&mut f, s, cp, w);
+    emit!(f, I::LocalGet(cp), I::End);
+    f
+}
+
+/// `(cp) -> s`: a new string of the code point, UTF-8 encoded, for `chr`.
+pub(crate) fn build_from_code_point(ctx: &CompilationContext) -> Function {
+    let mut f = function(&[ValType::I32; 2]);
+    let (cp, w, out) = (0, 1, 2);
+    // The width: 1 below 0x80, 2 below 0x800, 3 below 0x10000, else 4.
+    emit!(
+        f,
+        I::I32Const(1),
+        I::I32Const(2),
+        I::LocalGet(cp),
+        I::I32Const(0x80),
+        I::I32LtU,
+        I::Select,
+        I::LocalSet(w)
+    );
+    for (limit, width) in [(0x800, 2), (0x10000, 3)] {
+        emit!(
+            f,
+            I::LocalGet(cp),
+            I::I32Const(limit),
+            I::I32GeU,
+            I::If(BlockType::Empty),
+            I::I32Const(width + 1),
+            I::LocalSet(w),
+            I::End
+        );
+    }
+    alloc_string(&mut f, ctx, w, out);
+    let byte_at = |f: &mut Function, k: u64, value: &dyn Fn(&mut Function)| {
+        emit!(f, I::LocalGet(out));
+        value(f);
+        emit!(f, I::I32Store8(crate::compiler::runtime::mem(k, 0)));
+    };
+    let cont = |shift: i32| {
+        move |f: &mut Function| {
+            emit!(
+                f,
+                I::LocalGet(cp),
+                I::I32Const(shift),
+                I::I32ShrU,
+                I::I32Const(0x3f),
+                I::I32And,
+                I::I32Const(0x80),
+                I::I32Or
+            );
+        }
+    };
+    let lead = |shift: i32, mask: i32, tag: i32| {
+        move |f: &mut Function| {
+            emit!(
+                f,
+                I::LocalGet(cp),
+                I::I32Const(shift),
+                I::I32ShrU,
+                I::I32Const(mask),
+                I::I32And,
+                I::I32Const(tag),
+                I::I32Or
+            );
+        }
+    };
+    for width in 1..=4 {
+        emit!(
+            f,
+            I::LocalGet(w),
+            I::I32Const(width),
+            I::I32Eq,
+            I::If(BlockType::Empty)
+        );
+        match width {
+            1 => byte_at(&mut f, 0, &|f: &mut Function| emit!(f, I::LocalGet(cp))),
+            2 => {
+                byte_at(&mut f, 0, &lead(6, 0x1f, 0xc0));
+                byte_at(&mut f, 1, &cont(0));
+            }
+            3 => {
+                byte_at(&mut f, 0, &lead(12, 0x0f, 0xe0));
+                byte_at(&mut f, 1, &cont(6));
+                byte_at(&mut f, 2, &cont(0));
+            }
+            _ => {
+                byte_at(&mut f, 0, &lead(18, 0x07, 0xf0));
+                byte_at(&mut f, 1, &cont(12));
+                byte_at(&mut f, 2, &cont(6));
+                byte_at(&mut f, 3, &cont(0));
+            }
+        }
+        emit!(f, I::End);
+    }
+    emit!(f, I::LocalGet(out), I::End);
+    f
+}
