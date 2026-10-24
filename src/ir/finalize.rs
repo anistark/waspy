@@ -87,6 +87,13 @@ pub fn finalize_module(module: &mut IRModule) -> Result<()> {
         for method in &mut class.methods {
             visit_body(&mut method.body, &mut rewrite)?;
         }
+        // A class variable's value is a call like any other.
+        for var in &mut class.class_vars {
+            visit_expr(&mut var.value, &mut rewrite)?;
+        }
+    }
+    for var in &mut module.variables {
+        visit_expr(&mut var.value, &mut rewrite)?;
     }
 
     name_function_values(module);
@@ -270,6 +277,9 @@ pub fn resolve_keyword_arguments(module: &mut IRModule) -> Result<()> {
         for method in &mut class.methods {
             visit_body(&mut method.body, &mut rewrite)?;
         }
+        for var in &mut class.class_vars {
+            visit_expr(&mut var.value, &mut rewrite)?;
+        }
     }
     for var in &mut module.variables {
         visit_expr(&mut var.value, &mut rewrite)?;
@@ -280,10 +290,15 @@ pub fn resolve_keyword_arguments(module: &mut IRModule) -> Result<()> {
 /// Whether evaluating `expr` can have an effect another argument could
 /// observe, so moving it changes the program.
 fn may_have_effects(expr: &IRExpr) -> bool {
-    !matches!(
-        expr,
-        IRExpr::Const(_) | IRExpr::Variable(_) | IRExpr::Param(_) | IRExpr::Lambda { .. }
-    )
+    match expr {
+        IRExpr::Const(_) | IRExpr::Variable(_) | IRExpr::Param(_) | IRExpr::Lambda { .. } => false,
+        // A negative number is written as a negated constant.
+        IRExpr::UnaryOp {
+            operand,
+            op: crate::ir::IRUnaryOp::Neg | crate::ir::IRUnaryOp::UAdd,
+        } => !matches!(operand.as_ref(), IRExpr::Const(_)),
+        _ => true,
+    }
 }
 
 /// Bind a call's arguments to the parameters of a function or constructor of

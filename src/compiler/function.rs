@@ -513,6 +513,19 @@ fn ensure_local(ctx: &mut CompilationContext, name: &str, var_type: IRType) {
 /// anything else is left `Unknown` (an i32 slot, which collections and pointers
 /// also use).
 pub(crate) fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRType {
+    // An operator on an instance answers what its special method does. A
+    // binary operator is one only when an operand is an instance, which its
+    // arm below checks first: asking the rewrite of every operator in a chain
+    // would type each operand twice per level.
+    if !matches!(value, IRExpr::BinaryOp { .. }) {
+        if let Some(call) = crate::compiler::dunders::rewrite(value, ctx) {
+            return infer_value_type(&call, ctx);
+        }
+    }
+    // A call into the standard library answers the type its function does.
+    if let Some(ty) = crate::compiler::stdlib::result_type(value, ctx) {
+        return ty;
+    }
     match value {
         IRExpr::Const(IRConstant::Float(_)) => IRType::Float,
         IRExpr::Const(IRConstant::String(_)) => IRType::String,
@@ -520,6 +533,11 @@ pub(crate) fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRTy
         IRExpr::BinaryOp { left, right, op } => {
             let lt = infer_value_type(left, ctx);
             let rt = infer_value_type(right, ctx);
+            if matches!(lt, IRType::Class(_)) || matches!(rt, IRType::Class(_)) {
+                if let Some(call) = crate::compiler::dunders::rewrite(value, ctx) {
+                    return infer_value_type(&call, ctx);
+                }
+            }
             if lt == IRType::Float || rt == IRType::Float || matches!(op, IROp::Div) {
                 IRType::Float
             } else if matches!(op, IROp::Add | IROp::Mul)
@@ -574,8 +592,40 @@ pub(crate) fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRTy
             {
                 IRType::Float
             }
-            _ => IRType::Unknown,
+            // An instance's field, as the class layout typed it (through an
+            // optional one too, which is checked for None where it is read).
+            _ => crate::compiler::expression::quick_type(value, ctx).unwrap_or_else(|| {
+                match infer_value_type(object, ctx) {
+                    IRType::Optional(inner) => match *inner {
+                        IRType::Class(class) => lookup_field(ctx, &class, attribute)
+                            .map(|(_, t)| t)
+                            .unwrap_or(IRType::Unknown),
+                        _ => IRType::Unknown,
+                    },
+                    IRType::Class(class) => lookup_field(ctx, &class, attribute)
+                        .map(|(_, t)| t)
+                        .unwrap_or(IRType::Unknown),
+                    // A class variable read through its class.
+                    IRType::ClassRef(class) => {
+                        crate::compiler::expression::class_var_global(ctx, &class, attribute)
+                            .and_then(|g| ctx.module_global_types.get(&g).cloned())
+                            .unwrap_or(IRType::Unknown)
+                    }
+                    _ => IRType::Unknown,
+                }
+            }),
         },
+        // An optional instance, checked for None, is the instance.
+        IRExpr::FunctionCall {
+            function_name,
+            arguments,
+        } if function_name == crate::ir::SOME_FN => {
+            match arguments.first().map(|a| infer_value_type(a, ctx)) {
+                Some(IRType::Optional(inner)) => *inner,
+                Some(other) => other,
+                None => IRType::Unknown,
+            }
+        }
         // Slicing a string/bytes yields the same kind; indexing a string yields
         // a one-character string (bytes/list indexing yields a scalar).
         IRExpr::Slicing { container, .. } => match infer_value_type(container, ctx) {
@@ -597,20 +647,37 @@ pub(crate) fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRTy
             IRType::Dict(_, v) => *v,
             _ => IRType::Unknown,
         },
+        // A local, else a module global.
         IRExpr::Variable(name) | IRExpr::Param(name) => ctx
             .get_local_info(name)
             .map(|info| info.var_type.clone())
+            .or_else(|| ctx.module_global_types.get(name).cloned())
             .unwrap_or(IRType::Unknown),
         // A comprehension's element type isn't resolved until codegen, but the
         // result is always a pointer-shaped collection (an i32 slot), which is
         // what the local's WASM type needs to know.
-        IRExpr::Comprehension { kind, .. } => match kind {
-            crate::ir::IRComprehensionKind::List => IRType::List(Box::new(IRType::Unknown)),
-            crate::ir::IRComprehensionKind::Set => IRType::Set(Box::new(IRType::Unknown)),
-            crate::ir::IRComprehensionKind::Dict => {
-                IRType::Dict(Box::new(IRType::Unknown), Box::new(IRType::Unknown))
+        // Once the scan has typed the targets (they are renamed apart, so
+        // the names are this comprehension's), the element's type is known
+        // where it is plain.
+        IRExpr::Comprehension {
+            kind,
+            element,
+            value,
+            ..
+        } => {
+            let plain = |e: &IRExpr| match infer_value_type(e, ctx) {
+                t @ (IRType::Class(_) | IRType::Tuple(_) | IRType::String | IRType::Float) => t,
+                _ => IRType::Unknown,
+            };
+            match kind {
+                crate::ir::IRComprehensionKind::List => IRType::List(Box::new(plain(element))),
+                crate::ir::IRComprehensionKind::Set => IRType::Set(Box::new(plain(element))),
+                crate::ir::IRComprehensionKind::Dict => IRType::Dict(
+                    Box::new(plain(element)),
+                    Box::new(value.as_deref().map(plain).unwrap_or(IRType::Unknown)),
+                ),
             }
-        },
+        }
         // A collection literal's element type decides how its elements are
         // loaded back out (`for x in xs` over a float list must bind an f64
         // loop variable), so keep the element type instead of collapsing the
@@ -651,6 +718,21 @@ pub(crate) fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRTy
             }
         }
         IRExpr::FunctionCall { function_name, .. } if function_name == "float" => IRType::Float,
+        IRExpr::FunctionCall { function_name, .. }
+            if function_name == "ord" && ctx.get_function_info("ord").is_none() =>
+        {
+            IRType::Int
+        }
+        // `tuple(iterable)`, a list read as a tuple.
+        IRExpr::FunctionCall {
+            function_name,
+            arguments,
+        } if function_name == crate::ir::AS_TUPLE_FN => {
+            match arguments.first().map(|a| infer_value_type(a, ctx)) {
+                Some(IRType::List(e)) => IRType::VarTuple(e),
+                _ => IRType::VarTuple(Box::new(IRType::Unknown)),
+            }
+        }
         // The builtins that answer a str.
         IRExpr::FunctionCall { function_name, .. }
             if matches!(
@@ -732,6 +814,7 @@ pub(crate) fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRTy
             .cloned()
             .unwrap_or(IRType::Unknown),
         IRExpr::ClosureMake { lambda_name, .. } => closure_signature(lambda_name, ctx),
+        IRExpr::RangeCall { .. } => IRType::Range,
         // An unannotated local assigned from a method call takes the method's
         // declared return type. Without this an f64-returning method stored
         // into an i32 local produced a module Binaryen rejected outright.
@@ -855,21 +938,27 @@ fn method_return_type(
             _ => None,
         };
     }
-    let class_name = match object {
-        IRExpr::Variable(name) => match ctx.get_local_info(name)?.var_type.clone() {
-            IRType::Class(class_name) => class_name,
-            _ => return None,
-        },
-        IRExpr::Attribute { object, attribute } => {
-            let IRExpr::Variable(obj_name) = object.as_ref() else {
-                return None;
-            };
-            let IRType::Class(owner) = ctx.get_local_info(obj_name)?.var_type.clone() else {
-                return None;
-            };
-            match lookup_field(ctx, &owner, attribute)?.1 {
-                IRType::Class(class_name) => class_name,
-                _ => return None,
+    let class_name = match infer_value_type(object, ctx) {
+        IRType::Class(class_name) => class_name,
+        // The dict and list methods whose result's type follows from the
+        // collection's.
+        IRType::Dict(k, v) => {
+            return match method_name {
+                "keys" => Some(IRType::List(k)),
+                "values" => Some(IRType::List(v)),
+                "items" => Some(IRType::List(Box::new(IRType::Tuple(vec![*k, *v])))),
+                "copy" => Some(IRType::Dict(k, v)),
+                "pop" | "setdefault" => Some(*v),
+                "popitem" => Some(IRType::Tuple(vec![*k, *v])),
+                _ => None,
+            }
+        }
+        IRType::List(e) => {
+            return match method_name {
+                "copy" => Some(IRType::List(e)),
+                "pop" => Some(*e),
+                "index" | "count" => Some(IRType::Int),
+                _ => None,
             }
         }
         _ => return None,
@@ -927,10 +1016,18 @@ fn infer_iterable_elem_type(iterable: &IRExpr, ctx: &CompilationContext) -> IRTy
     if crate::compiler::host::std_stream(ctx, iterable) == Some(0) {
         return IRType::String;
     }
+    // A tuple's members, when they share a type (a walk reads them as one).
+    let tuple_member = |members: &[IRType]| match members.first() {
+        Some(first) if members.iter().all(|m| m == first) => first.clone(),
+        _ => IRType::Unknown,
+    };
     match iterable {
-        IRExpr::ListLiteral(elems) | IRExpr::SetLiteral(elems) => literal_elem_type(elems, ctx),
+        IRExpr::ListLiteral(elems) | IRExpr::SetLiteral(elems) | IRExpr::TupleLiteral(elems) => {
+            literal_elem_type(elems, ctx)
+        }
         IRExpr::Variable(name) => match ctx.get_local_info(name).map(|i| i.var_type.clone()) {
             Some(IRType::List(t)) | Some(IRType::Set(t)) | Some(IRType::VarTuple(t)) => *t,
+            Some(IRType::Tuple(members)) => tuple_member(&members),
             // A str's characters are strs.
             Some(IRType::String) => IRType::String,
             // `for k in d` binds the dict's keys.
@@ -962,11 +1059,30 @@ fn infer_iterable_elem_type(iterable: &IRExpr, ctx: &CompilationContext) -> IRTy
             };
             match lookup_field(ctx, &owner, attribute).map(|(_, ty)| ty) {
                 Some(IRType::List(t)) | Some(IRType::Set(t)) | Some(IRType::VarTuple(t)) => *t,
+                Some(IRType::String) => IRType::String,
+                Some(IRType::Dict(k, _)) => *k,
+                Some(IRType::Tuple(members)) => tuple_member(&members),
                 _ => IRType::Unknown,
             }
         }
+        // A comprehension's elements, once its own targets are typed.
+        IRExpr::Comprehension { .. } => match infer_value_type(iterable, ctx) {
+            IRType::List(t) | IRType::Set(t) => *t,
+            IRType::Dict(k, _) => *k,
+            _ => IRType::Unknown,
+        },
         other => match infer_value_type(other, ctx) {
             IRType::String => IRType::String,
+            // A call's or a method's declared result.
+            IRType::List(t) | IRType::Set(t) | IRType::VarTuple(t)
+                if matches!(other, IRExpr::MethodCall { .. }) =>
+            {
+                *t
+            }
+            IRType::Dict(k, _) if matches!(other, IRExpr::MethodCall { .. }) => *k,
+            IRType::Tuple(members) if matches!(other, IRExpr::MethodCall { .. }) => {
+                tuple_member(&members)
+            }
             _ => IRType::Unknown,
         },
     }
@@ -1051,6 +1167,9 @@ fn collect_return_type(body: &IRBody, ctx: &CompilationContext, out: &mut IRType
 /// a depth's locals (their evaluations never overlap) while nested ones get
 /// their own.
 fn scan_expr_locals(expr: &IRExpr, ctx: &mut CompilationContext, depth: u32) {
+    if let Some(rewritten) = crate::compiler::dunders::rewrite(expr, ctx) {
+        return scan_expr_locals(&rewritten, ctx, depth);
+    }
     match expr {
         // A closure environment read touches no locals of its own.
         IRExpr::EnvRead { .. } | IRExpr::CellNew | IRExpr::CellLoad { .. } => {}
@@ -1075,6 +1194,9 @@ fn scan_expr_locals(expr: &IRExpr, ctx: &mut CompilationContext, depth: u32) {
                 ensure_local(ctx, &comp_gen_local_name("ptr", depth, g), IRType::Int);
                 ensure_local(ctx, &comp_gen_local_name("idx", depth, g), IRType::Int);
                 ensure_local(ctx, &comp_gen_local_name("len", depth, g), IRType::Int);
+                // The iterable first: a comprehension inside it types its own
+                // target, which the element type here may be read through.
+                scan_expr_locals(&generator.iterable, ctx, depth + 1);
                 // The loop target binds each element, so a float iterable needs
                 // an f64 local (same rule as the `for` statement's target).
                 if let [target] = generator.targets.as_slice() {
@@ -1086,6 +1208,14 @@ fn scan_expr_locals(expr: &IRExpr, ctx: &mut CompilationContext, depth: u32) {
                     let target_ty = match infer_iterable_elem_type(&generator.iterable, ctx) {
                         ty @ (IRType::Float | IRType::String | IRType::Bytes) => ty,
                         class @ IRType::Class(_) => class,
+                        // A tuple or collection element is a pointer whose
+                        // type the reads of the target need: an untyped one
+                        // rendered its address.
+                        ty @ (IRType::Tuple(_)
+                        | IRType::VarTuple(_)
+                        | IRType::List(_)
+                        | IRType::Set(_)
+                        | IRType::Dict(_, _)) => ty,
                         _ => IRType::Unknown,
                     };
                     ensure_local(ctx, target, target_ty);
@@ -1121,7 +1251,6 @@ fn scan_expr_locals(expr: &IRExpr, ctx: &mut CompilationContext, depth: u32) {
                         ensure_local(ctx, &strlen_local_name(target), IRType::Int);
                     }
                 }
-                scan_expr_locals(&generator.iterable, ctx, depth + 1);
                 for condition in &generator.conditions {
                     scan_expr_locals(condition, ctx, depth + 1);
                 }
@@ -1372,6 +1501,9 @@ fn assigns_module_global(ctx: &CompilationContext, target: &str) -> bool {
 /// Scan the function body for variable declarations and allocate local variables
 pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
     for stmt in &body.statements {
+        // As compiled: a special method's call, or a named tuple's tuple.
+        let rewritten = crate::compiler::dunders::rewrite_statement(stmt, ctx);
+        let stmt = rewritten.as_ref().unwrap_or(stmt);
         scan_stmt_exprs(stmt, ctx);
         let bound: Vec<&String> = match stmt {
             IRStatement::For { target, .. } => vec![target],
@@ -1585,6 +1717,9 @@ pub fn compile_body(
     memory_layout: &MemoryLayout,
 ) {
     for stmt in &body.statements {
+        // `c[k] = v` and `a += b` on an instance call its special methods.
+        let rewritten = crate::compiler::dunders::rewrite_statement(stmt, ctx);
+        let stmt = rewritten.as_ref().unwrap_or(stmt);
         match stmt {
             IRStatement::Return(expr_opt) => {
                 if ctx.return_self {
@@ -2412,6 +2547,26 @@ pub fn compile_body(
                 // Emit the object reference (the store address) first; a WASM
                 // store pops the value, then the address.
                 let obj_type = emit_expr(object, func, ctx, memory_layout, None);
+
+                // A named tuple's fields are set once, by its constructor.
+                if let IRType::Class(class) = &obj_type {
+                    let constructing = ctx.current_class.as_deref() == Some(class.as_str())
+                        && ctx
+                            .current_function
+                            .as_deref()
+                            .is_some_and(|f| f.ends_with("__init__"));
+                    if crate::compiler::dunders::is_named_tuple(ctx, class) && !constructing {
+                        ctx.report(format!(
+                            "can't set attribute '{attribute}' of a '{class}': a named tuple \
+                             cannot be changed. Hint: use _replace()"
+                        ));
+                    } else if crate::compiler::dunders::is_frozen(ctx, class) && !constructing {
+                        ctx.report(format!(
+                            "attribute '{attribute}' of '{class}' objects is not writable. Hint: \
+                             use replace()"
+                        ));
+                    }
+                }
 
                 // `obj.attr = v` where `attr` is a `@property` compiles to its
                 // setter: the instance pointer is already on the stack, so the

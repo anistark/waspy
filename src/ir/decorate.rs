@@ -47,6 +47,14 @@ pub fn is_internal_function(name: &str) -> bool {
         || name.starts_with(DECORATED_FN_PREFIX)
         || name.starts_with(crate::ir::GEN_METHOD_PREFIX)
         || name.starts_with(crate::ir::METACLASS_FN_PREFIX)
+        || name.starts_with(crate::ir::PARTIAL_FN_PREFIX)
+        || name.starts_with(crate::ir::CMP_KEY_PREFIX)
+        || name.starts_with(crate::ir::ITERTOOLS_FN_PREFIX)
+        || name.starts_with("__Gen___itertools_")
+        || name.starts_with(crate::ir::COLLECTIONS_FN_PREFIX)
+        || name.starts_with(crate::ir::DATETIME_FN_PREFIX)
+        || name.starts_with(crate::ir::LOGGING_FN_PREFIX)
+        || name.starts_with(crate::ir::RE_FN_PREFIX)
 }
 
 fn refuse(message: String) -> anyhow::Error {

@@ -1,4 +1,4 @@
-//! Coverage audit for v0.20.0: every bundled `examples/*.py` (and the
+//! Coverage audit: every bundled `examples/*.py` (and the
 //! multi-file `examples/user_modules_app/`) has at least one test that
 //! compiles it, instantiates the WASM, and asserts concrete runtime results.
 //!

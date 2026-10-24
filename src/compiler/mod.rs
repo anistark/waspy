@@ -1,5 +1,7 @@
+mod asm;
 mod closures;
 mod context;
+mod dunders;
 mod equality;
 mod exceptions;
 mod expression;
@@ -7,10 +9,12 @@ mod float_parse;
 mod format;
 mod function;
 mod host;
+mod libm;
 mod module;
 mod operators;
 mod runtime;
 mod sets;
+mod stdlib;
 mod unicode;
 mod validate;
 

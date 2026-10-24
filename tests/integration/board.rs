@@ -3046,6 +3046,11 @@ mod runtime_features {
 mod stdlib {
     use super::*;
 
+    /// CPython 3.13's draws for `random_module`'s seed.
+    const RANDOM_2024: &str = "[0.7572170996413706, 1.758625874409237, -1.391185562476273, \
+                               0.6248799482691346, 0.7493563774790886][5, 13, 1267]c\
+                               [6, 5, 1, 3, 2, 4][4, 1, 6]";
+
     /// sys.exit([status]) raises a catchable SystemExit; one nothing catches exits with its status (an int, 0 for none or None, 1 with the message printed to stderr for anything else)
     #[test]
     fn sys_exit() {
@@ -3233,36 +3238,383 @@ mod stdlib {
         );
     }
 
-    /// json module: dumps, loads, dump, load, JSONEncoder, JSONDecoder (refused today)
+    /// json module: dumps (indent, separators, sort_keys, ensure_ascii, allow_nan), loads into the declared type with CPython's JSONDecodeError, dump, load
     #[test]
-    #[ignore = "open on the board"]
     fn json_module() {
         check(
             r#"
             import json
 
-            def f() -> int:
-                return len(json.dumps([1, 2, 3]))
+            def f() -> str:
+                d: dict[str, list[int]] = json.loads('{"a": [1, 2], "b": []}')
+                return json.dumps(d, sort_keys=True) + json.dumps((1.5, None), indent=1) + str(len(json.dumps([1, 2, 3])))
         "#,
-            &[("f", Want::Int(9))],
+            &[(
+                "f",
+                Want::Str("{\"a\": [1, 2], \"b\": []}[\n 1.5,\n null\n]9"),
+            )],
+        );
+    }
+
+    /// random module, bit-identical to CPython for a seed: random, randint, randrange, uniform, choice, shuffle, sample, seed, getrandbits, gauss, normalvariate, expovariate
+    #[test]
+    fn random_module() {
+        check(
+            r#"
+            import random
+
+            def f() -> str:
+                random.seed(2024)
+                xs = [1, 2, 3, 4, 5, 6]
+                random.shuffle(xs)
+                return (str([random.random(), random.uniform(1, 2), random.gauss(), random.normalvariate(), random.expovariate()])
+                        + str([random.randint(1, 6), random.randrange(10, 20, 3), random.getrandbits(12)])
+                        + random.choice("abc")
+                        + str(xs) + str(random.sample(xs, 3)))
+
+            def unseeded() -> int:
+                random.seed()
+                x = random.random()
+                return int(x >= 0.0 and x < 1.0)
+        "#,
+            &[("f", Want::Str(RANDOM_2024)), ("unseeded", Want::Int(1))],
+        );
+    }
+
+    /// sys: platform, version, path
+    #[test]
+    fn sys_host_strings() {
+        let version = format!("3.13.0 (waspy {})", env!("CARGO_PKG_VERSION"));
+        let src = dedent(
+            r#"
+            import sys
+
+            def platform() -> str:
+                return sys.platform
+
+            def version() -> str:
+                return sys.version
+
+            def path() -> str:
+                sys.path.append("lib")
+                return str(sys.path) + str(len(sys.path))
+        "#,
+        );
+        assert_eq!(call_str(&src, "platform"), "wasi");
+        assert_eq!(call_str(&src, "version"), version);
+        assert_eq!(call_str(&src, "path"), "['lib']1");
+    }
+
+    /// os functions on host values: getcwd(), getenv(), environ, getpid(), urandom()
+    #[test]
+    fn os_host_values() {
+        check(
+            r#"
+            import os
+
+            def f() -> str:
+                return (os.getcwd() + " " + str(os.getpid()) + " " + str(len(os.urandom(5)))
+                        + " " + os.getenv("NOPE", "dflt") + " " + str(os.getenv("NOPE"))
+                        + " " + str(len(os.environ)) + " " + os.environ.get("NOPE", "-"))
+        "#,
+            &[("f", Want::Str("/ 42 5 dflt None 0 -"))],
+        );
+    }
+
+    /// os.path functions: join(), basename(), dirname(), split(), splitext(), abspath(), exists(), isfile(), isdir()
+    #[test]
+    fn os_path_functions() {
+        check(
+            r#"
+            import os.path
+
+            def f() -> str:
+                p = os.path.join("a/b", "c.tar.gz")
+                return str([p, os.path.basename(p), os.path.dirname(p), os.path.abspath("x/../y"),
+                            os.path.join("a", "/b")]) + str(os.path.split(p)) + str(os.path.splitext(p))
+
+            def kinds() -> str:
+                return str([os.path.exists("."), os.path.isdir("."), os.path.isfile("."),
+                            os.path.exists("missing")])
+        "#,
+            &[
+                (
+                    "f",
+                    Want::Str(
+                        "['a/b/c.tar.gz', 'c.tar.gz', 'a/b', '/y', '/b']('a/b', 'c.tar.gz')\
+                         ('a/b/c.tar', '.gz')",
+                    ),
+                ),
+                ("kinds", Want::Str("[True, True, False, False]")),
+            ],
+        );
+    }
+
+    /// functools: reduce, partial, partialmethod, cmp_to_key, cached_property, singledispatchmethod
+    #[test]
+    fn functools_functions() {
+        check(
+            r#"
+            from functools import reduce, partial, partialmethod, cmp_to_key, cached_property, singledispatchmethod
+
+            def add(a: int, b: int) -> int:
+                return a + b
+
+            def desc(a: int, b: int) -> int:
+                return b - a
+
+            class Box:
+                def __init__(self, n: int) -> None:
+                    self.n = n
+                    self.reads = 0
+
+                def scaled(self, k: int, m: int) -> int:
+                    return self.n * k + m
+
+                double = partialmethod(scaled, 2)
+
+                @cached_property
+                def square(self) -> int:
+                    self.reads += 1
+                    return self.n * self.n
+
+                @singledispatchmethod
+                def describe(self, x: object) -> str:
+                    return "?"
+
+                @describe.register
+                def _(self, x: int) -> str:
+                    return "int"
+
+                @describe.register
+                def _(self, x: str) -> str:
+                    return "str"
+
+            def f() -> str:
+                b = Box(5)
+                inc = partial(add, 1)
+                return str([reduce(add, [1, 2, 3], 10), inc(41), b.double(1), b.square, b.square,
+                            b.reads]) + str(sorted([3, 1, 2], key=cmp_to_key(desc))) + b.describe(1) + b.describe("s")
+        "#,
+            &[("f", Want::Str("[16, 42, 11, 25, 25, 1][3, 2, 1]intstr"))],
+        );
+    }
+
+    /// datetime: date / time / datetime / timedelta construction, each field checked as CPython checks it
+    #[test]
+    fn datetime_construction() {
+        check(
+            r#"
+            from datetime import date, time, datetime, timedelta
+
+
+            def f() -> str:
+                out = [repr(date(2024, 2, 29)), repr(time(13, 5, 9, 7)), repr(datetime(2024, 1, 2, 3, 4)),
+                       repr(timedelta(hours=1.5, minutes=-3))]
+                try:
+                    date(2023, 2, 29)
+                except ValueError as e:
+                    out.append(str(e))
+                try:
+                    time(24)
+                except ValueError as e:
+                    out.append(str(e))
+                return " ".join(out)
+        "#,
+            &[("f", Want::Str("datetime.date(2024, 2, 29) datetime.time(13, 5, 9, 7) datetime.datetime(2024, 1, 2, 3, 4) datetime.timedelta(seconds=5220) day is out of range for month hour must be in 0..23"))],
+        );
+    }
+
+    /// datetime: attributes, arithmetic, weekday, isoformat, fromisoformat, strftime, strptime, replace, timestamp, fromtimestamp, timezone, tzinfo, and now() / today() read at run time
+    #[test]
+    fn datetime_operations() {
+        check(
+            r#"
+            from datetime import date, datetime, timedelta, timezone
+
+
+            def f() -> str:
+                d = datetime(2024, 3, 15, 13, 5, 9, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+                later = d + timedelta(days=20)
+                parsed = datetime.strptime("15/03/2024 01:05 PM", "%d/%m/%Y %I:%M %p")
+                return " | ".join([later.isoformat(), str(later.weekday()), d.strftime("%a %d %b %Y %H:%M %z"),
+                                   repr(datetime.fromisoformat("2024-03-15T07:35:09Z") == d), str(d.timestamp()),
+                                   repr(d.astimezone(timezone.utc)), repr(parsed),
+                                   str(date(2024, 12, 25) - date(2024, 1, 1)), repr(d.replace(tzinfo=None)),
+                                   str(datetime.fromtimestamp(0, timezone.utc)), str(datetime.now().year >= 2024)])
+        "#,
+            &[("f", Want::Str("2024-04-04T13:05:09+05:30 | 3 | Fri 15 Mar 2024 13:05 +0530 | True | 1710488109.0 | datetime.datetime(2024, 3, 15, 7, 35, 9, tzinfo=datetime.timezone.utc) | datetime.datetime(2024, 3, 15, 13, 5) | 359 days, 0:00:00 | datetime.datetime(2024, 3, 15, 13, 5, 9) | 1970-01-01 00:00:00+00:00 | True"))],
+        );
+    }
+
+    /// logging module: getLogger and the logger hierarchy, debug, info, warning, error, critical, log, basicConfig, setLevel, disable, Logger, Handler, StreamHandler, FileHandler, NullHandler, Formatter (the %, {, and $ styles), Filter, LogRecord, with each record's line and function
+    #[test]
+    fn logging_module() {
+        check(
+            r#"
+            import sys
+            import logging
+
+
+            class Collect(logging.Handler):
+                def __init__(self) -> None:
+                    super().__init__()
+                    self.lines: list[str] = []
+
+                def emit(self, record: logging.LogRecord) -> None:
+                    self.lines.append(self.format(record))
+
+
+            def f() -> str:
+                log = logging.getLogger("app.part")
+                log.setLevel(logging.INFO)
+                h = Collect()
+                h.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(funcName)s:%(message)s"))
+                log.addHandler(h)
+                log.debug("hidden %d", 1)
+                log.info("shown %d", 2)
+                log.log(logging.ERROR, "logged %s", "x")
+                logging.getLogger("app").addFilter(logging.Filter("other"))
+                log.warning("propagates past a parent's filter")
+                logging.disable(logging.CRITICAL)
+                log.critical("disabled")
+                logging.disable(logging.NOTSET)
+                return " | ".join(h.lines) + " | " + repr(log) + " " + logging.getLevelName(40)
+        "#,
+            &[("f", Want::Str("INFO:app.part:f:shown 2 | ERROR:app.part:f:logged x | WARNING:app.part:f:propagates past a parent's filter | <Logger app.part (INFO)> ERROR"))],
+        );
+    }
+
+    /// re module at runtime: compile, search, match, fullmatch, findall, finditer, split, sub, subn, escape, Pattern and Match objects, flags, matched as CPython's sre matches (backtracking, lookarounds, atomic and possessive repeats, conditionals, Unicode classes and case folding)
+    #[test]
+    fn re_runtime() {
+        check(
+            r#"
+            import re
+
+            WORD = re.compile(r"(?P<w>[a-z]+)(\d*)", re.I)
+
+
+            def f() -> str:
+                m = WORD.search("-- Hello42 x")
+                parts = []
+                if m:
+                    parts.append(m.group("w") + "|" + str(m.group(2)) + "|" + str(m.span()) + "|" + str(m.lastindex))
+                parts.append(str(re.findall(r"\d+", "a1 b22 c333")))
+                parts.append(str(re.split(r"[,;]\s*", "x, y;z")))
+                parts.append(re.sub(r"(\w+)@(\w+)", r"\2:\1", "me@home"))
+                parts.append(str(re.subn(r"o", "0", "foo")))
+                parts.append(str(re.fullmatch(r"\d{3}-\d{4}", "555-1234") is not None))
+                parts.append(str([x.start() for x in re.finditer(r"a", "banana")]))
+                parts.append(str(re.match(r"(a)|b", "b")))
+                return " ".join(parts)
+        "#,
+            &[("f", Want::Str("Hello|42|(3, 10)|2 ['1', '22', '333'] ['x', 'y', 'z'] home:me ('f00', 2) True [1, 3, 5] <re.Match object; span=(0, 1), match='b'>"))],
+        );
+    }
+
+    /// collections module: namedtuple and typing.NamedTuple (classes whose fields take their types from the calls), deque, Counter, OrderedDict, defaultdict, ChainMap, each a class specialized by its element types
+    #[test]
+    fn collections_classes() {
+        check(
+            r#"
+            from collections import namedtuple, Counter, defaultdict, deque, OrderedDict, ChainMap
+
+            Point = namedtuple("Point", "x y")
+
+
+            def f() -> str:
+                p = Point(1, 2)
+                c = Counter("abca")
+                d = defaultdict(list)
+                d["k"].append(1)
+                q = deque([1, 2, 3], maxlen=3)
+                q.append(4)
+                o = OrderedDict(a=1, b=2)
+                o.move_to_end("a")
+                m = ChainMap({"x": 1}, {"x": 2, "y": 3})
+                return (str(p) + str(p.x + p[1]) + str(c) + str(c.most_common(1)) + str(d) + str(q)
+                        + str(q.popleft()) + str(o) + str(m["x"]) + str(m["y"]) + str(len(m)))
+
+        "#,
+            &[("f", Want::Str("Point(x=1, y=2)3Counter({'a': 2, 'b': 1, 'c': 1})[('a', 2)]defaultdict(<class 'list'>, {'k': [1]})deque([2, 3, 4], maxlen=3)2OrderedDict({'b': 2, 'a': 1})132"))],
+        );
+    }
+
+    /// itertools module: count, cycle, repeat, chain, compress, dropwhile, filterfalse, groupby, islice, starmap, takewhile, tee, zip_longest, product, permutations, combinations, combinations_with_replacement, accumulate, batched, pairwise, lowered to generators (tee and zip_longest over sequences)
+    #[test]
+    fn itertools_functions() {
+        check(
+            r#"
+            import itertools
+            from itertools import count, islice
+
+
+            def f() -> str:
+                parts = [str(list(islice(count(3), 3))), str(list(islice(itertools.cycle("ab"), 3))),
+                         str(list(itertools.repeat(0, 2))), str(list(itertools.chain([1], [2]))),
+                         str(list(itertools.compress([1, 2, 3], [1, 0, 1]))),
+                         str(list(itertools.dropwhile(lambda x: x < 2, [1, 2, 1]))),
+                         str(list(itertools.takewhile(lambda x: x < 2, [1, 2, 1]))),
+                         str(list(itertools.filterfalse(lambda x: x > 1, [1, 2, 0]))),
+                         str(list(itertools.accumulate([1, 2, 3]))),
+                         str(list(itertools.starmap(lambda x, y: x * y, [(2, 3)]))),
+                         str(list(itertools.islice("abcd", 1, 3))), str(list(itertools.pairwise([1, 2, 3]))),
+                         str(list(itertools.batched([1, 2, 3], 2))),
+                         str([(k, len(list(g))) for k, g in itertools.groupby("aab")]),
+                         str(list(itertools.zip_longest([1, 2], [3], fillvalue=0))),
+                         str(list(itertools.product([1, 2], repeat=2))), str(list(itertools.permutations([1, 2]))),
+                         str(list(itertools.combinations([1, 2, 3], 2))),
+                         str(list(itertools.combinations_with_replacement([1, 2], 2)))]
+                t1, t2 = itertools.tee([1, 2])
+                parts.append(str(list(t1)) + str(list(t2)))
+                return "".join(parts)
+
+        "#,
+            &[("f", Want::Str("[3, 4, 5]['a', 'b', 'a'][0, 0][1, 2][1, 3][2, 1][1][1, 0][1, 3, 6][6]['b', 'c'][(1, 2), (2, 3)][(1, 2), (3,)][('a', 2), ('b', 1)][(1, 3), (2, 0)][(1, 1), (1, 2), (2, 1), (2, 2)][(1, 2), (2, 1)][(1, 2), (1, 3), (2, 3)][(1, 1), (1, 2), (2, 2)][1, 2][1, 2]"))],
         );
     }
 
     /// math functions on runtime values: sqrt, sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh, exp, log, log10, log2, pow, floor, ceil, trunc, fabs, copysign, fmod, remainder, degrees, radians, hypot, factorial, gcd, isnan, isinf, isfinite (refused today)
     #[test]
-    #[ignore = "open on the board"]
     fn math_functions() {
         check(
             r#"
             import math
 
-            def f(x: float) -> float:
-                return math.sqrt(x)
+            def f() -> str:
+                xs = [math.sqrt(16.0), math.sin(0.5), math.cos(0.5), math.tan(0.5),
+                      math.asin(0.25), math.acos(0.25), math.atan(0.25), math.atan2(1.0, 2.0),
+                      math.sinh(0.5), math.cosh(0.5), math.tanh(0.5), math.exp(0.5),
+                      math.log(10.0), math.log10(1000.0), math.log2(8.0), math.pow(2.0, 0.5),
+                      math.fabs(-1.5), math.copysign(1.0, -0.0), math.fmod(7.5, 2.0),
+                      math.remainder(7.5, 2.0), math.degrees(1.0), math.radians(90.0),
+                      math.hypot(3.0, 4.0)]
+                ints = [math.floor(-1.5), math.ceil(-1.5), math.trunc(-1.5), math.factorial(10),
+                        math.gcd(12, 18)]
+                flags = [math.isnan(math.nan), math.isinf(math.inf), math.isfinite(1.0)]
+                return str(xs) + str(ints) + str(flags)
 
-            def g() -> float:
-                return f(16.0)
+            def domain() -> str:
+                try:
+                    return str(math.sqrt(-1.0))
+                except ValueError as e:
+                    return str(e)
         "#,
-            &[("g", Want::Float(4.0))],
+            &[
+                (
+                    "f",
+                    Want::Str(
+                        "[4.0, 0.479425538604203, 0.8775825618903728, 0.5463024898437905, \
+                         0.25268025514207865, 1.318116071652818, 0.24497866312686414, \
+                         0.4636476090008061, 0.5210953054937474, 1.1276259652063807, \
+                         0.46211715726000974, 1.6487212707001282, 2.302585092994046, 3.0, 3.0, \
+                         1.4142135623730951, 1.5, -1.0, 1.5, -0.5, 57.29577951308232, \
+                         1.5707963267948966, 5.0][-2, -1, -1, 3628800, 6][True, True, True]",
+                    ),
+                ),
+                ("domain", Want::Str("math domain error")),
+            ],
         );
     }
 }
@@ -4723,19 +5075,26 @@ mod advanced_types {
         );
     }
 
-    /// Named tuples - namedtuple() factory (refused today, see STANDARD LIBRARY)
+    /// Named tuples - namedtuple() and typing.NamedTuple, defined at module level: fields by name and position, unpacking, and tuple equality
     #[test]
-    #[ignore = "open on the board"]
     fn named_tuples() {
         check(
             r#"
             from collections import namedtuple
+            from typing import NamedTuple
+
+            P = namedtuple("P", "x y")
+
+            class Q(NamedTuple):
+                a: str
+                b: int = 0
 
             def f() -> int:
-                P = namedtuple("P", "x y")
-                return P(1, 2).y
+                p = P(1, 2)
+                x, y = p
+                return p.y * 100 + p[0] * 10 + x + y + (p == (1, 2)) + Q("s").b
         "#,
-            &[("f", Want::Int(2))],
+            &[("f", Want::Int(214))],
         );
     }
 

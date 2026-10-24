@@ -99,6 +99,10 @@ pub enum Helper {
     },
     /// `(s) -> n`: a string's length in code points.
     CharLen,
+    /// `(s) -> cp`: the code point of the string's first character.
+    FirstCodePoint,
+    /// `(cp) -> s`: the one-character string of a code point.
+    FromCodePoint,
     /// `(s, i) -> byte`: the byte offset of code point `i`.
     CharOffset,
     /// `(s, byte) -> i`: the code point index of a byte offset.
@@ -118,6 +122,8 @@ pub enum Helper {
     Utf8Error,
     /// `() -> list`: `sys.argv`.
     Argv,
+    /// `() -> list`: `sys.path`.
+    SysPath,
     /// `() -> list`: `sys.stdin.readlines()`.
     ReadLines,
     /// `() -> ()`: the WASI command entry, running the `__main__` block.
@@ -128,6 +134,12 @@ pub enum Helper {
     ExcText(String),
     /// `(message) -> ()`: leave a new `class(message)` pending.
     RaiseText(String),
+    /// `() -> ()`: leave a new `class(errno, message)` pending.
+    RaiseErrno {
+        class: String,
+        errno: i32,
+        message: String,
+    },
     /// `(value) -> ()`: leave a new `class(value)` pending.
     RaiseValue {
         class: String,
@@ -143,9 +155,19 @@ pub enum Helper {
     /// `(path, len, flags) -> fd`, `(fd, buf, len) -> n`, `(fd, buf, len)
     /// -> n`, `(fd) -> status`: file I/O through WASI.
     FileOpen,
+    /// `(path, len) -> dirfd`: the preopen a path resolves against.
+    ResolvePath,
     FileRead,
     FileWrite,
     FileClose,
+    /// A C math library routine (see `libm`).
+    Libm(crate::compiler::libm::Libm),
+    /// A routine of the `random` module's generator.
+    Random(crate::compiler::stdlib::RandomFn),
+    /// A routine of `os` or `os.path`.
+    Os(crate::compiler::stdlib::OsFn),
+    /// A routine of `json`.
+    Json(crate::compiler::stdlib::json::JsonFn),
 }
 
 /// The parameter and result types of `helper`.
@@ -192,14 +214,18 @@ pub fn signature(helper: &Helper) -> (Vec<ValType>, Vec<ValType>) {
         Helper::UniMap(_) => (vec![I32, I32], vec![I32]),
         Helper::CaseRun(_) => (vec![I32, I32, I32], vec![I32]),
         Helper::FinalSigma | Helper::TrimAt { .. } => (vec![I32, I32, I32, I32], vec![I32]),
-        Helper::CharLen | Helper::StrChars => (vec![I32], vec![I32]),
+        Helper::CharLen | Helper::StrChars | Helper::FirstCodePoint | Helper::FromCodePoint => {
+            (vec![I32], vec![I32])
+        }
         Helper::WriteFd => (vec![I32, I32], vec![]),
         Helper::Start => (vec![], vec![]),
         Helper::FileOpen | Helper::FileRead | Helper::FileWrite => (vec![I32; 3], vec![I32]),
         Helper::FileClose => (vec![I32], vec![I32]),
+        Helper::ResolvePath => (vec![I32, I32], vec![I32]),
         Helper::DictKeys | Helper::ClassName | Helper::ClassNameOf { .. } => (vec![I32], vec![I32]),
         Helper::ExcText(_) => (vec![], vec![I32]),
         Helper::RaiseText(_) => (vec![I32], vec![]),
+        Helper::RaiseErrno { .. } => (vec![], vec![]),
         Helper::RaiseValue { ty, .. } => (
             vec![if matches!(ty, IRType::Float) {
                 F64
@@ -208,10 +234,40 @@ pub fn signature(helper: &Helper) -> (Vec<ValType>, Vec<ValType>) {
             }],
             vec![],
         ),
-        Helper::ReadLine { .. } | Helper::Argv | Helper::ReadLines => (vec![], vec![I32]),
+        Helper::ReadLine { .. } | Helper::Argv | Helper::SysPath | Helper::ReadLines => {
+            (vec![], vec![I32])
+        }
         Helper::Utf8Check => (vec![I32], vec![]),
         Helper::Utf8Error => (vec![I32, I32, I32], vec![]),
         Helper::CharOffset | Helper::CharIndex => (vec![I32, I32], vec![I32]),
+        Helper::Os(routine) => {
+            let (params, result) = routine.signature();
+            (
+                params.iter().map(|t| t.val()).collect(),
+                result.iter().map(|t| t.val()).collect(),
+            )
+        }
+        Helper::Random(routine) => {
+            let (params, result) = routine.signature();
+            (
+                params.iter().map(|t| t.val()).collect(),
+                result.iter().map(|t| t.val()).collect(),
+            )
+        }
+        Helper::Json(routine) => {
+            let (params, result) = routine.signature();
+            (
+                params.iter().map(|t| t.val()).collect(),
+                result.iter().map(|t| t.val()).collect(),
+            )
+        }
+        Helper::Libm(routine) => {
+            let (params, result) = routine.signature();
+            (
+                params.iter().map(|t| t.val()).collect(),
+                result.iter().map(|t| t.val()).collect(),
+            )
+        }
     }
 }
 
@@ -249,6 +305,8 @@ pub fn build(helper: &Helper, ctx: &CompilationContext) -> Function {
         Helper::Case(case) => crate::compiler::unicode::build_case(ctx, *case),
         Helper::StrIs(predicate) => crate::compiler::unicode::build_str_is(ctx, *predicate),
         Helper::CharLen => crate::compiler::unicode::build_char_len(),
+        Helper::FirstCodePoint => crate::compiler::unicode::build_first_code_point(),
+        Helper::FromCodePoint => crate::compiler::unicode::build_from_code_point(ctx),
         Helper::CharOffset => crate::compiler::unicode::build_char_offset(ctx),
         Helper::CharIndex => crate::compiler::unicode::build_char_index(ctx),
         Helper::StrChars => crate::compiler::unicode::build_str_chars(ctx),
@@ -260,16 +318,23 @@ pub fn build(helper: &Helper, ctx: &CompilationContext) -> Function {
         Helper::Utf8Check => crate::compiler::host::build_utf8_check(ctx),
         Helper::Utf8Error => crate::compiler::host::build_utf8_error(ctx),
         Helper::Argv => crate::compiler::host::build_argv(ctx),
+        Helper::SysPath => crate::compiler::host::build_sys_path(ctx),
         Helper::ReadLines => crate::compiler::host::build_read_lines(ctx),
         Helper::Start => crate::compiler::host::build_start(ctx),
         Helper::DictKeys => build_dict_keys(ctx),
         Helper::ExcText(text) => crate::compiler::exceptions::build_text(ctx, text),
         Helper::RaiseText(class) => crate::compiler::exceptions::build_raise_text(ctx, class),
+        Helper::RaiseErrno {
+            class,
+            errno,
+            message,
+        } => crate::compiler::exceptions::build_raise_errno(ctx, class, *errno, message),
         Helper::RaiseValue { class, ty } => {
             crate::compiler::exceptions::build_raise_value(ctx, class, ty)
         }
         Helper::ClassName => crate::compiler::exceptions::build_class_name(ctx, None),
         Helper::FileOpen => crate::compiler::host::build_file_open(ctx),
+        Helper::ResolvePath => crate::compiler::host::build_resolve_path(ctx),
         Helper::FileRead => crate::compiler::host::build_file_read(ctx),
         Helper::FileWrite => crate::compiler::host::build_file_write(ctx),
         Helper::FileClose => crate::compiler::host::build_file_close(ctx),
@@ -283,6 +348,10 @@ pub fn build(helper: &Helper, ctx: &CompilationContext) -> Function {
         Helper::Repr(ty) => build_str(ctx, ty, true),
         Helper::StrRepr => build_text_repr(ctx, false),
         Helper::BytesRepr => build_text_repr(ctx, true),
+        Helper::Libm(routine) => crate::compiler::libm::build(ctx, *routine),
+        Helper::Random(routine) => crate::compiler::stdlib::build_random(ctx, *routine),
+        Helper::Os(routine) => crate::compiler::stdlib::build_os(ctx, *routine),
+        Helper::Json(routine) => crate::compiler::stdlib::json::build(ctx, routine),
     }
 }
 
@@ -1151,6 +1220,79 @@ pub(crate) fn build_shortest_digits(ctx: &CompilationContext) -> Function {
 /// Why `str()` (or `repr()`, with `repr`) of a value of `ty` cannot be given
 /// CPython's answer here, if it cannot.
 pub fn str_unsupported(ctx: &CompilationContext, ty: &IRType, repr: bool) -> Option<String> {
+    unsupported_rendering(ctx, ty, repr, false)
+}
+
+/// [`str_unsupported`] for a call site that renders through
+/// [`emit_rendering_call`], which passes on an exception a `__str__` or
+/// `__repr__` raises.
+pub fn render_unsupported(ctx: &CompilationContext, ty: &IRType, repr: bool) -> Option<String> {
+    unsupported_rendering(ctx, ty, repr, true)
+}
+
+/// Whether rendering a value of `ty` runs a `__str__` or `__repr__` (of an
+/// instance, or of one inside a collection) that can raise.
+pub(crate) fn rendering_can_raise(ctx: &CompilationContext, ty: &IRType, repr: bool) -> bool {
+    match ty {
+        IRType::List(e) | IRType::Set(e) | IRType::VarTuple(e) => rendering_can_raise(ctx, e, true),
+        IRType::Dict(k, v) => {
+            rendering_can_raise(ctx, k, true) || rendering_can_raise(ctx, v, true)
+        }
+        IRType::Tuple(members) => members.iter().any(|m| rendering_can_raise(ctx, m, true)),
+        IRType::Optional(inner) => rendering_can_raise(ctx, inner, repr),
+        IRType::Class(name) => {
+            let Some(info) = ctx.get_class_info(name) else {
+                return false;
+            };
+            let method = if !repr && info.methods.contains_key("__str__") {
+                "__str__"
+            } else {
+                "__repr__"
+            };
+            let Some(index) = info.methods.get(method) else {
+                return false;
+            };
+            ctx.can_raise.contains(index)
+                || ctx.virtual_call(name, method).is_some_and(|(column, _)| {
+                    ctx.virtual_implementations(column)
+                        .any(|f| ctx.can_raise.contains(&f))
+                })
+        }
+        _ => false,
+    }
+}
+
+/// Call the rendering helper `index` for a value of `ty` (on the stack) from
+/// the program's code: a `__str__` or `__repr__` it runs that raises leaves
+/// the exception pending, which unwinds from here as from any call.
+pub(crate) fn emit_rendering_call(
+    func: &mut Function,
+    ctx: &CompilationContext,
+    ty: &IRType,
+    repr: bool,
+    index: u32,
+) {
+    if !rendering_can_raise(ctx, ty, repr) {
+        func.instruction(&Instruction::Call(index));
+        return;
+    }
+    crate::compiler::function::emit_call_depth_step(func, 1);
+    func.instruction(&Instruction::Call(index));
+    crate::compiler::function::emit_call_depth_step(func, -1);
+    func.instruction(&Instruction::LocalSet(ctx.temp_local));
+    crate::compiler::function::emit_post_call_check(func, ctx);
+    func.instruction(&Instruction::LocalGet(ctx.temp_local));
+}
+
+fn unsupported_rendering(
+    ctx: &CompilationContext,
+    ty: &IRType,
+    repr: bool,
+    raising_ok: bool,
+) -> Option<String> {
+    let str_unsupported = |ctx: &CompilationContext, ty: &IRType, repr: bool| {
+        unsupported_rendering(ctx, ty, repr, raising_ok)
+    };
     match ty {
         IRType::Int
         | IRType::Bool
@@ -1192,7 +1334,7 @@ pub fn str_unsupported(ctx: &CompilationContext, ty: &IRType, repr: bool) -> Opt
                      shows its memory address, which nothing here reproduces). Hint: define \
                      __repr__, or make it a @dataclass"
                 )),
-                Some(index) if ctx.can_raise.contains(index) => {
+                Some(index) if !raising_ok && ctx.can_raise.contains(index) => {
                     Some(format!("an instance of '{name}', whose {method} can raise"))
                 }
                 Some(_) => None,
@@ -1246,12 +1388,23 @@ fn call_str_of(f: &mut Function, ctx: &CompilationContext, ty: &IRType, repr: bo
         IRType::Unknown | IRType::Any => IRType::Int,
         other => other.clone(),
     };
+    let raises = rendering_can_raise(ctx, &ty, repr);
     let helper = if repr {
         Helper::Repr(ty)
     } else {
         Helper::Str(ty)
     };
     f.instruction(&Instruction::Call(ctx.helper(helper)));
+    // A member's `__repr__` that raised: stop, with the exception pending.
+    if raises {
+        f.instruction(&Instruction::GlobalGet(
+            crate::compiler::context::EXC_TYPE_GLOBAL,
+        ));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+    }
 }
 
 /// Load the value of `ty` at the slot address on the stack: an f64 for a

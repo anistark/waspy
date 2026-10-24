@@ -26,11 +26,17 @@ Waspy is a **single linear compiler pipeline**. Every public entry point in `src
 [Python AST]
         ↓   ir/converter.rs       : lower_ast_to_ir() → IRModule, then the module
         ↓                            passes, in this order:
+        ↓                              ir/logging/            lower_logging
+        ↓                              ir/re/                 lower_re
         ↓                              ir/decorate.rs         apply_user_decorators
         ↓                              ir/metaclasses.rs      apply_metaclasses
         ↓                              ir/finalize.rs         lift_nested_functions
+        ↓                              ir/partials.rs         lower_partials
+        ↓                              ir/datetime/           lower_datetime
         ↓                              ir/finalize.rs         resolve_keyword_arguments
         ↓                              ir/context_managers.rs desugar_with_statements
+        ↓                              ir/itertools.rs        lower_itertools
+        ↓                              ir/collections/        lower_collections
         ↓                              ir/generators.rs       transform_generators
         ↓                              ir/finalize.rs         finalize_module
 [IR Module]
@@ -51,7 +57,7 @@ Waspy is a **single linear compiler pipeline**. Every public entry point in `src
 | Stage | Module | Responsibility | Key entry point |
 |-------|--------|----------------|-----------------|
 | **1. Parse** | `src/core/parser.rs` | Python text → AST via `rustpython-parser` | `parse_python()` |
-| **2. Lower (IR)** | `src/ir/converter.rs` + the module passes | AST → typed `IRModule` (functions, classes, variables, imports, memory layout), then the passes that desugar what codegen does not see: user decorators, metaclasses, nested functions, keyword arguments, `with`, generators | `lower_ast_to_ir()` |
+| **2. Lower (IR)** | `src/ir/converter.rs` + the module passes | AST → typed `IRModule` (functions, classes, variables, imports, memory layout), then the passes that desugar what codegen does not see: the standard-library modules written out in IR (`logging`, `re`, `functools.partial`, `datetime`, `itertools`, `collections`), user decorators, metaclasses, nested functions, keyword arguments, `with`, generators | `lower_ast_to_ir()` |
 | **3. Transform** | `src/ir/decorators.rs`, `src/ir/entry_points.rs` | Apply decorators; detect/inject `__main__` entry points | `DecoratorRegistry`, `detect_entry_points()` |
 | **4. Codegen** | `src/compiler/` | IR → WASM bytecode via `wasm-encoder`, plus the runtime helpers and WASI imports the program uses, validated before it is returned | `compile_ir_module()` |
 | **5. Optimize** | `src/optimize/wasm.rs` | Shrink/optimize WASM via Binaryen | `optimize_wasm()` |
@@ -68,11 +74,11 @@ Waspy is a **single linear compiler pipeline**. Every public entry point in `src
 
 5. **Optimization is optional and last.** `optimize_wasm()` (Binaryen) runs only when `CompilerOptions::optimize` is set. Never make correctness depend on the optimizer — the unoptimized binary must already be valid and correct.
 
-6. **stdlib modules are codegen shims, not a runtime.** `src/stdlib/` provides compile-time support for a fixed allowlist of Python modules (`is_stdlib_module()`). There is no Python interpreter at runtime — each supported module emits inline WASM. Adding a module means teaching the compiler to generate code for it.
+6. **stdlib modules are compiled, not interpreted.** There is no Python interpreter at runtime. `src/stdlib/` holds the allowlist of modules (`is_stdlib_module()`) and folds their constants. A module's functions are implemented one of two ways: as codegen in `src/compiler/stdlib/` (inline WASM and runtime helpers: `math`, `random`, `os`, `json`, `functools`), or as classes and functions written out in IR by a module pass (`src/ir/datetime/`, `src/ir/logging/`, `src/ir/re/`, `src/ir/collections/`, `src/ir/itertools.rs`, `src/ir/partials.rs`), which are then compiled like the program's own code. Choose IR when the module is mostly objects and algorithms CPython writes in Python; choose codegen when values' static types decide the code (`json.dumps` of a declared type).
 
-7. **A construct either gives Python's answer or fails loudly.** This is the correctness rule the project is built on, and it outranks coverage: a construct the compiler does not implement must be *rejected*, never accepted and ignored. Never emit a placeholder value for something unhandled: an `I32Const(0)` in a `_ =>` arm is a silently wrong answer. Use `CompilationContext::report` (which collects errors while the whole module is still walked) for a codegen-stage refusal, or return an `unsupported_feature` error from the converter for one the IR can see. The single documented exception is integer width: `int` is an i32 and wraps, which the reference page states under "Numbers" (`docs/reference/index.html`).
+7. **A construct either gives Python's answer or fails loudly.** This is the correctness rule the project is built on, and it outranks coverage: a construct the compiler does not implement must be *rejected*, never accepted and ignored. Never emit a placeholder value for something unhandled: an `I32Const(0)` in a `_ =>` arm is a silently wrong answer. Use `CompilationContext::report` (which collects errors while the whole module is still walked) for a codegen-stage refusal, or return an `unsupported_feature` error from the converter for one the IR can see. The single documented exception is integer width: `int` is an i32 and wraps, which the website's numbers page states (`docs/src/docs/numbers.md`).
 
-8. **The module passes run in a fixed order, and each relies on the ones before it.** User decorators and metaclasses first (both read nested `def`s and `super()` calls as written, and specialize functions per use), then nested functions are lifted, then keyword arguments are placed (the later passes' expression walkers have wildcard arms that would skip an `IRExpr::Keyword`), then `with` is desugared (before generators, so a `with` inside a generator is a `try`/`finally` the generator pass already handles), then generators become state classes. A new pass goes where what it consumes has been produced and what it produces is still handled.
+8. **The module passes run in a fixed order, and each relies on the ones before it.** `logging` and `re` go first: `logging` names each record's function from the program's own function names, before decorators and lifting rename them, and both rewrite calls the later passes then see as ordinary method calls. User decorators and metaclasses next (both read nested `def`s and `super()` calls as written, and specialize functions per use), then nested functions are lifted, then `functools.partial` becomes closures over the lifted functions, then `datetime`'s classes are made (their constructor calls take keywords), then keyword arguments are placed (the later passes' expression walkers have wildcard arms that would skip an `IRExpr::Keyword`), then `with` is desugared (before generators, so a `with` inside a generator is a `try`/`finally` the generator pass already handles), then `itertools` and `collections` synthesize their generators and classes, then generators become state classes. A new pass goes where what it consumes has been produced and what it produces is still handled.
 
 ---
 
@@ -149,6 +155,14 @@ src/
 │   ├── decorate.rs         #   User-written decorators, specialized per decorated function
 │   ├── metaclasses.rs      #   Metaclasses, specialized per class they make
 │   ├── generators.rs       #   Generators (functions and methods) to state classes; iterator consumption (for, comprehensions, zip)
+│   ├── build.rs            #   Short IR builders the module passes write their code with (v, int, call, mcall, if_, ...)
+│   ├── infer.rs            #   Types the IR shows before codegen, for passes that synthesize code
+│   ├── partials.rs         #   functools.partial and cmp_to_key, as closures over the bound arguments
+│   ├── itertools.rs        #   itertools, each call a generator synthesized for it
+│   ├── collections/        #   namedtuple / NamedTuple, Counter, defaultdict, OrderedDict, deque, ChainMap, specialized per element type (spec.rs names them, ctor.rs types their calls)
+│   ├── datetime/           #   timedelta, date, time, datetime, timezone (calendar.rs, classes.rs, time.rs, text.rs: strftime, ISO parsing, strptime)
+│   ├── logging/            #   Loggers, handlers, Formatter (format.rs compiles each format), Filter, LogRecord, the module's state
+│   ├── re/                 #   parse.rs (port of re/_parser.py), compile.rs (to a program), vm.rs (the backtracking matcher), classes.rs (Pattern, Match)
 │   ├── context_managers.rs #   `with` desugared to __enter__/__exit__ calls
 │   ├── finalize.rs         #   Whole-module checks and rewrites (nested def lifting, keyword arguments, abstract classes, call-site defaults)
 │   └── entry_points.rs     #   detect_entry_points(), add_entry_point_to_module()
@@ -158,6 +172,10 @@ src/
 │   ├── expression.rs       #   Expression codegen
 │   ├── equality.rs         #   Value equality, ordering, and hashing (==, <, in, sets, dict keys)
 │   ├── operators.rs        #   Binary operators on non-numbers: sequence + and *, set and dict operators, set comparisons
+│   ├── dunders.rs          #   Rewrites at codegen: special methods, method variants and keywords, views, optional receivers, logging calls
+│   ├── asm.rs              #   A structured builder for runtime helpers written as code
+│   ├── libm.rs             #   musl's libm, ported over asm.rs, for math
+│   ├── stdlib/             #   Codegen for the stdlib functions: math, random, os, json, functools
 │   ├── sets.rs             #   Sets laid out and probed as CPython's are (iteration order is CPython's)
 │   ├── closures.rs         #   Types a lifted closure's untyped parameters and captured cells from its calls
 │   ├── exceptions.rs       #   Exceptions as objects: the builtin hierarchy, EXC_VALUE_GLOBAL, str/repr/args
@@ -170,7 +188,7 @@ src/
 │   └── context.rs          #   CompilationContext, SCRATCH_LOCALS, held slots, the runtime globals, LocalInfo/FunctionInfo/ClassInfo
 ├── optimize/               # [Stage 5] WASM optimization
 │   └── wasm.rs             #   optimize_wasm() — Binaryen
-├── stdlib/                 # Compile-time stdlib shims (codegen, not a runtime)
+├── stdlib/                 # The stdlib allowlist and its constants (the functions are in compiler/stdlib/ and the ir/ module passes)
 │   ├── mod.rs              #   is_stdlib_module(), get_stdlib_attributes() dispatch
 │   ├── sys.rs  os.rs  math.rs  random.rs  json.rs  re.rs
 │   └── datetime.rs  collections.rs  itertools.rs  functools.rs  logging.rs
@@ -238,8 +256,9 @@ docs/
 | **esbuild** | Website scripts | Bundles the browser scripts, CodeMirror 6 in the playground included |
 | **anyhow** | Error context | Public API return type |
 | **thiserror** | Structured errors | `ChakraError` in `src/core/errors.rs`, `CompilationError` in plugin |
-| **chrono** | Date/time | Backs the `datetime` stdlib shim |
-| **regex** | Regex | Backs the `re` stdlib shim |
+| **chrono** | Date/time | Used by the legacy helpers in `src/stdlib/datetime.rs`; the `datetime` module itself is IR (`src/ir/datetime/`) |
+| **regex** | Regex | Compile-time folding of constant `re.sub` calls (`stdlib::re::fold_sub`); matching at run time is `src/ir/re/` |
+| **libm** (dev) | Reference math | What the `math` port (`compiler/libm.rs`) is checked against, bit for bit |
 | **serde** / **serde_json** | Serialization | Plugin metadata (`wasm-plugin` feature) |
 | **log** | Logging facade | Wrapped by `utils/logging.rs` macros |
 | **clippy** | Linting | Enforced: `-D warnings` (zero-warnings policy); see `clippy.toml` |
@@ -340,6 +359,7 @@ type_to_string(ir_type: &IRType) -> String
   - `unit/memory_safety.rs`: growth, aliasing, checked indexing, validation.
   - `unit/miscompiles.rs`: regressions for constructs that once compiled "successfully" and answered wrong. **This is where a silent-miscompile fix goes.**
   - `unit/language.rs`: nested functions and `nonlocal`, star parameters, and class objects, with the cases around them that must be refused rather than answered wrong.
+  - `unit/stdlib.rs`: the standard library at run time, mostly whole programs (`prints` / `streams` compare a `__main__` block's stdout and stderr with CPython's); the `math` port is checked bit for bit against the `libm` crate.
   - `integration/examples.rs`, `integration/coverage.rs`: every `examples/*.py` compiled, instantiated, and asserted; `integration/wasmrun_plugin.rs` does the same through the plugin (needs `--features wasm-plugin`).
   - `integration/board.rs`: one test per feature on the development board (`docs/src/_data/modules.json`), in a module per card. Each feature names its test with a `"test": "card::name"` field. A done feature's test must pass; an open feature may have one, marked `#[ignore]`, asserting the answer it will give once it lands. `just board-check` (`scripts/board_check.mjs`) fails when a done feature names no passing test, an open feature's test passes, or a test backs no feature, so **moving a feature on the board means adding or un-ignoring its test in the same change**, and adding a feature means adding its test.
 - **Every expected value is what CPython answers for the same source.** Run the Python first and assert its answer, so a failure means a divergence from the reference implementation rather than a change in what the compiler happens to do. Do not assert what the compiler currently does.
@@ -416,6 +436,8 @@ test: description          # Adding/fixing tests
 | `src/core/options.rs` | `CompilerOptions`, `Verbosity` |
 | `src/core/errors.rs` | `ChakraError` (structured errors) |
 | `src/stdlib/mod.rs` | stdlib module allowlist + attribute dispatch |
+| `src/compiler/dunders.rs` | The codegen-time rewrites: special methods, method variants and keywords, views, optional receivers, logging calls |
+| `src/ir/build.rs` | The IR builders every module pass writes with |
 | `src/wasmrun.rs` | Wasmrun plugin integration (`wasm-plugin` feature) |
 | `justfile` | All development task commands |
 | `CHANGELOG.md` | Keep updated with every change |
@@ -444,11 +466,10 @@ test: description          # Adding/fixing tests
 
 ### Adding a new stdlib module
 
-1. Create `src/stdlib/<module>.rs` exposing `get_attribute()` (and any codegen helpers) following the existing modules.
+1. Create `src/stdlib/<module>.rs` exposing `get_attribute()` (its constants), following the existing modules.
 2. Register it in `src/stdlib/mod.rs`: add to `is_stdlib_module()` and the `get_stdlib_attributes()` dispatch.
-3. Wire the actual WASM emission for the module's functions into the compiler.
-4. Add an example `.py` exercising it and a test.
-5. Remember: these are **compile-time codegen shims**, not a runtime — each call must lower to inline WASM.
+3. Implement its functions either as codegen in `src/compiler/stdlib/` (answer `None` for what is not implemented, and the call site refuses it), or as a module pass under `src/ir/` that writes CPython's classes and functions out in IR (see the gotcha "Standard-library modules written in IR follow one shape"). Place a new pass by rule 8.
+4. Add tests in `tests/unit/stdlib.rs` whose expected output is CPython 3.13's, and a board test per card.
 
 ### Adding a decorator or a builtin function
 
@@ -506,7 +527,14 @@ test: description          # Adding/fixing tests
 - **Iterators are consumed through the IR, not by codegen.** `src/ir/generators.rs` rewrites a `for` over a generator or `__next__` class into a `__next__` loop, and a comprehension's first iterable into a call to a synthesized `__drain_<Class>` helper (`DRAIN_FN_PREFIX`, kept out of exports and function metadata) that returns a list. Codegen only ever iterates collections and ranges and refuses anything else, so a new construct that iterates must go through this pass or refuse an iterator. A `zip()` lowers to per-round pulls into value temporaries (`ZIP_VALUE_PREFIX`), binding the targets only once every iterable has produced, so an early stop leaves the targets as CPython does. An iterator in a comprehension's inner `for` clause is refused, since inner iterables are evaluated twice (to size the result, then to fill it).
 - **`@singledispatch` dispatch is static.** `IRModule::dispatch_tables` (`IRDispatch` in `src/ir/types.rs`) carries each base function's registered arms; the converter fills it, `compile_ir_module` copies it onto `CompilationContext`, and the `FunctionCall` arm in `src/compiler/expression.rs` picks the arm from the *static* IR type of the first argument. There is no runtime type tag on scalars, so an argument whose type is `Unknown` is refused rather than guessed.
 - **stdlib support is an allowlist.** Only modules in `is_stdlib_module()` are recognized; everything else is treated as a user-written module: multi-file compilation links it into the single output module (namespace calls, aliases, and constants resolve statically), and `compile_python_file` resolves it from disk next to the entry file.
-- **Of the stdlib, only constants (and `sys`'s streams and `argv`) compile today.** A module constant is read (string constants are folded to interned literals in the converter), `from math import pi` reads through `ctx.stdlib_imports`, and constant `re.sub`/`re.escape` calls fold in the converter (`fold_re_call`, `stdlib::re::fold_sub`) only where the `regex` crate and CPython provably agree. Every other stdlib call or attribute is refused by one path in `src/compiler/expression.rs` (`stdlib_call_name`), naming the dotted function; a refusal never names a planned release version. Implementing a stdlib function means replacing that refusal for it, never adding a placeholder value.
+- **A stdlib function is implemented, or refused by name.** A module constant is read (string constants are folded to interned literals in the converter), and `from math import pi` reads through `ctx.stdlib_imports`. A call the codegen modules or the IR passes do not implement reaches one path in `src/compiler/expression.rs` (`stdlib_call_name`), which refuses it naming the dotted function; a refusal never names a planned release version. Implementing a stdlib function means replacing that refusal for it, never adding a placeholder value. Constant `re.sub`/`re.escape` calls are still folded in the converter (`fold_re_call`) where the `regex` crate and CPython provably agree, and left to the run-time engine otherwise.
+- **Standard-library modules written in IR follow one shape.** A pass runs only when the module imports its module, and finds the program's names for it (`import logging as lg`, `from re import compile`) through a `Bindings` of the imports. Its classes are named `module.Class` (`datetime.date`, `logging.Logger`, `re.Match`, so `type(x)` prints `<class 're.Match'>`, `build_class_name` in `exceptions.rs`), and annotations name them through the module (`type_annotation_to_ir_type` maps `datetime.X`, `logging.X`, `re.X`). Its functions take a prefix (`__datetime_`, `__logging_`, `__re_`, ...) listed in `is_internal_function`, so they stay out of exports and metadata. It interns every string its code uses (`memory_layout.add_string`). Module state lives in class variables of a class the pass puts first in `module.classes` (`logging._State`, `re._Cache`), since class variables are initialized before the program's own definitions. A class whose instances CPython makes immutable carries `FROZEN_VAR`, so assigning a field is refused.
+- **A method can have variants by its argument's type**, named `method<encoded type>` (`collections::spec::variant`): `setLevel<int>` and `setLevel<str>`, `__sub__<datetime.timedelta>`. Code generation picks the variant for the argument's static type (`dunders::rewrite_variant`, `rewrite_binary` for operators), an int taking a float variant when there is no int one. It is how a builtin method that accepts several types is written in IR.
+- **Hidden names carry facts between passes and codegen.** The `collections` markers (`<view>`, `<data>`, `<from>`, `<delegates>`, `<frozen>`), and keywords no Python call can spell: the converter adds `__log_line` to calls of logging methods (from the parser's line table, `core::parser::line_of`), the logging pass adds `__log_func` and pre-lowers a literal message's `%` formatting into `__log_text` over `__log_arg<k>` placeholders, and codegen consumes them on a `logging.Logger` receiver (`dunders::log_parts`) and strips them from any other. A logging call that is a statement evaluates its arguments, then formats the message only if the logger is enabled for the level.
+- **Method calls take keywords and defaults at codegen.** The receiver's class decides which method is called, so `dunders::place_method_keywords` places keywords by name and `fill_method_defaults` fills constant defaults; `super().m(...)` is placed against the method it reaches (`place_super_arguments`).
+- **An optional string or instance is used as CPython uses the value.** `Optional[str]` is a single word, the string's offset or 0. Converting it to `str` checks for None (it traps); `x == s` compares the text (`__optional_text_eq`); `+`, `len()`, `int()`, and `float()` raise CPython's `TypeError` on None; a method call or attribute read on an `Optional[str]` or `Optional[Class]` goes through `__some`, which raises `AttributeError` (or the error a third argument names, as `x[k]`'s `TypeError`). Because these checks raise, a function that reads an optional reference and uses it counts as one that can raise (`may_deref_none` in `module.rs`).
+- **`re` patterns are compiled with the program.** `src/ir/re/parse.rs` is a port of CPython 3.13's parser (its `re.error` messages and positions are reported at compile time), `compile.rs` turns the parse into a program, and `vm.rs` is the backtracking matcher, written in IR, whose repeats follow `sre`'s `MAX_UNTIL`/`MIN_UNTIL`. Each distinct pattern and flags is one `re._Cache` class variable; a pattern is an instance of `_Pattern0`, `_Pattern1`, or `_PatternN` by its group count, because `findall` and `split` answer different types. A pattern must be a literal, a module constant, or a compiled pattern held in a module variable.
+- **`__name__` is the module's.** The converter lowers it to `"__main__"` in the entry file and to the module's dotted name in an imported one (`lower_ast_to_ir_named`, which the multi-file path in `lib.rs` uses).
 - **An untyped place holds one word, read as an int.** An unannotated parameter or return (`IRType::Unknown`) and the elements of a bare `list`/`set`/`dict` parameter or return (`IRType::Any`) take only ints, bools, None, and functions; `check_untyped_store` refuses anything else at the argument, return, field, or collection write, because a string loses its length and a float its width on the way. A bare annotation on a variable or field is different: its elements infer from the value (`elements_from_value` in the converter). `len()` of an untyped value is refused for the same reason.
 - **Keyword arguments are `IRExpr::Keyword`.** The converter keeps them after the positional arguments; `finalize::resolve_keyword_arguments` places them by name for this module's functions and constructors, before the generator and `with` passes (whose expression walkers have wildcard arms). One that reaches codegen is refused, never dropped.
 - **Every call to a module function is checked against its signature.** `finalize::place_keywords` runs for every call to this module's functions and constructors, with or without keywords, so a surplus positional argument or a missing one is a TypeError at compile time. Keyword-only parameters are `IRParam::keyword_only`, appended after the positional ones; they are accepted on functions and `__init__`, and refused on other methods and on lambdas. A class with no `__init__` along its chain is not checked.

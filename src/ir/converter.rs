@@ -23,8 +23,130 @@ pub const ZIP_VALUE_PREFIX: &str = "__zipv_";
 pub const DEL_ITEM_METHOD: &str = "__delitem__";
 pub const DEL_SLICE_METHOD: &str = "__delslice__";
 
-/// Lower a Python AST (Suite) into our IR.
+/// The name a `logging` call's line travels under, from the converter to
+/// code generation, as an [`IRExpr::Keyword`] no Python call can spell.
+pub const LOG_LINE_ARG: &str = "__log_line";
+/// The name of the function a `logging` call is in, added by the logging
+/// pass alongside [`LOG_LINE_ARG`].
+pub const LOG_FUNC_ARG: &str = "__log_func";
+/// A logging call's message, formatted with `%` over its arguments, which
+/// stand in it as [`LOG_ARG_PREFIX`]`<k>` variables until code generation
+/// substitutes them; added by the logging pass.
+pub const LOG_TEXT_ARG: &str = "__log_text";
+/// Why a logging call's message cannot be formatted, in its place.
+pub const LOG_TEXT_ERROR_ARG: &str = "__log_text_error";
+pub const LOG_ARG_PREFIX: &str = "__log_arg";
+/// The methods of a `logging.Logger` that log, and the module's functions
+/// of the same names.
+pub const LOG_METHODS: &[&str] = &[
+    "debug",
+    "info",
+    "warning",
+    "warn",
+    "error",
+    "exception",
+    "critical",
+    "fatal",
+    "log",
+];
+
+/// What lowering the current module needs to know beyond its AST.
+#[derive(Default)]
+struct Lowering {
+    /// `__name__`.
+    module_name: String,
+    /// When the module imports `logging`: the names it calls the module's
+    /// logging functions by (`from logging import info`).
+    logging: Option<std::collections::HashSet<String>>,
+}
+
+thread_local! {
+    static LOWERING: std::cell::RefCell<Lowering> = std::cell::RefCell::new(Lowering::default());
+}
+
+/// The `logging` imports anywhere in the module: None when there are none,
+/// else the names its functions are imported as.
+fn logging_imports(ast: &Suite) -> Option<std::collections::HashSet<String>> {
+    fn walk(body: &[Stmt], found: &mut bool, names: &mut std::collections::HashSet<String>) {
+        for stmt in body {
+            match stmt {
+                Stmt::Import(i) => {
+                    if i.names.iter().any(|a| a.name.as_str() == "logging") {
+                        *found = true;
+                    }
+                }
+                Stmt::ImportFrom(i) => {
+                    if i.module.as_deref() == Some("logging") {
+                        *found = true;
+                        for a in &i.names {
+                            if LOG_METHODS.contains(&a.name.as_str()) {
+                                names.insert(a.asname.as_ref().unwrap_or(&a.name).to_string());
+                            }
+                        }
+                    }
+                }
+                Stmt::FunctionDef(f) => walk(&f.body, found, names),
+                Stmt::ClassDef(c) => walk(&c.body, found, names),
+                Stmt::If(s) => {
+                    walk(&s.body, found, names);
+                    walk(&s.orelse, found, names);
+                }
+                Stmt::Try(t) => {
+                    walk(&t.body, found, names);
+                    walk(&t.orelse, found, names);
+                    walk(&t.finalbody, found, names);
+                }
+                _ => {}
+            }
+        }
+    }
+    let (mut found, mut names) = (false, std::collections::HashSet::new());
+    walk(ast, &mut found, &mut names);
+    found.then_some(names)
+}
+
+/// The line of a call to a logging function or method, as a keyword the
+/// logging pass and code generation read, when the module imports `logging`.
+fn log_line_keyword(call: &rustpython_parser::ast::ExprCall) -> Option<IRExpr> {
+    let logs = LOWERING.with(|l| {
+        let l = l.borrow();
+        let names = l.logging.as_ref()?;
+        Some(match &*call.func {
+            Expr::Attribute(a) => LOG_METHODS.contains(&a.attr.as_str()),
+            Expr::Name(n) => names.contains(n.id.as_str()),
+            _ => false,
+        })
+    })?;
+    if !logs {
+        return None;
+    }
+    let line = crate::core::parser::line_of(call.range.start().into())?;
+    Some(IRExpr::Keyword {
+        name: LOG_LINE_ARG.to_string(),
+        value: Box::new(IRExpr::Const(IRConstant::Int(line as i32))),
+    })
+}
+
+/// Lower a Python AST (Suite) into our IR, as the module `__main__`.
 pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
+    lower_ast_to_ir_named(ast, "__main__")
+}
+
+/// Lower a Python AST into our IR as the module named `module_name`, which
+/// is what `__name__` reads in it.
+pub fn lower_ast_to_ir_named(ast: &Suite, module_name: &str) -> Result<IRModule> {
+    let previous = LOWERING.with(|l| {
+        l.replace(Lowering {
+            module_name: module_name.to_string(),
+            logging: logging_imports(ast),
+        })
+    });
+    let lowered = lower_module(ast);
+    LOWERING.with(|l| l.replace(previous));
+    lowered
+}
+
+fn lower_module(ast: &Suite) -> Result<IRModule> {
     let mut module = IRModule::new();
     let mut memory_layout = MemoryLayout::new();
     // `format(x)` with no spec formats with the empty one.
@@ -175,6 +297,12 @@ pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
                 class.position = module.variables.len();
                 module.classes.push(class);
             }
+            Stmt::Assign(assign) if namedtuple_call(&assign.value).is_some() => {
+                // `P = namedtuple("P", "x y")` defines a class.
+                let mut class = namedtuple_definition(assign, &mut memory_layout)?;
+                class.position = module.variables.len();
+                module.classes.push(class);
+            }
             Stmt::Assign(_) => {
                 // Process module-level assignment
                 if let Some(var) = process_module_level_assign(stmt, &mut memory_layout)? {
@@ -277,22 +405,53 @@ pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
     // resolved offsets to emit loads and the data section.
     module.memory_layout = memory_layout;
 
-    // User decorators first (they rewrite which function a name is), then
-    // metaclasses (specialized per class they make), nested functions, keyword placement, the context-manager protocol (so
-    // a `with` in a generator is a `try` the generator pass can flatten),
-    // generator lowering (it synthesizes classes and constructor bodies the
-    // later passes must still see), then whole-module checks and rewrites
-    // (abstract-class instantiation, call-site parameter defaults).
+    // `logging` and `re` first (logging names records' functions as the
+    // program wrote them), then user decorators (they rewrite which function
+    // a name is), metaclasses (specialized per class they make), nested
+    // functions, `functools.partial` over them, `datetime`'s classes, keyword
+    // placement, the context-manager protocol (so a `with` in a generator is
+    // a `try` the generator pass can flatten), `itertools` and `collections`
+    // (they synthesize generators and classes), generator lowering (it
+    // synthesizes classes and constructor bodies the later passes must still
+    // see), then whole-module checks and rewrites (abstract-class
+    // instantiation, call-site parameter defaults).
+    crate::ir::lower_logging(&mut module)?;
+    crate::ir::lower_re(&mut module)?;
     crate::ir::apply_user_decorators(&mut module)?;
     crate::ir::apply_metaclasses(&mut module)?;
     crate::ir::finalize::lift_nested_functions(&mut module)?;
+    crate::ir::lower_partials(&mut module)?;
+    crate::ir::lower_datetime(&mut module)?;
     crate::ir::finalize::resolve_keyword_arguments(&mut module)?;
     crate::ir::context_managers::desugar_with_statements(&mut module)?;
+    crate::ir::lower_itertools(&mut module)?;
+    crate::ir::lower_collections(&mut module)?;
     crate::ir::generators::transform_generators(&mut module)?;
     crate::ir::finalize::finalize_module(&mut module)?;
 
     Ok(module)
 }
+
+/// Numbers the item names of the comprehensions `list()` and `tuple()` lower
+/// to, so nested ones never share one.
+static LIST_CALL_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// `tuple(iterable)`: a list of the items, which code generation reads as a
+/// tuple of their type (a tuple of one element type is laid out as a list).
+pub const AS_TUPLE_FN: &str = "__as_tuple";
+
+/// `__iter_seq(x)`: what a loop walking `x` by index walks, the elements of
+/// `x` as a sequence (a dict's keys, a set's members, a list or string
+/// itself), resolved where `x`'s type is known.
+pub const ITER_SEQ_FN: &str = "__iter_seq";
+
+/// `__datetime_clock_us()`: the host's realtime clock, in microseconds since
+/// the epoch, as a float.
+pub const DATETIME_CLOCK_FN: &str = "__datetime_clock_us";
+
+/// `__some(x, "attr")`: `x`, an optional instance, as the instance; CPython's
+/// AttributeError for reading `attr` of None when it is None.
+pub const SOME_FN: &str = "__some";
 
 /// Fold `re.sub` and `re.escape` over constant arguments into the string
 /// CPython would produce. `None` leaves the call for code generation, which
@@ -309,56 +468,23 @@ fn fold_re_call(
             _ => None,
         }
     }
-    fn int(expr: &IRExpr) -> Option<i32> {
-        match expr {
-            IRExpr::Const(IRConstant::Int(n)) => Some(*n),
-            IRExpr::Const(IRConstant::Bool(b)) => Some(*b as i32),
-            IRExpr::Attribute { object, attribute } if matches!(&**object, IRExpr::Variable(m) if m == "re") => {
-                match crate::stdlib::re::get_attribute(attribute)? {
-                    crate::stdlib::StdlibValue::Int(n) => Some(n),
-                    _ => None,
-                }
-            }
-            IRExpr::BinaryOp {
-                left,
-                right,
-                op: IROp::BitOr,
-            } => Some(int(left)? | int(right)?),
-            _ => None,
-        }
-    }
-
     let folded = match (method_name, arguments) {
         ("escape", [pattern]) => match text(pattern) {
             Some(pattern) => crate::stdlib::re::escape(pattern),
             None => return Ok(None),
         },
-        ("sub", [pattern, repl, string, rest @ ..]) if rest.len() <= 2 => {
+        // Three literals fold when the two engines provably agree; anything
+        // else is matched at run time.
+        ("sub", [pattern, repl, string]) => {
             let (Some(pattern), Some(repl), Some(string)) =
                 (text(pattern), text(repl), text(string))
             else {
                 return Ok(None);
             };
-            let count = rest.first().map(int);
-            let flags = rest.get(1).map(int);
-            if count == Some(None) || flags == Some(None) {
-                return Err(anyhow!(
-                    "re.sub()'s count and flags must be constants for the call to be folded"
-                ));
+            match crate::stdlib::re::fold_sub(pattern, repl, string, 0, 0) {
+                Ok(folded) => folded,
+                Err(_) => return Ok(None),
             }
-            crate::stdlib::re::fold_sub(
-                pattern,
-                repl,
-                string,
-                count.flatten().unwrap_or(0),
-                flags.flatten().unwrap_or(0),
-            )
-            .map_err(|why| {
-                anyhow!(
-                    "re.sub({pattern:?}, {repl:?}, ...) is not folded at compile time: {why}, \
-                     and regular expressions at run time are planned for 0.20.0"
-                )
-            })?
         }
         _ => return Ok(None),
     };
@@ -395,7 +521,8 @@ fn lower_keywords(
     callee: &str,
     memory_layout: &mut MemoryLayout,
 ) -> Result<Vec<IRExpr>> {
-    call.keywords
+    let mut lowered = call
+        .keywords
         .iter()
         .map(|keyword| match &keyword.arg {
             Some(name) => {
@@ -417,7 +544,9 @@ fn lower_keywords(
                 })
             }
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    lowered.extend(log_line_keyword(call));
+    Ok(lowered)
 }
 
 /// Process a dynamic import expression (using __import__ or importlib)
@@ -595,6 +724,133 @@ fn process_circular_imports(module: &mut IRModule) {
 }
 
 /// Process a class definition
+/// The `namedtuple(...)` call (or `collections.namedtuple(...)`) an
+/// expression is, if it is one.
+fn namedtuple_call(expr: &Expr) -> Option<&rustpython_parser::ast::ExprCall> {
+    let Expr::Call(call) = expr else {
+        return None;
+    };
+    match &*call.func {
+        Expr::Name(n) if n.id.as_str() == "namedtuple" => Some(call),
+        Expr::Attribute(a)
+            if a.attr.as_str() == "namedtuple"
+                && matches!(&*a.value, Expr::Name(m) if m.id.as_str() == "collections") =>
+        {
+            Some(call)
+        }
+        _ => None,
+    }
+}
+
+/// `P = namedtuple("P", fields, defaults=...)`: the class it defines. The
+/// field names are a string (split on commas and whitespace) or a list or
+/// tuple of strings; their types come from the module's calls of the class.
+fn namedtuple_definition(
+    assign: &rustpython_parser::ast::StmtAssign,
+    memory_layout: &mut MemoryLayout,
+) -> Result<IRClass> {
+    let refuse = |message: String| -> anyhow::Error {
+        crate::core::errors::unsupported_feature(message, None).into()
+    };
+    let [Expr::Name(target)] = assign.targets.as_slice() else {
+        return Err(refuse(
+            "namedtuple() must be assigned to one name".to_string(),
+        ));
+    };
+    let call = namedtuple_call(&assign.value).expect("checked by the caller");
+    let constant_str = |e: &Expr| match e {
+        Expr::Constant(c) => match &c.value {
+            rustpython_parser::ast::Constant::Str(s) => Some(s.to_string()),
+            _ => None,
+        },
+        _ => None,
+    };
+    let [typename, names] = call.args.as_slice() else {
+        return Err(refuse(
+            "namedtuple() takes a type name and the field names".to_string(),
+        ));
+    };
+    let Some(typename) = constant_str(typename) else {
+        return Err(refuse(
+            "namedtuple()'s type name must be a string literal".to_string(),
+        ));
+    };
+    let names: Vec<String> = match names {
+        Expr::List(l) => l.elts.iter().map(constant_str).collect::<Option<_>>(),
+        Expr::Tuple(t) => t.elts.iter().map(constant_str).collect::<Option<_>>(),
+        other => constant_str(other).map(|s| {
+            s.replace(',', " ")
+                .split_whitespace()
+                .map(str::to_string)
+                .collect()
+        }),
+    }
+    .ok_or_else(|| {
+        refuse(format!(
+            "namedtuple '{typename}': the field names must be a string literal, or a list or \
+             tuple of them"
+        ))
+    })?;
+    crate::ir::collections::check_field_names(&typename, std::slice::from_ref(&typename))
+        .and_then(|_| crate::ir::collections::check_field_names(&typename, &names))?;
+    let mut defaults: Vec<IRExpr> = Vec::new();
+    for keyword in &call.keywords {
+        match keyword.arg.as_deref() {
+            Some("defaults") => {
+                let items = match &keyword.value {
+                    Expr::List(l) => &l.elts,
+                    Expr::Tuple(t) => &t.elts,
+                    _ => {
+                        return Err(refuse(format!(
+                            "namedtuple '{typename}': defaults must be a list or tuple literal"
+                        )))
+                    }
+                };
+                if items.len() > names.len() {
+                    return Err(refuse(format!(
+                        "namedtuple '{typename}': got more default values than field names"
+                    )));
+                }
+                defaults = items
+                    .iter()
+                    .map(|e| lower_expr(e, memory_layout))
+                    .collect::<Result<_>>()?;
+            }
+            Some("rename") if matches!(&keyword.value, Expr::Constant(c) if matches!(c.value, rustpython_parser::ast::Constant::Bool(false))) =>
+                {}
+            Some(other) => {
+                return Err(refuse(format!(
+                    "namedtuple '{typename}': the '{other}' argument is not supported"
+                )))
+            }
+            None => return Err(refuse("namedtuple() does not take **kwargs".to_string())),
+        }
+    }
+    let first_default = names.len() - defaults.len();
+    let mut defaults = defaults.into_iter();
+    let fields = names
+        .into_iter()
+        .enumerate()
+        .map(|(i, name)| crate::ir::collections::TupleField {
+            name,
+            ty: IRType::Unknown,
+            default: if i >= first_default {
+                defaults.next()
+            } else {
+                None
+            },
+        })
+        .collect();
+    crate::ir::collections::namedtuple_class(
+        target.id.as_str(),
+        &typename,
+        fields,
+        Vec::new(),
+        Vec::new(),
+        memory_layout,
+    )
+}
+
 fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Result<IRClass> {
     if let Stmt::ClassDef(classdef) = stmt {
         let name = classdef.name.to_string();
@@ -660,6 +916,23 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
             is_dataclass = true;
         }
 
+        // `class P(NamedTuple)`: a named tuple whose fields are the annotated
+        // class-level names.
+        let is_named_tuple = bases
+            .iter()
+            .any(|b| b == "NamedTuple" || b == "typing.NamedTuple");
+        if is_named_tuple && (bases.len() != 1 || is_dataclass || is_total_ordering) {
+            return Err(crate::core::errors::unsupported_feature(
+                format!(
+                    "named tuple '{name}' with another base class or a class decorator is not \
+                     supported"
+                ),
+                None,
+            )
+            .into());
+        }
+        let bases = if is_named_tuple { Vec::new() } else { bases };
+
         // Dataclass fields come from the annotated class-level assignments, in
         // source order, validated against Python's dataclass rules.
         let dataclass_fields = if is_dataclass {
@@ -672,6 +945,11 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
         let mut class_vars = Vec::new();
         // (method name, kind) in source order, for post-validation below.
         let mut method_kinds: Vec<(String, MethodKind)> = Vec::new();
+        // `@functools.singledispatchmethod` methods, with how many arms each
+        // has registered so far.
+        let mut dispatch_methods: Vec<(String, usize)> = Vec::new();
+        let mut pending_partialmethods: Vec<(String, rustpython_parser::ast::ExprCall)> =
+            Vec::new();
 
         // Process class body
         for stmt in &classdef.body {
@@ -701,6 +979,107 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
                                 .into());
                             }
                         }
+                    }
+
+                    // `@functools.singledispatchmethod`: the method is the
+                    // fallback, and `@method.register` methods are arms chosen
+                    // by the static type of the first argument after `self`.
+                    // An arm is renamed so its `def _` never collides, and
+                    // keeps its `register` decorator for code generation.
+                    let mut method_name = method_name;
+                    if decorators.iter().any(|d| {
+                        d == "singledispatchmethod" || d == "functools.singledispatchmethod"
+                    }) {
+                        if decorators.len() != 1 {
+                            return Err(crate::core::errors::unsupported_feature(
+                                format!(
+                                    "'@singledispatchmethod' on '{name}.{method_name}' combined \
+                                     with another decorator is not supported"
+                                ),
+                                None,
+                            )
+                            .into());
+                        }
+                        dispatch_methods.push((method_name.clone(), 0));
+                    }
+                    let register = method_def.decorator_list.iter().find_map(|dec| {
+                        let (spelling, call) = decorator_spelling(dec)?;
+                        let base = spelling.strip_suffix(".register")?;
+                        Some((base.to_string(), call))
+                    });
+                    if let Some((base, call)) = register {
+                        let Some(entry) = dispatch_methods.iter_mut().find(|(b, _)| *b == base)
+                        else {
+                            return Err(crate::core::errors::unsupported_feature(
+                                format!(
+                                    "'@{base}.register' on method '{name}.{method_name}': '{base}' \
+                                     is not a '@singledispatchmethod' of the class defined above it"
+                                ),
+                                None,
+                            )
+                            .into());
+                        };
+                        if decorators.len() != 1 {
+                            return Err(crate::core::errors::unsupported_feature(
+                                format!(
+                                    "'@{base}.register' on '{name}.{method_name}' combined with \
+                                     another decorator is not supported"
+                                ),
+                                None,
+                            )
+                            .into());
+                        }
+                        // The type registered: the argument, or the annotation
+                        // of the parameter after `self`.
+                        if let Some(call) = call {
+                            let [explicit] = call.args.as_slice() else {
+                                return Err(anyhow!(
+                                    "'@{base}.register(...)' takes one type, on '{name}.{method_name}'"
+                                ));
+                            };
+                            let ty = type_annotation_to_ir_type(explicit)?;
+                            if let Some(p) = params.get_mut(1) {
+                                if p.param_type == IRType::Unknown {
+                                    p.param_type = ty;
+                                }
+                            }
+                        }
+                        if params
+                            .get(1)
+                            .map_or(true, |p| p.param_type == IRType::Unknown)
+                        {
+                            return Err(crate::core::errors::unsupported_feature(
+                                format!(
+                                    "'@{base}.register' on method '{name}.{method_name}' needs the \
+                                     type to dispatch on: annotate the parameter after 'self' or \
+                                     write '@{base}.register(type)'"
+                                ),
+                                None,
+                            )
+                            .into());
+                        }
+                        method_name = format!("{base}__register_{}", entry.1);
+                        entry.1 += 1;
+                        decorators = vec![format!("{base}.register")];
+                    }
+
+                    // `@functools.cached_property` is a property whose value is
+                    // computed on first read and kept on the instance.
+                    let cached = decorators
+                        .iter()
+                        .any(|d| d == "cached_property" || d == "functools.cached_property");
+                    if cached {
+                        if decorators.len() != 1 {
+                            return Err(crate::core::errors::unsupported_feature(
+                                format!(
+                                    "'@cached_property' on '{name}.{method_name}' combined with \
+                                     another decorator is not supported"
+                                ),
+                                None,
+                            )
+                            .into());
+                        }
+                        decorators = vec!["property".to_string()];
                     }
 
                     // Classify the method's binding up front so an unsupported
@@ -755,6 +1134,17 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
 
                     let body = lower_function_body(&method_def.body, memory_layout)?;
 
+                    if cached {
+                        methods.extend(cached_property_methods(
+                            &method_name,
+                            params,
+                            body,
+                            return_type,
+                        ));
+                        method_kinds.push((method_name, MethodKind::PropertySetter));
+                        continue;
+                    }
+
                     methods.push(IRFunction {
                         name: method_name,
                         params,
@@ -762,6 +1152,17 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
                         return_type,
                         decorators,
                     });
+                }
+                // `name = functools.partialmethod(method, *args, **kw)`: made
+                // into a method once every method is lowered.
+                Stmt::Assign(assign) if partialmethod_call(&assign.value).is_some() => {
+                    let [Expr::Name(target)] = assign.targets.as_slice() else {
+                        return Err(anyhow!(
+                            "partialmethod() must be assigned to one name in class '{name}'"
+                        ));
+                    };
+                    let call = partialmethod_call(&assign.value).expect("checked");
+                    pending_partialmethods.push((target.id.to_string(), call.clone()));
                 }
                 Stmt::Assign(_) => {
                     // Process class variable
@@ -789,6 +1190,12 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
                     .into());
                 }
             }
+        }
+
+        for (method_name, call) in &pending_partialmethods {
+            let method = partialmethod_method(&name, method_name, call, &methods, memory_layout)?;
+            method_kinds.push((method_name.clone(), MethodKind::Instance));
+            methods.push(method);
         }
 
         // A setter is reachable only through attribute assignment, which
@@ -819,6 +1226,81 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
         }
         if is_total_ordering {
             synthesize_total_ordering(&name, &mut methods)?;
+        }
+
+        if is_named_tuple {
+            let mut fields = Vec::new();
+            let mut defaulted: Option<String> = None;
+            for stmt in &classdef.body {
+                let Stmt::AnnAssign(ann) = stmt else {
+                    continue;
+                };
+                let Expr::Name(target) = &*ann.target else {
+                    continue;
+                };
+                let field = target.id.to_string();
+                let default = match ann.value.as_deref() {
+                    Some(value) => Some(lower_expr(value, memory_layout)?),
+                    None => None,
+                };
+                match (&default, &defaulted) {
+                    (Some(_), None) => defaulted = Some(field.clone()),
+                    (None, Some(_)) => {
+                        return Err(crate::core::errors::type_error(
+                            format!(
+                                "Non-default namedtuple field {field} cannot follow default \
+                                 field{} {}",
+                                if fields
+                                    .iter()
+                                    .filter(|f: &&crate::ir::collections::TupleField| f
+                                        .default
+                                        .is_some())
+                                    .count()
+                                    > 1
+                                {
+                                    "s"
+                                } else {
+                                    ""
+                                },
+                                fields
+                                    .iter()
+                                    .filter(|f: &&crate::ir::collections::TupleField| f
+                                        .default
+                                        .is_some())
+                                    .map(|f| f.name.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                            None,
+                        )
+                        .into());
+                    }
+                    _ => {}
+                }
+                fields.push(crate::ir::collections::TupleField {
+                    name: field,
+                    ty: type_annotation_to_ir_type(&ann.annotation)?,
+                    default,
+                });
+            }
+            let names: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
+            if let Some(bad) = names.iter().find(|n| n.starts_with('_')) {
+                return Err(crate::core::errors::unsupported_feature(
+                    format!("Field names cannot start with an underscore: '{bad}'"),
+                    None,
+                )
+                .into());
+            }
+            let mut class = crate::ir::collections::namedtuple_class(
+                &name,
+                &name,
+                fields,
+                methods,
+                class_vars,
+                memory_layout,
+            )?;
+            class.metaclass = None;
+            return Ok(class);
         }
 
         // `metaclass=M`, the one class keyword with a meaning here (the parser
@@ -1192,6 +1674,220 @@ fn collect_dataclass_fields(
 /// builds `Name(field=value, ...)` at runtime and is only generated when every
 /// field can be stringified (int/bool via `str()`, str spliced directly) —
 /// float formatting has no runtime support yet.
+/// `functools.partialmethod(...)` / `partialmethod(...)` in a class body.
+fn partialmethod_call(value: &Expr) -> Option<&rustpython_parser::ast::ExprCall> {
+    let Expr::Call(call) = value else {
+        return None;
+    };
+    let named = match &*call.func {
+        Expr::Name(n) => n.id.as_str() == "partialmethod",
+        Expr::Attribute(attr) => {
+            attr.attr.as_str() == "partialmethod"
+                && matches!(&*attr.value, Expr::Name(m) if m.id.as_str() == "functools")
+        }
+        _ => false,
+    };
+    named.then_some(call)
+}
+
+/// The method `name = partialmethod(target, *args, **kw)` stands for:
+/// `def name(self, *rest): return self.target(*args, *rest, **kw)`, the bound
+/// arguments constants (CPython evaluates them once, as the class is made).
+/// A parameter bound by keyword has to follow every free one, as for
+/// `partial`; the call passes it in its place.
+fn partialmethod_method(
+    class: &str,
+    name: &str,
+    call: &rustpython_parser::ast::ExprCall,
+    methods: &[IRFunction],
+    memory_layout: &mut MemoryLayout,
+) -> Result<IRFunction> {
+    let refuse = |why: String| -> anyhow::Error {
+        crate::core::errors::unsupported_feature(
+            format!("partialmethod() for '{class}.{name}': {why}"),
+            None,
+        )
+        .into()
+    };
+    let Some(Expr::Name(target)) = call.args.first() else {
+        return Err(refuse(
+            "its first argument must name a method of the class".to_string(),
+        ));
+    };
+    let target = target.id.to_string();
+    let Some(method) = methods.iter().find(|m| m.name == target) else {
+        return Err(refuse(format!("'{target}' is not a method of the class")));
+    };
+    if !method.decorators.is_empty() || method.params.first().map_or(true, |p| p.name != "self") {
+        return Err(refuse(format!("'{target}' is not a plain instance method")));
+    }
+    let mut constant = |e: &Expr| -> Result<IRExpr> {
+        let lowered = lower_expr(e, memory_layout)?;
+        match lowered {
+            IRExpr::Const(_) => Ok(lowered),
+            IRExpr::UnaryOp { ref operand, .. } if matches!(**operand, IRExpr::Const(_)) => {
+                Ok(lowered)
+            }
+            _ => Err(refuse(
+                "its bound arguments must be constants here, since CPython evaluates them once, \
+                 as the class is made"
+                    .to_string(),
+            )),
+        }
+    };
+    let mut bound = Vec::new();
+    for arg in &call.args[1..] {
+        bound.push(constant(arg)?);
+    }
+    let params = &method.params[1..];
+    if bound.len() > params.len() {
+        return Err(anyhow!(
+            "TypeError: partialmethod() binds {} arguments to '{target}', which takes {}",
+            bound.len(),
+            params.len()
+        ));
+    }
+    let mut by_name: Vec<(String, IRExpr)> = Vec::new();
+    for kw in &call.keywords {
+        let Some(arg) = &kw.arg else {
+            return Err(refuse("'**' in its arguments is not supported".to_string()));
+        };
+        by_name.push((arg.to_string(), constant(&kw.value)?));
+    }
+    let rest = &params[bound.len()..];
+    let free: Vec<&IRParam> = rest
+        .iter()
+        .take_while(|p| !by_name.iter().any(|(n, _)| *n == p.name))
+        .collect();
+    let tail = &rest[free.len()..];
+    // What follows the free parameters is bound by keyword, all of it.
+    let mut tail_args = Vec::new();
+    for p in tail {
+        match by_name.iter().find(|(n, _)| *n == p.name) {
+            Some((_, v)) => tail_args.push(v.clone()),
+            None => {
+                return Err(refuse(format!(
+                    "binding a parameter by keyword before one left free ('{}') is not supported",
+                    p.name
+                )))
+            }
+        }
+    }
+    if by_name.len() != tail.len() {
+        return Err(anyhow!(
+            "TypeError: {target}() got an unexpected keyword argument"
+        ));
+    }
+    let mut self_param = method.params[0].clone();
+    self_param.param_type = IRType::Class(class.to_string());
+    let mut new_params = vec![self_param];
+    new_params.extend(free.iter().map(|p| (*p).clone()));
+    let mut arguments = bound;
+    arguments.extend(free.iter().map(|p| IRExpr::Variable(p.name.clone())));
+    arguments.extend(tail_args);
+    Ok(IRFunction {
+        name: name.to_string(),
+        params: new_params,
+        body: IRBody {
+            statements: vec![IRStatement::Return(Some(IRExpr::MethodCall {
+                object: Box::new(IRExpr::Variable("self".to_string())),
+                method_name: target,
+                arguments,
+            }))],
+        },
+        return_type: method.return_type.clone(),
+        decorators: Vec::new(),
+    })
+}
+
+/// The methods `@cached_property def name(self)` stands for: the body as a
+/// plain method, a getter that runs it on the first read and keeps what it
+/// answers in a field of the instance, and a setter, since assigning the
+/// attribute replaces the kept value as it does in CPython.
+fn cached_property_methods(
+    name: &str,
+    params: Vec<IRParam>,
+    body: IRBody,
+    return_type: IRType,
+) -> Vec<IRFunction> {
+    let compute = format!("__cached_{name}");
+    let value = format!("__cache_{name}");
+    let set = format!("__cache_set_{name}");
+    let field = |f: &str| IRExpr::Attribute {
+        object: Box::new(IRExpr::Variable("self".to_string())),
+        attribute: f.to_string(),
+    };
+    let assign = |f: &str, v: IRExpr| IRStatement::AttributeAssign {
+        object: IRExpr::Variable("self".to_string()),
+        attribute: f.to_string(),
+        value: v,
+        annotation: None,
+    };
+    let self_param = params.first().cloned();
+    let getter = IRFunction {
+        name: name.to_string(),
+        params: self_param.iter().cloned().collect(),
+        body: IRBody {
+            statements: vec![
+                IRStatement::If {
+                    condition: IRExpr::UnaryOp {
+                        op: IRUnaryOp::Not,
+                        operand: Box::new(field(&set)),
+                    },
+                    then_body: Box::new(IRBody {
+                        statements: vec![
+                            assign(
+                                &value,
+                                IRExpr::MethodCall {
+                                    object: Box::new(IRExpr::Variable("self".to_string())),
+                                    method_name: compute.clone(),
+                                    arguments: Vec::new(),
+                                },
+                            ),
+                            assign(&set, IRExpr::Const(IRConstant::Bool(true))),
+                        ],
+                    }),
+                    else_body: None,
+                },
+                IRStatement::Return(Some(field(&value))),
+            ],
+        },
+        return_type: return_type.clone(),
+        decorators: vec!["property".to_string()],
+    };
+    let mut setter_params: Vec<IRParam> = self_param.iter().cloned().collect();
+    setter_params.push(IRParam {
+        name: "value".to_string(),
+        param_type: return_type.clone(),
+        default_value: None,
+        keyword_only: false,
+        star: ParamStar::None,
+    });
+    let setter = IRFunction {
+        name: name.to_string(),
+        params: setter_params,
+        body: IRBody {
+            statements: vec![
+                assign(&value, IRExpr::Variable("value".to_string())),
+                assign(&set, IRExpr::Const(IRConstant::Bool(true))),
+            ],
+        },
+        return_type: IRType::None,
+        decorators: vec![format!("{name}.setter")],
+    };
+    vec![
+        IRFunction {
+            name: compute,
+            params,
+            body,
+            return_type,
+            decorators: Vec::new(),
+        },
+        getter,
+        setter,
+    ]
+}
+
 fn synthesize_dataclass_methods(
     class_name: &str,
     fields: &[DataclassField],
@@ -1576,7 +2272,63 @@ fn type_annotation_to_ir_type(expr: &Expr) -> Result<IRType> {
             }),
             _ => Ok(IRType::Class(name.id.to_string())),
         },
+        // `datetime.date`: a module's class, named through the module.
+        Expr::Attribute(attr) => match &*attr.value {
+            Expr::Name(module) if matches!(module.id.as_str(), "datetime" | "logging" | "re") => {
+                Ok(IRType::Class(format!("{}.{}", module.id, attr.attr)))
+            }
+            Expr::Name(module) if matches!(module.id.as_str(), "collections" | "typing") => {
+                type_annotation_to_ir_type(&Expr::Name(rustpython_parser::ast::ExprName {
+                    range: attr.range,
+                    id: attr.attr.clone(),
+                    ctx: rustpython_parser::ast::ExprContext::Load,
+                }))
+            }
+            _ => Ok(IRType::Any),
+        },
         Expr::Subscript(subscript) => {
+            // `Counter[str]`, `collections.deque[int]`, `typing.DefaultDict[str,
+            // int]`: the class specialized by those types.
+            let generic = match &*subscript.value {
+                Expr::Name(n) => Some(n.id.to_string()),
+                Expr::Attribute(a)
+                    if matches!(&*a.value, Expr::Name(m)
+                        if matches!(m.id.as_str(), "collections" | "typing")) =>
+                {
+                    Some(a.attr.to_string())
+                }
+                _ => None,
+            };
+            if let Some(kind) = generic
+                .as_deref()
+                .and_then(crate::ir::collections::spec::Kind::named)
+            {
+                let args = match &*subscript.slice {
+                    Expr::Tuple(t) => t
+                        .elts
+                        .iter()
+                        .map(type_annotation_to_ir_type)
+                        .collect::<Result<Vec<_>>>()?,
+                    other => vec![type_annotation_to_ir_type(other)?],
+                };
+                if args.len() != kind.arity() {
+                    return Err(anyhow!(
+                        "{}[...] takes {} type argument{}",
+                        kind.name(),
+                        kind.arity(),
+                        if kind.arity() == 1 { "" } else { "s" }
+                    ));
+                }
+                return crate::ir::collections::spec::name(kind, &args)
+                    .map(IRType::Class)
+                    .ok_or_else(|| {
+                        crate::core::errors::unsupported_feature(
+                            format!("{}[...] of these types is not supported", kind.name()),
+                            None,
+                        )
+                        .into()
+                    });
+            }
             // Handle generic types like List[int]
             if let Expr::Name(container) = &*subscript.value {
                 match container.id.to_string().as_str() {
@@ -1638,6 +2390,18 @@ fn type_annotation_to_ir_type(expr: &Expr) -> Result<IRType> {
                                 &subscript.slice,
                             )?]))
                         }
+                    }
+                    // `Iterator[T]` and `Generator[T, ...]`: what a generator
+                    // yields.
+                    "Iterator" | "Generator" => {
+                        let first = match &*subscript.slice {
+                            Expr::Tuple(tuple) => tuple.elts.first(),
+                            other => Some(other),
+                        };
+                        Ok(IRType::Generator(Box::new(match first {
+                            Some(t) => type_annotation_to_ir_type(t)?,
+                            None => IRType::Unknown,
+                        })))
                     }
                     // `Callable[[int, str], bool]`. `Callable[..., R]` gives
                     // the result but not the parameters, which a call through
@@ -2277,18 +3041,31 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                              as 'except E:' or 'except (E, F):'"
                         )
                     };
+                    // A standard-library module's exception class is named
+                    // through the module (`except json.JSONDecodeError:`).
+                    let class_named = |e: &Expr| -> Result<String> {
+                        match e {
+                            Expr::Name(name) => Ok(name.id.to_string()),
+                            Expr::Attribute(attr) => match (&*attr.value, attr.attr.as_str()) {
+                                (Expr::Name(m), "JSONDecodeError") if m.id.as_str() == "json" => {
+                                    Ok("JSONDecodeError".to_string())
+                                }
+                                (Expr::Name(m), "error" | "PatternError")
+                                    if m.id.as_str() == "re" =>
+                                {
+                                    Ok("PatternError".to_string())
+                                }
+                                _ => Err(not_a_name()),
+                            },
+                            _ => Err(not_a_name()),
+                        }
+                    };
                     let exception_types = match typ.map(|t| &**t) {
                         None => Vec::new(),
-                        Some(Expr::Name(name)) => vec![name.id.to_string()],
-                        Some(Expr::Tuple(tuple)) => tuple
-                            .elts
-                            .iter()
-                            .map(|elt| match elt {
-                                Expr::Name(name) => Ok(name.id.to_string()),
-                                _ => Err(not_a_name()),
-                            })
-                            .collect::<Result<_>>()?,
-                        Some(_) => return Err(not_a_name()),
+                        Some(Expr::Tuple(tuple)) => {
+                            tuple.elts.iter().map(class_named).collect::<Result<_>>()?
+                        }
+                        Some(other) => vec![class_named(other)?],
                     };
 
                     // Extract name if present
@@ -3303,6 +4080,11 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                 _ => Err(anyhow!("Unsupported constant type")),
             }
         }
+        Expr::Name(name) if name.id.as_str() == "__name__" => {
+            let module_name = LOWERING.with(|l| l.borrow().module_name.clone());
+            memory_layout.add_string(&module_name);
+            Ok(IRExpr::Const(IRConstant::String(module_name)))
+        }
         Expr::Name(name) => Ok(IRExpr::Variable(name.id.to_string())),
         Expr::Call(call) => {
             // Check for dynamic imports
@@ -3386,6 +4168,38 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                             }
                             _ => Err(anyhow!("bool() takes at most one argument")),
                         };
+                    }
+
+                    // `list(iterable)` is `[x for x in iterable]`, a new list
+                    // of whatever iterating the argument yields (a str's
+                    // characters, a dict's keys, a generator's values), and
+                    // `tuple(iterable)` the same list read as a tuple, which
+                    // a tuple of one element type is laid out as.
+                    if call.args.len() == 1
+                        && call.keywords.is_empty()
+                        && matches!(function_name.as_str(), "list" | "tuple")
+                    {
+                        let n =
+                            LIST_CALL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let item = format!("__list_item_{n}");
+                        let comprehension = IRExpr::Comprehension {
+                            kind: crate::ir::IRComprehensionKind::List,
+                            element: Box::new(IRExpr::Variable(item.clone())),
+                            value: None,
+                            generators: vec![crate::ir::IRGenerator {
+                                targets: vec![item],
+                                iterable: lower_expr(&call.args[0], memory_layout)?,
+                                conditions: Vec::new(),
+                            }],
+                        };
+                        return Ok(if function_name == "list" {
+                            comprehension
+                        } else {
+                            IRExpr::FunctionCall {
+                                function_name: crate::ir::AS_TUPLE_FN.to_string(),
+                                arguments: vec![comprehension],
+                            }
+                        });
                     }
 
                     // The empty constructors `list()`, `dict()`, `set()`,
@@ -3515,12 +4329,14 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                         });
                     }
 
-                    // namedtuple() builds a class at run time, which nothing
-                    // here models. It compiled to a null pointer.
+                    // namedtuple() defines a class, which is made at compile
+                    // time from a module-level `P = namedtuple(...)`; one made
+                    // anywhere else would be a new class at every run.
                     if function_name == "namedtuple" {
                         return Err(crate::core::errors::unsupported_feature(
-                            "namedtuple() is not supported yet (planned with the collections \
-                             module for 0.20.0). Hint: write a class, or a @dataclass",
+                            "namedtuple() is supported as a module-level assignment, \
+                             'P = namedtuple(\"P\", \"x y\")'. Hint: define it at module level, or \
+                             write 'class P(NamedTuple)'",
                             None,
                         )
                         .into());
@@ -3571,18 +4387,34 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                             ("sort", Some("reverse")) => {
                                 arguments.push(lower_expr(&keyword.value, memory_layout)?);
                             }
-                            // `str.format`'s named fields.
-                            ("format", Some(kw)) => {
+                            // A standard-library function's keywords are
+                            // bound (or refused) where its call is emitted.
+                            (_, Some(kw))
+                                if matches!(&*attr.value, Expr::Name(m)
+                                    if crate::stdlib::is_stdlib_module(m.id.as_str())) =>
+                            {
                                 arguments.push(IRExpr::Keyword {
                                     name: kw.to_string(),
                                     value: Box::new(lower_expr(&keyword.value, memory_layout)?),
                                 });
                             }
+                            // `str.format`'s named fields, and the fields a
+                            // named tuple's `_replace` replaces.
+                            ("format" | "_replace", Some(kw))
+                            | ("popitem" | "move_to_end", Some(kw @ "last")) => {
+                                arguments.push(IRExpr::Keyword {
+                                    name: kw.to_string(),
+                                    value: Box::new(lower_expr(&keyword.value, memory_layout)?),
+                                });
+                            }
+                            // Placed by name where the receiver's class is
+                            // known (code generation), and refused on a
+                            // builtin value's method there.
                             (_, Some(kw)) => {
-                                return Err(anyhow!(
-                                    "keyword argument '{kw}' is not supported on '{method_name}()'. \
-                                     Hint: pass the arguments positionally"
-                                ));
+                                arguments.push(IRExpr::Keyword {
+                                    name: kw.to_string(),
+                                    value: Box::new(lower_expr(&keyword.value, memory_layout)?),
+                                });
                             }
                             (_, None) => {
                                 return Err(anyhow!(
@@ -3591,6 +4423,7 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                             }
                         }
                     }
+                    arguments.extend(log_line_keyword(call));
 
                     if matches!(&*attr.value, Expr::Name(m) if m.id.as_str() == "re") {
                         if let Some(folded) = fold_re_call(&method_name, &arguments, memory_layout)?
@@ -4653,6 +5486,37 @@ fn lower_percent_format(
     right: &Expr,
     memory_layout: &mut MemoryLayout,
 ) -> Result<IRExpr> {
+    let keyed = parse_percent(template)?
+        .iter()
+        .any(|p| matches!(p, Err(f) if f.key.is_some()));
+    let operand = match right {
+        Expr::Tuple(tuple) if !keyed => PercentOperand::Tuple(
+            tuple
+                .elts
+                .iter()
+                .map(|e| lower_expr(e, memory_layout))
+                .collect::<Result<_>>()?,
+        ),
+        other => PercentOperand::One(lower_expr(other, memory_layout)?),
+    };
+    percent_format(template, operand, memory_layout)
+}
+
+/// The right operand of `template % operand`, lowered.
+pub(crate) enum PercentOperand {
+    /// A tuple literal, whose items are the values in order.
+    Tuple(Vec<IRExpr>),
+    /// Anything else: one value, a tuple of them, or a mapping.
+    One(IRExpr),
+}
+
+/// `template % operand` over a lowered operand, as [`lower_percent_format`]
+/// lowers it.
+pub(crate) fn percent_format(
+    template: &str,
+    right: PercentOperand,
+    memory_layout: &mut MemoryLayout,
+) -> Result<IRExpr> {
     let type_error = |m: String| -> anyhow::Error {
         crate::core::errors::type_error(format!("{m} (TypeError)"), None).into()
     };
@@ -4667,23 +5531,31 @@ fn lower_percent_format(
         |e: &IRExpr| matches!(e, IRExpr::Variable(_) | IRExpr::Param(_) | IRExpr::Const(_));
     let mut values: Vec<IRExpr> = Vec::new();
     match right {
-        Expr::Tuple(tuple) if keyed == 0 => {
-            if tuple.elts.len() > fields.len() {
+        PercentOperand::Tuple(elts) if keyed == 0 => {
+            if elts.len() > fields.len() {
                 return Err(type_error(
                     "not all arguments converted during string formatting".to_string(),
                 ));
             }
-            if tuple.elts.len() < fields.len() {
+            if elts.len() < fields.len() {
                 return Err(type_error(
                     "not enough arguments for format string".to_string(),
                 ));
             }
-            for e in &tuple.elts {
-                values.push(lower_expr(e, memory_layout)?);
-            }
+            values.extend(elts);
         }
-        _ => {
-            let value = lower_expr(right, memory_layout)?;
+        PercentOperand::Tuple(elts) => {
+            return Err(crate::core::errors::unsupported_feature(
+                format!(
+                    "a '%(key)' format applied to a tuple of {} values, where CPython raises \
+                     TypeError: format requires a mapping",
+                    elts.len()
+                ),
+                None,
+            )
+            .into())
+        }
+        PercentOperand::One(value) => {
             if fields.len() > 1 && !simple(&value) {
                 return Err(crate::core::errors::unsupported_feature(
                     "a '%' format with several conversions over a computed operand is not \

@@ -42,6 +42,8 @@ regex-syntax = "0.8"
 
 [dev-dependencies]
 wasmi = "0.31"
+# The reference the libm port is checked against, bit for bit.
+libm = "0.2"
 
 [lib]
 name = "waspy"
@@ -123,6 +125,10 @@ path = "tests/unit/miscompiles.rs"
 [[test]]
 name = "unit_language"
 path = "tests/unit/language.rs"
+
+[[test]]
+name = "unit_stdlib"
+path = "tests/unit/stdlib.rs"
 
 [[test]]
 name = "integration_wasmrun_plugin"

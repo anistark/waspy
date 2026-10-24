@@ -1121,30 +1121,44 @@
         "test": "stdlib::sys_exit"
       },
       {
-        "name": "sys: platform, version, path (refused today)",
-        "status": "todo"
+        "name": "sys: platform (\"wasi\", as CPython on WASI reports), version (\"3.13.0 (waspy x.y.z)\"), path (an empty list: imports are linked at compile time)",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::sys_host_strings"
       },
       {
-        "name": "os functions on host values: getcwd(), getenv(), environ, getpid(), urandom() (refused today)",
-        "status": "todo"
+        "name": "os functions on host values, through WASI: environ and getenv() from the host's environment, urandom() from its entropy, getcwd() \"/\" and getpid() 42 (WASI has neither; wasi-libc's answers, as CPython on WASI gives them)",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::os_host_values"
       },
       {
-        "name": "os.path functions: join(), basename(), dirname(), split(), splitext(), abspath(), exists(), isfile(), isdir() (refused today)",
-        "status": "todo"
+        "name": "os.path functions: join(), basename(), dirname(), split(), splitext(), normpath(), abspath(), isabs() as posixpath computes them, and exists(), isfile(), isdir() through the host",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::os_path_functions"
       },
       {
-        "name": "math functions on runtime values: sqrt, sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh, exp, log, log10, log2, pow, floor, ceil, trunc, fabs, copysign, fmod, remainder, degrees, radians, hypot, factorial, gcd, isnan, isinf, isfinite (refused today)",
-        "status": "todo",
+        "name": "math functions on runtime values: sqrt, sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh, exp, log, log10, log2, pow, floor, ceil, trunc, fabs, copysign, fmod, remainder, degrees, radians, hypot, factorial, gcd, isnan, isinf, isfinite, with CPython's domain and range errors; results are musl libm's, bit for bit (CPython on WASI's)",
+        "status": "done",
+        "version": "upcoming",
         "test": "stdlib::math_functions"
       },
       {
-        "name": "random module, bit-identical to CPython for a seed: random, randint, randrange, uniform, choice, shuffle, sample, seed, getrandbits, gauss, normalvariate, expovariate (refused today)",
-        "status": "todo"
+        "name": "random module, bit-identical to CPython for a seed: random, randint, randrange, uniform, choice, shuffle, sample, seed (an int, bool, float, or None for host entropy), getrandbits, gauss, normalvariate, expovariate",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::random_module"
       },
       {
-        "name": "json module: dumps, loads, dump, load, JSONEncoder, JSONDecoder (refused today)",
-        "status": "todo",
+        "name": "json module: dumps (indent, separators, sort_keys, ensure_ascii, allow_nan), loads into the declared type with CPython's JSONDecodeError, dump, load",
+        "status": "done",
+        "version": "upcoming",
         "test": "stdlib::json_module"
+      },
+      {
+        "name": "json module: JSONEncoder, JSONDecoder, and dumps(default=...) (refused today)",
+        "status": "todo"
       },
       {
         "name": "re module, compile-time folding: sub and escape over constant arguments, where the pattern is one CPython and the compiler read alike (anything else refused)",
@@ -1153,24 +1167,42 @@
         "test": "stdlib::re_constant_folds"
       },
       {
-        "name": "re module at runtime: compile, search, match, fullmatch, findall, finditer, split, sub, subn, match objects, flags (refused today)",
+        "name": "re module at runtime: compile, search, match, fullmatch, findall, finditer, split, sub, subn, escape, Pattern and Match objects, flags, matched as CPython's sre matches (backtracking, lookarounds, atomic and possessive repeats, conditionals, Unicode classes and case folding)",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::re_runtime"
+      },
+      {
+        "name": "re module: patterns computed at run time, bytes patterns, \\N{name} escapes, Pattern.groupindex, finditer as a lazy iterator (refused today)",
         "status": "todo"
       },
       {
-        "name": "datetime: date / time / datetime / timedelta construction (refused today: it validated nothing)",
+        "name": "datetime: date / time / datetime / timedelta construction, each field checked as CPython checks it",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::datetime_construction"
+      },
+      {
+        "name": "datetime: attributes, arithmetic, weekday, isoformat, fromisoformat, strftime, strptime, replace, timestamp, fromtimestamp, timezone, tzinfo, and now() / today() read at run time",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::datetime_operations"
+      },
+      {
+        "name": "collections module: namedtuple and typing.NamedTuple (classes whose fields take their types from the calls), deque, Counter, OrderedDict, defaultdict, ChainMap, each a class specialized by its element types",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::collections_classes"
+      },
+      {
+        "name": "collections module: UserDict, UserList, UserString (refused today)",
         "status": "todo"
       },
       {
-        "name": "datetime: attributes, arithmetic, weekday, isoformat, fromisoformat, strftime, strptime, replace, timestamp, fromtimestamp, timezone, tzinfo, and now() / today() read at run time (refused today)",
-        "status": "todo"
-      },
-      {
-        "name": "collections module: namedtuple, deque, Counter, OrderedDict, defaultdict, ChainMap, UserDict, UserList, UserString (refused today)",
-        "status": "todo"
-      },
-      {
-        "name": "itertools module: count, cycle, repeat, chain, compress, dropwhile, filterfalse, groupby, islice, starmap, takewhile, tee, zip_longest, product, permutations, combinations, combinations_with_replacement, accumulate, batched, pairwise (refused today)",
-        "status": "todo"
+        "name": "itertools module: count, cycle, repeat, chain, compress, dropwhile, filterfalse, groupby, islice, starmap, takewhile, tee, zip_longest, product, permutations, combinations, combinations_with_replacement, accumulate, batched, pairwise, lowered to generators (tee and zip_longest over sequences)",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::itertools_functions"
       },
       {
         "name": "functools: @singledispatch with @f.register (static dispatch on the first argument's type), @total_ordering (derives the missing ordering methods)",
@@ -1185,11 +1217,19 @@
         "test": "stdlib::caching_decorators"
       },
       {
-        "name": "functools: reduce, partial, partialmethod, cmp_to_key, cached_property, singledispatchmethod (refused at compile time)",
-        "status": "todo"
+        "name": "functools: reduce, partial, partialmethod, cmp_to_key, cached_property, singledispatchmethod (lru_cache's cache_info() and cache_clear() refused)",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::functools_functions"
       },
       {
-        "name": "logging module: debug, info, warning, error, critical, exception, log, basicConfig, getLogger, setLevel, disable, Logger, Handler, StreamHandler, FileHandler, Formatter, Filter, LogRecord (refused today)",
+        "name": "logging module: getLogger and the logger hierarchy, debug, info, warning, error, critical, log, basicConfig, setLevel, disable, Logger, Handler, StreamHandler, FileHandler, NullHandler, Formatter (the %, {, and $ styles), Filter, LogRecord, with each record's line and function",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::logging_module"
+      },
+      {
+        "name": "logging module: exception() and exc_info (a traceback in the record), extra=, addLevelName, logging.config, logging.handlers (refused today)",
         "status": "todo"
       }
     ]
@@ -1576,7 +1616,7 @@
   },
   "advancedTypes": {
     "title": "ADVANCED DATA TYPES",
-    "status": "progress",
+    "status": "done",
     "version": "0.8.0",
     "features": [
       {
@@ -1676,8 +1716,9 @@
         "test": "advanced_types::tuple_index"
       },
       {
-        "name": "Named tuples - namedtuple() factory (refused today, see STANDARD LIBRARY)",
-        "status": "todo",
+        "name": "Named tuples - namedtuple() and typing.NamedTuple, defined at module level: fields by name and position, unpacking, and tuple equality",
+        "status": "done",
+        "version": "upcoming",
         "test": "advanced_types::named_tuples"
       },
       {

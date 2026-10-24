@@ -970,6 +970,7 @@ dependencies = [
  "anyhow",
  "binaryen",
  "chrono",
+ "libm",
  "log",
  "regex",
  "regex-syntax",

@@ -280,14 +280,38 @@ pub fn transform_generators(module: &mut IRModule) -> Result<()> {
     // Desugar iteration and iterator method calls in every body (generator
     // bodies included, so a generator can consume another generator).
     let mut counter = 0u32;
+    let yields: HashMap<String, IRType> = module
+        .functions
+        .iter()
+        .filter_map(|f| match &f.return_type {
+            IRType::Generator(t) => gen_classes.get(&f.name).map(|c| (c.clone(), (**t).clone())),
+            _ => None,
+        })
+        .collect();
+    // A function declared `-> C` for an iterator class `C` returns one.
+    let iter_fns: HashMap<String, String> = module
+        .functions
+        .iter()
+        .filter_map(|f| match &f.return_type {
+            IRType::Class(c) if iter_facts.get(c).is_some_and(|f| f.has_next) => {
+                Some((f.name.clone(), c.clone()))
+            }
+            _ => None,
+        })
+        .collect();
     let mut drains = BTreeSet::new();
+    let mut decides = BTreeSet::new();
     let mut errors = Vec::new();
     {
         let mut desugarer = Desugarer {
             gen_fns: &gen_classes,
+            iter_fns: &iter_fns,
+            yields: &yields,
+            tuple_iters: HashMap::new(),
             facts: &iter_facts,
             counter: &mut counter,
             drains: &mut drains,
+            decides: &mut decides,
             errors: &mut errors,
             current: String::new(),
             gen_methods: &gen_methods,
@@ -352,8 +376,72 @@ pub fn transform_generators(module: &mut IRModule) -> Result<()> {
             .map_or(IRType::Unknown, |m| m.return_type.clone());
         module.functions.push(drain_function(&class, element));
     }
+    for (which, class) in decides {
+        module.functions.push(decide_function(which, &class));
+    }
 
     Ok(())
+}
+
+fn decide_fn_name(which: &str, class: &str) -> String {
+    format!("{DRAIN_FN_PREFIX}{which}_{class}")
+}
+
+/// `def __drain_any_<C>(it) -> bool` (or `all`): pull from an iterator of
+/// class `C` until a value's truth decides the answer.
+fn decide_function(which: &str, class: &str) -> IRFunction {
+    let var = |name: &str| IRExpr::Variable(name.to_string());
+    let is_any = which == "any";
+    let truth = |v: IRExpr| {
+        if is_any {
+            v
+        } else {
+            IRExpr::UnaryOp {
+                operand: Box::new(v),
+                op: IRUnaryOp::Not,
+            }
+        }
+    };
+    IRFunction {
+        name: decide_fn_name(which, class),
+        params: vec![IRParam {
+            name: "it".to_string(),
+            param_type: IRType::Class(class.to_string()),
+            default_value: None,
+            keyword_only: false,
+            star: crate::ir::ParamStar::None,
+        }],
+        body: IRBody {
+            statements: vec![
+                while_true(vec![
+                    IRStatement::Expression(stop_check()),
+                    IRStatement::Assign {
+                        target: "item".to_string(),
+                        value: IRExpr::FunctionCall {
+                            function_name: format!("{class}::__next__"),
+                            arguments: vec![var("it")],
+                        },
+                        var_type: None,
+                    },
+                    IRStatement::If {
+                        condition: stop_check(),
+                        then_body: body_of(vec![IRStatement::Break]),
+                        else_body: None,
+                    },
+                    IRStatement::If {
+                        condition: truth(var("item")),
+                        then_body: body_of(vec![IRStatement::Return(Some(IRExpr::Const(
+                            IRConstant::Bool(is_any),
+                        )))]),
+                        else_body: None,
+                    },
+                ]),
+                IRStatement::Return(Some(IRExpr::Const(IRConstant::Bool(!is_any)))),
+            ],
+        },
+        return_type: IRType::Bool,
+        decorators: Vec::new(),
+    }
 }
 
 fn drain_fn_name(class: &str) -> String {
@@ -419,10 +507,21 @@ fn drain_function(class: &str, element: IRType) -> IRFunction {
 /// annotations through local assignments.
 struct Desugarer<'a> {
     gen_fns: &'a HashMap<String, String>,
+    /// Functions declared to return an iterator class (a wrapper that checks
+    /// its arguments and returns a generator), to that class.
+    iter_fns: &'a HashMap<String, String>,
+    /// What a generator class whose function declares it yields
+    /// (`-> Iterator[Tuple[K, Group]]`).
+    yields: &'a HashMap<String, IRType>,
+    /// Loop targets bound to tuples holding iterators, per position, so the
+    /// unpacking that follows knows which targets are iterators.
+    tuple_iters: HashMap<String, Vec<Option<String>>>,
     facts: &'a HashMap<String, IterFacts>,
     counter: &'a mut u32,
     /// Iterator classes a comprehension drains, each needing a helper.
     drains: &'a mut BTreeSet<String>,
+    /// `(any|all, class)` pairs needing a helper that pulls until decided.
+    decides: &'a mut BTreeSet<(&'static str, String)>,
     errors: &'a mut Vec<String>,
     /// The function or method being rewritten, for error messages.
     current: String,
@@ -451,6 +550,9 @@ impl Desugarer<'_> {
         match expr {
             IRExpr::FunctionCall { function_name, .. } => {
                 if let Some(class) = self.gen_fns.get(function_name) {
+                    return Some(class.clone());
+                }
+                if let Some(class) = self.iter_fns.get(function_name) {
                     return Some(class.clone());
                 }
                 self.facts
@@ -650,6 +752,22 @@ impl Desugarer<'_> {
                     });
                     vars.insert(it_var.clone(), it_class.clone());
                     vars.remove(&target);
+                    // A generator yielding tuples that hold iterators (a
+                    // groupby's groups): the unpacking of the target knows them.
+                    if let Some(IRType::Tuple(members)) = self.yields.get(&it_class) {
+                        let positions = members
+                            .iter()
+                            .map(|m| match m {
+                                IRType::Class(c)
+                                    if self.facts.get(c).is_some_and(|f| f.has_next) =>
+                                {
+                                    Some(c.clone())
+                                }
+                                _ => None,
+                            })
+                            .collect();
+                        self.tuple_iters.insert(target.clone(), positions);
+                    }
                     self.rewrite_body(&mut for_body, vars);
 
                     // Clear any stale stop flag, pull the next value, and
@@ -710,6 +828,38 @@ impl Desugarer<'_> {
                         target,
                         value,
                         var_type,
+                    });
+                }
+                IRStatement::TupleUnpack {
+                    targets,
+                    value,
+                    starred,
+                } => {
+                    // `a, b = tee(xs)`, `k, g = <groupby's tuple>`: the targets
+                    // holding iterators are iterators.
+                    let positions: Vec<Option<String>> = match &value {
+                        IRExpr::TupleLiteral(items) if starred.is_none() => {
+                            items.iter().map(|i| self.iterator_class(i, vars)).collect()
+                        }
+                        IRExpr::Variable(name) if starred.is_none() => {
+                            self.tuple_iters.get(name).cloned().unwrap_or_default()
+                        }
+                        _ => Vec::new(),
+                    };
+                    for (k, t) in targets.iter().enumerate() {
+                        match positions.get(k).cloned().flatten() {
+                            Some(class) => {
+                                vars.insert(t.clone(), class);
+                            }
+                            None => {
+                                vars.remove(t);
+                            }
+                        }
+                    }
+                    out.push(IRStatement::TupleUnpack {
+                        targets,
+                        value,
+                        starred,
                     });
                 }
                 IRStatement::If {
@@ -809,12 +959,51 @@ impl Desugarer<'_> {
     }
 
     fn rewrite_expr(&mut self, expr: &mut IRExpr, vars: &HashMap<String, String>) {
-        for_each_child(expr, &mut |child| self.rewrite_expr(child, vars));
-
-        if let IRExpr::Comprehension { generators, .. } = expr {
+        // A comprehension's targets are a scope of their own: one bound to an
+        // iterator a tuple yielded (a groupby's group) is an iterator in the
+        // element and the filters.
+        if let IRExpr::Comprehension {
+            element,
+            value,
+            generators,
+            ..
+        } = expr
+        {
+            for g in generators.iter_mut() {
+                self.rewrite_expr(&mut g.iterable, vars);
+            }
+            let mut scope = vars.clone();
+            if let Some(first) = generators.first() {
+                if let Some(class) = self.iterator_class(&first.iterable, vars) {
+                    if let Some(IRType::Tuple(members)) = self.yields.get(&class) {
+                        for (t, m) in first.targets.iter().zip(members) {
+                            match m {
+                                IRType::Class(c)
+                                    if self.facts.get(c).is_some_and(|f| f.has_next) =>
+                                {
+                                    scope.insert(t.clone(), c.clone());
+                                }
+                                _ => {
+                                    scope.remove(t);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            for g in generators.iter_mut() {
+                for c in &mut g.conditions {
+                    self.rewrite_expr(c, &scope);
+                }
+            }
+            self.rewrite_expr(element, &scope);
+            if let Some(value) = value {
+                self.rewrite_expr(value, &scope);
+            }
             self.drain_comprehension_iterables(generators, vars);
             return;
         }
+        for_each_child(expr, &mut |child| self.rewrite_expr(child, vars));
 
         // `len()` of an iterator is a TypeError in Python; it read the
         // iterator object's first word as a length (#133).
@@ -823,6 +1012,47 @@ impl Desugarer<'_> {
             arguments,
         } = expr
         {
+            // The builtins that walk their argument once take an iterator
+            // drained into a list, as a comprehension's first clause does.
+            // any() and all() pull an iterator only as far as it decides
+            // them, as CPython's do (an infinite one included).
+            if matches!(function_name.as_str(), "any" | "all") && arguments.len() == 1 {
+                if let Some(class) = self.iterator_class(&arguments[0], vars) {
+                    let iterable =
+                        std::mem::replace(&mut arguments[0], IRExpr::Const(IRConstant::None));
+                    let (it_expr, it_class) = self.iteration_source(iterable, class);
+                    if self.facts.get(&it_class).is_some_and(|f| f.has_next) {
+                        let which = if function_name == "any" { "any" } else { "all" };
+                        self.decides.insert((which, it_class.clone()));
+                        *expr = IRExpr::FunctionCall {
+                            function_name: decide_fn_name(which, &it_class),
+                            arguments: vec![it_expr],
+                        };
+                        return;
+                    }
+                    arguments[0] = it_expr;
+                }
+            }
+            if matches!(
+                function_name.as_str(),
+                "sum" | "sorted" | "__sorted_desc" | "min" | "max" | "set"
+            ) && !arguments.is_empty()
+            {
+                if let Some(class) = self.iterator_class(&arguments[0], vars) {
+                    let iterable =
+                        std::mem::replace(&mut arguments[0], IRExpr::Const(IRConstant::None));
+                    let (it_expr, it_class) = self.iteration_source(iterable, class);
+                    arguments[0] = if self.facts.get(&it_class).is_some_and(|f| f.has_next) {
+                        self.drains.insert(it_class.clone());
+                        IRExpr::FunctionCall {
+                            function_name: drain_fn_name(&it_class),
+                            arguments: vec![it_expr],
+                        }
+                    } else {
+                        it_expr
+                    };
+                }
+            }
             if function_name == "len" && arguments.len() == 1 {
                 if let Some(class) = self.iterator_class(&arguments[0], vars) {
                     let kind = if self.facts.get(&class).is_some_and(|f| f.synthetic) {
@@ -976,7 +1206,11 @@ fn build_state_class(
 
     // Resolved before the lift below rewrites parameter references into
     // `self.<name>` attribute reads.
-    let elem_type = yielded_type(&body, &func.params);
+    // A declared `-> Iterator[T]` says what it yields.
+    let elem_type = match &func.return_type {
+        IRType::Generator(t) if !matches!(**t, IRType::Unknown | IRType::Any) => (**t).clone(),
+        _ => yielded_type(&body, &func.params),
+    };
 
     // Every parameter and assigned local moves into a state-class field so it
     // survives suspension; the targets of tuple unpacking and of yield-free
@@ -1254,7 +1488,11 @@ fn lift_generator_methods(module: &mut IRModule) -> Result<HashMap<(String, Stri
                 name: function.clone(),
                 params,
                 body,
-                return_type: IRType::Unknown,
+                // `-> Iterator[T]` says what it yields.
+                return_type: match &method.return_type {
+                    t @ IRType::Generator(_) => t.clone(),
+                    _ => IRType::Unknown,
+                },
                 decorators: Vec::new(),
             });
             let target = &mut module.classes[c].methods[m];
@@ -1308,14 +1546,38 @@ fn certain_instances(
     ) {
         for stmt in &body.statements {
             match stmt {
-                IRStatement::Assign { target, value, .. } => {
-                    let class = match value {
+                IRStatement::Assign {
+                    target,
+                    value,
+                    var_type,
+                } => {
+                    let made = |value: &IRExpr| match value {
                         IRExpr::FunctionCall { function_name, .. }
                             if classes.contains_key(function_name) =>
                         {
                             Some(function_name.clone())
                         }
                         _ => None,
+                    };
+                    let class = match (value, var_type) {
+                        // `C().<from>(src)`: a `collections` class filled
+                        // from its constructor's argument is a `C`.
+                        (
+                            IRExpr::MethodCall {
+                                object,
+                                method_name,
+                                ..
+                            },
+                            _,
+                        ) if method_name == crate::ir::FROM_METHOD => made(object),
+                        (_, Some(IRType::Class(c))) if classes.contains_key(c) => {
+                            made(value).filter(|m| m == c).or_else(|| {
+                                matches!(value, IRExpr::MethodCall { method_name, .. }
+                                    if method_name == crate::ir::FROM_METHOD)
+                                .then(|| c.clone())
+                            })
+                        }
+                        _ => made(value),
                     };
                     record(seen, target, class);
                 }
@@ -1473,7 +1735,8 @@ fn collect_handler_names(body: &IRBody, out: &mut HashSet<String>) {
 /// Rewrite each `for` loop whose body suspends into an equivalent `while`
 /// with explicit iteration state, so the flattener only has to handle
 /// `while`. Range loops step arithmetically; everything else drives
-/// `len()` + indexing (lists and tuples). The increment leads the body so a
+/// `len()` + indexing (lists, tuples, strings, and a dict's keys or a set's
+/// members as a list). The increment leads the body so a
 /// flattened `continue` (which jumps to the loop head) still advances.
 fn desugar_suspending_fors(body: &mut IRBody, counter: &mut u32) {
     let stmts = std::mem::take(&mut body.statements);
@@ -1570,7 +1833,15 @@ fn desugar_suspending_fors(body: &mut IRBody, counter: &mut u32) {
                         out.push(while_true(loop_body));
                     }
                     other => {
-                        out.push(assign("__gsq", other));
+                        // A dict's keys or a set's members, as a sequence to
+                        // index (a list or string as itself).
+                        out.push(assign(
+                            "__gsq",
+                            IRExpr::FunctionCall {
+                                function_name: crate::ir::ITER_SEQ_FN.to_string(),
+                                arguments: vec![other],
+                            },
+                        ));
                         out.push(assign("__gix", int_const(-1)));
                         let mut loop_body = vec![
                             IRStatement::AugAssign {
@@ -2021,65 +2292,136 @@ fn lift_expr(expr: &mut IRExpr, lift: &HashSet<String>) {
 /// otherwise (the general slot type). Best-effort, through plain locals; a
 /// generator yielding both text and numbers is refused where its value is
 /// returned, since one slot cannot hold both.
-fn yielded_type(body: &IRBody, params: &[IRParam]) -> IRType {
-    #[derive(Clone, Copy, PartialEq)]
-    enum Kind {
-        Float,
-        Text,
-    }
-    let mut kinds: HashMap<String, Kind> = params
+pub(crate) fn yielded_type(body: &IRBody, params: &[IRParam]) -> IRType {
+    // What each name holds, where it is known: an annotated parameter, or a
+    // local assigned a value whose type is.
+    let mut kinds: HashMap<String, IRType> = params
         .iter()
-        .filter_map(|p| match p.param_type {
-            IRType::Float => Some((p.name.clone(), Kind::Float)),
-            IRType::String => Some((p.name.clone(), Kind::Text)),
-            _ => None,
-        })
+        .filter(|p| !matches!(p.param_type, IRType::Unknown | IRType::Any))
+        .map(|p| (p.name.clone(), p.param_type.clone()))
         .collect();
-    fn kind_of(expr: &IRExpr, kinds: &HashMap<String, Kind>) -> Option<Kind> {
+    fn kind_of(expr: &IRExpr, kinds: &HashMap<String, IRType>) -> Option<IRType> {
         match expr {
-            IRExpr::Const(IRConstant::Float(_)) => Some(Kind::Float),
-            IRExpr::Const(IRConstant::String(_)) => Some(Kind::Text),
-            IRExpr::Variable(name) | IRExpr::Param(name) => kinds.get(name).copied(),
+            IRExpr::Const(IRConstant::Float(_)) => Some(IRType::Float),
+            IRExpr::Const(IRConstant::String(_)) => Some(IRType::String),
+            IRExpr::Const(IRConstant::Int(_)) => Some(IRType::Int),
+            IRExpr::Const(IRConstant::Bool(_)) => Some(IRType::Bool),
+            IRExpr::Variable(name) | IRExpr::Param(name) => kinds.get(name).cloned(),
             // True division is a float whatever its operands are; `yield i / 2`
             // was inferred as an int and truncated every value.
-            IRExpr::BinaryOp { op: IROp::Div, .. } => Some(Kind::Float),
+            IRExpr::BinaryOp { op: IROp::Div, .. } => Some(IRType::Float),
             IRExpr::BinaryOp { left, right, .. } => {
                 let (l, r) = (kind_of(left, kinds), kind_of(right, kinds));
-                if l == Some(Kind::Text) || r == Some(Kind::Text) {
-                    Some(Kind::Text)
+                if l == Some(IRType::String) || r == Some(IRType::String) {
+                    Some(IRType::String)
+                } else if l == Some(IRType::Float) || r == Some(IRType::Float) {
+                    Some(IRType::Float)
                 } else {
-                    l.or(r)
+                    match (l, r) {
+                        (Some(a), Some(b)) if a == b => Some(a),
+                        (Some(IRType::Int), _) | (_, Some(IRType::Int)) => None,
+                        (a, b) => a.or(b),
+                    }
                 }
+            }
+            IRExpr::UnaryOp {
+                operand,
+                op: crate::ir::IRUnaryOp::Not,
+            } => {
+                let _ = operand;
+                Some(IRType::Bool)
             }
             IRExpr::UnaryOp { operand, .. } => kind_of(operand, kinds),
             IRExpr::Conditional { body, orelse, .. } => {
                 kind_of(body, kinds).or_else(|| kind_of(orelse, kinds))
             }
-            IRExpr::Attribute { object, .. } => kind_of(object, kinds),
+            // A tuple of members whose types are known.
+            IRExpr::TupleLiteral(items) => items
+                .iter()
+                .map(|i| kind_of(i, kinds))
+                .collect::<Option<Vec<_>>>()
+                .map(IRType::Tuple),
+            IRExpr::Attribute { object, .. } => match kind_of(object, kinds) {
+                Some(t @ (IRType::Float | IRType::String)) => Some(t),
+                _ => None,
+            },
+            // A suspending loop's walk (`__gsq = __iter_seq(xs)`, then
+            // `x = __gsq[__gix]`).
+            IRExpr::FunctionCall {
+                function_name,
+                arguments,
+            } if function_name == crate::ir::ITER_SEQ_FN => {
+                match kind_of(arguments.first()?, kinds)? {
+                    IRType::Dict(k, _) => Some(IRType::List(k)),
+                    IRType::Set(e) => Some(IRType::List(e)),
+                    other => Some(other),
+                }
+            }
+            IRExpr::Indexing { container, .. } => match kind_of(container, kinds)? {
+                IRType::List(e) | IRType::VarTuple(e) => Some(*e),
+                IRType::String => Some(IRType::String),
+                IRType::Dict(_, v) => Some(*v),
+                _ => None,
+            },
+            IRExpr::ListLiteral(items) => {
+                let first = items.first().and_then(|i| kind_of(i, kinds))?;
+                items
+                    .iter()
+                    .all(|i| kind_of(i, kinds).as_ref() == Some(&first))
+                    .then(|| IRType::List(Box::new(first)))
+            }
             IRExpr::FunctionCall { function_name, .. } => match function_name.as_str() {
-                "float" => Some(Kind::Float),
-                "str" | "repr" | "format" | "ascii" | "chr" | "input" => Some(Kind::Text),
+                "float" => Some(IRType::Float),
+                "str" | "repr" | "format" | "ascii" | "chr" | "input" => Some(IRType::String),
                 _ => None,
             },
             IRExpr::MethodCall { method_name, .. } => match method_name.as_str() {
                 "upper" | "lower" | "strip" | "lstrip" | "rstrip" | "join" | "replace"
                 | "title" | "capitalize" | "format" | "casefold" | "swapcase" | "center"
-                | "ljust" | "rjust" | "zfill" => Some(Kind::Text),
+                | "ljust" | "rjust" | "zfill" => Some(IRType::String),
                 _ => None,
             },
             _ => None,
         }
     }
-    // A local assigned a float or a string is one too (`x = i / 4; yield x`),
-    // which may in turn make another one, so this runs to a fixpoint.
+    // A local assigned a typed value is one too (`x = i / 4; yield x`),
+    // which may in turn type another one, so this runs to a fixpoint.
     loop {
         let mut found = Vec::new();
         for stmt in &body.statements {
             any_sub_body(stmt, &mut |s: &IRStatement| {
-                if let IRStatement::Assign { target, value, .. } = s {
+                if let IRStatement::Assign {
+                    target,
+                    value,
+                    var_type,
+                } = s
+                {
                     if !kinds.contains_key(target.as_str()) {
-                        if let Some(kind) = kind_of(value, &kinds) {
-                            found.push((target.clone(), kind));
+                        let ty = var_type
+                            .clone()
+                            .filter(|t| !matches!(t, IRType::Unknown | IRType::Any))
+                            .or_else(|| kind_of(value, &kinds));
+                        if let Some(ty) = ty {
+                            found.push((target.clone(), ty));
+                        }
+                    }
+                }
+                // A loop's target is an element of what it walks.
+                if let IRStatement::For {
+                    target, iterable, ..
+                } = s
+                {
+                    if !kinds.contains_key(target.as_str()) {
+                        let element = match kind_of(iterable, &kinds) {
+                            Some(IRType::List(e) | IRType::Set(e) | IRType::VarTuple(e)) => {
+                                Some(*e)
+                            }
+                            Some(IRType::Dict(k, _)) => Some(*k),
+                            Some(IRType::String) => Some(IRType::String),
+                            _ => None,
+                        };
+                        if let Some(ty) = element {
+                            found.push((target.clone(), ty));
                         }
                     }
                 }
@@ -2091,20 +2433,19 @@ fn yielded_type(body: &IRBody, params: &[IRParam]) -> IRType {
         }
         kinds.extend(found);
     }
-    let mut yielded = None;
+    let mut yielded: Option<IRType> = None;
     for stmt in &body.statements {
         any_sub_body(stmt, &mut |s: &IRStatement| {
             if let IRStatement::Yield { value: Some(value) } = s {
-                yielded = yielded.or(kind_of(value, &kinds));
+                if yielded.is_none() {
+                    yielded =
+                        kind_of(value, &kinds).filter(|t| !matches!(t, IRType::Int | IRType::Bool));
+                }
             }
             false
         });
     }
-    match yielded {
-        Some(Kind::Float) => IRType::Float,
-        Some(Kind::Text) => IRType::String,
-        None => IRType::Int,
-    }
+    yielded.unwrap_or(IRType::Int)
 }
 
 /// Flattens a generator body into basic blocks for the `__gen_pc` trampoline.

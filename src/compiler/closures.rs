@@ -113,8 +113,9 @@ pub(crate) fn type_closures(module: &IRModule) -> (IRModule, CaptureTypes) {
             .collect();
         bodies.extend(typed.classes.iter().flat_map(|c| c.methods.iter()));
         bodies.extend(closures.iter().map(|&i| &typed.functions[i]));
+        let classes: Vec<String> = typed.classes.iter().map(|c| c.name.clone()).collect();
         for f in bodies {
-            observe(f, &params, &returns, &mut next, &mut seen);
+            observe(f, &classes, &params, &returns, &mut next, &mut seen);
         }
 
         let mut changed = next != captures;
@@ -147,12 +148,33 @@ pub(crate) fn type_closures(module: &IRModule) -> (IRModule, CaptureTypes) {
 /// call to one.
 fn observe(
     func: &IRFunction,
+    classes: &[String],
     params: &HashMap<String, Vec<IRType>>,
     returns: &HashMap<String, IRType>,
     captures: &mut CaptureTypes,
     seen: &mut HashMap<String, Vec<Seen>>,
 ) {
     let mut ctx = CompilationContext::new();
+    // The classes, so a constructor call makes an instance of its class (and
+    // a list of them a list of instances), which a key is called with. Only
+    // the names: nothing is laid out yet.
+    for class in classes {
+        ctx.add_class(crate::compiler::context::ClassInfo {
+            name: class.clone(),
+            base: None,
+            class_id: 0,
+            mro: vec![class.clone()],
+            methods: HashMap::new(),
+            method_owner: HashMap::new(),
+            method_kinds: HashMap::new(),
+            property_setters: HashMap::new(),
+            field_offsets: HashMap::new(),
+            field_types: HashMap::new(),
+            class_var_values: HashMap::new(),
+            class_var_owner: HashMap::new(),
+            instance_size: 0,
+        });
+    }
     for (name, ret) in returns {
         let params = params.get(name).cloned().unwrap_or_default();
         ctx.add_function(name, 0, params, ret.clone());
@@ -222,6 +244,24 @@ fn observe(
                     }
                 }
             }
+            // `functools.reduce(lambda acc, x: ..., xs[, initial])` calls the
+            // function with the accumulator (the initial value's type, or an
+            // element's) and each element.
+            IRExpr::MethodCall {
+                object,
+                method_name,
+                arguments,
+            } if method_name == "reduce"
+                && matches!(object.as_ref(), IRExpr::Variable(m) if m == "functools") =>
+            {
+                observe_reduce(arguments, &ctx, seen);
+            }
+            IRExpr::FunctionCall {
+                function_name,
+                arguments,
+            } if function_name == "reduce" && !params.contains_key("reduce") => {
+                observe_reduce(arguments, &ctx, seen);
+            }
             // `sorted(xs, key=lambda x: ...)` calls the key with each element.
             IRExpr::FunctionCall {
                 function_name,
@@ -250,6 +290,30 @@ fn observe(
             if let Some(ty) = cells.get(&cell) {
                 entry.insert(cell, ty.clone());
             }
+        }
+    }
+}
+
+/// Type a lambda passed to `reduce` from the sequence and initial value.
+fn observe_reduce(
+    arguments: &[IRExpr],
+    ctx: &CompilationContext,
+    seen: &mut HashMap<String, Vec<Seen>>,
+) {
+    let (Some(IRExpr::ClosureMake { lambda_name, .. }), Some(iterable)) =
+        (arguments.first(), arguments.get(1))
+    else {
+        return;
+    };
+    let elem = element_type(&argument_type(iterable, ctx));
+    let acc = match arguments.get(2) {
+        Some(initial) => argument_type(initial, ctx),
+        None => elem.clone(),
+    };
+    if let Some(slots) = seen.get_mut(lambda_name.as_str()) {
+        if let [first, second, ..] = slots.as_mut_slice() {
+            first.record(acc);
+            second.record(elem);
         }
     }
 }

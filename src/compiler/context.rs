@@ -308,6 +308,12 @@ pub struct CompilationContext {
     /// computes. `sorted(seq, key=...)` needs exactly that to know what type
     /// the key produces, and therefore how to compare two of them.
     pub lambda_bodies: HashMap<String, (String, crate::ir::IRExpr)>,
+    /// Each method's parameter defaults (`Class::method`, the implicit first
+    /// parameter included), which a call that leaves them out is given.
+    pub method_defaults: HashMap<String, Vec<Option<crate::ir::IRExpr>>>,
+    /// Each method's parameter names (`Class::method`, the implicit first
+    /// parameter included), which keyword arguments are placed by.
+    pub method_params: HashMap<String, Vec<String>>,
     pub locals_map: HashMap<String, LocalInfo>,
     pub local_count: u32,
     pub function_map: HashMap<String, FunctionInfo>,
@@ -536,6 +542,8 @@ impl CompilationContext {
         // params and named locals are allocated), so nothing is reserved here.
         CompilationContext {
             lambda_bodies: HashMap::new(),
+            method_defaults: HashMap::new(),
+            method_params: HashMap::new(),
             locals_map: HashMap::new(),
             local_count: 0,
             function_map: HashMap::new(),
@@ -616,9 +624,14 @@ impl CompilationContext {
             Some(name) => format!("{} (in function '{name}')", message.into()),
             None => message.into(),
         };
-        self.errors
-            .borrow_mut()
-            .push(unsupported_feature(message, None));
+        // A construct the pre-pass and code generation both look at is
+        // reported once.
+        let error = unsupported_feature(message, None);
+        let mut errors = self.errors.borrow_mut();
+        let text = error.to_string();
+        if !errors.iter().any(|e| e.to_string() == text) {
+            errors.push(error);
+        }
     }
 
     pub fn resolve_import_alias<'a>(&'a self, name: &'a str) -> &'a str {
@@ -715,6 +728,30 @@ impl CompilationContext {
                 return;
             }
             _ => {}
+        }
+        // An instance where a builtin value is expected would be read as one.
+        if let IRType::Class(c) = value {
+            let builtin = matches!(
+                slot,
+                IRType::List(_)
+                    | IRType::Dict(..)
+                    | IRType::Set(_)
+                    | IRType::Tuple(_)
+                    | IRType::VarTuple(_)
+                    | IRType::String
+                    | IRType::Bytes
+                    | IRType::Int
+                    | IRType::Float
+                    | IRType::Bool
+                    | IRType::Range
+            );
+            if builtin {
+                self.report(format!(
+                    "an instance of {c} is used where {} is expected ({what})",
+                    crate::compiler::operators::python_type_name(slot)
+                ));
+                return;
+            }
         }
         // A class where an instance is expected, or the other way round: one
         // would be read as the other.
