@@ -918,7 +918,6 @@ pub fn lower_logging(module: &mut IRModule) -> Result<()> {
             crate::ir::visit_body(body, &mut rewrite)
         })?;
     }
-    drop(rewrite);
     for f in &mut module.functions {
         expand_basic_config(&mut f.body, &mut formats)?;
         rename_function(f, &b);
