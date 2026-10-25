@@ -55,6 +55,7 @@ pub fn is_internal_function(name: &str) -> bool {
         || name.starts_with(crate::ir::DATETIME_FN_PREFIX)
         || name.starts_with(crate::ir::LOGGING_FN_PREFIX)
         || name.starts_with(crate::ir::RE_FN_PREFIX)
+        || name == crate::ir::MAIN_BLOCK_FN
 }
 
 fn refuse(message: String) -> anyhow::Error {

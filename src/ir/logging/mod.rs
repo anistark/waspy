@@ -881,7 +881,11 @@ pub fn lower_logging(module: &mut IRModule) -> Result<()> {
     // The function each logging call is in, while the names are the
     // program's own.
     for f in &mut module.functions {
-        let name = f.name.clone();
+        // The `__main__` block is module code.
+        let name = match f.name.as_str() {
+            crate::ir::MAIN_BLOCK_FN => "<module>".to_string(),
+            name => name.to_string(),
+        };
         tag_functions(&mut f.body, &name);
     }
     for c in &mut module.classes {

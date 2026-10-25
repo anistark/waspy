@@ -153,8 +153,17 @@ fn lower_module(ast: &Suite) -> Result<IRModule> {
     memory_layout.add_string("");
     let mut in_try_block = false;
     let mut conditional_fallbacks = Vec::new();
+    // The body of the `if __name__ == "__main__":` block, in the module that
+    // is `__main__`. It becomes the function `_start` runs.
+    let mut main_block: Option<Vec<Stmt>> = None;
+    // The names defined after that block, which CPython has not defined yet
+    // when the block runs.
+    let mut defined_after: Vec<String> = Vec::new();
 
     for stmt in ast {
+        if main_block.is_some() {
+            module_statement_bindings(stmt, &mut defined_after);
+        }
         match stmt {
             Stmt::FunctionDef(fundef) => {
                 // Process function definition
@@ -374,11 +383,21 @@ fn lower_module(ast: &Suite) -> Result<IRModule> {
                 in_try_block = false;
             }
             Stmt::Pass(_) => continue,
-            // The `__main__` block runs only when the file is executed as a
-            // script; a compiled module is instantiated, as an import is.
+            // The `__main__` block runs when the file is the program: its
+            // body becomes the entry point. In an imported module it never
+            // runs, and an `else` would run at import.
             Stmt::If(if_stmt) if is_main_guard(&if_stmt.test) => {
                 in_try_block = false;
                 conditional_fallbacks.clear();
+                if LOWERING.with(|l| l.borrow().module_name == "__main__") {
+                    main_block
+                        .get_or_insert_with(Vec::new)
+                        .extend(if_stmt.body.iter().cloned());
+                } else if !if_stmt.orelse.is_empty() {
+                    return Err(module_statement_not_run(
+                        "the 'else' of an 'if __name__ == \"__main__\":' block",
+                    ));
+                }
                 continue;
             }
             other => {
@@ -396,6 +415,12 @@ fn lower_module(ast: &Suite) -> Result<IRModule> {
                 return Err(module_statement_not_run(kind));
             }
         }
+    }
+
+    if let Some(block) = main_block {
+        let entry = main_block_function(&block, &module, &mut memory_layout)?;
+        check_main_block_order(&entry, &module, &defined_after)?;
+        module.functions.push(entry);
     }
 
     // Process circular imports
@@ -2058,6 +2083,207 @@ fn module_statement_not_run(kind: &str) -> anyhow::Error {
         None,
     )
     .into()
+}
+
+/// The names a module-level statement defines.
+fn module_statement_bindings(stmt: &Stmt, out: &mut Vec<String>) {
+    match stmt {
+        Stmt::Import(s) => out.extend(s.names.iter().map(|a| {
+            a.asname
+                .as_ref()
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| a.name.split('.').next().unwrap_or_default().to_string())
+        })),
+        Stmt::ImportFrom(s) => out.extend(
+            s.names
+                .iter()
+                .map(|a| a.asname.as_ref().unwrap_or(&a.name).to_string()),
+        ),
+        _ => statement_bindings(stmt, out),
+    }
+}
+
+/// Refuse a `__main__` block that reaches a name the module defines after
+/// it, directly or through the functions and classes it uses: CPython runs
+/// the block at its place in the file, where that name is a `NameError`, and
+/// here every definition is made before `_start` runs.
+fn check_main_block_order(
+    entry: &IRFunction,
+    module: &IRModule,
+    defined_after: &[String],
+) -> Result<()> {
+    if defined_after.is_empty() {
+        return Ok(());
+    }
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut pending = vec![entry.body.clone()];
+    while let Some(mut body) = pending.pop() {
+        let mut names = Vec::new();
+        crate::ir::visit_body(&mut body, &mut |e: &mut IRExpr| {
+            match e {
+                IRExpr::Variable(n) => names.push(n.clone()),
+                IRExpr::FunctionCall { function_name, .. } => names.push(function_name.clone()),
+                _ => {}
+            }
+            Ok(())
+        })?;
+        for name in names {
+            if defined_after.contains(&name) {
+                return Err(crate::core::errors::unsupported_feature(
+                    format!(
+                        "the 'if __name__ == \"__main__\":' block uses '{name}', which is \
+                         defined after it: CPython runs the block first and raises NameError. \
+                         Hint: move the block to the end of the file"
+                    ),
+                    None,
+                )
+                .into());
+            }
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            if let Some(f) = module.functions.iter().find(|f| f.name == name) {
+                pending.push(f.body.clone());
+            }
+            if let Some(c) = module.classes.iter().find(|c| c.name == name) {
+                pending.extend(c.methods.iter().map(|m| m.body.clone()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The `__main__` block as a function. Its statements are module-level
+/// code, so a name it assigns that the module defines is that definition
+/// (declared `global`), and one that is a module function or class is
+/// refused, as other functions would go on seeing the original.
+fn main_block_function(
+    block: &[Stmt],
+    module: &IRModule,
+    memory_layout: &mut MemoryLayout,
+) -> Result<IRFunction> {
+    let mut bound = Vec::new();
+    let mut outside_function = None;
+    walk_block_statements(block, &mut |stmt| {
+        match stmt {
+            Stmt::Return(_) => outside_function = outside_function.or(Some("'return'")),
+            Stmt::Expr(e) if matches!(&*e.value, Expr::Yield(_) | Expr::YieldFrom(_)) => {
+                outside_function = outside_function.or(Some("'yield'"))
+            }
+            Stmt::Expr(e) if matches!(&*e.value, Expr::Await(_)) => {
+                outside_function = outside_function.or(Some("'await'"))
+            }
+            Stmt::Nonlocal(_) => outside_function = outside_function.or(Some("'nonlocal'")),
+            _ => {}
+        }
+        statement_bindings(stmt, &mut bound);
+    });
+    if let Some(what) = outside_function {
+        return Err(crate::core::errors::unsupported_feature(
+            format!("{what} outside a function is a SyntaxError in CPython"),
+            None,
+        )
+        .into());
+    }
+    let mut globals = Vec::new();
+    for name in bound {
+        let defined = |n: &str| n == name.as_str();
+        if module.functions.iter().any(|f| defined(&f.name))
+            || module.classes.iter().any(|c| defined(&c.name))
+        {
+            return Err(crate::core::errors::unsupported_feature(
+                format!(
+                    "the 'if __name__ == \"__main__\":' block rebinds '{name}', which the \
+                     module defines as a function or class"
+                ),
+                None,
+            )
+            .into());
+        }
+        if module.variables.iter().any(|v| defined(&v.name)) && !globals.contains(&name) {
+            globals.push(name);
+        }
+    }
+    let mut body = lower_function_body(block, memory_layout)?;
+    if !globals.is_empty() {
+        body.statements.insert(0, IRStatement::Global(globals));
+    }
+    Ok(IRFunction {
+        name: crate::ir::MAIN_BLOCK_FN.to_string(),
+        params: Vec::new(),
+        body,
+        return_type: IRType::None,
+        decorators: Vec::new(),
+    })
+}
+
+/// Visit `stmts` and the statements nested in them, not entering a `def` or
+/// `class` body (its own scope).
+fn walk_block_statements(stmts: &[Stmt], f: &mut impl FnMut(&Stmt)) {
+    for stmt in stmts {
+        f(stmt);
+        match stmt {
+            Stmt::If(s) => {
+                walk_block_statements(&s.body, f);
+                walk_block_statements(&s.orelse, f);
+            }
+            Stmt::While(s) => {
+                walk_block_statements(&s.body, f);
+                walk_block_statements(&s.orelse, f);
+            }
+            Stmt::For(s) => {
+                walk_block_statements(&s.body, f);
+                walk_block_statements(&s.orelse, f);
+            }
+            Stmt::With(s) => walk_block_statements(&s.body, f),
+            Stmt::Try(s) => {
+                walk_block_statements(&s.body, f);
+                for handler in &s.handlers {
+                    let ExceptHandler::ExceptHandler(h) = handler;
+                    walk_block_statements(&h.body, f);
+                }
+                walk_block_statements(&s.orelse, f);
+                walk_block_statements(&s.finalbody, f);
+            }
+            Stmt::Match(s) => {
+                for case in &s.cases {
+                    walk_block_statements(&case.body, f);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The names `stmt` itself binds (not those of statements nested in it).
+fn statement_bindings(stmt: &Stmt, out: &mut Vec<String>) {
+    fn targets(e: &Expr, out: &mut Vec<String>) {
+        match e {
+            Expr::Name(n) => {
+                if !out.iter().any(|o| o == n.id.as_str()) {
+                    out.push(n.id.to_string());
+                }
+            }
+            Expr::Tuple(t) => t.elts.iter().for_each(|e| targets(e, out)),
+            Expr::List(l) => l.elts.iter().for_each(|e| targets(e, out)),
+            Expr::Starred(s) => targets(&s.value, out),
+            _ => {}
+        }
+    }
+    match stmt {
+        Stmt::Assign(s) => s.targets.iter().for_each(|t| targets(t, out)),
+        Stmt::AnnAssign(s) => targets(&s.target, out),
+        Stmt::AugAssign(s) => targets(&s.target, out),
+        Stmt::For(s) => targets(&s.target, out),
+        Stmt::With(s) => s
+            .items
+            .iter()
+            .filter_map(|i| i.optional_vars.as_deref())
+            .for_each(|t| targets(t, out)),
+        Stmt::FunctionDef(s) => out.push(s.name.to_string()),
+        Stmt::ClassDef(s) => out.push(s.name.to_string()),
+        _ => {}
+    }
 }
 
 /// `__name__ == "__main__"`, either way round.

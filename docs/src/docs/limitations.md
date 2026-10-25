@@ -34,6 +34,7 @@ Each of these is refused at compile time, or traps, rather than answering differ
 - `reversed()` gives the list it walks, so only where it is walked (a loop, a comprehension, `list()`, `sorted()`, `str.join()`), and only over a variable or a field, which it reads twice; anywhere else, where CPython gives an iterator object, it is refused
 - A `with` statement needs its context manager's class to be known at compile time (an instantiation, a call with an annotated class return type, or a variable of known class type). `__exit__`'s `exc_type` receives the exception object as well as `exc`, and `tb` None; either may only be compared with None or tested for truth, and any other use is refused
 - The default `repr` of an instance whose class defines neither `__repr__` nor `__str__` is refused, since CPython's includes an address
+- The `if __name__ == "__main__":` block runs after every module definition is made, so one that reaches a definition placed after it (a `NameError` in CPython) is refused; move the block to the end of the file. A name the block binds for the first time is its own, not a module global another function can read, and rebinding a module function or class there is refused
 
 ## Exceptions and formatting
 
