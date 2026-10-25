@@ -1647,8 +1647,9 @@ pub(crate) fn build_read_lines(ctx: &CompilationContext) -> Function {
 /// a non-zero exit if it raised an exception it did not catch.
 pub(crate) fn build_start(ctx: &CompilationContext) -> Function {
     let main = ctx
-        .get_function_info("main")
-        .expect("_start is exported only with a main function");
+        .get_function_info(crate::ir::MAIN_BLOCK_FN)
+        .or_else(|| ctx.get_function_info("main"))
+        .expect("_start is exported only with an entry function");
     let mut f = function(&[ValType::I32; 2]);
     // Every function answers one word, None included. Below a call the
     // runtime counts, an exception main does not catch returns here rather

@@ -2,6 +2,10 @@ use crate::ir::{IRBody, IRConstant, IRExpr, IRFunction, IRModule, IRStatement, I
 use anyhow::Result;
 use std::path::Path;
 
+/// The function the `if __name__ == "__main__":` block of the program's
+/// module is lowered to; `_start` runs it.
+pub const MAIN_BLOCK_FN: &str = "__main__block";
+
 /// Entry points
 #[derive(Debug)]
 pub struct EntryPointInfo {
@@ -138,20 +142,20 @@ pub fn create_main_function_from_entry_point(
     Ok(main_function)
 }
 
-/// Add entry point support to an existing IR module
+/// Mark the module as a program, run by `_start`: its `__main__` block
+/// (lowered to [`MAIN_BLOCK_FN`] by the converter) or, for a `__main__.py`
+/// or command-line script without one, its `main()`. A module with neither
+/// has nothing to run and stays a library.
 pub fn add_entry_point_to_module(
     module: &mut IRModule,
     entry_point_info: &EntryPointInfo,
 ) -> Result<()> {
-    // Create the main function
-    let main_function = create_main_function_from_entry_point("", entry_point_info)?;
-
-    // First check if a main function already exists
-    let main_exists = module.functions.iter().any(|f| f.name == "main");
-
-    // Add the main function to the module if it doesn't already exist
-    if !main_exists {
-        module.functions.push(main_function);
+    let runs = module
+        .functions
+        .iter()
+        .any(|f| f.name == MAIN_BLOCK_FN || f.name == "main");
+    if !runs {
+        return Ok(());
     }
 
     // Add entry point metadata

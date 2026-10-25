@@ -1794,13 +1794,22 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
     // The WASI imports after them: whatever the program prints, reads, or
     // asks of the host, and what the `__main__` block needs to report an
     // exception it does not catch.
-    let main_can_raise = ir_module.functions.iter().any(|f| f.name == "main")
+    let entry = if ir_module
+        .functions
+        .iter()
+        .any(|f| f.name == crate::ir::MAIN_BLOCK_FN)
+    {
+        crate::ir::MAIN_BLOCK_FN
+    } else {
+        "main"
+    };
+    let main_can_raise = ir_module.functions.iter().any(|f| f.name == entry)
         && ir_module
             .metadata
             .get("has_entry_point")
             .map(String::as_str)
             == Some("true")
-        && functions_that_can_raise(ir_module).contains("main");
+        && functions_that_can_raise(ir_module).contains(entry);
     let wasi_imports = crate::compiler::host::wasi_needed(ir_module, main_can_raise);
     for (k, import) in wasi_imports.iter().enumerate() {
         ctx.wasi.insert(*import, file_io_count + k as u32);
@@ -2663,7 +2672,8 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
         .get("has_entry_point")
         .map(String::as_str)
         == Some("true")
-        && ctx.get_function_info("main").is_some()
+        && (ctx.get_function_info(crate::ir::MAIN_BLOCK_FN).is_some()
+            || ctx.get_function_info("main").is_some())
     {
         let start = ctx.helper(crate::compiler::runtime::Helper::Start);
         exports.export("_start", wasm_encoder::ExportKind::Func, start);

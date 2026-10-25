@@ -28,7 +28,7 @@ A compiled program's side effects go through [WASI preview 1](https://github.com
 
 ## Running a program
 
-A program with an `if __name__ == "__main__":` block is a WASI command: it exports `_start`, which runs the block, so `wasmtime run program.wasm args...` runs it like `python3 program.py args...`. An exception the block does not catch makes it exit with status 1. Every other function is exported too and can be called directly; an exception escaping one traps.
+A program with an `if __name__ == "__main__":` block is a WASI command: it exports `_start`, which runs the block, so `wasmtime run program.wasm args...` runs it like `python3 program.py args...`. The block runs as module code once every module definition is made: a module variable it assigns is rebound for every function, and it may not reach a definition that comes after it in the file, which CPython would not have made yet. An exception the block does not catch makes it exit with status 1. Only the program's own block runs, never an imported module's. Every other function is exported too and can be called directly; an exception escaping one traps.
 
 Writes are unbuffered, one `fd_write` per `print` or `write`, so standard output and standard error come out in the order the program wrote them. Standard input is read in UTF-8, as CPython's is on POSIX: lines end at `\n` alone (a `\r` is kept, as CPython keeps it there), and bytes that are not UTF-8 raise `UnicodeDecodeError`. `input()` at the end of input raises `EOFError`. `sys.argv[0]` is whatever the host passes first (`wasmtime` passes the module's path). `sys.stdout` and the other streams are used through their methods; one passed around as a value is refused.
 

@@ -30,8 +30,8 @@
 mod harness;
 
 use harness::{
-    call_f64, call_i32, call_i32_1, call_i32_traps, call_str, call_str_1, dedent, try_compile,
-    try_compile_multi,
+    call_f64, call_i32, call_i32_1, call_i32_traps, call_str, call_str_1, dedent,
+    instantiate_wasm_with, run_main, try_compile, try_compile_multi, Host,
 };
 
 // ---------------------------------------------------------------------------
@@ -5068,4 +5068,245 @@ fn super_defaults_optional_strings_and_name() {
         call_str(&src, "g"),
         "7 a 7 c ab!TrueTrueFalse cd!FalseFalseTrue none __main__"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The `__main__` block
+// ---------------------------------------------------------------------------
+
+/// The block's own statements are the program. `_start` used to call
+/// `main()` and nothing else, so statements around that call never ran, and
+/// a block with no `main` to call trapped: the generated entry point was a
+/// `main` calling `main`, itself.
+#[test]
+fn main_block_statements_run() {
+    let around = dedent(
+        r#"
+        def main():
+            print("working...")
+
+        if __name__ == "__main__":
+            print("starting up")
+            main()
+            print("all done")
+        "#,
+    );
+    let run = run_main(&around, "", &[]);
+    assert_eq!(
+        (run.stdout.as_str(), run.exit),
+        ("starting up\nworking...\nall done\n", 0)
+    );
+
+    let no_main = dedent(
+        r#"
+        import sys
+
+
+        def greet(name: str) -> str:
+            return "Hello, " + name
+
+        if __name__ == "__main__":
+            for who in ["Ada", "Grace"]:
+                print(greet(who))
+            if len(sys.argv) > 1:
+                print("args:", len(sys.argv))
+            name = input()
+            print(greet(name))
+        "#,
+    );
+    let run = run_main(&no_main, "Linus\n", &["x"]);
+    assert_eq!(
+        (run.stdout.as_str(), run.exit),
+        ("Hello, Ada\nHello, Grace\nargs: 2\nHello, Linus\n", 0)
+    );
+
+    let empty = "def f() -> int:\n    return 1\n\nif __name__ == \"__main__\":\n    pass\n";
+    assert_eq!(run_main(empty, "", &[]).exit, 0);
+}
+
+/// The block is module code: assigning a module definition rebinds it for
+/// every function, and a loop variable or a nested `def` there works too.
+#[test]
+fn main_block_assigns_module_definitions() {
+    let src = dedent(
+        r#"
+        COUNT = 0
+        NAMES: list[str] = []
+
+
+        def bump(n: int):
+            global COUNT
+            COUNT += n
+
+
+        def report() -> str:
+            return str(COUNT) + " " + ",".join(NAMES)
+
+        if __name__ == "__main__":
+            bump(2)
+            COUNT = COUNT + 10
+            NAMES.append("x")
+            print(report())
+            total = 0
+            for i in range(4):
+                total += i
+            print(total, COUNT)
+
+            def double(x: int) -> int:
+                return x * 2
+            print(double(21))
+        "#,
+    );
+    assert_eq!(run_main(&src, "", &[]).stdout, "12 x\n6 12\n42\n");
+}
+
+/// An exception the block does not catch, `sys.exit()`, and a log record
+/// made in the block (whose function CPython names `<module>`).
+#[test]
+fn main_block_raises_exits_and_logs_as_module_code() {
+    let raises = dedent(
+        r#"
+        def check(n: int) -> int:
+            if n < 0:
+                raise ValueError("negative: " + str(n))
+            return n
+
+        if __name__ == "__main__":
+            print(check(3))
+            try:
+                check(-1)
+            except ValueError as e:
+                print("caught", e)
+            print(check(-2))
+            print("never")
+        "#,
+    );
+    let run = run_main(&raises, "", &[]);
+    assert_eq!(run.stdout, "3\ncaught negative: -1\n");
+    assert_eq!(run.stderr, "ValueError: negative: -2\n");
+    assert_eq!(run.exit, 1);
+
+    let exits = dedent(
+        r#"
+        import sys
+
+
+        def main() -> int:
+            print("hi")
+            return 3
+
+        if __name__ == "__main__":
+            sys.exit(main())
+        "#,
+    );
+    let run = run_main(&exits, "", &[]);
+    assert_eq!((run.stdout.as_str(), run.exit), ("hi\n", 3));
+
+    let logs = dedent(
+        r#"
+        import logging
+
+
+        def work():
+            logging.warning("in work")
+
+        if __name__ == "__main__":
+            logging.basicConfig(format="%(funcName)s:%(lineno)d %(message)s")
+            logging.warning("at top")
+            work()
+        "#,
+    );
+    assert_eq!(
+        run_main(&logs, "", &[]).stderr,
+        "<module>:9 at top\nwork:5 in work\n"
+    );
+}
+
+/// Only the program's own block runs: an imported module's is skipped, as
+/// its `__name__` is not `"__main__"`, and an `else` there, which would run
+/// at import, is refused.
+#[test]
+fn imported_modules_main_block_does_not_run() {
+    let lib = dedent(
+        r#"
+        def twice(x: int) -> int:
+            return 2 * x
+
+        if __name__ == "__main__":
+            print("lib's own block")
+        "#,
+    );
+    let main = dedent(
+        r#"
+        from lib import twice
+
+        if __name__ == "__main__":
+            print(twice(21))
+        "#,
+    );
+    let wasm = try_compile_multi(&[("main.py", &main), ("lib.py", &lib)]).expect("compiles");
+    let (instance, mut store) = instantiate_wasm_with(&wasm, Host::with_input("", &[]));
+    instance
+        .get_typed_func::<(), ()>(&store, "_start")
+        .expect("an exported _start")
+        .call(&mut store, ())
+        .expect("runs");
+    assert_eq!(
+        String::from_utf8(store.data().stdout.clone()).unwrap(),
+        "42\n"
+    );
+
+    let lib_else = format!("{lib}else:\n    print(\"imported\")\n");
+    let err = try_compile_multi(&[("main.py", &main), ("lib.py", &lib_else)]).unwrap_err();
+    assert!(err.contains("the 'else' of an 'if __name__"), "{err}");
+}
+
+/// A definition after the block is made before `_start` runs, where CPython
+/// has not made it yet when the block runs: the block may not reach one. One
+/// it does not reach is an ordinary function.
+#[test]
+fn main_block_and_definitions_after_it() {
+    let unused = dedent(
+        r#"
+        def main():
+            print("m")
+
+        if __name__ == "__main__":
+            main()
+
+
+        def later() -> int:
+            return 7
+        "#,
+    );
+    assert_eq!(run_main(&unused, "", &[]).stdout, "m\n");
+    assert_eq!(call_i32(&unused, "later"), 7);
+
+    // CPython: NameError: name 'later' is not defined, raised from main().
+    let reached = unused.replace("print(\"m\")", "print(later())");
+    let err = try_compile(&reached).unwrap_err();
+    assert!(
+        err.contains("uses 'later', which is defined after it"),
+        "{err}"
+    );
+
+    // CPython: NameError: name 'LIMIT' is not defined.
+    let variable = "if __name__ == \"__main__\":\n    print(LIMIT)\n\nLIMIT = 10\n";
+    let err = try_compile(variable).unwrap_err();
+    assert!(err.contains("uses 'LIMIT'"), "{err}");
+}
+
+/// What the block cannot do as a function: rebind a module function (other
+/// functions would go on calling the original), or `return` (CPython's
+/// SyntaxError).
+#[test]
+fn main_block_refusals() {
+    let rebinds =
+        "def f() -> int:\n    return 1\n\nif __name__ == \"__main__\":\n    f = 3\n    print(f)\n";
+    let err = try_compile(rebinds).unwrap_err();
+    assert!(err.contains("rebinds 'f'"), "{err}");
+
+    let returns = "if __name__ == \"__main__\":\n    if 1 > 0:\n        return\n";
+    let err = try_compile(returns).unwrap_err();
+    assert!(err.contains("'return' outside a function"), "{err}");
 }
