@@ -23,6 +23,9 @@ fn start() {
 /// Binaryen itself (binaryen.js) when the optimize switch is on.
 #[wasm_bindgen]
 pub fn compile(source: &str) -> Result<Vec<u8>, JsError> {
+    // Over the defaults, so a new option does not break this literal (every
+    // field is named today).
+    #[allow(clippy::needless_update)]
     let options = CompilerOptions {
         optimize: false,
         verbosity: Verbosity::Quiet,
