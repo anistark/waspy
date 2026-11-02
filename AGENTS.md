@@ -289,6 +289,9 @@ just playground      # build waspy to wasm32 into docs/src/playground/compiler/ 
 just playground-verify  # compile every playground example with that build, check against CPython
 just playground-serve   # build, then serve the website at localhost:8000/waspy/
 just playground-lint    # fmt + clippy for the playground crate (wasm32)
+just notebook        # open tests/notebook/stdlib-lessons.ipynb, the standard-library talk, in Jupyter + RISE (installed into target/notebook-venv)
+just notebook-test   # run every notebook cell headless, failing on a cell that raises
+just notebook-slides # build a static reveal.js copy of the talk into target/notebook/
 just clean           # cargo clean + remove examples/output and docs/_site
 ```
 
@@ -366,6 +369,7 @@ type_to_string(ir_type: &IRType) -> String
 - **Unit tests may also live inline** as `#[cfg(test)]` modules alongside source (`src/stdlib/re.rs`, `src/utils/logging.rs`) when they cover something with no Python-level surface.
 - **Examples double as functional tests.** `just verify-examples` compiles every bundled example, and depends on `just verify-runtime`, which runs the end-to-end programs under Node and the `wasmtime` CLI (both optimization levels) against checker suffixes in `tests/fixtures/runtime/`.
 - Always run `cargo test --all-features` before committing.
+- **The standard-library talk** (`tests/notebook/stdlib-lessons.ipynb`) is a notebook of RISE slides (each cell's `slideshow.slide_type`: a finding's `slide`, its demo as a `subslide`, the long explanation as `notes`). Its demos run programs under CPython 3.13 and through Waspy side by side, via its helper `tests/notebook/lab.py` (the `%%compare` and `%%cpython` cell magics, over the `advanced_compiler` example and `wasmtime`). It is documentation, not a gate: a cell showing a difference is expected where the notebook describes one. Commit it without outputs (`jupyter nbconvert --clear-output --inplace`), and check it with `just notebook-test` after changing what it demonstrates.
 - **The playground examples are checked too.** `docs/src/playground/examples.js` holds the examples the page ships; `just playground-verify` (`scripts/verify_playground.mjs`) compiles each with the wasm32 build, calls the functions listed in the script, and requires CPython's answer. Adding an example means adding its calls there, and an example must avoid constructs the compiler refuses (except the one meant to show a refusal).
 - CI runs tests on `stable` and enforces zero clippy warnings on Rust 1.88: `cargo clippy --all-targets --all-features -- -D warnings`. There are three named gates: the test binaries, the board check, and the runtime verification above.
 - Harness helpers worth knowing: `dedent` (write a test's Python indented in a raw string), `call_i32_traps` (assert a call traps, how a fault CPython raises for and nothing here catches surfaces), and `run_main(source, stdin, args)` (run a program's `__main__` block as a WASI command and get its stdout, stderr, and exit code, to compare with CPython's).
