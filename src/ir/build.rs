@@ -270,7 +270,6 @@ pub(crate) fn lambda(params: Vec<IRParam>, body: IRExpr) -> IRExpr {
     IRExpr::Lambda {
         params,
         body: Box::new(body),
-        captured_vars: Vec::new(),
     }
 }
 /// A parameter with a default value.

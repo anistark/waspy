@@ -1,5 +1,5 @@
-"""datetime's constants. Constructing and reading dates and times is not
-implemented yet (planned for 0.20.0), so those calls are compile errors."""
+"""datetime's constants. Constructing and reading dates and times is tested
+in tests/unit/stdlib.rs."""
 
 import datetime
 

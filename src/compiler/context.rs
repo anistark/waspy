@@ -190,8 +190,6 @@ pub struct LoopContext {
 /// Function
 pub struct FunctionInfo {
     pub index: u32,
-    // TODO: Add param and return types to function
-    #[allow(dead_code)]
     pub param_types: Vec<IRType>,
     pub return_type: IRType,
 }

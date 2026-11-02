@@ -1,6 +1,6 @@
-"""os's path constants. The functions that ask the host (getcwd, getenv,
-environ, getpid, urandom, and os.path) are not implemented yet (planned for
-0.20.0), so using one is a compile error."""
+"""os's path constants and its name. The functions that ask the host
+(getcwd, getenv, environ, getpid, urandom) and os.path are tested in
+tests/unit/stdlib.rs."""
 
 import os
 

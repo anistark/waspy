@@ -1,5 +1,5 @@
-"""logging's level constants. The logging functions and classes are not
-implemented yet (planned for 0.20.0), so calling one is a compile error."""
+"""logging's level constants. Loggers, handlers, and formatters are tested
+in tests/unit/stdlib.rs."""
 
 import logging
 

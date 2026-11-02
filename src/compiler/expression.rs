@@ -8591,11 +8591,7 @@ fn emit_expr_inner(
             func.instruction(&Instruction::I32Const(0));
             IRType::Unknown
         }
-        IRExpr::Lambda {
-            params,
-            body: _,
-            captured_vars: _,
-        } => {
+        IRExpr::Lambda { params, body: _ } => {
             // The finalize pass lifts every lambda into `ClosureMake`; one that
             // was not lifted has no function to refer to.
             let param_types = params.iter().map(|p| p.param_type.clone()).collect();
@@ -13069,8 +13065,8 @@ fn emit_file_method_call(
             // read([n]) -> str: allocate a fresh [len][bytes][nul] blob and
             // fill it with `waspy_host.read` calls until the cap is reached
             // or the host reports EOF (n <= 0). Python's size-less read()
-            // means "read everything"; here it reads up to one page — the
-            // documented v0.19 cap. Scratch: t+0 fd, t+1 cap, t+2 blob base,
+            // means "read everything"; here it reads up to one page, the
+            // documented cap. Scratch: t+0 fd, t+1 cap, t+2 blob base,
             // t+3 total read, t+4 last chunk size.
             let (t0, t1, t2, t3, t4) = (
                 ctx.temp_local,

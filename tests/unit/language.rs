@@ -1,6 +1,6 @@
-//! Runtime coverage for the core-syntax constructs added in 0.19.0: nested
-//! functions and `nonlocal`, star parameters, class objects, and the cases
-//! around them that have to be refused rather than answered wrong.
+//! Runtime coverage for the core-syntax constructs: nested functions and
+//! `nonlocal`, star parameters, class objects, and the cases around them that
+//! have to be refused rather than answered wrong.
 //!
 //! Every expected value is what CPython answers for the same source.
 

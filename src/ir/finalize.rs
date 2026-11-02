@@ -157,7 +157,6 @@ fn name_function_values(module: &mut IRModule) {
                 function_name: name.to_string(),
                 arguments,
             }),
-            captured_vars: Vec::new(),
         })
     };
     let rewrite_body = |params: &[IRParam], body: &mut IRBody| {

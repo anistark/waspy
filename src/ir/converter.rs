@@ -5134,16 +5134,9 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
             }
             let params = process_function_params(args, memory_layout)?;
             let body = Box::new(lower_expr(&lambda.body, memory_layout)?);
-
-            // TODO: Analyze body to detect captured variables from outer scope
-            // For now, assume no captured variables (would require full scope analysis)
-            let captured_vars = Vec::new();
-
-            Ok(IRExpr::Lambda {
-                params,
-                body,
-                captured_vars,
-            })
+            // Captured variables are found when the finalize pass lifts the
+            // lambda into a module function.
+            Ok(IRExpr::Lambda { params, body })
         }
         Expr::IfExp(if_exp) => Ok(IRExpr::Conditional {
             condition: Box::new(lower_expr(&if_exp.test, memory_layout)?),

@@ -1,7 +1,7 @@
 """
 Every supported standard library module imports, and the constants it
 defines read back as CPython's values (sys.maxsize under waspy's 32-bit int).
-The modules' functions are not implemented yet (planned for 0.20.0).
+The modules' functions are exercised in tests/unit/stdlib.rs.
 """
 
 import sys

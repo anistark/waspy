@@ -238,7 +238,6 @@ fn cmp_to_key(
             function_name: make.name.clone(),
             arguments: vec![IRExpr::Variable("x".to_string())],
         }),
-        captured_vars: Vec::new(),
     };
     Ok((
         make,
@@ -392,7 +391,6 @@ fn lower_one(
                     function_name: target.clone(),
                     arguments: call_args,
                 }),
-                captured_vars: Vec::new(),
             }))],
         },
         return_type: IRType::Callable {

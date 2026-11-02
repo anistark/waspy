@@ -369,7 +369,6 @@ pub enum IRExpr {
         // lambda x: x + 1
         params: Vec<IRParam>,
         body: Box<IRExpr>,
-        captured_vars: Vec<String>, // Variables captured from outer scope
     },
     // A lifted lambda (closure creation). The finalize pass replaces every
     // `Lambda` with this after hoisting its body into a real module function
