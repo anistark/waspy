@@ -85,6 +85,7 @@ waspy/
 ├── docs/                - The website (Eleventy + Tailwind; `just docs` serves it)
 ├── tests/               - Test suite
 │   ├── integration/     - Integration tests
+│   ├── notebook/        - The standard-library talk, a notebook of slides (`just notebook` opens it)
 │   └── unit/            - Unit tests
 ├── Cargo.toml           - Project configuration
 ├── justfile             - Command runner configuration
@@ -153,6 +154,18 @@ just playground          # build docs/src/playground/compiler/
 just playground-verify   # compile every playground example, check against CPython
 just playground-serve    # build, then serve the site at localhost:8000/waspy/playground/
 ```
+
+### The Standard-Library Talk
+
+`tests/notebook/stdlib-lessons.ipynb` is a talk on what porting the standard library taught us, written as a notebook of slides: each finding is a slide, the demo below it runs a program under CPython 3.13 and compiled by Waspy with the two outputs side by side, and the longer explanation is in its speaker notes. It needs `python3.13` and `wasmtime`; Jupyter and [RISE](https://github.com/jupyterlab-contrib/rise) are installed on first use into `target/notebook-venv`:
+
+```sh
+just notebook         # open it in Jupyter; Run All, then present with RISE (Alt+R)
+just notebook-test    # run every cell headless (the executed copy goes to target/notebook/)
+just notebook-slides  # a static reveal.js copy with outputs, target/notebook/stdlib-lessons.slides.html
+```
+
+How to present it is in [`tests/notebook/README.md`](tests/notebook/README.md). Each cell's role in the slideshow is its `slideshow.slide_type` metadata (`slide`, `subslide` for a demo below its slide, `fragment`, `notes`, `skip`). Keep it committed without outputs, so a diff shows the cells and not their results.
 
 ### Creating and Running Your Own Examples
 
@@ -232,6 +245,7 @@ Waspy uses a `justfile` to manage common development tasks:
 - `just dev` - Run the full development workflow
 - `just compile <file>` - Compile a Python file to WebAssembly
 - `just optimize <file>` - Compile a Python file with optimization
+- `just notebook` - Open the standard-library talk in Jupyter
 
 ### CI Quality Checks
 

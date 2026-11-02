@@ -187,6 +187,42 @@ verify-runtime:
     echo ""
     echo "Every end-to-end program answers correctly under both runtimes."
 
+# The standard-library talk, tests/notebook/stdlib-lessons.ipynb: what porting
+# the standard library taught us, as slides whose demos run each program under
+# CPython 3.13 and compiled by Waspy, side by side. Present it with RISE (the
+# slideshow button, or Alt+R). Jupyter and RISE are installed on first use into
+# target/notebook-venv. Needs python3.13, wasmtime, and cargo.
+# Open the standard-library talk in Jupyter
+notebook port="8888": _notebook-venv
+    target/notebook-venv/bin/jupyter notebook --port={{port}} tests/notebook/stdlib-lessons.ipynb
+
+# The executed copy, outputs and all, is written to target/notebook/.
+# Run every cell of the notebook headless, failing on a cell that raises
+notebook-test: _notebook-venv
+    target/notebook-venv/bin/jupyter nbconvert --to notebook --execute \
+        --ExecutePreprocessor.timeout=600 --output-dir target/notebook \
+        tests/notebook/stdlib-lessons.ipynb
+
+# A static copy of the slides, outputs included, for when a live kernel is not
+# an option: target/notebook/stdlib-lessons.slides.html (reveal.js loads from a CDN).
+# Build the standard-library talk as static slides
+notebook-slides: _notebook-venv
+    target/notebook-venv/bin/jupyter nbconvert --to slides --execute \
+        --ExecutePreprocessor.timeout=600 --output-dir target/notebook \
+        --TagRemovePreprocessor.remove_input_tags='["remove-input"]' \
+        --SlidesExporter.reveal_scroll=True --SlidesExporter.reveal_theme=simple \
+        --SlidesExporter.reveal_transition=fade \
+        tests/notebook/stdlib-lessons.ipynb
+
+_notebook-venv:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    venv=target/notebook-venv
+    [ -x $venv/bin/python ] && $venv/bin/python -c "import notebook, jupyterlab_rise" 2>/dev/null && exit 0
+    command -v python3.13 >/dev/null || { echo "python3.13 is required (the notebook's reference CPython)."; exit 1; }
+    [ -x $venv/bin/python ] || python3.13 -m venv $venv
+    $venv/bin/pip install --quiet --upgrade pip notebook jupyterlab_rise
+
 # Compile-time and module-size baseline for the end-to-end programs, median
 # of nine release-build runs each, optimized and unoptimized. Prints a table
 # ready to paste into CHANGELOG.md. Report the machine alongside the numbers:

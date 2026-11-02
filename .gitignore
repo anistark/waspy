@@ -21,3 +21,7 @@ plan
 docs/node_modules
 docs/_site
 docs/src/playground/compiler
+
+# notebook
+__pycache__
+.ipynb_*
