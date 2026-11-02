@@ -38,19 +38,6 @@ A path is resolved against the host's preopened directories as wasi-libc resolve
 
 **Confinement is the preopens'.** A program reaches only the directories its host preopened, which is WASI's sandbox, so a host running untrusted Python chooses them, and its own limits on descriptor count and transfer size. The playground's shim keeps files in a `Map` and touches no filesystem.
 
-## The deprecated `waspy_host` interface
-
-With `CompilerOptions::waspy_host_file_io` set, file I/O compiles instead to four imports from the `waspy_host` namespace, for embedders that implement them.
-
-| Import | Signature | Result |
-|--------|-----------|--------|
-| `waspy_host.open` | `(path_ptr: i32, path_len: i32, flags: i32) -> i32` | file descriptor, or `-1` |
-| `waspy_host.read` | `(fd: i32, buf_ptr: i32, len: i32) -> i32` | bytes read, `0` at EOF, negative on error |
-| `waspy_host.write` | `(fd: i32, buf_ptr: i32, len: i32) -> i32` | bytes written, negative on error |
-| `waspy_host.close` | `(fd: i32) -> i32` | `0` on success |
-
-`path_ptr`/`path_len` and `buf_ptr`/`len` address the module's own linear memory, which the host reads and writes through the exported `memory`. `flags` is the Python mode string folded at compile time: `1` read, `2` write, `4` append, `8` binary, `16` update, or-ed together, so `"w+b"` is `26`. Under this interface the embedder owns confinement (the program chooses the path it passes), and a failed open answers -1 rather than raising.
-
 ## Preserved comments
 
 Comments from the Python sources are kept in the generated binary as a `python.comments` custom section: UTF-8 text, one `file:line:text` entry per line. Custom sections carry no code, so this changes nothing about how the module runs, and the section survives optimization. Read it back with `waspy::core::comments::comments_from_wasm`, or with any tool that dumps WebAssembly custom sections.

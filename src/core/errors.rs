@@ -24,10 +24,9 @@ fn location_suffix(location: &Option<ErrorLocation>) -> String {
 ///
 /// Every located variant renders its position information in the display
 /// output, so downstream users see "Unsupported feature: ... (at line 3)"
-/// without having to destructure the error. (The `Chakra` name is legacy —
-/// the project's original name — kept because the type is public API.)
+/// without having to destructure the error.
 #[derive(Error, Debug)]
-pub enum ChakraError {
+pub enum WaspyError {
     #[error("Python parsing error: {message}{}", line_col_suffix(.line, .column))]
     ParseError {
         message: String,
@@ -148,8 +147,8 @@ pub fn parse_error(
     message: impl Into<String>,
     line: Option<usize>,
     column: Option<usize>,
-) -> ChakraError {
-    ChakraError::ParseError {
+) -> WaspyError {
+    WaspyError::ParseError {
         message: message.into(),
         line,
         column,
@@ -157,8 +156,8 @@ pub fn parse_error(
 }
 
 /// Type error
-pub fn type_error(message: impl Into<String>, location: Option<ErrorLocation>) -> ChakraError {
-    ChakraError::TypeError {
+pub fn type_error(message: impl Into<String>, location: Option<ErrorLocation>) -> WaspyError {
+    WaspyError::TypeError {
         message: message.into(),
         location,
     }
@@ -168,34 +167,34 @@ pub fn type_error(message: impl Into<String>, location: Option<ErrorLocation>) -
 pub fn unsupported_feature(
     message: impl Into<String>,
     location: Option<ErrorLocation>,
-) -> ChakraError {
-    ChakraError::UnsupportedFeature {
+) -> WaspyError {
+    WaspyError::UnsupportedFeature {
         message: message.into(),
         location,
     }
 }
 
 /// Name error (undefined variable/function)
-pub fn name_error(message: impl Into<String>, location: Option<ErrorLocation>) -> ChakraError {
-    ChakraError::NameError {
+pub fn name_error(message: impl Into<String>, location: Option<ErrorLocation>) -> WaspyError {
+    WaspyError::NameError {
         message: message.into(),
         location,
     }
 }
 
 /// WebAssembly compilation error
-pub fn wasm_compilation_error(message: impl Into<String>) -> ChakraError {
-    ChakraError::WasmCompilationError(message.into())
+pub fn wasm_compilation_error(message: impl Into<String>) -> WaspyError {
+    WaspyError::WasmCompilationError(message.into())
 }
 
 /// WebAssembly optimization error
-pub fn wasm_optimization_error(message: impl Into<String>) -> ChakraError {
-    ChakraError::WasmOptimizationError(message.into())
+pub fn wasm_optimization_error(message: impl Into<String>) -> WaspyError {
+    WaspyError::WasmOptimizationError(message.into())
 }
 
 /// Generic error
-pub fn other_error(message: impl Into<String>) -> ChakraError {
-    ChakraError::Other(message.into())
+pub fn other_error(message: impl Into<String>) -> WaspyError {
+    WaspyError::Other(message.into())
 }
 
 /// New warning

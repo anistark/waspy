@@ -7,7 +7,7 @@
 #[path = "../utils/harness.rs"]
 mod harness;
 
-use harness::{call_f64, call_i32, call_i32_2, call_i32_traps, call_str, dedent};
+use harness::{call_f64, call_i32, call_i32_2, call_i32_traps, call_str, dedent, run_main};
 
 /// The integer binary operators produce Python's results.
 #[test]
@@ -764,4 +764,60 @@ fn float_of_a_string_is_correctly_rounded() {
         err.contains("could not convert string to float: \"12_\""),
         "{err}"
     );
+}
+
+/// `a < b < c` is `a < b and b < c` with `b` read once, so a chain of any
+/// length over names and constants gives CPython's answer; chains were
+/// refused. An int compared with a float converts the int whichever side it
+/// is on: `0 <= p` with `p` a float failed validation, and `0 < 0.5` was
+/// refused as a float stored in an int.
+#[test]
+fn chained_and_mixed_comparisons() {
+    let run = run_main(
+        &dedent(
+            r#"
+            def in_range(p: float) -> bool:
+                return 0 <= p <= 100
+
+
+            def main() -> None:
+                a, b, c = 1, 5, 3
+                print(1 < 2 < 3, 3 > 2 > 2, a < b > c, a == 1 == a, -1 < a <= 1 < b)
+                print(in_range(0.0), in_range(100.5), in_range(-0.5))
+                print(0 < 0.5, 1 >= 1.0, 2 == 2.0, 3 != 3.5, True < 1.5, 1.5 > True, False == 0.0)
+                xs = [1, 2]
+                print(1 in xs != False, "a" < "b" < "c")
+                x = 7
+                if 0 < x < 10:
+                    print("one digit")
+                if not 0 <= x <= 5:
+                    print("out")
+
+
+            if __name__ == "__main__":
+                main()
+        "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(run.stderr, "");
+    assert_eq!(run.stdout, "True False True True True\nTrue False False\nTrue True True True True True True\nTrue True\none digit\nout\n");
+}
+
+/// A chain whose middle operand is a call would evaluate it twice as an
+/// `and` of links, so it is refused rather than run twice.
+#[test]
+fn chained_comparison_over_a_call_is_refused() {
+    let err = harness::try_compile(&dedent(
+        r#"
+        def g() -> int:
+            return 2
+
+        def f() -> bool:
+            return 1 < g() < 3
+        "#,
+    ))
+    .expect_err("a call in the middle of a chain is refused");
+    assert!(err.contains("chained comparison"), "{err}");
 }

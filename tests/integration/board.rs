@@ -358,6 +358,29 @@ mod control_flow {
         );
     }
 
+    /// Chained comparisons (0 <= x <= 100, a < b > c), each operand read once
+    #[test]
+    fn chained_comparisons() {
+        check(
+            r#"
+            def f() -> int:
+                x = 7
+                p = 2.5
+                r = 0
+                if 0 < x < 10:
+                    r += 1
+                if 0 <= p <= 100:
+                    r += 2
+                if 1 < 2 < x < 5:
+                    r += 4
+                if x == 7 != 8:
+                    r += 8
+                return r
+        "#,
+            &[("f", Want::Int(11))],
+        );
+    }
+
     /// Boolean logic (and, or, not) with short-circuit
     #[test]
     fn boolean_short_circuit() {
@@ -4019,6 +4042,35 @@ mod generators {
         );
     }
 
+    /// for loops over .items(), .keys(), and .values() of a class that defines them, of the collections mappings, and with one target (for kv in d.items())
+    #[test]
+    fn view_loops() {
+        check(
+            r#"
+            from collections import Counter
+            from typing import List, Tuple
+
+
+            class Bag:
+                def items(self) -> List[Tuple[str, int]]:
+                    return [("a", 3), ("bb", 4)]
+
+
+            def f() -> int:
+                t = 0
+                for k, v in Bag().items():
+                    t += len(k) * v
+                c: Counter[str] = Counter("abca")
+                for k, v in c.items():
+                    t += v * 10
+                for kv in {"x": 5}.items():
+                    t += kv[1] * 100
+                return t
+        "#,
+            &[("f", Want::Int(551))],
+        );
+    }
+
     /// yield inside try / except / finally and with, resuming inside them; close() raising GeneratorExit at the suspended yield (finally blocks and handlers run, a generator yielding instead is CPython's RuntimeError); and generator methods holding their instance
     #[test]
     fn yield_in_try() {
@@ -5658,6 +5710,8 @@ mod optimization {
     /// Compiler options & configuration (reviewed API: optimize + verbosity)
     #[test]
     fn compiler_options() {
+        // Over the defaults, so a new option does not break this literal.
+        #[allow(clippy::needless_update)]
         let options = waspy::CompilerOptions {
             optimize: false,
             verbosity: waspy::Verbosity::Quiet,
@@ -5808,7 +5862,7 @@ def read_some() -> int:
     return len(s)
 "#;
 
-    /// open(path, mode) through WASI: path_open on the preopened directories (r, w, a, b, + modes); the waspy_host imports under the deprecated waspy_host_file_io option
+    /// open(path, mode) through WASI: path_open on the preopened directories (r, w, a, b, + modes)
     #[test]
     fn open_with_modes() {
         let (instance, mut store) = instantiate_with_host_fs(FILE_SRC);
@@ -5857,17 +5911,6 @@ def read_some() -> int:
         let io = wasmi::Module::new(&engine, &compile_with(FILE_SRC, false)[..]).unwrap();
         assert!(io.imports().any(|i| i.name() == "path_open"));
         assert!(io.imports().all(|i| i.module() == "wasi_snapshot_preview1"));
-        // The deprecated option keeps the `waspy_host` interface.
-        let options = waspy::CompilerOptions {
-            optimize: false,
-            waspy_host_file_io: true,
-            ..waspy::CompilerOptions::default()
-        };
-        let legacy = waspy::compile_python_to_wasm_with_options(FILE_SRC, &options).unwrap();
-        let legacy = wasmi::Module::new(&engine, &legacy[..]).unwrap();
-        assert!(
-            legacy.imports().count() > 0 && legacy.imports().all(|i| i.module() == "waspy_host")
-        );
     }
 
     /// A file open() cannot open raises CPython's exception (FileNotFoundError: [Errno 2] No such file or directory: 'x', PermissionError, IsADirectoryError, ...)

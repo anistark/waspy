@@ -13,7 +13,7 @@ mod harness;
 use harness::{
     call_f64, call_host_fs_i32, call_i32, call_i32_1, call_i32_2, call_instance_i32, call_str,
     call_str_1, call_str_2, call_untyped_f64, call_untyped_i32, examples_dir, instantiate_file,
-    instantiate_with_host_fs, read_example, read_str,
+    instantiate_with_host_fs, read_example, read_str, run_main,
 };
 use wasmi::Value;
 
@@ -673,6 +673,53 @@ fn text_report_lines() {
     assert_eq!(lines[2], "fox: 4");
     assert_eq!(lines[3], "the: 4");
     assert_eq!(lines[4], "a: 2");
+}
+
+// ---------------------------------------------------------------------------
+// examples/gradebook.py (a WASI command reading standard input)
+// ---------------------------------------------------------------------------
+
+/// The gradebook prints what CPython prints for the same input: averages
+/// ranked with a tie broken by name, letter grades counted with `Counter`,
+/// each subject's leader through an `Optional` instance, a JSON summary with
+/// rounded floats, and the lines it rejected, each with CPython's message.
+#[test]
+fn gradebook_matches_cpython() {
+    let src = read_example("gradebook.py");
+    let input = concat!(
+        "# name, subject, score\n",
+        "ada, Math, 95\n",
+        "ada, physics, 88.5\n",
+        "bob, math, 72\n",
+        "bob, Physics, 91\n",
+        "cy, math, 64\n",
+        "cy, art, 99\n",
+        "dee, art, 58\n",
+        "dee, math, 61.5\n",
+        "eve, math, abc\n",
+        "eve, art\n",
+        "fay, math, 101\n",
+    );
+    let run = run_main(&src, input, &[]);
+    assert_eq!(run.stderr, "");
+    assert_eq!(
+        run.stdout,
+        concat!(
+            "Ada       91.75  A\n",
+            "Bob       81.50  B\n",
+            "Cy        81.50  B\n",
+            "Dee       59.75  F\n",
+            "grades: A=1, B=2, F=1\n",
+            "top art: Cy (99)\n",
+            "top math: Ada (95)\n",
+            "top physics: Bob (91)\n",
+            "{\"Ada\": 91.8, \"Bob\": 81.5, \"Cy\": 81.5, \"Dee\": 59.8}\n",
+            "3 bad line(s):\n",
+            "  line 10: bad score 'abc'\n",
+            "  line 11: expected 3 fields, got 2\n",
+            "  line 12: score 101.0 out of range\n",
+        )
+    );
 }
 
 // ---------------------------------------------------------------------------

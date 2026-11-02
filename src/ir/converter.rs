@@ -436,7 +436,9 @@ fn lower_module(ast: &Suite) -> Result<IRModule> {
     // functions, `functools.partial` over them, `datetime`'s classes, keyword
     // placement, the context-manager protocol (so a `with` in a generator is
     // a `try` the generator pass can flatten), `itertools` and `collections`
-    // (they synthesize generators and classes), generator lowering (it
+    // (they synthesize generators and classes), dict-view loops (once every
+    // class with an `items()` exists, and before a generator method's loop is
+    // consumed), generator lowering (it
     // synthesizes classes and constructor bodies the later passes must still
     // see), then whole-module checks and rewrites (abstract-class
     // instantiation, call-site parameter defaults).
@@ -451,6 +453,7 @@ fn lower_module(ast: &Suite) -> Result<IRModule> {
     crate::ir::context_managers::desugar_with_statements(&mut module)?;
     crate::ir::lower_itertools(&mut module)?;
     crate::ir::lower_collections(&mut module)?;
+    crate::ir::lower_dict_views(&mut module);
     crate::ir::generators::transform_generators(&mut module)?;
     crate::ir::finalize::finalize_module(&mut module)?;
 
@@ -3563,9 +3566,9 @@ fn lower_for_targets(target: &Expr) -> Result<(Vec<String>, Option<usize>)> {
 ///   counter alongside.
 /// - `for a, b, ... in zip(s0, s1, ...):` drives `s0` and indexes the other
 ///   sequences with a shared counter, stopping at the shortest.
-/// - `for k, v in d.items():` (and `.keys()` / `.values()` with one target)
-///   walks the dict's entry slots positionally via the `__dict_key_at` /
-///   `__dict_val_at` codegen intrinsics.
+/// - `for k, v in x.items():` (and `.keys()` / `.values()`) is an ordinary
+///   loop over the method's result here; `ir::dict_views` walks a dict's
+///   entry slots in place once the program's classes are known.
 ///
 /// A `for`-`else` clause is dropped, matching the existing `for` codegen.
 fn lower_for_statement(
@@ -3781,51 +3784,6 @@ fn lower_for_loop(
             });
             return Ok(stmts);
         }
-
-        // for k, v in d.items() / for k in d.keys() / for v in d.values():
-        // walk the entry slots positionally.
-        if let Expr::Attribute(attr) = &*call.func {
-            let method = attr.attr.as_str();
-            if matches!(method, "items" | "keys" | "values") && call.args.is_empty() {
-                let expected = if method == "items" { 2 } else { 1 };
-                if targets.len() != expected || starred.is_some() {
-                    return Err(anyhow!(
-                        "dict.{method}() in a for loop needs exactly {expected} plain target(s)"
-                    ));
-                }
-                let dict = format!("__dict_{uniq}");
-                let counter = format!("__di_{uniq}");
-                let entry_at = |intrinsic: &str| IRExpr::FunctionCall {
-                    function_name: intrinsic.to_string(),
-                    arguments: vec![variable(&dict), variable(&counter)],
-                };
-                let mut inner = vec![
-                    increment(&counter),
-                    break_if(IRExpr::CompareOp {
-                        left: Box::new(variable(&counter)),
-                        right: Box::new(len_of(&dict)),
-                        op: IRCompareOp::GtE,
-                    }),
-                ];
-                match method {
-                    "items" => {
-                        inner.push(assign(&targets[0], entry_at(DICT_KEY_AT_FN)));
-                        inner.push(assign(&targets[1], entry_at(DICT_VAL_AT_FN)));
-                    }
-                    "keys" => inner.push(assign(&targets[0], entry_at(DICT_KEY_AT_FN))),
-                    _ => inner.push(assign(&targets[0], entry_at(DICT_VAL_AT_FN))),
-                }
-                inner.extend(body.statements);
-                return Ok(vec![
-                    assign(&dict, lower_expr(&attr.value, memory_layout)?),
-                    assign(&counter, int_const(-1)),
-                    IRStatement::While {
-                        condition: IRExpr::Const(IRConstant::Bool(true)),
-                        body: Box::new(IRBody { statements: inner }),
-                    },
-                ]);
-            }
-        }
     }
 
     let iterable = lower_expr(&for_stmt.iter, memory_layout)?;
@@ -3856,6 +3814,21 @@ fn lower_for_loop(
         }),
         else_body,
     }])
+}
+
+/// Whether evaluating `expr` twice reads the same value and has no effect:
+/// a name or a constant (negated or not).
+fn reads_alike_twice(expr: &Expr) -> bool {
+    match expr {
+        Expr::Name(_) | Expr::Constant(_) => true,
+        Expr::UnaryOp(u) => {
+            matches!(
+                u.op,
+                rustpython_parser::ast::UnaryOp::USub | rustpython_parser::ast::UnaryOp::UAdd
+            ) && matches!(&*u.operand, Expr::Constant(_))
+        }
+        _ => false,
+    }
 }
 
 /// Check for dynamic imports in expressions
@@ -4199,11 +4172,7 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
             })
         }
         Expr::Compare(compare) => {
-            if compare.ops.len() != 1 || compare.comparators.len() != 1 {
-                return Err(anyhow!("Only single comparisons supported"));
-            }
-
-            let op = match &compare.ops[0] {
+            let compare_op = |op: &rustpython_parser::ast::CmpOp| match op {
                 rustpython_parser::ast::CmpOp::Eq => IRCompareOp::Eq,
                 rustpython_parser::ast::CmpOp::NotEq => IRCompareOp::NotEq,
                 rustpython_parser::ast::CmpOp::Lt => IRCompareOp::Lt,
@@ -4215,12 +4184,37 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                 rustpython_parser::ast::CmpOp::Is => IRCompareOp::Is,
                 rustpython_parser::ast::CmpOp::IsNot => IRCompareOp::IsNot,
             };
-
-            Ok(IRExpr::CompareOp {
-                left: Box::new(lower_expr(&compare.left, memory_layout)?),
-                right: Box::new(lower_expr(&compare.comparators[0], memory_layout)?),
-                op,
-            })
+            // `a < b < c` is `a < b and b < c` with `b` evaluated once. A
+            // middle operand that is a name or a constant reads the same
+            // twice, so the chain lowers to the `and` of its links; any
+            // other would run twice, so it is refused.
+            let middle = &compare.comparators[..compare.comparators.len() - 1];
+            if !middle.iter().all(reads_alike_twice) {
+                return Err(anyhow!(
+                    "a chained comparison whose middle operand is not a name or a \
+                     constant. Hint: assign it to a variable first"
+                ));
+            }
+            let mut left = lower_expr(&compare.left, memory_layout)?;
+            let mut chain: Option<IRExpr> = None;
+            for (op, right) in compare.ops.iter().zip(&compare.comparators) {
+                let right = lower_expr(right, memory_layout)?;
+                let link = IRExpr::CompareOp {
+                    left: Box::new(left),
+                    right: Box::new(right.clone()),
+                    op: compare_op(op),
+                };
+                chain = Some(match chain {
+                    Some(chain) => IRExpr::BoolOp {
+                        left: Box::new(chain),
+                        right: Box::new(link),
+                        op: IRBoolOp::And,
+                    },
+                    None => link,
+                });
+                left = right;
+            }
+            chain.ok_or_else(|| anyhow!("a comparison needs an operand"))
         }
         Expr::BoolOp(boolop) => {
             // Python parses `a or b or c` as one operation over a list of

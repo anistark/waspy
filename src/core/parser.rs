@@ -18,9 +18,9 @@ use rustpython_parser::Parse;
 ///
 /// # Errors
 ///
-/// Returns [`crate::core::errors::ChakraError::ParseError`] (with line and
+/// Returns [`crate::core::errors::WaspyError::ParseError`] (with line and
 /// column) when the source is not valid Python, and
-/// [`crate::core::errors::ChakraError::UnsupportedFeature`] (with location
+/// [`crate::core::errors::WaspyError::UnsupportedFeature`] (with location
 /// and a hint) when it parses but uses a construct outside the supported
 /// subset.
 pub fn parse_python(source: &str) -> Result<Suite> {

@@ -45,7 +45,7 @@
 //! All compile entry points return `anyhow::Result<Vec<u8>>`; the byte vector
 //! is a complete, validated WebAssembly binary. Structured compiler errors
 //! (with source locations where available) travel in the error chain as
-//! [`core::errors::ChakraError`] values.
+//! [`core::errors::WaspyError`] values.
 //!
 //! The pipeline modules ([`core`], [`ir`], [`compiler`], [`optimize`],
 //! [`stdlib`], [`analysis`], [`utils`]) are exposed for advanced embedding
@@ -199,11 +199,6 @@ pub fn compile_python_to_wasm_with_options(
 
     // Generate WASM binary
     log_verbose!("Generating WebAssembly binary...");
-    if options.waspy_host_file_io {
-        ir_module
-            .metadata
-            .insert(ir::FILE_IO_HOST_KEY.to_string(), "waspy_host".to_string());
-    }
     let raw_wasm = compiler::compile_ir_module(&ir_module)?;
     log_debug!("Generated WASM binary: {} bytes", raw_wasm.len());
 
@@ -538,11 +533,6 @@ fn compile_merged_sources(
     }
 
     // Generate WASM binary from the combined module
-    if options.waspy_host_file_io {
-        combined_module
-            .metadata
-            .insert(ir::FILE_IO_HOST_KEY.to_string(), "waspy_host".to_string());
-    }
     let raw_wasm = compiler::compile_ir_module(&combined_module)?;
     compiler::validate_wasm(&raw_wasm)?;
 
@@ -1827,216 +1817,5 @@ mod user_module_tests {
         let mut names: Vec<&str> = modules.iter().map(|(n, _, _)| n.as_str()).collect();
         names.sort_unstable();
         assert_eq!(names, ["a", "b", "c"]);
-    }
-}
-
-#[cfg(test)]
-mod file_io_tests {
-    use super::*;
-
-    use std::collections::HashMap;
-    use wasmi::{Caller, Engine, Extern, Linker, Module, Store};
-
-    /// In-memory filesystem backing the `waspy_host` imports in tests: a
-    /// reference implementation of that interface (#25), which file I/O
-    /// compiles to under the deprecated `waspy_host_file_io` option.
-    #[derive(Default)]
-    struct HostFs {
-        files: HashMap<String, Vec<u8>>,
-        /// fd -> (file name, read cursor, readable, writable). fds index this
-        /// vec; a closed fd is None.
-        handles: Vec<Option<(String, usize, bool, bool)>>,
-    }
-
-    const FLAG_READ: i32 = 1;
-    const FLAG_WRITE: i32 = 2;
-    const FLAG_APPEND: i32 = 4;
-    const FLAG_UPDATE: i32 = 16;
-
-    fn memory_of(caller: &mut Caller<'_, HostFs>) -> wasmi::Memory {
-        caller
-            .get_export("memory")
-            .and_then(Extern::into_memory)
-            .expect("exported memory")
-    }
-
-    fn linker_with_host_fs(engine: &Engine) -> Linker<HostFs> {
-        let mut linker = Linker::<HostFs>::new(engine);
-        linker
-            .func_wrap(
-                "waspy_host",
-                "open",
-                |mut caller: Caller<'_, HostFs>, path_ptr: i32, path_len: i32, flags: i32| -> i32 {
-                    let memory = memory_of(&mut caller);
-                    let (data, fs) = memory.data_and_store_mut(&mut caller);
-                    let start = path_ptr as usize;
-                    let name = String::from_utf8_lossy(&data[start..start + path_len as usize])
-                        .to_string();
-
-                    let readable = flags & (FLAG_READ | FLAG_UPDATE) != 0;
-                    let writable = flags & (FLAG_WRITE | FLAG_APPEND | FLAG_UPDATE) != 0;
-                    if flags & FLAG_WRITE != 0 {
-                        fs.files.insert(name.clone(), Vec::new()); // truncate/create
-                    } else if flags & FLAG_APPEND != 0 {
-                        fs.files.entry(name.clone()).or_default();
-                    } else if !fs.files.contains_key(&name) {
-                        return -1; // read of a missing file
-                    }
-                    fs.handles.push(Some((name, 0, readable, writable)));
-                    (fs.handles.len() - 1) as i32
-                },
-            )
-            .unwrap();
-        linker
-            .func_wrap(
-                "waspy_host",
-                "read",
-                |mut caller: Caller<'_, HostFs>, fd: i32, buf: i32, len: i32| -> i32 {
-                    let memory = memory_of(&mut caller);
-                    let (data, fs) = memory.data_and_store_mut(&mut caller);
-                    let Some(Some((name, pos, readable, _))) = fs.handles.get_mut(fd as usize)
-                    else {
-                        return -1;
-                    };
-                    if !*readable {
-                        return -1;
-                    }
-                    let contents = fs
-                        .files
-                        .get(name.as_str())
-                        .map(|c| c.as_slice())
-                        .unwrap_or(&[]);
-                    let n = (contents.len().saturating_sub(*pos)).min(len as usize);
-                    let start = buf as usize;
-                    data[start..start + n].copy_from_slice(&contents[*pos..*pos + n]);
-                    *pos += n;
-                    n as i32
-                },
-            )
-            .unwrap();
-        linker
-            .func_wrap(
-                "waspy_host",
-                "write",
-                |mut caller: Caller<'_, HostFs>, fd: i32, buf: i32, len: i32| -> i32 {
-                    let memory = memory_of(&mut caller);
-                    let (data, fs) = memory.data_and_store_mut(&mut caller);
-                    let Some(Some((name, _, _, writable))) = fs.handles.get(fd as usize) else {
-                        return -1;
-                    };
-                    if !*writable {
-                        return -1;
-                    }
-                    let start = buf as usize;
-                    let bytes = &data[start..start + len as usize];
-                    fs.files
-                        .get_mut(name.as_str())
-                        .unwrap()
-                        .extend_from_slice(bytes);
-                    len
-                },
-            )
-            .unwrap();
-        linker
-            .func_wrap(
-                "waspy_host",
-                "close",
-                |mut caller: Caller<'_, HostFs>, fd: i32| -> i32 {
-                    if let Some(handle) = caller.data_mut().handles.get_mut(fd as usize) {
-                        *handle = None;
-                        0
-                    } else {
-                        -1
-                    }
-                },
-            )
-            .unwrap();
-        linker
-    }
-
-    /// Compile (unoptimized), instantiate with the in-memory host filesystem,
-    /// and return the instance + store for calls and post-run inspection.
-    fn instantiate_with_fs(source: &str) -> (wasmi::Instance, Store<HostFs>) {
-        // The deprecated interface these tests are the reference host for.
-        let options = CompilerOptions {
-            optimize: false,
-            waspy_host_file_io: true,
-            ..CompilerOptions::default()
-        };
-        let wasm = compile_python_to_wasm_with_options(source, &options).expect("compilation");
-        let engine = Engine::default();
-        let module = Module::new(&engine, &wasm[..]).expect("valid wasm module");
-        let mut store = Store::new(&engine, HostFs::default());
-        let instance = linker_with_host_fs(&engine)
-            .instantiate(&mut store, &module)
-            .expect("instantiation")
-            .start(&mut store)
-            .expect("start");
-        (instance, store)
-    }
-
-    fn call_fs_i32(source: &str, func: &str) -> (i32, Store<HostFs>) {
-        let (instance, mut store) = instantiate_with_fs(source);
-        let result = instance
-            .get_typed_func::<(), i32>(&store, func)
-            .expect("exported i32 fn")
-            .call(&mut store, ())
-            .expect("call");
-        (result, store)
-    }
-
-    #[test]
-    fn write_then_read_round_trips() {
-        // A full round trip through the host interface: write() reports the
-        // byte count, read() returns a string with the file's contents, and
-        // the host sees the exact bytes (#25).
-        let src = "def f() -> int:\n    f = open(\"data.txt\", \"w\")\n    n = f.write(\"hello world\")\n    f.close()\n    g = open(\"data.txt\", \"r\")\n    s = g.read()\n    g.close()\n    return n + len(s)\n";
-        let (result, store) = call_fs_i32(src, "f");
-        assert_eq!(result, 22); // 11 written + 11 read back
-        assert_eq!(
-            store.data().files.get("data.txt").map(|c| c.as_slice()),
-            Some("hello world".as_bytes())
-        );
-    }
-
-    #[test]
-    fn with_open_closes_the_file() {
-        // `with open(...) as f:` desugars to open/body/close (#25); the write
-        // lands and both handles are closed by the end.
-        let src = "def f() -> int:\n    with open(\"out.txt\", \"w\") as f:\n        f.write(\"abc\")\n    with open(\"out.txt\") as g:\n        s = g.read()\n    return len(s)\n";
-        let (result, store) = call_fs_i32(src, "f");
-        assert_eq!(result, 3);
-        assert!(store.data().handles.iter().all(|h| h.is_none()));
-    }
-
-    #[test]
-    fn read_with_size_caps_the_result() {
-        let src = "def f() -> int:\n    f = open(\"cap.txt\", \"w\")\n    f.write(\"abcdefgh\")\n    f.close()\n    g = open(\"cap.txt\")\n    s = g.read(3)\n    g.close()\n    return len(s)\n";
-        let (result, _store) = call_fs_i32(src, "f");
-        assert_eq!(result, 3);
-    }
-
-    #[test]
-    fn open_missing_file_returns_invalid_fd() {
-        // Reading a file that was never created: the host reports fd -1 and
-        // read() on it yields an empty string rather than trapping.
-        let src = "def f() -> int:\n    g = open(\"missing.txt\", \"r\")\n    s = g.read()\n    g.close()\n    return len(s)\n";
-        let (result, _store) = call_fs_i32(src, "f");
-        assert_eq!(result, 0);
-    }
-
-    #[test]
-    fn module_without_file_io_has_no_imports() {
-        // Programs that never call open() must keep instantiating with an
-        // empty import object (no `waspy_host` requirement).
-        let options = CompilerOptions {
-            optimize: false,
-            ..CompilerOptions::default()
-        };
-        let wasm = compile_python_to_wasm_with_options("def f() -> int:\n    return 1\n", &options)
-            .expect("compilation");
-        let engine = Engine::default();
-        let module = Module::new(&engine, &wasm[..]).expect("valid wasm module");
-        assert_eq!(module.imports().len(), 0);
     }
 }

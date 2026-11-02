@@ -36,7 +36,6 @@ let wasm = compile_python_to_wasm_with_options(source, &options)?;
 
 - `optimize` runs Binaryen over the output. The unoptimized module is already valid and correct; optimization only shrinks and speeds it up, at several times the cost of the rest of the pipeline, so it is worth skipping in a fast edit loop ([what it costs](/docs/programs/#what-it-costs)).
 - `verbosity` sets how much the compiler logs. `Verbosity::from_flags(verbose, debug)` maps a tool's own `--verbose` and `--debug` flags onto it.
-- `waspy_host_file_io` (deprecated) compiles `open()` to the older `waspy_host` imports instead of WASI: see [The `waspy_host` interface](/docs/running/#the-deprecated-waspy-host-interface).
 
 ## Building without Binaryen
 

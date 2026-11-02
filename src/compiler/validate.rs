@@ -11,7 +11,7 @@
 //! fails. This is what keeps the project's correctness rule honest: a
 //! compilation that reports success produces a module that validates.
 
-use crate::core::errors::ChakraError;
+use crate::core::errors::WaspyError;
 use wasmparser::{ExternalKind, Parser, Payload, Validator};
 
 /// Validate a generated WebAssembly binary.
@@ -19,7 +19,7 @@ use wasmparser::{ExternalKind, Parser, Payload, Validator};
 /// Returns `Ok(())` when the module is valid. Otherwise the error carries the
 /// validator's own message, the byte offset it stopped at, and (when the
 /// offset falls inside a function body) the name or index of that function.
-pub fn validate_wasm(wasm: &[u8]) -> Result<(), ChakraError> {
+pub fn validate_wasm(wasm: &[u8]) -> Result<(), WaspyError> {
     let mut validator = Validator::new();
     match validator.validate_all(wasm) {
         Ok(_) => Ok(()),
@@ -29,7 +29,7 @@ pub fn validate_wasm(wasm: &[u8]) -> Result<(), ChakraError> {
                 Some(name) => format!(" in {name}"),
                 None => String::new(),
             };
-            Err(ChakraError::WasmCompilationError(format!(
+            Err(WaspyError::WasmCompilationError(format!(
                 "generated module failed WebAssembly validation{where_}: {} (at byte offset {offset}). \
                  This is a code generation bug, not a problem with the Python source",
                 err.message()

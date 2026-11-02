@@ -23,7 +23,7 @@ Waspy compiles a typed subset of Python ahead of time. The rule it holds to: a c
 ## Numbers and operators
 
 - Types: integers (32-bit, see [Numbers](/docs/numbers/)), floats, booleans, strings, bytes, and the collections below
-- Arithmetic (`+`, `-`, `*`, `/`, `%`, `//`, `**`), comparisons (`==`, `!=`, `<`, `<=`, `>`, `>=`), boolean operators (`and`, `or`, short-circuiting), and bitwise operators (`&`, `|`, `^`, `<<`, `>>`)
+- Arithmetic (`+`, `-`, `*`, `/`, `%`, `//`, `**`), comparisons (`==`, `!=`, `<`, `<=`, `>`, `>=`, chained as in `0 <= x <= 100`), boolean operators (`and`, `or`, short-circuiting), and bitwise operators (`&`, `|`, `^`, `<<`, `>>`)
 
 ## Strings and formatting
 
@@ -67,7 +67,7 @@ Waspy compiles a typed subset of Python ahead of time. The rule it holds to: a c
 
 - Comprehensions: list, set, and dict comprehensions with filters, multiple generators, nesting, and `{k: v for k, v in pairs}` unpacking. A comprehension over a generator or iterator pulls one value at a time, as CPython's does, so their side effects interleave the same way; `list()`, `tuple()`, `sum()`, `sorted()`, `min()`, `max()`, `any()`, `all()`, and `set()` take one too
 - Generators with real state preservation: `yield` suspends and resumes (inside `try`/`except`/`finally` and `with` too), `yield from` delegates, and `next()`/`send()`/`close()` work, `close()` raising `GeneratorExit` at the suspended `yield` so `finally` blocks and handlers run; generator methods; user classes implementing `__iter__`/`__next__` iterate in `for` loops with `StopIteration` ending the loop, and `zip()` pulls a generator one value per round in any argument position
-- Tuple targets in `for` loops (`for a, b in pairs`, star targets included) and the iterator-shaped builtins: `enumerate(xs[, start])` (`start=` too), `zip(...)`, and `dict.items()`/`.keys()`/`.values()`
+- Tuple targets in `for` loops (`for a, b in pairs`, star targets included) and the iterator-shaped builtins: `enumerate(xs[, start])` (`start=` too), `zip(...)`, and `.items()`/`.keys()`/`.values()` of a dict, of a `collections` mapping, or of an instance whose class defines them
 - Closures: lambdas compile to real functions dispatched through a `call_indirect` table, capture enclosing variables by reference, and work as first-class values: returned, passed as arguments, and stored in collections. A module function, `len`, or `abs` named as a value works too (`sorted(words, key=len)`)
 - Nested functions: a `def` inside a function or method keeps its annotations, closes over the enclosing variables by reference (floats and strings included), recurses, calls its siblings, and takes keywords and defaults. Called by name it is a direct, fully typed call; returned or passed on it is a closure value called at its signature where that is known (`Callable[[float], float]` annotations are understood). `nonlocal name` rebinds the enclosing variable for every reader
 

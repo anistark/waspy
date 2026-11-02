@@ -1,7 +1,7 @@
 //! Project structure analysis and dependencies.
 
 use crate::analysis::imports::{extract_imports, path_to_module_path, ImportInfo, ImportType};
-use crate::core::errors::ChakraError;
+use crate::core::errors::WaspyError;
 use crate::ir::IRImport;
 use anyhow::{anyhow, Context, Result};
 use std::collections::{HashMap, HashSet};
@@ -356,7 +356,7 @@ impl PythonProject {
         // Perform topological sort on module dependencies
         let ordered_modules = self
             .topological_sort()
-            .map_err(|e| ChakraError::Other(format!("Dependency cycle detected: {e}")))?;
+            .map_err(|e| WaspyError::Other(format!("Dependency cycle detected: {e}")))?;
 
         // Map modules back to file paths and contents
         let mut ordered_files = Vec::new();

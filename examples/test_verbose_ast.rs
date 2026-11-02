@@ -19,6 +19,8 @@ def multiply(x: int, y: int) -> int:
 "#;
 
     // Compile with verbose mode to see AST output
+    // Over the defaults, so a new option does not break this literal.
+    #[allow(clippy::needless_update)]
     let options = CompilerOptions {
         optimize: false,
         verbosity: Verbosity::Verbose,

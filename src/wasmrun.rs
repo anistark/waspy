@@ -170,7 +170,9 @@ impl WasmBuilder for WaspyBuilder {
 
         let start_time = std::time::Instant::now();
 
-        // Convert BuildConfig to CompilerOptions
+        // Convert BuildConfig to CompilerOptions, over the defaults so a new
+        // option does not break this literal (every field is named today).
+        #[allow(clippy::needless_update)]
         let compiler_options = CompilerOptions {
             optimize: matches!(
                 config.optimization,
