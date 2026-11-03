@@ -990,12 +990,12 @@ fn sorting_raises_from_a_key_or_comparison() {
     );
 }
 
-/// singledispatchmethod picks the method registered for the argument's type
-/// (a bool takes the int arm), by annotation or by register(type).
+/// singledispatchmethod picks the method registered for the argument's type,
+/// by annotation or by register(type). A bool would take the int arm, whose
+/// parameter holds it as an int where CPython keeps the bool, so it is refused.
 #[test]
 fn functools_singledispatchmethod() {
-    prints(
-        r#"
+    let src = r#"
         from functools import singledispatchmethod, partialmethod
         import functools
 
@@ -1026,13 +1026,20 @@ fn functools_singledispatchmethod() {
             print(f.show(21))
             print(f.show("hi"))
             print(f.show(3.0))
-            print(f.show(True))
 
 
         if __name__ == "__main__":
             main()
-    "#,
-        "> int 42\n> str HI\n> float 1.5\n> int 2\n",
+    "#;
+    prints(src, "> int 42\n> str HI\n> float 1.5\n");
+    let with_bool = dedent(src).replace(
+        "    print(f.show(3.0))\n",
+        "    print(f.show(3.0))\n    print(f.show(True))\n",
+    );
+    let err = try_compile(&with_bool).expect_err("a bool for an int arm");
+    assert!(
+        err.contains("a bool is stored where 'int' is declared"),
+        "{err}"
     );
 }
 
@@ -1910,13 +1917,312 @@ fn json_loads_needs_its_type() {
             "import json\n\ndef f() -> str:\n    return json.dumps({1, 2})\n",
             "Object of type set is not JSON serializable",
         ),
-        (
-            "import json\n\ndef f() -> str:\n    return json.dumps([1], default=str)\n",
-            "'default' argument is not supported",
-        ),
     ] {
         let err = try_compile(source).expect_err("must be refused");
         assert!(err.contains(needle), "expected `{needle}` in: {err}");
+    }
+}
+
+/// json's encoders: `dumps(default=...)` with a function of the program, `json.JSONEncoder` with its options as fields (held in a variable, passed as a parameter), a subclass's `default()`, `dumps(cls=...)`, `super().default(o)`'s TypeError, and an exception raised by a hook.
+#[test]
+fn json_encoders_and_default() {
+    prints(
+        r#"
+        import json
+        from json import JSONEncoder, dumps
+        from typing import Optional
+
+
+        class Point:
+            def __init__(self, x: int, y: int):
+                self.x = x
+                self.y = y
+
+
+        def as_dict(p: Point) -> dict[str, int]:
+            if p.y < 0:
+                raise ValueError("negative y")
+            return {"x": p.x, "y": p.y}
+
+
+        class PairEncoder(JSONEncoder):
+            def default(self, o: Point) -> list[int]:
+                return [o.x, o.y]
+
+
+        class PositiveEncoder(json.JSONEncoder):
+            def default(self, o: Point) -> int:
+                if o.x > 0:
+                    return o.x
+                return super().default(o)
+
+
+        PRETTY = PairEncoder(indent=2, sort_keys=True, ensure_ascii=False)
+
+
+        def encode_floats(enc: JSONEncoder, xs: list[float]) -> str:
+            return enc.encode(xs)
+
+
+        def main() -> None:
+            p = Point(1, 2)
+            print(json.dumps(p, default=as_dict), dumps([p, Point(3, 4)], default=as_dict, separators=(",", ":")))
+            maybe: list[Optional[Point]] = []
+            maybe.append(p)
+            maybe.append(None)
+            print(json.dumps(maybe, default=as_dict))
+            print(json.dumps({"b": p, "a": Point(5, 6)}, cls=PairEncoder, sort_keys=True))
+            print(PRETTY.encode({"é": p}))
+            print(PairEncoder(indent="\t").encode([p]), JSONEncoder(indent=0).encode([1]))
+            print(json.JSONEncoder(separators=(";", "=")).encode({"k": [1, 2]}))
+            e = PairEncoder()
+            print(repr(e.item_separator), repr(e.key_separator), e.sort_keys, e.ensure_ascii)
+            print(repr(JSONEncoder(indent=1).item_separator), isinstance(e, json.JSONEncoder))
+            print(PositiveEncoder().encode([Point(3, 0)]))
+            try:
+                PositiveEncoder().encode(Point(0, 1))
+            except TypeError as err:
+                print("TypeError:", err)
+            try:
+                json.dumps(Point(1, -1), default=as_dict)
+            except ValueError as err:
+                print("ValueError:", err)
+            print(encode_floats(JSONEncoder(), [1.5, float("inf")]))
+            try:
+                encode_floats(JSONEncoder(allow_nan=False), [float("nan")])
+            except ValueError as err:
+                print("ValueError:", err)
+
+
+        if __name__ == "__main__":
+            main()
+    "#,
+        "{\"x\": 1, \"y\": 2} [{\"x\":1,\"y\":2},{\"x\":3,\"y\":4}]\n[{\"x\": 1, \"y\": 2}, null]\n{\"a\": [5, 6], \"b\": [1, 2]}\n{\n  \"é\": [\n    1,\n    2\n  ]\n}\n[\n\t[\n\t\t1,\n\t\t2\n\t]\n] [\n1\n]\n{\"k\"=[1;2]}\n', ' ': ' False True\n',' True\n[3]\nTypeError: Object of type Point is not JSON serializable\nValueError: negative y\n[1.5, Infinity]\nValueError: Out of range float values are not JSON compliant: nan\n",
+    );
+}
+
+/// json's decoders: `loads(object_hook=...)` into a class, nested in lists and optional, `json.JSONDecoder` with and without a hook, `loads(cls=...)`, and JSONDecodeError found before any object is handed to the hook.
+#[test]
+fn json_decoders_and_object_hook() {
+    prints(
+        r#"
+        import json
+        from json import JSONDecoder
+        from typing import Optional
+
+
+        class Point:
+            def __init__(self, x: int, y: int):
+                self.x = x
+                self.y = y
+
+
+        def as_point(d: dict[str, int]) -> Point:
+            return Point(d["x"], d["y"])
+
+
+        class Decoder(JSONDecoder):
+            pass
+
+
+        def main() -> None:
+            p: Point = json.loads('{"x": 5, "y": 6}', object_hook=as_point)
+            print(p.x, p.y)
+            ps: list[Point] = json.loads('[{"x": 1, "y": 2}, {"y": 4, "x": 3}]', object_hook=as_point)
+            print(len(ps), ps[1].x, ps[1].y)
+            rows: list[list[Point]] = json.loads('[[{"x": 7, "y": 8}], []]', object_hook=as_point)
+            print(len(rows), rows[0][0].y, len(rows[1]))
+            none: Optional[Point] = json.loads("null", object_hook=as_point)
+            some: Optional[Point] = json.loads('{"x": 9, "y": 9}', object_hook=as_point)
+            print(none is None, some is not None)
+            dec = json.JSONDecoder(object_hook=as_point)
+            q: Point = dec.decode(' {"x": 2, "y": 3} ')
+            print(q.x + q.y, dec.strict)
+            plain = JSONDecoder()
+            counts: dict[str, int] = plain.decode('{"a": 1, "b": 2}')
+            print(counts)
+            r: list[Point] = json.loads('[{"x": 0, "y": 1}]', cls=Decoder, object_hook=as_point)
+            print(r[0].y, isinstance(dec, JSONDecoder))
+            for bad in ['{"x": 1, "y": 2', '[{"x": 1, "y": 2},]']:
+                try:
+                    t: list[Point] = json.loads(bad, object_hook=as_point)
+                    print(len(t))
+                except json.JSONDecodeError as err:
+                    print("JSONDecodeError:", err)
+
+
+        if __name__ == "__main__":
+            main()
+    "#,
+        "5 6\n2 3 4\n2 8 0\nTrue True\n5 True\n{'a': 1, 'b': 2}\n1 True\nJSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)\nJSONDecodeError: Illegal trailing comma before end of array: line 1 column 18 (char 17)\n",
+    );
+}
+
+/// `json.dump(cls=...)` and `json.load(object_hook=...)` through files.
+#[test]
+fn json_hooks_through_files() {
+    let out = run_on(
+        r#"
+        import json
+
+
+        class Point:
+            def __init__(self, x: int, y: int):
+                self.x = x
+                self.y = y
+
+
+        class PairEncoder(json.JSONEncoder):
+            def default(self, o: Point) -> list[int]:
+                return [o.x, o.y]
+
+
+        def as_dict(p: Point) -> dict[str, int]:
+            return {"x": p.x, "y": p.y}
+
+
+        def as_point(d: dict[str, int]) -> Point:
+            return Point(d["x"], d["y"])
+
+
+        def main() -> None:
+            with open("pairs.json", "w") as f:
+                json.dump([Point(1, 2)], f, cls=PairEncoder)
+            with open("pairs.json") as f:
+                back: list[list[int]] = json.load(f)
+            print(back)
+            with open("point.json", "w") as f:
+                json.dump(Point(3, 4), f, default=as_dict, indent=1)
+            with open("point.json") as f:
+                print(repr(f.read()))
+            with open("point.json") as f:
+                q: Point = json.load(f, object_hook=as_point)
+            print(q.x, q.y)
+
+
+        if __name__ == "__main__":
+            main()
+    "#,
+        &[],
+        &[],
+    );
+    assert_eq!(out, "[[1, 2]]\n'{\\n \"x\": 3,\\n \"y\": 4\\n}'\n3 4\n");
+}
+
+/// What json's hooks and classes cannot be given is refused where it is
+/// compiled: a hook whose types are not known, or that does not take what it
+/// would be called with, or that answers what it is called with again; the
+/// options that change parsing; and an encoder whose `default()` a subclass
+/// could replace.
+#[test]
+fn json_hooks_refused() {
+    let header = r#"
+        import json
+
+        class Point:
+            def __init__(self, x: int, y: int):
+                self.x = x
+                self.y = y
+
+        def to_list(o: Point) -> list[int]:
+            return [o.x]
+
+        def same(o: Point) -> Point:
+            return o
+
+        def from_list(d: list[int]) -> Point:
+            return Point(d[0], d[1])
+
+        class Sub(json.JSONEncoder):
+            def default(self, o: Point) -> int:
+                return 1
+
+        class SubSub(Sub):
+            def default(self, o: Point) -> int:
+                return 2
+
+        class Own(json.JSONEncoder):
+            def __init__(self, k: int):
+                super().__init__()
+
+        def f(n: int) -> str:
+    "#;
+    for (body, needle) in [
+        (
+            "return json.dumps(Point(1, 2))",
+            "Object of type Point is not JSON serializable",
+        ),
+        (
+            "return json.dumps(Point(1, 2), default=lambda o: [o.x])",
+            "default must be a function of one parameter",
+        ),
+        (
+            "return json.dumps([1], default=str)",
+            "default must be a function of one parameter",
+        ),
+        (
+            "return json.dumps({1, 2}, default=to_list)",
+            "the default given takes a Point, not a Set[int]",
+        ),
+        (
+            "return json.dumps(Point(1, 2), default=same)",
+            "answers a value it is called with again",
+        ),
+        (
+            "return json.JSONEncoder(default=to_list).encode(1)",
+            "a JSONEncoder's default= is not supported",
+        ),
+        (
+            "return json.JSONEncoder(indent=n).encode([1])",
+            "indent must be a constant",
+        ),
+        (
+            "return json.JSONEncoder().iterencode(1)",
+            "iterencode() is not supported",
+        ),
+        (
+            "return json.JSONEncoder().indent",
+            "has no attribute 'indent'",
+        ),
+        (
+            "e: Sub = SubSub()\n    return e.encode(Point(1, 2))",
+            "a subclass of which overrides default()",
+        ),
+        (
+            "return json.dumps(1, cls=Own)",
+            "where Own defines __init__ is not supported",
+        ),
+        (
+            "x: float = json.loads('1', parse_float=float)\n    return ''",
+            "'parse_float' argument is not supported",
+        ),
+        (
+            "x: dict[str, int] = json.loads('{}', object_pairs_hook=dict)\n    return ''",
+            "'object_pairs_hook' argument is not supported",
+        ),
+        (
+            "p: Point = json.loads('[1, 2]', object_hook=from_list)\n    return ''",
+            "an object_hook taking a List[int]",
+        ),
+        (
+            "p: Point = json.loads('{}')\n    return ''",
+            "a Point, which JSON has no value for",
+        ),
+        (
+            "d = json.JSONDecoder(strict=False)\n    return ''",
+            "strict= other than True is not supported",
+        ),
+        (
+            "d = json.JSONDecoder(object_hook=lambda d: d)\n    return ''",
+            "object_hook must be a function of this module",
+        ),
+    ] {
+        let src = format!("{}    {body}\n", dedent(header));
+        let err = try_compile(&src).expect_err(body);
+        assert!(
+            err.contains(needle),
+            "expected `{needle}` for `{body}` in: {err}"
+        );
     }
 }
 

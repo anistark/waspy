@@ -1953,6 +1953,15 @@ pub fn compile_body(
                         expected,
                         &format!("assigning to '{target}'"),
                     );
+                    // A local holds one kind of scalar for the whole function,
+                    // so `x = 5` then `x = "a"` would read the string's offset
+                    // as the int.
+                    crate::compiler::expression::check_scalar_store(
+                        ctx,
+                        &value_type,
+                        expected,
+                        &format!("the value assigned to '{target}'"),
+                    );
                 }
 
                 // An unannotated local is allocated as Unknown (an i32 slot).
@@ -1966,11 +1975,11 @@ pub fn compile_body(
                 // resolved during codegen) is upgraded the same way once the
                 // emitted value reports the concrete element type.
                 //
-                // Adopting `int` is what lets a value pass through a local and
-                // still be widened when it is written into a float collection:
-                // `n = 3` followed by `xs.append(n)` used to reach the write
-                // path as Unknown, which is one word wide, and stored 4 bytes
-                // into an 8-byte slot (#123).
+                // Adopting `int` is what lets a value that passes through a
+                // local keep its type: `n = 3` followed by `xs.append(n)` into a
+                // float collection used to reach the write path as Unknown,
+                // which is one word wide, and stored 4 bytes into an 8-byte slot
+                // (#123). It is an int there, which the write refuses.
                 if let Some(info) = ctx.locals_map.get_mut(target) {
                     let adopt = match (&info.var_type, &value_type) {
                         (IRType::Unknown, _) => matches!(
@@ -2623,10 +2632,13 @@ pub fn compile_body(
                             .unwrap_or_default();
                         let t = emit_expr(value, func, ctx, memory_layout, param_types.get(1));
                         if let Some(param) = param_types.get(1) {
-                            ctx.check_class_store(
+                            let what = format!("assigning to '.{attribute}'");
+                            ctx.check_class_store(&t, param, &what);
+                            crate::compiler::expression::check_scalar_store(
+                                ctx,
                                 &t,
                                 param,
-                                &format!("assigning to '.{attribute}'"),
+                                &format!("the value assigned to '.{attribute}'"),
                             );
                         }
                         if matches!(t, IRType::String | IRType::Bytes) {
@@ -2654,6 +2666,12 @@ pub fn compile_body(
                     let value_ty = emit_expr(value, func, ctx, memory_layout, Some(&field_ty));
                     let what = format!("assigning to '.{attribute}'");
                     ctx.check_class_store(&value_ty, &field_ty, &what);
+                    crate::compiler::expression::check_scalar_store(
+                        ctx,
+                        &value_ty,
+                        &field_ty,
+                        &format!("the value assigned to '.{attribute}'"),
+                    );
                     // Compiler-made fields (a generator's lifted iterator or
                     // dict) hold pointers their own reads know the type of.
                     if !attribute.starts_with("__") {

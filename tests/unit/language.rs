@@ -374,7 +374,7 @@ fn star_args_is_a_tuple() {
             return s
 
         def t_float() -> float:
-            return fsum(1, 2.5, 3)
+            return fsum(1.0, 2.5, 3.0)
 
         def names(*parts: str) -> str:
             return "-".join(parts)
@@ -462,8 +462,8 @@ fn star_arguments_combine() {
         def floats(**kw: float) -> float:
             return kw["a"] + kw["b"]
 
-        def t_kwargs_widen() -> float:
-            return floats(a=1, b=2.5)
+        def t_kwargs_float() -> float:
+            return floats(a=1.0, b=2.5)
 
         def t_kwargs_lookup() -> int:
             def g(**kw: int) -> int:
@@ -473,7 +473,7 @@ fn star_arguments_combine() {
     );
     assert_eq!(call_i32(&src, "t_forward"), 515);
     assert_eq!(call_i32(&src, "t_mixed"), 2065);
-    assert_eq!(call_f64(&src, "t_kwargs_widen"), 3.5);
+    assert_eq!(call_f64(&src, "t_kwargs_float"), 3.5);
     assert_eq!(call_i32(&src, "t_kwargs_lookup"), 47);
 }
 

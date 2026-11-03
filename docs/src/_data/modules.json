@@ -741,7 +741,7 @@
         "test": "collections::tuple_subscript"
       },
       {
-        "name": "Collection writes convert the value to the element type, or are refused (append, insert, item assignment, dict values, set.add)",
+        "name": "Collection writes store the element type's values and refuse others, an int in a float collection included (append, insert, item assignment, dict values, set.add)",
         "status": "done",
         "version": "0.17.0",
         "test": "collections::collection_writes_convert"
@@ -1163,8 +1163,10 @@
         "test": "stdlib::json_module"
       },
       {
-        "name": "json module: JSONEncoder, JSONDecoder, and dumps(default=...) (refused today)",
-        "status": "todo"
+        "name": "json module: dumps(default=...) and loads(object_hook=...) with functions of the program, JSONEncoder (its options as fields, a subclass's default(), cls=), and JSONDecoder (object_hook, decode(), cls=)",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::json_encoder_decoder"
       },
       {
         "name": "re module, compile-time folding: sub and escape over constant arguments, where the pattern is one CPython and the compiler read alike (anything else refused)",

@@ -18,8 +18,8 @@ class Rectangle:
     """A simple rectangle class."""
     
     # Class variables
-    default_width = 10
-    default_height = 5
+    default_width = 10.0
+    default_height = 5.0
     
     def __init__(self, width: float, height: float):
         """Initialize the rectangle with width and height."""

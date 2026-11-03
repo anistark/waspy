@@ -2083,20 +2083,23 @@ mod collections {
         );
     }
 
-    /// Collection writes convert the value to the element type, or are refused (append, insert, item assignment, dict values, set.add)
+    /// Collection writes store the element type's values and refuse others, an int in a float collection included (append, insert, item assignment, dict values, set.add)
     #[test]
     fn collection_writes_convert() {
-        check(
-            r#"
+        let src = r#"
             from typing import List
 
             def f() -> float:
                 xs: List[float] = []
-                xs.append(3)
-                xs.insert(0, 1)
+                xs.append(3.0)
+                xs.insert(0, 1.0)
                 return xs[0] + xs[1] / 2
-        "#,
-            &[("f", Want::Float(2.5))],
+        "#;
+        check(src, &[("f", Want::Float(2.5))]);
+        let err = try_compile(&dedent(src).replace("append(3.0)", "append(3)")).unwrap_err();
+        assert!(
+            err.contains("the int 3 is stored where 'float' is declared"),
+            "{err}"
         );
     }
 
@@ -3275,6 +3278,40 @@ mod stdlib {
             &[(
                 "f",
                 Want::Str("{\"a\": [1, 2], \"b\": []}[\n 1.5,\n null\n]9"),
+            )],
+        );
+    }
+
+    /// json module: dumps(default=...) and loads(object_hook=...) with functions of the program, JSONEncoder (its options as fields, a subclass's default(), cls=), and JSONDecoder (object_hook, decode(), cls=)
+    #[test]
+    fn json_encoder_decoder() {
+        check(
+            r#"
+            import json
+
+            class Point:
+                def __init__(self, x: int, y: int):
+                    self.x = x
+                    self.y = y
+
+            def as_list(p: Point) -> list[int]:
+                return [p.x, p.y]
+
+            def as_point(d: dict[str, int]) -> Point:
+                return Point(d["x"], d["y"])
+
+            class PointEncoder(json.JSONEncoder):
+                def default(self, o: Point) -> dict[str, int]:
+                    return {"y": o.y, "x": o.x}
+
+            def f() -> str:
+                p: Point = json.JSONDecoder(object_hook=as_point).decode('{"x": 3, "y": 4}')
+                q: Point = json.loads('{"x": 5, "y": 6}', object_hook=as_point)
+                return json.dumps(Point(1, 2), default=as_list) + PointEncoder(indent=1).encode([p]) + json.dumps(q, cls=PointEncoder, sort_keys=True)
+        "#,
+            &[(
+                "f",
+                Want::Str("[1, 2][\n {\n  \"y\": 4,\n  \"x\": 3\n }\n]{\"x\": 5, \"y\": 6}"),
             )],
         );
     }

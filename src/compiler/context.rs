@@ -431,6 +431,12 @@ pub struct CompilationContext {
     /// because expression codegen holds `&CompilationContext`. An exception
     /// raised inside one branches out through them to its `try`.
     pub expr_block_depth: Cell<u32>,
+    /// Set just before emitting an expression whose only use is its number (a
+    /// comparison's operand, a `math` function's argument, an argument of a
+    /// standard-library class), which an int then converts into the float
+    /// expected with the answer CPython gives. The next `emit_expr` takes it,
+    /// so the expressions inside the operand are checked as usual.
+    pub numeric_operand: Cell<bool>,
     /// WASM function index of the runtime bump allocator `__alloc(size) -> ptr`.
     /// Emitted after all user functions/methods, so callers (e.g. string/bytes
     /// concatenation) reference it by this index. Set during module assembly.
@@ -579,6 +585,7 @@ impl CompilationContext {
             except_scan_depth: 0,
             comp_depth: Cell::new(0),
             expr_block_depth: Cell::new(0),
+            numeric_operand: Cell::new(false),
             alloc_func_index: 0,
             alloc_obj_func_index: 0,
             i32_to_str_func_index: 0,
