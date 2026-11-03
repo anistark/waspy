@@ -4,7 +4,7 @@ use crate::compiler::context::{
     MODULE_INIT_FN,
 };
 use crate::compiler::function::{compile_function, resolve_return_type};
-use crate::core::errors::ChakraError;
+use crate::core::errors::WaspyError;
 use crate::ir::{
     method_kind, IRBody, IRCompareOp, IRConstant, IRExpr, IRFunction, IRModule, IROp, IRStatement,
     IRType, IRUnaryOp, MethodKind, STRING_LEN_PREFIX,
@@ -1565,9 +1565,9 @@ fn body_uses_open(body: &IRBody) -> bool {
 }
 
 /// Does the module use file I/O anywhere (an `open()` call in any function,
-/// method, or module-variable initializer)? Only then is the `waspy_host`
-/// import section emitted, so programs without file I/O keep instantiating
-/// with no imports at all.
+/// method, or module-variable initializer)? Only then are the file helpers
+/// built and WASI's file imports emitted, so programs without file I/O keep
+/// instantiating with no imports at all.
 pub(crate) fn module_uses_file_io(ir_module: &IRModule) -> bool {
     ir_module.functions.iter().any(|f| body_uses_open(&f.body))
         || ir_module
@@ -1620,7 +1620,7 @@ fn is_pure_constant(
 /// `G[0] = 9; G[0]` answered G's first element, and `C = Counter()` was a fresh
 /// instance wherever it was mentioned. Arbitrary module-level statements stay
 /// refused; this covers definitions, which is what Python runs at import.
-pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, ChakraError> {
+pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, WaspyError> {
     // A module that can raise carries the builtin exception classes, ahead of
     // its own, so every exception is an object of one.
     let with_exceptions;
@@ -1703,7 +1703,7 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, ChakraError> {
     compile_module(&with_init, &names)
 }
 
-fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec<u8>, ChakraError> {
+fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec<u8>, WaspyError> {
     // Unannotated closure parameters are typed from their calls, and captured
     // cells from their stores, before any signature is fixed.
     let (typed, capture_types) = crate::compiler::closures::type_closures(ir_module);
@@ -1782,18 +1782,14 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
         }
     }
 
-    // File I/O (#25): when the program calls `open()` anywhere, the module
-    // imports the four `waspy_host` functions. Imported functions occupy the
-    // lowest indices of the function index space, so every defined function's
-    // index shifts up by the import count.
-    // File I/O is WASI (helpers over its imports), or with the deprecated
-    // option the four `waspy_host` imports.
+    // File I/O (#25) is runtime helpers over WASI's imports, built when the
+    // program calls `open()` anywhere.
     let uses_file_io = module_uses_file_io(ir_module);
-    let legacy_file_io = uses_file_io && crate::compiler::host::legacy_file_io(ir_module);
-    let file_io_count: u32 = if legacy_file_io { 4 } else { 0 };
-    // The WASI imports after them: whatever the program prints, reads, or
-    // asks of the host, and what the `__main__` block needs to report an
-    // exception it does not catch.
+    // The WASI imports: whatever the program prints, reads, or asks of the
+    // host, and what the `__main__` block needs to report an exception it
+    // does not catch. Imported functions occupy the lowest indices of the
+    // function index space, so every defined function's index shifts up by
+    // the import count.
     let entry = if ir_module
         .functions
         .iter()
@@ -1812,17 +1808,9 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
         && functions_that_can_raise(ir_module).contains(entry);
     let wasi_imports = crate::compiler::host::wasi_needed(ir_module, main_can_raise);
     for (k, import) in wasi_imports.iter().enumerate() {
-        ctx.wasi.insert(*import, file_io_count + k as u32);
+        ctx.wasi.insert(*import, k as u32);
     }
-    let import_count: u32 = file_io_count + wasi_imports.len() as u32;
-    if legacy_file_io {
-        ctx.file_io = Some(FileIoImports {
-            open: 0,
-            read: 1,
-            write: 2,
-            close: 3,
-        });
-    }
+    let import_count: u32 = wasi_imports.len() as u32;
 
     // Resolve each function's (and method's) return type up front, inferring
     // unannotated ones from their bodies, so the type section, the registered
@@ -1971,30 +1959,9 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
         }
     }
 
-    // Types for the `waspy_host` file-I/O imports, appended after every other
-    // type so the existing "defined function i has type i" mapping is
-    // untouched. `open`/`read`/`write` share the 3-arg shape; `close` takes
-    // one argument.
+    // Types for the WASI imports, appended after every other type so the
+    // existing "defined function i has type i" mapping is untouched.
     let mut host_imports = ImportSection::new();
-    if legacy_file_io {
-        let closure_type_count = ctx
-            .closure_type_base
-            .map(|_| ctx.closure_max_arity + 1)
-            .unwrap_or(0);
-        let host3_type = total_function_count as u32 + 3 + closure_type_count;
-        let host1_type = host3_type + 1;
-        types
-            .ty()
-            .function([ValType::I32, ValType::I32, ValType::I32], [ValType::I32]);
-        types.ty().function([ValType::I32], [ValType::I32]);
-
-        // Import order fixes the function indices recorded in `ctx.file_io`:
-        // open=0, read=1, write=2, close=3.
-        host_imports.import("waspy_host", "open", EntityType::Function(host3_type));
-        host_imports.import("waspy_host", "read", EntityType::Function(host3_type));
-        host_imports.import("waspy_host", "write", EntityType::Function(host3_type));
-        host_imports.import("waspy_host", "close", EntityType::Function(host1_type));
-    }
     for import in &wasi_imports {
         let (params, results) = import.signature();
         let type_index = types.len();
@@ -2031,7 +1998,7 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
     // The runtime helpers code generation asks for come after all of these.
     ctx.helper_base =
         import_count + total_function_count as u32 + 3 + u32::from(start_type_index.is_some());
-    if uses_file_io && !legacy_file_io {
+    if uses_file_io {
         use crate::compiler::runtime::Helper;
         ctx.file_io = Some(FileIoImports {
             open: ctx.helper(Helper::FileOpen),
@@ -3060,10 +3027,10 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
             .iter()
             .map(|e| format!("\n  also: {e}"))
             .collect::<String>();
-        let ChakraError::UnsupportedFeature { message, location } = first else {
+        let WaspyError::UnsupportedFeature { message, location } = first else {
             return Err(first);
         };
-        return Err(ChakraError::UnsupportedFeature {
+        return Err(WaspyError::UnsupportedFeature {
             message: format!("{message}{rest}"),
             location,
         });

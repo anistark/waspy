@@ -1,4 +1,4 @@
-use crate::core::errors::{unsupported_feature, ChakraError};
+use crate::core::errors::{unsupported_feature, WaspyError};
 use crate::ir::{IRExpr, IRType, MethodKind};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -231,19 +231,20 @@ pub struct ClassInfo {
     pub instance_size: u32, // size of instance in bytes
 }
 
-/// WASM function indices of the `waspy_host` file-I/O imports. Present only
-/// when the module actually uses file operations — an import section is
-/// emitted solely in that case, so modules without file I/O keep instantiating
-/// with an empty import object.
+/// WASM function indices of the file-I/O helpers over WASI. Present only
+/// when the module actually uses file operations; the helpers and their WASI
+/// imports are emitted solely in that case, so modules without file I/O keep
+/// instantiating with an empty import object.
 #[derive(Clone, Copy)]
 pub struct FileIoImports {
-    /// `waspy_host.open(path_ptr, path_len, flags) -> fd` (-1 on failure).
+    /// `open(path_ptr, path_len, flags) -> fd`, raising CPython's `OSError`
+    /// subclass on failure.
     pub open: u32,
-    /// `waspy_host.read(fd, buf_ptr, len) -> bytes_read` (0 = EOF, <0 error).
+    /// `read(fd, buf_ptr, len) -> bytes_read` (0 = EOF, <0 error).
     pub read: u32,
-    /// `waspy_host.write(fd, buf_ptr, len) -> bytes_written` (<0 error).
+    /// `write(fd, buf_ptr, len) -> bytes_written` (<0 error).
     pub write: u32,
-    /// `waspy_host.close(fd) -> status` (0 = ok).
+    /// `close(fd) -> status` (0 = ok).
     pub close: u32,
 }
 
@@ -530,7 +531,7 @@ pub struct CompilationContext {
     /// the emitted code still traps, keeping the module valid and the stack
     /// balanced, but `compile_ir_module` fails with the collected errors
     /// instead of handing back a module that dies at runtime.
-    pub errors: RefCell<Vec<ChakraError>>,
+    pub errors: RefCell<Vec<WaspyError>>,
 }
 
 impl CompilationContext {

@@ -1093,3 +1093,192 @@ fn optional_instance_methods() {
     assert_eq!(run.stderr, "");
     assert_eq!(run.stdout, "-1 5 7 True\n");
 }
+
+// ---------------------------------------------------------------------------
+// Loops over items(), keys(), and values()
+// ---------------------------------------------------------------------------
+
+/// `for k, v in x.items()` (and `.keys()` / `.values()`) calls the method
+/// when `x` is an instance of a class that defines it, inherited, through a
+/// parameter or a field, or as a generator; a dict, and the `collections`
+/// classes that read as one, walk their entries in place. A user class was
+/// lowered as a dict and refused with "has no len()", the `collections`
+/// classes' loops were refused, and `for kv in d.items()` needed two targets.
+#[test]
+fn loops_over_views_call_the_method_or_walk_the_dict() {
+    let run = run_main(
+        &dedent(
+            r#"
+            from collections import ChainMap, Counter, OrderedDict, defaultdict
+            from typing import Dict, Iterator, List, Tuple
+
+
+            class Bag:
+                def __init__(self) -> None:
+                    self.names: List[str] = ["a", "bb"]
+                    self.counts: List[int] = [3, 4]
+
+                def items(self) -> List[Tuple[str, int]]:
+                    return [(self.names[i], self.counts[i]) for i in range(len(self.names))]
+
+                def keys(self) -> List[str]:
+                    return self.names
+
+                def total(self) -> int:
+                    t = 0
+                    for k, v in self.items():
+                        t += v
+                    return t
+
+
+            class Sack(Bag):
+                pass
+
+
+            class Shelf:
+                def __init__(self) -> None:
+                    self.bag: Bag = Sack()
+
+                def labels(self) -> str:
+                    out = ""
+                    for k in self.bag.keys():
+                        out += k
+                    return out
+
+
+            class Ticker:
+                def values(self) -> Iterator[int]:
+                    yield 7
+                    yield 8
+
+
+            def from_param(b: Bag) -> str:
+                out = ""
+                for k, v in b.items():
+                    if v == 4:
+                        break
+                    out += k * v
+                return out
+
+
+            def main() -> None:
+                sack = Sack()
+                print([kv for kv in sack.items()], sack.total(), from_param(Bag()), Shelf().labels())
+                print(sum(x for x in Ticker().values()))
+                t = 0
+                for x in Ticker().values():
+                    t += x
+                print(t)
+                d: Dict[str, int] = {"x": 1, "yy": 2}
+                for kv in d.items():
+                    print(kv)
+                c: Counter[str] = Counter("abca")
+                for k, v in c.items():
+                    print(k, v)
+                dd: defaultdict[str, List[int]] = defaultdict(list)
+                dd["p"].append(1)
+                for k in dd.keys():
+                    print(k)
+                od: OrderedDict[str, int] = OrderedDict()
+                od["z"] = 9
+                for v in od.values():
+                    print(v)
+                a: Dict[str, int] = {"x": 1, "y": 2}
+                b: Dict[str, int] = {"y": 20, "z": 30}
+                cm: ChainMap[str, int] = ChainMap(a, b)
+                for k, v in cm.items():
+                    print(k, v)
+
+
+            if __name__ == "__main__":
+                main()
+        "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(run.stderr, "");
+    assert_eq!(
+        run.stdout,
+        "[('a', 3), ('bb', 4)] 7 aaa abb\n15\n15\n('x', 1)\n('yy', 2)\na 2\nb 1\nc 1\np\n9\ny 2\nz 30\nx 1\n"
+    );
+}
+
+/// A receiver whose class the loop cannot see (a method's result) is refused
+/// with a hint, not walked as a dict.
+#[test]
+fn view_loop_over_an_unknown_instance_is_refused() {
+    refused(
+        r#"
+        from typing import List, Tuple
+
+        class Bag:
+            def items(self) -> List[Tuple[str, int]]:
+                return [("a", 1)]
+
+        class Shelf:
+            def bag(self) -> Bag:
+                return Bag()
+
+        def total() -> int:
+            t = 0
+            for k, v in Shelf().bag().items():
+                t += v
+            return t
+        "#,
+        "a for loop over the items(), keys(), or values() of a 'Bag' instance",
+    );
+}
+
+/// What the scan types before code generation: `sorted()` of a dict, a
+/// `Counter`, or a `defaultdict` is a list of its keys; a variable a lambda
+/// captures keeps its type through its cell; a field read through a captured
+/// instance is typed; and a `defaultdict` field annotated `Dict[...]` takes
+/// its types from the annotation. Each was refused, the comprehension variables
+/// over them untyped.
+#[test]
+fn sorted_cells_and_dict_annotated_collections_are_typed() {
+    let run = run_main(
+        &dedent(
+            r#"
+            from collections import Counter, defaultdict
+            from typing import Dict, List
+
+
+            class Board:
+                def __init__(self) -> None:
+                    self.by: Dict[str, List[int]] = defaultdict(list)
+                    self.notes: List[str] = ["n1", "n2"]
+
+
+            def ranked(scores: Dict[str, int]) -> List[str]:
+                order = sorted(scores, key=lambda k: (-scores[k], k))
+                return [k.upper() for k in order]
+
+
+            def main() -> None:
+                b = Board()
+                b.by["x"].append(3)
+                b.by["y"].append(1)
+                b.by["x"].append(2)
+                print(sorted(b.by), b.by["x"], len(b.by))
+                print(ranked({"b": 2, "a": 2, "c": 5}))
+                first = lambda: b
+                print([n + "!" for n in b.notes], first().notes[0])
+                c = Counter("abcab")
+                print(", ".join(f"{k}={c[k]}" for k in sorted(c)))
+
+
+            if __name__ == "__main__":
+                main()
+        "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(run.stderr, "");
+    assert_eq!(
+        run.stdout,
+        "['x', 'y'] [3, 2] 2\n['C', 'A', 'B']\n['n1!', 'n2!'] n1\na=2, b=2, c=1\n"
+    );
+}

@@ -267,8 +267,8 @@ pub(crate) fn wasi_needed(module: &IRModule, main_can_raise: bool) -> Vec<Wasi> 
         needed.insert(Wasi::FdWrite);
         needed.insert(Wasi::ProcExit);
     }
-    // `open()` and the file methods, unless they go to `waspy_host`.
-    if crate::compiler::module::module_uses_file_io(module) && !legacy_file_io(module) {
+    // `open()` and the file methods.
+    if crate::compiler::module::module_uses_file_io(module) {
         needed.extend([
             Wasi::FdRead,
             Wasi::FdWrite,
@@ -279,15 +279,6 @@ pub(crate) fn wasi_needed(module: &IRModule, main_can_raise: bool) -> Vec<Wasi> 
         ]);
     }
     needed.into_iter().collect()
-}
-
-/// Whether the module's file I/O compiles to the deprecated `waspy_host`
-/// imports.
-pub(crate) fn legacy_file_io(module: &IRModule) -> bool {
-    module
-        .metadata
-        .get(crate::ir::FILE_IO_HOST_KEY)
-        .is_some_and(|h| h == "waspy_host")
 }
 
 // ---------------------------------------------------------------------------

@@ -5,6 +5,7 @@ mod converter;
 pub(crate) mod datetime;
 pub(crate) mod decorate;
 mod decorators;
+mod dict_views;
 mod entry_points;
 mod finalize;
 mod generators;
@@ -27,6 +28,7 @@ pub use decorate::{
 };
 pub(crate) use decorate::{rename_body, walk_targets};
 pub use decorators::*;
+pub use dict_views::{lower_dict_views, DICT_VIEW_PREFIX};
 pub use entry_points::*;
 pub use finalize::cell_local;
 pub(crate) use finalize::visit_body;

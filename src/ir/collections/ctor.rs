@@ -391,6 +391,16 @@ fn construct(
             }
             None => None,
         },
+        // The builtin it reads as, as code commonly declares it:
+        // `d: Dict[str, List[int]] = defaultdict(list)`.
+        Some(IRType::Dict(k, v)) if known(k) && known(v) => match kind {
+            Kind::DefaultDict | Kind::OrderedDict | Kind::ChainMap => {
+                Some(vec![(**k).clone(), (**v).clone()])
+            }
+            Kind::Counter if matches!(**v, IRType::Int) => Some(vec![(**k).clone()]),
+            _ => None,
+        },
+        Some(IRType::List(e)) if kind == Kind::Deque && known(e) => Some(vec![(**e).clone()]),
         _ => None,
     };
     let positional: Vec<&IRExpr> = arguments

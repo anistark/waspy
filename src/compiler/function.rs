@@ -742,7 +742,36 @@ pub(crate) fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRTy
         {
             IRType::String
         }
-        // A dict loop's key or value (see the dict loops in `ir::converter`).
+        // `sorted(x)` is a list of what iterating `x` yields: a dict's keys,
+        // a sequence's or set's elements, a string's characters.
+        IRExpr::FunctionCall {
+            function_name,
+            arguments,
+        } if matches!(function_name.as_str(), "sorted" | "__sorted_desc")
+            && ctx.get_function_info(function_name).is_none() =>
+        {
+            let elem = match arguments.first().map(|a| infer_value_type(a, ctx)) {
+                Some(IRType::List(e) | IRType::VarTuple(e) | IRType::Set(e)) => *e,
+                Some(IRType::Dict(k, _)) => *k,
+                Some(IRType::Tuple(members)) => match members.first() {
+                    Some(first) if members.iter().all(|m| m == first) => first.clone(),
+                    _ => IRType::Unknown,
+                },
+                Some(IRType::String) => IRType::String,
+                // A `collections` class iterates as what it holds: a
+                // mapping's keys, a deque's elements.
+                Some(IRType::Class(class)) => crate::ir::collections::spec::parse(&class)
+                    .and_then(|(_, args)| args.into_iter().next())
+                    .unwrap_or(IRType::Unknown),
+                _ => IRType::Unknown,
+            };
+            if matches!(elem, IRType::Unknown) {
+                IRType::Unknown
+            } else {
+                IRType::List(Box::new(elem))
+            }
+        }
+        // A dict loop's key or value (see `ir::dict_views`).
         IRExpr::FunctionCall {
             function_name,
             arguments,
@@ -1037,24 +1066,23 @@ fn infer_iterable_elem_type(iterable: &IRExpr, ctx: &CompilationContext) -> IRTy
         // `for c, w in top_words(...)`: the callee's declared return type.
         // Without this a comprehension over a call binds untyped targets, so a
         // string member rendered as its pointer inside an f-string.
+        // A builtin's result as the scan types it (`sorted(d)`).
         IRExpr::FunctionCall { function_name, .. } => {
-            match ctx
-                .get_function_info(function_name)
-                .map(|f| f.return_type.clone())
-            {
-                Some(IRType::List(t)) | Some(IRType::Set(t)) | Some(IRType::VarTuple(t)) => *t,
-                Some(IRType::Dict(k, _)) => *k,
+            let result = match ctx.get_function_info(function_name) {
+                Some(f) => f.return_type.clone(),
+                None => infer_value_type(iterable, ctx),
+            };
+            match result {
+                IRType::List(t) | IRType::Set(t) | IRType::VarTuple(t) => *t,
+                IRType::Dict(k, _) => *k,
                 _ => IRType::Unknown,
             }
         }
         // `for x in self.items`: the field's declared element type.
         IRExpr::Attribute { object, attribute } => {
-            let IRExpr::Variable(obj_name) = object.as_ref() else {
-                return IRType::Unknown;
-            };
-            let Some(IRType::Class(owner)) =
-                ctx.get_local_info(obj_name).map(|i| i.var_type.clone())
-            else {
+            // The object as the scan types it: a local, a parameter, or a
+            // variable a closure captures (read through its cell).
+            let IRType::Class(owner) = infer_value_type(object, ctx) else {
                 return IRType::Unknown;
             };
             match lookup_field(ctx, &owner, attribute).map(|(_, ty)| ty) {
@@ -1505,6 +1533,19 @@ pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
         let rewritten = crate::compiler::dunders::rewrite_statement(stmt, ctx);
         let stmt = rewritten.as_ref().unwrap_or(stmt);
         scan_stmt_exprs(stmt, ctx);
+        // A variable a closure captures lives in a cell, whose type codegen
+        // fixes at the first store. Record it here too, from the first store
+        // whose value the scan can type, so a local computed from the
+        // variable (`ranked = sorted(d, key=lambda k: d[k])`) is typed.
+        if let IRStatement::Expression(IRExpr::CellStore { cell, value }) = stmt {
+            let ty = infer_value_type(value, ctx);
+            if !matches!(ty, IRType::Unknown) {
+                ctx.cell_types
+                    .borrow_mut()
+                    .entry(cell.clone())
+                    .or_insert(ty);
+            }
+        }
         let bound: Vec<&String> = match stmt {
             IRStatement::For { target, .. } => vec![target],
             IRStatement::TupleUnpack { targets, .. } => targets.iter().collect(),

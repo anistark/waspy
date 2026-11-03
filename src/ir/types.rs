@@ -28,10 +28,6 @@ pub struct IRUserDecoration {
     pub position: usize,
 }
 
-/// The `IRModule::metadata` key set (to `waspy_host`) when file I/O compiles
-/// to the deprecated `waspy_host` imports rather than WASI.
-pub const FILE_IO_HOST_KEY: &str = "file_io_host";
-
 /// The `IRModule::metadata` key prefix naming the module a class merged in
 /// from another file belongs to (`class_module:Square` -> `shapes`).
 pub const CLASS_MODULE_KEY: &str = "class_module:";
@@ -477,9 +473,9 @@ pub enum IRType {
         return_type: Box<IRType>,
     },
     Generator(Box<IRType>), // Generator yields values of this type
-    // A file object returned by `open()`. At runtime the value is the host
-    // file descriptor (a single i32); read/write/close lower to calls into
-    // the `waspy_host` import namespace.
+    // A file object returned by `open()`. At runtime the value is the WASI
+    // file descriptor (a single i32); read/write/close lower to the file
+    // helpers over WASI's imports.
     File,
     // Datetime types for proper arithmetic support
     Datetime,  // (year, month, day, hour, minute, second, microsecond)

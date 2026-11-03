@@ -1444,7 +1444,7 @@ fn nested_bodies_ref(stmt: &IRStatement) -> Vec<&IRBody> {
 }
 
 /// Every body a statement owns, for the cell rewrite.
-fn nested_bodies_mut(stmt: &mut IRStatement) -> Vec<&mut IRBody> {
+pub(crate) fn nested_bodies_mut(stmt: &mut IRStatement) -> Vec<&mut IRBody> {
     match stmt {
         IRStatement::If {
             then_body,

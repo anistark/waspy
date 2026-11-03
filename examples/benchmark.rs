@@ -95,6 +95,8 @@ fn main() -> Result<()> {
 /// Compile `entry` `RUNS` times and return the median wall-clock time along
 /// with the module size, which is deterministic across runs.
 fn measure(entry: &Path, optimize: bool) -> Result<Measurement> {
+    // Over the defaults, so a new option does not break this literal.
+    #[allow(clippy::needless_update)]
     let options = CompilerOptions {
         optimize,
         verbosity: waspy::Verbosity::Quiet,

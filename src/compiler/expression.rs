@@ -475,6 +475,17 @@ fn is_compiler_name(expr: &IRExpr) -> bool {
     }
 }
 
+/// The dict a `for` loop over `x.items()` walks (`ir::dict_views`).
+fn is_dict_view(expr: &IRExpr) -> bool {
+    match expr {
+        IRExpr::Variable(name) | IRExpr::Param(name) => {
+            name.starts_with(crate::ir::DICT_VIEW_PREFIX)
+        }
+        IRExpr::Attribute { attribute, .. } => attribute.starts_with(crate::ir::DICT_VIEW_PREFIX),
+        _ => false,
+    }
+}
+
 /// `len(r)` for the range block on top of the stack, as CPython computes it:
 /// `max(0, ceil((stop - start) / step))`, rounding away from zero for a
 /// negative step.
@@ -8969,7 +8980,18 @@ fn emit_compare_expr(
     }
 
     let left_type = emit_value(left, func, ctx, memory_layout, None);
-    let right_type = emit_value(right, func, ctx, memory_layout, Some(&left_type));
+    // The right operand is emitted at the left's type, so an int constant
+    // compared with a float is a float. A float compared with an int is
+    // emitted as itself, and the int under it is converted below: emitted as
+    // an int, `0 < 0.5` was refused as a float stored in an int.
+    let right_hint = match (
+        &left_type,
+        crate::compiler::function::infer_value_type(right, ctx),
+    ) {
+        (IRType::Int | IRType::Bool, IRType::Float) => IRType::Float,
+        _ => left_type.clone(),
+    };
+    let right_type = emit_value(right, func, ctx, memory_layout, Some(&right_hint));
 
     if let (IRType::Set(a), IRType::Set(b)) = (&left_type, &right_type) {
         return crate::compiler::operators::emit_set_comparison(func, ctx, op, a, b);
@@ -9313,13 +9335,15 @@ fn emit_compare_expr(
     }
 
     // Handle type coercion for comparison
-    if left_type == IRType::Float && right_type == IRType::Int {
+    let word = |t: &IRType| matches!(t, IRType::Int | IRType::Bool);
+    if left_type == IRType::Float && word(&right_type) {
         func.instruction(&Instruction::F64ConvertI32S);
-    } else if left_type == IRType::Int && right_type == IRType::Float {
-        // Move stack: f64 under i32
-        func.instruction(&Instruction::LocalSet(ctx.temp_local));
+    } else if word(&left_type) && right_type == IRType::Float {
+        // Park the f64 to convert the int under it. It went to the i32
+        // scratch local, so `0 <= x` failed validation.
+        func.instruction(&Instruction::LocalSet(ctx.temp_local_f64));
         func.instruction(&Instruction::F64ConvertI32S);
-        func.instruction(&Instruction::LocalGet(ctx.temp_local));
+        func.instruction(&Instruction::LocalGet(ctx.temp_local_f64));
     }
 
     if left_type == IRType::Float || right_type == IRType::Float {
@@ -10089,6 +10113,18 @@ fn emit_function_call_expr(
                     // Anything else has no length in Python (a
                     // TypeError), and an untyped value is a word here:
                     // reading it as a count answered garbage.
+                    // `ir::dict_views` walks a receiver it could not tell
+                    // was an instance as a dict.
+                    ty @ IRType::Class(_) if is_dict_view(&arguments[0]) => {
+                        ctx.report(format!(
+                            "a for loop over the items(), keys(), or values() of a '{}' \
+                             instance whose class is not known where the loop is written. \
+                             Hint: assign the instance to an annotated local first",
+                            crate::compiler::operators::python_type_name(ty)
+                        ));
+                        func.instruction(&Instruction::Drop);
+                        func.instruction(&Instruction::I32Const(0));
+                    }
                     other => {
                         let hint = if matches!(other, IRType::Unknown | IRType::Any) {
                             ". Hint: annotate the value it comes from"
@@ -10107,9 +10143,9 @@ fn emit_function_call_expr(
             }
             "open" => {
                 // open(path[, mode]) -> file (#25). The path's
-                // (offset, length) pair feeds `waspy_host.open`
-                // directly; the mode must be a string literal and is
-                // folded to host flag bits at compile time (a fresh
+                // (offset, length) pair feeds the open helper directly;
+                // the mode must be a string literal and is folded to the
+                // helper's flag bits at compile time (a fresh
                 // "r"/"w" literal need not be interned in memory).
                 if let Some(io) = ctx.file_io {
                     // The generic argument emission above already
@@ -12976,10 +13012,9 @@ pub fn emit_float_modulo_operation(func: &mut Function, ctx: &CompilationContext
     func.instruction(&Instruction::F64Sub);
 }
 
-/// Emit WebAssembly instructions for list method calls
-/// Host file-open flag bits — the `flags` argument of `waspy_host.open`,
-/// folded at compile time from the Python mode string ("r", "w", "a", "rb",
-/// "w+", ...). Part of the documented host interface (#25).
+/// File-open flag bits, the `flags` argument of the open helper, folded at
+/// compile time from the Python mode string ("r", "w", "a", "rb", "w+",
+/// ...).
 pub const FILE_FLAG_READ: i32 = 1;
 pub const FILE_FLAG_WRITE: i32 = 2;
 pub const FILE_FLAG_APPEND: i32 = 4;
@@ -13014,7 +13049,7 @@ fn file_mode_flags(mode: &IRExpr) -> i32 {
 
 /// Emit a method call on a file object (#25). The file descriptor (the file
 /// value's single i32 word) is already on the stack. Supported: `read([n])`,
-/// `write(s)`, `close()`, `flush()`. Each lowers to the `waspy_host` imports;
+/// `write(s)`, `close()`, `flush()`. Each lowers to the file helpers;
 /// scratch locals are used only across straight-line sequences with no nested
 /// `emit_expr`, per the scratch-local discipline.
 fn emit_file_method_call(
@@ -13063,7 +13098,7 @@ fn emit_file_method_call(
     match method_name {
         "read" => {
             // read([n]) -> str: allocate a fresh [len][bytes][nul] blob and
-            // fill it with `waspy_host.read` calls until the cap is reached
+            // fill it with read-helper calls until the cap is reached
             // or the host reports EOF (n <= 0). Python's size-less read()
             // means "read everything"; here it reads up to one page, the
             // documented cap. Scratch: t+0 fd, t+1 cap, t+2 blob base,

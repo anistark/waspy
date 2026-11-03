@@ -97,6 +97,12 @@
         "test": "control_flow::comparisons"
       },
       {
+        "name": "Chained comparisons (0 <= x <= 100, a < b > c), each operand read once",
+        "status": "done",
+        "version": "upcoming",
+        "test": "control_flow::chained_comparisons"
+      },
+      {
         "name": "Boolean logic (and, or, not) with short-circuit",
         "status": "done",
         "version": "0.1.0",
@@ -1393,6 +1399,12 @@
         "test": "generators::enumerate_zip_items"
       },
       {
+        "name": "for loops over .items(), .keys(), and .values() of a class that defines them, of the collections mappings, and with one target (for kv in d.items())",
+        "status": "done",
+        "version": "upcoming",
+        "test": "generators::view_loops"
+      },
+      {
         "name": "yield inside try / except / finally and with, resuming inside them; close() raising GeneratorExit at the suspended yield (finally blocks and handlers run, a generator yielding instead is CPython's RuntimeError); and generator methods holding their instance",
         "status": "done",
         "version": "upcoming",
@@ -1480,7 +1492,7 @@
     "version": "0.14.0",
     "features": [
       {
-        "name": "open(path, mode) through WASI: path_open on the preopened directories (r, w, a, b, + modes); the waspy_host imports under the deprecated waspy_host_file_io option",
+        "name": "open(path, mode) through WASI: path_open on the preopened directories (r, w, a, b, + modes)",
         "status": "done",
         "version": "upcoming",
         "test": "file_io::open_with_modes"
