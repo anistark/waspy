@@ -1379,6 +1379,10 @@ fn emit_class_level_method_call(
         _ => 0,
     };
     for (i, arg) in arguments.iter().enumerate() {
+        // A standard-library class's method takes either kind of number.
+        if is_stdlib_code(&owner, ctx) {
+            ctx.numeric_operand.set(true);
+        }
         let t = emit_expr(arg, func, ctx, memory_layout, param_types.get(i + arg_base));
         check_class_arg(
             ctx,
@@ -1809,8 +1813,9 @@ fn probe_type(
 /// is one. CPython keeps each arm's own type, but here a single value holds
 /// whichever arm ran, so the arms must agree on how it reads: two classes share
 /// their nearest common base, a class and None make an Optional, an empty
-/// collection takes the other arm's element type, and an int widens only where
-/// a float is expected (as it does when stored into a float place).
+/// collection takes the other arm's element type, and an int converts only
+/// where a float is expected (which [`check_widening`] refuses where the value
+/// is stored rather than only computed with, since CPython keeps the int).
 fn conditional_type(
     ctx: &CompilationContext,
     body: &IRType,
@@ -2068,11 +2073,14 @@ fn emit_closure_call(
                     }
                     (IRType::Float, IRType::Float) => {}
                     (_, IRType::Float) => {
-                        ctx.report(format!(
-                            "argument {} to '{name}' is a float where the function takes a '{}'",
-                            i + 1,
-                            crate::type_to_string(&param)
-                        ));
+                        if !scalar_mismatch(&t, &param) {
+                            ctx.report(format!(
+                                "argument {} to '{name}' is a float where the function takes a \
+                                 '{}'",
+                                i + 1,
+                                crate::type_to_string(&param)
+                            ));
+                        }
                         func.instruction(&Instruction::I32TruncF64S);
                     }
                     (_, IRType::String | IRType::Bytes) => {
@@ -2080,8 +2088,10 @@ fn emit_closure_call(
                     }
                     _ => {}
                 }
-                ctx.check_class_store(&t, &param, &format!("argument {} to '{name}'", i + 1));
-                ctx.check_untyped_store(&t, &param, &format!("argument {} to '{name}'", i + 1));
+                let what = format!("argument {} to '{name}'", i + 1);
+                ctx.check_class_store(&t, &param, &what);
+                ctx.check_untyped_store(&t, &param, &what);
+                check_scalar_store(ctx, &t, &param, &what);
             }
             let mut wasm_params: Vec<ValType> = params.iter().map(wasm_value_type).collect();
             wasm_params.push(ValType::I32);
@@ -3281,8 +3291,9 @@ pub(crate) fn emit_collection_element(
     }
 
     match (declared, &actual) {
-        // An int or bool into a float slot widens, which is what the slot is
-        // read back at and what Python's own arithmetic on the element does.
+        // An int or bool into a float slot is converted to the width the slot
+        // is read back at. A write of the program's own is refused first by
+        // `check_widening`, since CPython keeps the int.
         (Some(IRType::Float), IRType::Int | IRType::Bool) => {
             func.instruction(&Instruction::F64ConvertI32S);
             IRType::Float
@@ -6532,8 +6543,9 @@ fn emit_dict_literal(
 
 /// Emit argument `position` of a call to the user function `callee`, whose
 /// parameter there is `param`, as the single word (or f64) the parameter
-/// takes: an int widens to a float parameter, a string or bytes value passes
-/// its offset, and `*args` is packed at its member type.
+/// takes: an int converts for a float parameter (refused by
+/// [`check_widening`] unless the callee is the standard library's), a string
+/// or bytes value passes its offset, and `*args` is packed at its member type.
 #[allow(clippy::too_many_arguments)]
 fn emit_user_argument(
     arg: &IRExpr,
@@ -6546,7 +6558,7 @@ fn emit_user_argument(
 ) {
     let callee = &crate::compiler::function::display_function_name(callee);
     // The tuple a call's surplus positional arguments are bound into, built
-    // at the member type so `total(1, 2.5)` for `*nums: float` widens the 1.
+    // at the member type, each member checked as an argument is.
     if let (Some(IRType::VarTuple(member)), IRExpr::TupleLiteral(items)) = (param, arg) {
         let built = emit_sequence_of(items, member, func, ctx, memory_layout, callee);
         check_class_arg(ctx, &built, param, position, callee);
@@ -6560,6 +6572,10 @@ fn emit_user_argument(
             return;
         }
     }
+    // A standard-library class or function takes either kind of number.
+    if is_stdlib_code(callee, ctx) {
+        ctx.numeric_operand.set(true);
+    }
     let arg_type = emit_value(arg, func, ctx, memory_layout, param);
     match (param, &arg_type) {
         (Some(IRType::Float), IRType::Int | IRType::Bool) => {
@@ -6567,8 +6583,9 @@ fn emit_user_argument(
         }
         (Some(IRType::Float), IRType::Float) => {}
         (Some(p), IRType::Float) if !matches!(p, IRType::Float) => {
-            // An untyped parameter is refused by the untyped-store check.
-            if !matches!(p, IRType::Unknown | IRType::Any) {
+            // An untyped parameter is refused by the untyped-store check, and
+            // a scalar one by the scalar check.
+            if !matches!(p, IRType::Unknown | IRType::Any) && !scalar_mismatch(&arg_type, p) {
                 ctx.report(format!(
                     "argument {} of {callee}() is a float, where the parameter is '{}'",
                     position + 1,
@@ -6578,11 +6595,13 @@ fn emit_user_argument(
             func.instruction(&Instruction::I32TruncF64S);
         }
         (Some(IRType::Float), other) => {
-            ctx.report(format!(
-                "argument {} of {callee}() is a '{}', where the parameter is a float",
-                position + 1,
-                crate::type_to_string(other)
-            ));
+            if !scalar_mismatch(other, &IRType::Float) {
+                ctx.report(format!(
+                    "argument {} of {callee}() is a '{}', where the parameter is a float",
+                    position + 1,
+                    crate::type_to_string(other)
+                ));
+            }
             if matches!(other, IRType::String | IRType::Bytes) {
                 func.instruction(&Instruction::Drop);
             }
@@ -6680,6 +6699,36 @@ fn check_class_arg(
         let what = format!("argument {} of {callee}()", position + 1);
         ctx.check_class_store(arg, param, &what);
         ctx.check_untyped_store(arg, param, &what);
+        check_scalar_store(ctx, arg, param, &what);
+    }
+}
+
+/// Refuse storing a scalar of another kind than its place is declared to
+/// hold, which would be read as the declared one: an int as a string's offset,
+/// a string's offset as an int, an f64 as a word. Python keeps the value
+/// whatever the annotation says. `what` names the store, e.g. "argument 1 of
+/// f()".
+pub(crate) fn check_scalar_store(
+    ctx: &CompilationContext,
+    value: &IRType,
+    slot: &IRType,
+    what: &str,
+) {
+    // A number into an optional number's cell is refused by the class check.
+    let number = |t: &IRType| matches!(t, IRType::Int | IRType::Bool | IRType::Float);
+    if let IRType::Optional(inner) = slot {
+        if number(value) && number(inner) {
+            return;
+        }
+    }
+    if scalar_mismatch(value, slot) {
+        ctx.report(format!(
+            "{what} is a '{}', where '{}' is declared, which it would be read as; Python \
+             keeps the '{}'. Hint: correct the annotation, or convert the value",
+            crate::type_to_string(value),
+            crate::type_to_string(slot),
+            crate::type_to_string(value)
+        ));
     }
 }
 
@@ -7234,6 +7283,87 @@ fn rewritten_expr(
         .map(Box::new)
 }
 
+/// Whether `name` is a class or function a standard-library module pass wrote
+/// (`datetime.timedelta`, `__datetime_ord`), whose numbers follow CPython's
+/// code, which takes an int wherever it takes a float.
+fn is_stdlib_code(name: &str, ctx: &CompilationContext) -> bool {
+    (name.contains('.') && ctx.class_map.contains_key(name))
+        || [
+            crate::ir::ITERTOOLS_FN_PREFIX,
+            "__Gen___itertools_",
+            crate::ir::COLLECTIONS_FN_PREFIX,
+            crate::ir::DATETIME_FN_PREFIX,
+            crate::ir::LOGGING_FN_PREFIX,
+            crate::ir::RE_FN_PREFIX,
+        ]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+}
+
+/// Refuse an int or bool stored where a float is declared, and a bool where an
+/// int is. The place holds the declared kind, so the value would be read, and
+/// printed, as one (`5.0`, `1`) where Python keeps the int or the bool (`5`,
+/// `True`). An operand whose only use is its number is not a store
+/// ([`CompilationContext::numeric_operand`]), and neither is the standard
+/// library's own code, which takes either kind of number as CPython's does.
+fn check_widening(expr: &IRExpr, ty: &IRType, expected: Option<&IRType>, ctx: &CompilationContext) {
+    let slot = match expected {
+        Some(IRType::Optional(inner)) => inner.as_ref(),
+        Some(slot) => slot,
+        None => return,
+    };
+    // An int literal is emitted as the float expected, so its type is lost.
+    let literal = match expr {
+        IRExpr::Const(IRConstant::Int(n)) => Some(*n as i64),
+        IRExpr::UnaryOp {
+            operand,
+            op: IRUnaryOp::Neg,
+        } => match operand.as_ref() {
+            IRExpr::Const(IRConstant::Int(n)) => Some(-(*n as i64)),
+            _ => None,
+        },
+        _ => None,
+    };
+    let declared = crate::type_to_string(expected.unwrap_or(slot));
+    let message = match (slot, ty) {
+        (IRType::Float, IRType::Float) => match literal {
+            Some(n) => format!(
+                "the int {n} is stored where '{declared}' is declared, which holds it as the \
+                 float {n}.0; Python keeps the int, so the two print differently. Hint: write \
+                 it {n}.0"
+            ),
+            None => return,
+        },
+        (IRType::Float, IRType::Int) => format!(
+            "an int is stored where '{declared}' is declared, which holds it as a float; Python \
+             keeps the int, so the two print differently (5 and 5.0). Hint: convert it with \
+             float(), or declare the place int"
+        ),
+        (IRType::Float, IRType::Bool) => format!(
+            "a bool is stored where '{declared}' is declared, which holds it as a float; Python \
+             keeps the bool, so the two print differently (True and 1.0). Hint: convert it with \
+             float()"
+        ),
+        (IRType::Int, IRType::Bool) => format!(
+            "a bool is stored where '{declared}' is declared, which holds it as an int; Python \
+             keeps the bool, so the two print differently (True and 1). Hint: convert it with \
+             int(), or declare the place bool"
+        ),
+        _ => return,
+    };
+    let stdlib = ctx
+        .current_class
+        .as_deref()
+        .is_some_and(|c| is_stdlib_code(c, ctx))
+        || ctx
+            .current_function
+            .as_deref()
+            .is_some_and(|f| is_stdlib_code(f, ctx));
+    if !stdlib {
+        ctx.report(message);
+    }
+}
+
 pub fn emit_expr(
     expr: &IRExpr,
     func: &mut Function,
@@ -7241,13 +7371,18 @@ pub fn emit_expr(
     memory_layout: &MemoryLayout,
     expected_type: Option<&IRType>,
 ) -> IRType {
+    let numeric = ctx.numeric_operand.replace(false);
     // The expression as it is compiled, when that is another one. Boxed, so
     // the recursion through here keeps one pointer per frame (a debug build
     // runs deep expressions on a test thread's stack).
     if let Some(rewritten) = rewritten_expr(expr, ctx, expected_type) {
+        ctx.numeric_operand.set(numeric);
         return emit_expr(&rewritten, func, ctx, memory_layout, expected_type);
     }
     let ty = emit_expr_inner(expr, func, ctx, memory_layout, expected_type);
+    if !numeric {
+        check_widening(expr, &ty, expected_type, ctx);
+    }
     // A number stored where an optional one is held is boxed.
     match (expected_type.and_then(boxed_scalar), &ty) {
         (Some(slot), t) if t == slot => {
@@ -7622,8 +7757,9 @@ fn emit_expr_inner(
         IRExpr::Const(constant) => {
             match constant {
                 IRConstant::Int(i) => {
-                    // Widen to f64 when a float is expected (e.g. an int literal
-                    // passed to a float parameter or stored in a float field).
+                    // An f64 when a float is expected (an int literal compared
+                    // with a float, or passed to a `math` function). Stored into
+                    // a float place, `check_widening` refuses it.
                     if let Some(IRType::Float) = expected_type {
                         func.instruction(&Instruction::F64Const(f64_const(*i as f64)));
                         IRType::Float
@@ -7757,7 +7893,35 @@ fn emit_expr_inner(
                 // constant to i32 in `2 * PI`.
                 let declared = declared.clone();
                 let value = value.clone();
-                let emitted = emit_expr(&value, func, ctx, memory_layout, None);
+                // An optional number is a cell, which the value is boxed into.
+                let boxed = declared.as_ref().filter(|d| boxed_scalar(d).is_some());
+                let emitted = emit_expr(&value, func, ctx, memory_layout, boxed);
+                // A scalar of another kind than its annotation would be read
+                // as the annotation's (and an int's word as a float's f64 does
+                // not validate). Python keeps the value whatever it says.
+                let scalar = |t: &IRType| {
+                    matches!(
+                        t,
+                        IRType::Int | IRType::Bool | IRType::Float | IRType::String | IRType::Bytes
+                    )
+                };
+                let slot = match &declared {
+                    Some(IRType::Optional(inner)) => Some(inner.as_ref()),
+                    other => other.as_ref(),
+                };
+                if let Some(slot) = slot.filter(|s| scalar(s) && scalar(&emitted) && **s != emitted)
+                {
+                    ctx.report(format!(
+                        "module-level '{name}' is declared '{}' and its value is a '{}', which \
+                         would be read as the declared kind; Python keeps the '{}'. Hint: \
+                         correct the annotation, or write the value as a {}",
+                        crate::type_to_string(declared.as_ref().unwrap_or(slot)),
+                        crate::type_to_string(&emitted),
+                        crate::type_to_string(&emitted),
+                        crate::compiler::operators::python_type_name(slot),
+                    ));
+                    return emitted;
+                }
                 declared.unwrap_or(emitted)
             } else if let Some((module, attribute)) = ctx.stdlib_imports.get(name).cloned() {
                 // `from math import pi`: read through the module, which folds
@@ -8991,6 +9155,7 @@ fn emit_compare_expr(
         (IRType::Int | IRType::Bool, IRType::Float) => IRType::Float,
         _ => left_type.clone(),
     };
+    ctx.numeric_operand.set(true);
     let right_type = emit_value(right, func, ctx, memory_layout, Some(&right_hint));
 
     if let (IRType::Set(a), IRType::Set(b)) = (&left_type, &right_type) {
@@ -9729,7 +9894,7 @@ fn emit_function_call_expr(
             func.instruction(&Instruction::I32Const(instance_size as i32));
             func.instruction(&Instruction::I32Const(class_id));
             func.instruction(&Instruction::Call(ctx.alloc_obj_func_index));
-            // Each argument as a function's is: an int widened for a float
+            // Each argument as a function's is: an int converted for a float
             // parameter, a string narrowed to its offset word.
             for (i, arg) in arguments.iter().enumerate() {
                 emit_user_argument(
@@ -11975,7 +12140,19 @@ fn emit_method_call_expr(
     expected_type: Option<&IRType>,
 ) -> IRType {
     let _ = expr;
-    let _ = expected_type;
+    // `encoder.encode(o)` and `decoder.decode(s)`, through `dumps` and
+    // `loads` with the instance's options.
+    if let Some(t) = crate::compiler::stdlib::json::emit_instance_call(
+        object,
+        method_name,
+        arguments,
+        func,
+        ctx,
+        memory_layout,
+        expected_type,
+    ) {
+        return t;
+    }
     // `dict.fromkeys(...)`, a method of the type rather than a value.
     if let IRExpr::Variable(name) = object.as_ref() {
         if name == "dict"
@@ -12843,6 +13020,9 @@ fn emit_method_call_expr(
                     _ => 1,
                 };
                 for (i, arg) in arguments.iter().enumerate() {
+                    if is_stdlib_code(&owner, ctx) {
+                        ctx.numeric_operand.set(true);
+                    }
                     let t = emit_expr(arg, func, ctx, memory_layout, param_types.get(i + arg_base));
                     check_class_arg(
                         ctx,

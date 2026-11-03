@@ -1218,7 +1218,7 @@ mod collection_tests {
     /// A rectangle class with float fields, used by the class+float tests. Each
     /// test function returns 1 when the float computation matches its expected
     /// value (the wasmi build in use can't return an f64 directly).
-    const RECT_SRC: &str = "class Rectangle:\n    default_width = 10\n    default_height = 5\n    def __init__(self, width: float, height: float):\n        self.width = width\n        self.height = height\n    def area(self) -> float:\n        return self.width * self.height\n    def perimeter(self) -> float:\n        return 2 * (self.width + self.height)\n    def scale(self, factor: float) -> None:\n        self.width *= factor\n        self.height *= factor\n";
+    const RECT_SRC: &str = "class Rectangle:\n    default_width = 10.0\n    default_height = 5.0\n    def __init__(self, width: float, height: float):\n        self.width = width\n        self.height = height\n    def area(self) -> float:\n        return self.width * self.height\n    def perimeter(self) -> float:\n        return 2 * (self.width + self.height)\n    def scale(self, factor: float) -> None:\n        self.width *= factor\n        self.height *= factor\n";
 
     #[test]
     fn class_float_fields_and_methods() {
@@ -1237,12 +1237,17 @@ mod collection_tests {
     }
 
     #[test]
-    fn class_int_args_coerced_to_float() {
-        // Int literals passed to float constructor parameters widen to f64.
+    fn class_int_args_to_float_parameters_are_refused() {
+        // An int literal passed to a float constructor parameter would be held
+        // as a float, where CPython keeps the int (`r.width` prints 3, not 3.0).
         let src = format!(
             "{RECT_SRC}def f() -> int:\n    r = Rectangle(3, 4)\n    if r.area() == 12.0:\n        return 1\n    return 0\n"
         );
-        assert_eq!(call_i32(&src, "f"), 1);
+        let err = format!("{:#}", compile_python_to_wasm(&src).unwrap_err());
+        assert!(
+            err.contains("the int 3 is stored where 'float' is declared"),
+            "{err}"
+        );
     }
 
     #[test]

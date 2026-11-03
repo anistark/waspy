@@ -1404,38 +1404,38 @@ fn empty_constructors_are_empty_literals() {
 // List writes stored the value at its own width, not the element's (#123)
 // ---------------------------------------------------------------------------
 
-/// An int written into a collection whose elements are read as floats is
-/// widened to the slot's width. Every write path stored whatever `emit_expr`
-/// produced, so a 4-byte integer landed in an 8-byte float slot and the
-/// element read back as 1.5e-323 (`append`, `extend`) or 1.0000000000000007
-/// (`insert`, item assignment, which overwrote the slot's low half).
+/// Every write into a float collection stores the full f64. A 4-byte integer
+/// once landed in an 8-byte float slot and read back as 1.5e-323 (`append`,
+/// `extend`) or 1.0000000000000007 (`insert`, item assignment, which overwrote
+/// the slot's low half). An int written there is refused now (CPython keeps
+/// the int), so the floats are what reach each write path.
 #[test]
-fn writes_into_a_float_collection_widen_the_value() {
+fn writes_into_a_float_collection_store_the_value() {
     let src = "from typing import Dict, List, Set\n\
                \n\
                def by_append() -> float:\n\
                \x20   xs: List[float] = [1.0, 2.0]\n\
-               \x20   xs.append(3)\n\
+               \x20   xs.append(3.0)\n\
                \x20   return xs[2]\n\
                \n\
                def by_insert() -> float:\n\
                \x20   xs: List[float] = [10.0]\n\
-               \x20   xs.insert(0, 4)\n\
+               \x20   xs.insert(0, 4.0)\n\
                \x20   return xs[0]\n\
                \n\
                def by_subscript() -> float:\n\
                \x20   xs: List[float] = [1.0, 2.0]\n\
-               \x20   xs[0] = 3\n\
+               \x20   xs[0] = 3.0\n\
                \x20   return xs[0]\n\
                \n\
                def by_dict_value() -> float:\n\
                \x20   d: Dict[int, float] = {1: 1.0}\n\
-               \x20   d[2] = 3\n\
+               \x20   d[2] = 3.0\n\
                \x20   return d[2]\n\
                \n\
                def by_set_add() -> int:\n\
                \x20   s: Set[float] = {1.0}\n\
-               \x20   s.add(3)\n\
+               \x20   s.add(3.0)\n\
                \x20   if 3.0 in s:\n\
                \x20       return 1\n\
                \x20   return 0\n";
@@ -1444,39 +1444,43 @@ fn writes_into_a_float_collection_widen_the_value() {
     assert_eq!(call_f64(src, "by_subscript"), 3.0);
     assert_eq!(call_f64(src, "by_dict_value"), 3.0);
     assert_eq!(call_i32(src, "by_set_add"), 1);
+    for (write, int) in [
+        ("xs.append(3.0)", "xs.append(3)"),
+        ("xs.insert(0, 4.0)", "xs.insert(0, 4)"),
+        ("xs[0] = 3.0", "xs[0] = 3"),
+        ("d[2] = 3.0", "d[2] = 3"),
+        ("s.add(3.0)", "s.add(3)"),
+    ] {
+        let err = try_compile(&src.replace(write, int)).expect_err(int);
+        assert!(
+            err.contains("is stored where 'float' is declared"),
+            "{int}: {err}"
+        );
+    }
 }
 
-/// The widening reaches a value that arrives through a variable or a call, not
-/// only a literal. The type hint alone does not: it is consumed by constants
-/// and arithmetic, so an int that passed through a local came out an int
-/// whatever the destination asked for. An unannotated local now takes `int`
-/// from the value assigned to it (both live in the same i32 slot, so the local
-/// layout is unchanged), and the conversion happens at the write.
+/// An int that reaches a float collection through a local, a call, or a
+/// parameter is refused, as a literal is. Once it was stored at an int's
+/// width: an unannotated local was typed only from its annotation, so the
+/// value came out an int whatever the destination asked for.
 #[test]
-fn widening_reaches_values_that_arrive_through_a_variable() {
-    let src = "from typing import List\n\
-               \n\
-               def plain(n: int) -> int:\n\
-               \x20   return n\n\
-               \n\
-               def through_a_local() -> float:\n\
-               \x20   n = 3\n\
-               \x20   xs: List[float] = [1.0]\n\
-               \x20   xs.append(n)\n\
-               \x20   return xs[1]\n\
-               \n\
-               def through_a_call() -> float:\n\
-               \x20   xs: List[float] = [1.0]\n\
-               \x20   xs.append(plain(4))\n\
-               \x20   return xs[1]\n\
-               \n\
-               def through_a_parameter(n: int) -> float:\n\
-               \x20   xs: List[float] = [1.0]\n\
-               \x20   xs[0] = n\n\
-               \x20   return xs[0]\n";
-    assert_eq!(call_f64(src, "through_a_local"), 3.0);
-    assert_eq!(call_f64(src, "through_a_call"), 4.0);
-    assert_eq!(call_i32_1(src, "plain", 5), 5);
+fn an_int_arriving_through_a_variable_is_refused_by_a_float_collection() {
+    let header = "from typing import List\n\ndef plain(n: int) -> int:\n    return n\n\n";
+    for body in [
+        "def f() -> float:\n    n = 3\n    xs: List[float] = [1.0]\n    xs.append(n)\n    return xs[1]\n",
+        "def f() -> float:\n    xs: List[float] = [1.0]\n    xs.append(plain(4))\n    return xs[1]\n",
+        "def f(n: int) -> float:\n    xs: List[float] = [1.0]\n    xs[0] = n\n    return xs[0]\n",
+    ] {
+        let err = try_compile(&format!("{header}{body}")).expect_err(body);
+        assert!(
+            err.contains("an int is stored where 'float' is declared"),
+            "{body}: {err}"
+        );
+    }
+    let converted = format!(
+        "{header}def f() -> float:\n    n = 3\n    xs: List[float] = [1.0]\n    xs.append(float(n))\n    return xs[1]\n"
+    );
+    assert_eq!(call_f64(&converted, "f"), 3.0);
 }
 
 /// A write the compiler cannot make good on is refused rather than stored at
@@ -4549,7 +4553,7 @@ fn dict_get_keeps_its_operands_and_width() {
 
         def float_value() -> float:
             d: Dict[str, float] = {"a": 1.5}
-            return d.get("b", 2) + d.get("a", 0.0)
+            return d.get("b", 2.0) + d.get("a", 0.0)
 
         def str_value() -> int:
             d: Dict[str, str] = {"a": "hello"}
@@ -4593,10 +4597,200 @@ fn collections_of_the_wrong_element_type_are_refused() {
     }
 }
 
-/// An int passed to a float parameter is widened. The module failed
-/// validation, blamed on code generation.
+/// A scalar stored where another kind is declared is refused, since the place
+/// is read as what it declares. An int passed to `def g(s: Optional[str])` was
+/// read as a string offset and `print(s)` printed an empty line, `x = 5` then
+/// `x = "a"` printed the string's offset (21), and a str passed to an `int`
+/// parameter its offset too. CPython keeps each value whatever the annotation
+/// says, printing 5, a, and x.
 #[test]
-fn an_int_argument_widens_to_a_float_parameter() {
+fn scalars_of_another_kind_than_declared_are_refused() {
+    let header = "from typing import Optional\n\nclass C:\n    def m(self, s: str) -> None:\n        print(s)\n\nclass P:\n    def __init__(self, name: str) -> None:\n        self.name = name\n\ndef g(s: Optional[str]) -> None:\n    print(s)\n\ndef h(s: str) -> None:\n    print(s)\n\ndef i(n: int) -> None:\n    print(n)\n\ndef b(t: bytes) -> None:\n    print(t)\n\ndef f() -> None:\n";
+    let cases = [
+        (
+            "g(5)",
+            "argument 1 of g() is a 'int', where 'Optional[str]' is declared",
+        ),
+        (
+            "g(True)",
+            "argument 1 of g() is a 'bool', where 'Optional[str]' is declared",
+        ),
+        (
+            "h(5)",
+            "argument 1 of h() is a 'int', where 'str' is declared",
+        ),
+        (
+            "h(b\"x\")",
+            "argument 1 of h() is a 'bytes', where 'str' is declared",
+        ),
+        (
+            "i(\"x\")",
+            "argument 1 of i() is a 'str', where 'int' is declared",
+        ),
+        (
+            "b(3)",
+            "argument 1 of b() is a 'int', where 'bytes' is declared",
+        ),
+        (
+            "C().m(5)",
+            "argument 1 of C.m() is a 'int', where 'str' is declared",
+        ),
+        (
+            "C().m(2.5)",
+            "argument 1 of C.m() is a 'float', where 'str' is declared",
+        ),
+        (
+            "P(9)",
+            "argument 1 of P() is a 'int', where 'str' is declared",
+        ),
+        (
+            "fn = h\n    fn(5)",
+            "argument 1 to 'fn' is a 'int', where 'str' is declared",
+        ),
+        (
+            "v: str = 5",
+            "the value assigned to 'v' is a 'int', where 'str' is declared",
+        ),
+        (
+            "v: Optional[str] = 5",
+            "the value assigned to 'v' is a 'int', where 'Optional[str]' is declared",
+        ),
+        (
+            "x = 5\n    x = \"a\"\n    print(x)",
+            "the value assigned to 'x' is a 'str'",
+        ),
+    ];
+    for (body, needle) in cases {
+        let src = format!("{header}    {body}\n");
+        let err = try_compile(&src).expect_err(body);
+        assert!(
+            err.contains(needle),
+            "expected `{needle}` for `{body}` in: {err}"
+        );
+    }
+
+    // A field is typed by what its class stores in it.
+    let field = "class P:\n    def __init__(self) -> None:\n        self.name: str = 5\n";
+    let err = try_compile(field).expect_err("a field");
+    assert!(
+        err.contains("the value assigned to '.name' is a 'int', where 'str' is declared"),
+        "{err}"
+    );
+
+    // What does fit still runs: None or a str into an optional string, an int
+    // into an optional int, a string rebinding a local that started as None.
+    let fits = dedent(
+        r#"
+        from typing import Optional
+
+        def g(s: Optional[str]) -> None:
+            print(s)
+
+        def k(n: Optional[int]) -> None:
+            print(n)
+
+        if __name__ == "__main__":
+            g(None)
+            g("a")
+            k(3)
+            k(None)
+            x = None
+            x = "b"
+            print(x)
+        "#,
+    );
+    assert_eq!(run_main(&fits, "", &[]).stdout, "None\na\n3\nNone\nb\n");
+}
+
+/// An int or bool stored where a float is declared, or a bool where an int is,
+/// is refused: the place holds the declared kind, so it printed `5.0` for
+/// `f(5)` with `x: float`, `0.0` for `x: float = 0`, `[2.0]` for an int
+/// appended to a `list[float]`, and `1` for `True` passed to an `int`
+/// parameter, where CPython keeps the value and prints 5, 0, [2], and True.
+/// Where only the number is used (a comparison, arithmetic, a `math` function,
+/// a `timedelta`), the int converts with CPython's answer. A module constant
+/// annotated `float` and given an int failed validation, and one annotated
+/// `Optional[int]` printed its cell's address (65536 for 3).
+#[test]
+fn a_number_stored_where_another_kind_is_declared_is_refused() {
+    let header = "from typing import List, Optional\n\nclass K:\n    def __init__(self) -> None:\n        self.x = 0.5\n\ndef f(x: float) -> None:\n    print(x)\n\ndef i(n: int) -> None:\n    print(n)\n\ndef g() -> None:\n";
+    let cases = [
+        ("f(5)", "the int 5 is stored where 'float' is declared"),
+        (
+            "n = 3\n    f(n)",
+            "an int is stored where 'float' is declared",
+        ),
+        ("f(True)", "a bool is stored where 'float' is declared"),
+        ("i(True)", "a bool is stored where 'int' is declared"),
+        (
+            "x: float = 0",
+            "the int 0 is stored where 'float' is declared",
+        ),
+        (
+            "o: Optional[float] = 3",
+            "is stored where 'Optional[float]' is declared",
+        ),
+        (
+            "xs: List[float] = []\n    xs.append(2)",
+            "the int 2 is stored where 'float' is declared",
+        ),
+        (
+            "n = 0\n    n = True",
+            "a bool is stored where 'int' is declared",
+        ),
+        (
+            "k = K()\n    k.x = 1",
+            "the int 1 is stored where 'float' is declared",
+        ),
+    ];
+    for (body, needle) in cases {
+        let src = format!("{header}    {body}\n");
+        let err = try_compile(&src).expect_err(body);
+        assert!(
+            err.contains(needle),
+            "expected `{needle}` for `{body}` in: {err}"
+        );
+    }
+    let returned = "def r() -> float:\n    return 1\n";
+    let err = try_compile(returned).expect_err("a return");
+    assert!(
+        err.contains("the int 1 is stored where 'float' is declared"),
+        "{err}"
+    );
+    let constant = "RATE: float = 2\n\ndef r() -> float:\n    return RATE\n";
+    let err = try_compile(constant).expect_err("a module constant");
+    assert!(
+        err.contains("module-level 'RATE' is declared 'float' and its value is a 'int'"),
+        "{err}"
+    );
+
+    let numeric = dedent(
+        r#"
+        import math
+        from datetime import timedelta
+        from typing import Optional
+
+        LIMIT: Optional[int] = 3
+
+        if __name__ == "__main__":
+            x = 2.5
+            print(x > 1, 1 < x, x == 2, x * 2, 3 - x, x / 2, math.sqrt(9), math.pow(2, 3))
+            print(repr(timedelta(days=1, hours=2)), timedelta(hours=1) * 2, LIMIT)
+            print(float(3), int(2.5), True + 1)
+        "#,
+    );
+    assert_eq!(
+        run_main(&numeric, "", &[]).stdout,
+        "True True False 5.0 0.5 1.25 3.0 8.0\ndatetime.timedelta(days=1, seconds=7200) 2:00:00 3\n3.0 2 2\n"
+    );
+}
+
+/// An int passed to a float parameter is refused, since the parameter would
+/// hold it as a float where CPython keeps the int (`g(1)` returning `x` gives
+/// 1 there, not 1.0). Passed as floats, the arguments compute as CPython's do.
+/// The int argument once failed validation, blamed on code generation.
+#[test]
+fn an_int_argument_to_a_float_parameter_is_refused() {
     let src = dedent(
         r#"
         def g(x: float) -> float:
@@ -4604,10 +4798,21 @@ fn an_int_argument_widens_to_a_float_parameter() {
 
         def f() -> float:
             n = 3
-            return g(1) + g(n)
+            return g(1.0) + g(float(n))
         "#,
     );
     assert_eq!(call_f64(&src, "f"), 8.0);
+    for (call, needle) in [
+        ("g(1)", "the int 1 is stored where 'float' is declared"),
+        ("g(n)", "an int is stored where 'float' is declared"),
+    ] {
+        let refused = src.replace("g(1.0) + g(float(n))", call);
+        let err = try_compile(&refused).expect_err(call);
+        assert!(
+            err.contains(needle),
+            "expected `{needle}` for `{call}` in: {err}"
+        );
+    }
 }
 
 /// A `for` loop over a set walked its hash table as a list, so the loop bound
@@ -4981,7 +5186,7 @@ fn method_defaults_and_generators_over_dicts() {
     assert_eq!(call_str(&src, "f"), "xxxxxxxy20[5, 7]['a', 'b']");
 }
 
-/// Constructor arguments widen a computed int for a float parameter, a class
+/// Constructor arguments take a negative float for a float parameter, a class
 /// variable's call gets its defaults and keywords, `format()` and an f-string
 /// spec call `__format__`, a class variable read through its class is typed,
 /// a negative keyword argument may be written out of order, and a long `+`
@@ -5013,7 +5218,7 @@ fn constructor_arguments_class_variables_and_format() {
 
 
         def g() -> str:
-            p = P(-5)
+            p = P(-5.0)
             s = "a" + "b" + "c" + "d" + "e" + "f" + "g" + "h" + "i" + "j" + "k" + "l" + "m" + "n" + "o" + "p" + "q" + "r" + "s" + "t" + "u" + "v" + "w" + "x" + "y" + "z" + "0" + "1" + "2" + "3" + "4" + "5"
             return " ".join([str(p.total()), f"{p:>8}", format(p, "x"), str(Q.origin.total()),
                              Q.named.label, str(f(b=-1, a=2)), s])

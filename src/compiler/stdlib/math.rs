@@ -451,6 +451,7 @@ fn emit_float_arg(
     ctx: &CompilationContext,
     memory_layout: &MemoryLayout,
 ) -> bool {
+    ctx.numeric_operand.set(true);
     let ty = emit_expr(arg, func, ctx, memory_layout, Some(&IRType::Float));
     match ty {
         IRType::Float => true,

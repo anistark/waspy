@@ -431,7 +431,9 @@ fn lower_module(ast: &Suite) -> Result<IRModule> {
     module.memory_layout = memory_layout;
 
     // `logging` and `re` first (logging names records' functions as the
-    // program wrote them), then user decorators (they rewrite which function
+    // program wrote them), `json`'s classes (before keyword placement, which
+    // its constructors' options reach in the form the fields hold), then
+    // user decorators (they rewrite which function
     // a name is), metaclasses (specialized per class they make), nested
     // functions, `functools.partial` over them, `datetime`'s classes, keyword
     // placement, the context-manager protocol (so a `with` in a generator is
@@ -444,6 +446,7 @@ fn lower_module(ast: &Suite) -> Result<IRModule> {
     // instantiation, call-site parameter defaults).
     crate::ir::lower_logging(&mut module)?;
     crate::ir::lower_re(&mut module)?;
+    crate::ir::lower_json(&mut module)?;
     crate::ir::apply_user_decorators(&mut module)?;
     crate::ir::apply_metaclasses(&mut module)?;
     crate::ir::finalize::lift_nested_functions(&mut module)?;
@@ -2503,7 +2506,9 @@ fn type_annotation_to_ir_type(expr: &Expr) -> Result<IRType> {
         },
         // `datetime.date`: a module's class, named through the module.
         Expr::Attribute(attr) => match &*attr.value {
-            Expr::Name(module) if matches!(module.id.as_str(), "datetime" | "logging" | "re") => {
+            Expr::Name(module)
+                if matches!(module.id.as_str(), "datetime" | "json" | "logging" | "re") =>
+            {
                 Ok(IRType::Class(format!("{}.{}", module.id, attr.attr)))
             }
             Expr::Name(module) if matches!(module.id.as_str(), "collections" | "typing") => {

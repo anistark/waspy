@@ -383,7 +383,7 @@ fn conditional_expressions() {
 
         def widened() -> float:
             n = 3
-            return n if n > 5 else 0.5
+            return float(n) if n > 5 else 0.5
 
         def fact(n: int) -> int:
             return 1 if n <= 1 else n * fact(n - 1)
