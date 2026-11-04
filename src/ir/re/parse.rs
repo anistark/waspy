@@ -1,6 +1,7 @@
-//! A port of CPython's `re/_parser.py` (Python 3.13) for str patterns: the
-//! pattern parsed into the same nodes, with the same `re.error` messages and
-//! positions, which the compiler reports where CPython would raise them.
+//! A port of CPython's `re/_parser.py` (Python 3.13): the pattern parsed into
+//! the same nodes, with the same `re.error` messages and positions, which the
+//! compiler reports where CPython would raise them. A bytes pattern is read
+//! as its latin-1 decoding, as CPython's tokenizer reads it.
 
 use std::collections::HashMap;
 
@@ -121,15 +122,18 @@ pub type Error = String;
 /// The tokenizer: a character, or a backslash and the character after it.
 struct Source<'a> {
     pattern: &'a str,
+    /// A str pattern (not bytes): `\u`, `\U`, and `\N` are escapes.
+    istext: bool,
     chars: Vec<char>,
     index: usize,
     next: Option<String>,
 }
 
 impl<'a> Source<'a> {
-    fn new(pattern: &'a str) -> Result<Source<'a>, Error> {
+    fn new(pattern: &'a str, istext: bool) -> Result<Source<'a>, Error> {
         let mut s = Source {
             pattern,
+            istext,
             chars: pattern.chars().collect(),
             index: 0,
             next: None,
@@ -227,10 +231,21 @@ impl<'a> Source<'a> {
         self.advance()
     }
     fn error(&self, msg: &str, offset: usize) -> Error {
-        error_message(msg, self.pattern, self.tell().saturating_sub(offset))
+        // A bytes pattern's message is encoded with backslashreplace.
+        let msg = if self.istext {
+            msg.to_string()
+        } else {
+            msg.chars()
+                .map(|c| match c as u32 {
+                    n if n < 0x80 => c.to_string(),
+                    n => format!("\\x{n:02x}"),
+                })
+                .collect()
+        };
+        error_message(&msg, self.pattern, self.tell().saturating_sub(offset))
     }
     fn checkgroupname(&self, name: &str, offset: usize) -> Result<(), Error> {
-        if !is_identifier(name) {
+        if !is_identifier(name) || !(self.istext || name.is_ascii()) {
             return Err(self.error(
                 &format!("bad character in group name {}", py_repr(name)),
                 name.chars().count() + offset,
@@ -387,6 +402,22 @@ fn hex_escape(source: &mut Source, escape: &str, n: usize) -> Result<u32, Error>
     Ok(c)
 }
 
+/// `\N{name}`: the character `unicodedata.lookup()` finds by that name.
+fn named_escape(source: &mut Source) -> Result<u32, Error> {
+    if !source.matches("{")? {
+        return Err(source.error("missing {", 0));
+    }
+    let name = source.getuntil("}", "character name")?;
+    crate::core::unicode::lookup_name(&name)
+        .map(|c| c as u32)
+        .ok_or_else(|| {
+            source.error(
+                &format!("undefined character name {}", py_repr(&name)),
+                name.chars().count() + 4,
+            )
+        })
+}
+
 fn class_escape(source: &mut Source, escape: &str) -> Result<SetItem, Error> {
     if let Some(c) = escape_literal(escape) {
         return Ok(SetItem::Literal(c));
@@ -397,14 +428,9 @@ fn class_escape(source: &mut Source, escape: &str) -> Result<SetItem, Error> {
     let c = escape.chars().nth(1).expect("an escape");
     match c {
         'x' => return Ok(SetItem::Literal(hex_escape(source, escape, 2)?)),
-        'u' => return Ok(SetItem::Literal(hex_escape(source, escape, 4)?)),
-        'U' => return Ok(SetItem::Literal(hex_escape(source, escape, 8)?)),
-        'N' => {
-            return Err(source.error(
-                "\\N{...} named characters are not supported by this compiler",
-                2,
-            ))
-        }
+        'u' if source.istext => return Ok(SetItem::Literal(hex_escape(source, escape, 4)?)),
+        'U' if source.istext => return Ok(SetItem::Literal(hex_escape(source, escape, 8)?)),
+        'N' if source.istext => return Ok(SetItem::Literal(named_escape(source)?)),
         c if OCTDIGITS.contains(c) => {
             let more = source.getwhile(2, OCTDIGITS)?;
             let full = format!("{escape}{more}");
@@ -437,14 +463,9 @@ fn escape(source: &mut Source, escape: &str, state: &State) -> Result<Node, Erro
     let c = escape.chars().nth(1).expect("an escape");
     match c {
         'x' => return Ok(Node::Literal(hex_escape(source, escape, 2)?)),
-        'u' => return Ok(Node::Literal(hex_escape(source, escape, 4)?)),
-        'U' => return Ok(Node::Literal(hex_escape(source, escape, 8)?)),
-        'N' => {
-            return Err(source.error(
-                "\\N{...} named characters are not supported by this compiler",
-                2,
-            ))
-        }
+        'u' if source.istext => return Ok(Node::Literal(hex_escape(source, escape, 4)?)),
+        'U' if source.istext => return Ok(Node::Literal(hex_escape(source, escape, 8)?)),
+        'N' if source.istext => return Ok(Node::Literal(named_escape(source)?)),
         '0' => {
             let more = source.getwhile(2, OCTDIGITS)?;
             let v = u32::from_str_radix(&format!("0{more}"), 8).expect("octal");
@@ -616,9 +637,15 @@ fn parse_flags(
     if c != "-" {
         loop {
             let flag = flag_of(&c).expect("a flag");
-            if c == "L" {
+            if source.istext && c == "L" {
                 return Err(source.error(
                     "bad inline flags: cannot use 'L' flag with a str pattern",
+                    0,
+                ));
+            }
+            if !source.istext && c == "u" {
+                return Err(source.error(
+                    "bad inline flags: cannot use 'u' flag with a bytes pattern",
                     0,
                 ));
             }
@@ -1162,9 +1189,10 @@ fn parse(
     Ok(unpacked)
 }
 
-/// Parse a str pattern under `flags`, as `re.compile` does.
-pub fn parse_pattern(pattern: &str, flags: u32) -> Result<Parsed, Error> {
-    let mut source = Source::new(pattern)?;
+/// Parse a pattern under `flags`, as `re.compile` does: a str pattern, or a
+/// bytes one (`istext` false) given as its latin-1 decoding.
+pub fn parse_pattern(pattern: &str, flags: u32, istext: bool) -> Result<Parsed, Error> {
+    let mut source = Source::new(pattern, istext)?;
     let mut state = State {
         flags,
         groupdict: Vec::new(),
@@ -1173,15 +1201,31 @@ pub fn parse_pattern(pattern: &str, flags: u32) -> Result<Parsed, Error> {
         grouprefpos: HashMap::new(),
     };
     let nodes = parse_sub(&mut source, &mut state, flags & FLAG_VERBOSE != 0, 0)?;
-    // fix_flags, for a str pattern.
+    // fix_flags.
     let mut flags = state.flags;
-    if flags & FLAG_LOCALE != 0 {
-        return Err("ValueError: cannot use LOCALE flag with a str pattern".to_string());
-    }
-    if flags & FLAG_ASCII == 0 {
-        flags |= FLAG_UNICODE;
-    } else if flags & FLAG_UNICODE != 0 {
-        return Err("ValueError: ASCII and UNICODE flags are incompatible".to_string());
+    if istext {
+        if flags & FLAG_LOCALE != 0 {
+            return Err("ValueError: cannot use LOCALE flag with a str pattern".to_string());
+        }
+        if flags & FLAG_ASCII == 0 {
+            flags |= FLAG_UNICODE;
+        } else if flags & FLAG_UNICODE != 0 {
+            return Err("ValueError: ASCII and UNICODE flags are incompatible".to_string());
+        }
+    } else {
+        if flags & FLAG_UNICODE != 0 {
+            return Err("ValueError: cannot use UNICODE flag with a bytes pattern".to_string());
+        }
+        if flags & FLAG_LOCALE != 0 && flags & FLAG_ASCII != 0 {
+            return Err("ValueError: ASCII and LOCALE flags are incompatible".to_string());
+        }
+        if flags & FLAG_LOCALE != 0 {
+            return Err(
+                "unsupported: re.LOCALE matches a bytes pattern by the host's locale, which \
+                 is not supported. Hint: leave it out"
+                    .to_string(),
+            );
+        }
     }
     if source.next.is_some() {
         return Err(source.error("unbalanced parenthesis", 0));

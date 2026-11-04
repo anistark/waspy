@@ -121,6 +121,11 @@ def main():
     emit_ranges("TITLE", ranges(lambda c: unicodedata.category(c) == "Lt"))
     emit_ranges("CASED", ranges(cased))
     emit_ranges("CASE_IGNORABLE", ranges(case_ignorable))
+    # The characters unicodedata.lookup() finds by a name or an alias (the
+    # controls have only aliases), for \N{...} in a pattern.
+    emit_ranges("NAMED", ranges(
+        lambda c: unicodedata.name(c, None) is not None
+        or unicodedata.category(c) == "Cc"))
     emit_map("TO_UPPER", str.upper)
     emit_map("TO_LOWER", str.lower)
     emit_map("TO_TITLE", title_char)

@@ -9810,6 +9810,65 @@ fn emit_function_call_expr(
         return IRType::Unknown;
     }
 
+    // `next(it)` the program wrote (see `ir::generators`): the pull, then,
+    // if it raised StopIteration (the flag, global 1, is set), what CPython
+    // does with it. Inside a `try` it is raised, to be caught. Outside one, a
+    // user `__next__` passes it on to its caller as its own exhaustion (the
+    // flag stays set and it returns), a generator's body turns it into
+    // RuntimeError (PEP 479), and anywhere else it is raised.
+    if function_name == crate::ir::NEXT_FN && ctx.get_function_info(function_name).is_none() {
+        let Some(pull) = arguments.first() else {
+            ctx.report("next() takes an iterator");
+            func.instruction(&Instruction::I32Const(0));
+            return IRType::Unknown;
+        };
+        let ty = emit_expr(pull, func, ctx, memory_layout, None);
+        let in_try = !ctx.try_stack.is_empty();
+        let in_generator = ctx
+            .current_class
+            .as_deref()
+            .is_some_and(|c| c.starts_with("__Gen_"));
+        let in_next = ctx
+            .current_function
+            .as_deref()
+            .is_some_and(|f| f.ends_with(".__next__"));
+        func.instruction(&Instruction::GlobalGet(1));
+        func.instruction(&Instruction::If(BlockType::Empty));
+        if !in_try && in_next && !in_generator {
+            crate::compiler::function::emit_default_result(func, ctx);
+            func.instruction(&Instruction::Return);
+        } else {
+            func.instruction(&Instruction::I32Const(0));
+            func.instruction(&Instruction::GlobalSet(1));
+            if !in_try && in_generator {
+                crate::compiler::function::emit_raise(
+                    func,
+                    ctx,
+                    "RuntimeError",
+                    crate::compiler::exceptions::ExcArg::Text("generator raised StopIteration"),
+                    1,
+                );
+            } else {
+                ctx.enter_expr_blocks(1);
+                emit_expr(
+                    &IRExpr::FunctionCall {
+                        function_name: "StopIteration".to_string(),
+                        arguments: Vec::new(),
+                    },
+                    func,
+                    ctx,
+                    memory_layout,
+                    None,
+                );
+                ctx.exit_expr_blocks(1);
+                func.instruction(&Instruction::LocalSet(ctx.temp_local));
+                crate::compiler::exceptions::emit_raise_object(func, ctx, ctx.temp_local, 1);
+            }
+        }
+        func.instruction(&Instruction::End);
+        return ty;
+    }
+
     // Iterator-protocol intrinsic (see `ir::generators`): leave the
     // current StopIteration flag (global 1) on the stack and clear it.
     if function_name == crate::ir::STOP_CHECK_FN {
@@ -10178,6 +10237,78 @@ fn emit_function_call_expr(
                 ctx.release_held();
                 ctx.release_held();
                 IRType::Int
+            }
+            // `bytes()`, `bytes(n)` (n zero bytes), and `bytes(ints)` of a
+            // list or tuple of ints, each in range(0, 256).
+            "bytes" if arg_types.len() <= 1 => {
+                let from_ints = match arg_types.first() {
+                    None => None,
+                    Some(IRType::List(e) | IRType::VarTuple(e)) => {
+                        matches!(**e, IRType::Int | IRType::Bool).then_some(true)
+                    }
+                    Some(IRType::Int | IRType::Bool) => Some(false),
+                    Some(_) => {
+                        let t = arg_types[0].clone();
+                        ctx.report(format!(
+                            "bytes() of a '{}' is not supported. Hint: pass a list of ints",
+                            crate::compiler::operators::python_type_name(&t)
+                        ));
+                        if matches!(t, IRType::String | IRType::Bytes) {
+                            func.instruction(&Instruction::Drop);
+                        }
+                        func.instruction(&Instruction::Drop);
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::I32Const(0));
+                        return IRType::Bytes;
+                    }
+                };
+                match from_ints {
+                    None => {
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::Call(
+                            ctx.helper(crate::compiler::runtime::Helper::BytesZero),
+                        ));
+                    }
+                    Some(true) => {
+                        func.instruction(&Instruction::Call(
+                            ctx.helper(crate::compiler::runtime::Helper::BytesOf),
+                        ));
+                        func.instruction(&Instruction::LocalTee(ctx.temp_local));
+                        func.instruction(&Instruction::I32Eqz);
+                        func.instruction(&Instruction::If(BlockType::Empty));
+                        crate::compiler::function::emit_raise(
+                            func,
+                            ctx,
+                            "ValueError",
+                            crate::compiler::exceptions::ExcArg::Text(
+                                "bytes must be in range(0, 256)",
+                            ),
+                            1,
+                        );
+                        func.instruction(&Instruction::End);
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                    }
+                    Some(false) => {
+                        func.instruction(&Instruction::LocalTee(ctx.temp_local));
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::I32LtS);
+                        func.instruction(&Instruction::If(BlockType::Empty));
+                        crate::compiler::function::emit_raise(
+                            func,
+                            ctx,
+                            "ValueError",
+                            crate::compiler::exceptions::ExcArg::Text("negative count"),
+                            1,
+                        );
+                        func.instruction(&Instruction::End);
+                        func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                        func.instruction(&Instruction::Call(
+                            ctx.helper(crate::compiler::runtime::Helper::BytesZero),
+                        ));
+                    }
+                }
+                recover_str_pair(func, ctx);
+                IRType::Bytes
             }
             // `chr(i)`: the one-character string of a code point.
             "chr" if arg_types.len() == 1 => {
@@ -12377,6 +12508,35 @@ fn emit_method_call_expr(
     }
 
     match &object_type {
+        // `sep.join(parts)` over bytes: the pieces are laid out as strings
+        // are, so they join as strings do.
+        IRType::Bytes if method_name == "join" => {
+            let t = match arguments.as_slice() {
+                [parts] => emit_expr(parts, func, ctx, memory_layout, None),
+                _ => IRType::Unknown,
+            };
+            let joinable = match &t {
+                IRType::List(inner) | IRType::VarTuple(inner) => {
+                    matches!(**inner, IRType::Bytes | IRType::Unknown)
+                }
+                IRType::Tuple(items) => items
+                    .iter()
+                    .all(|e| matches!(e, IRType::Bytes | IRType::Unknown)),
+                _ => false,
+            };
+            if !joinable {
+                ctx.report(format!(
+                    "bytes.join() takes a list of bytes, got {}",
+                    crate::type_to_string(&t)
+                ));
+                func.instruction(&Instruction::Unreachable);
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32Const(0));
+                return IRType::Bytes;
+            }
+            emit_string_join(func, ctx);
+            IRType::Bytes
+        }
         IRType::String => {
             // String methods: upper(), lower(), split(sep), etc.
             match method_name.as_str() {

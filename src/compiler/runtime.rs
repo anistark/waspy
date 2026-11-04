@@ -109,6 +109,11 @@ pub enum Helper {
     CharIndex,
     /// `(s) -> list`: the list of a string's characters.
     StrChars,
+    /// `(list) -> b | 0`: the bytes of a list of ints, 0 when one is not in
+    /// range(0, 256).
+    BytesOf,
+    /// `(n) -> b`: `n` zero bytes.
+    BytesZero,
     /// `(fd, s) -> ()`: write a string to a file descriptor.
     WriteFd,
     /// `() -> str | 0`: a line of standard input (or all of it).
@@ -214,9 +219,12 @@ pub fn signature(helper: &Helper) -> (Vec<ValType>, Vec<ValType>) {
         Helper::UniMap(_) => (vec![I32, I32], vec![I32]),
         Helper::CaseRun(_) => (vec![I32, I32, I32], vec![I32]),
         Helper::FinalSigma | Helper::TrimAt { .. } => (vec![I32, I32, I32, I32], vec![I32]),
-        Helper::CharLen | Helper::StrChars | Helper::FirstCodePoint | Helper::FromCodePoint => {
-            (vec![I32], vec![I32])
-        }
+        Helper::CharLen
+        | Helper::StrChars
+        | Helper::FirstCodePoint
+        | Helper::FromCodePoint
+        | Helper::BytesOf
+        | Helper::BytesZero => (vec![I32], vec![I32]),
         Helper::WriteFd => (vec![I32, I32], vec![]),
         Helper::Start => (vec![], vec![]),
         Helper::FileOpen | Helper::FileRead | Helper::FileWrite => (vec![I32; 3], vec![I32]),
@@ -310,6 +318,8 @@ pub fn build(helper: &Helper, ctx: &CompilationContext) -> Function {
         Helper::CharOffset => crate::compiler::unicode::build_char_offset(ctx),
         Helper::CharIndex => crate::compiler::unicode::build_char_index(ctx),
         Helper::StrChars => crate::compiler::unicode::build_str_chars(ctx),
+        Helper::BytesOf => crate::compiler::unicode::build_bytes_of(ctx),
+        Helper::BytesZero => crate::compiler::unicode::build_bytes_zero(ctx),
         Helper::WriteFd => crate::compiler::host::build_write_fd(ctx),
         Helper::ReadLine {
             keep_newline,
@@ -1312,9 +1322,11 @@ fn unsupported_rendering(
         IRType::Optional(inner) => match inner.as_ref() {
             // None is the null pointer, which no instance or string is, and an
             // optional number is boxed.
-            IRType::Class(_) | IRType::String | IRType::List(_) | IRType::Dict(..) => {
-                str_unsupported(ctx, inner, repr)
-            }
+            IRType::Class(_)
+            | IRType::String
+            | IRType::Bytes
+            | IRType::List(_)
+            | IRType::Dict(..) => str_unsupported(ctx, inner, repr),
             IRType::Int | IRType::Bool | IRType::Float => None,
             other => Some(format!(
                 "an Optional[{}], whose None and whose 0 are the same word here",

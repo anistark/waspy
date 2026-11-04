@@ -49,6 +49,12 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 /// the flag.
 pub const STOP_CHECK_FN: &str = "__waspy_stop_check";
 
+/// Codegen intrinsic around a `next(it)` (or `it.__next__()`, `it.send(v)`)
+/// the program writes: the call, then, when it left the StopIteration flag
+/// set, what CPython does with the StopIteration it raised (see the
+/// intrinsic's code generation). A loop's own pulls are not wrapped.
+pub const NEXT_FN: &str = "__waspy_next";
+
 /// Prefix of the synthesized helpers that drain an iterator into a list for a
 /// comprehension (see `drain_function`). They are internal: not exported, and
 /// left out of function metadata.
@@ -299,6 +305,51 @@ pub fn transform_generators(module: &mut IRModule) -> Result<()> {
             _ => None,
         })
         .collect();
+    // A method name every class defining it declares `-> C` for one iterator
+    // class `C`: a call of it returns one, whatever the receiver. And each
+    // class's methods that return one, for a receiver whose class is known.
+    let mut iter_methods: HashMap<String, Option<String>> = HashMap::new();
+    let mut class_iter_methods: HashMap<(String, String), String> = HashMap::new();
+    for class in &module.classes {
+        for m in &class.methods {
+            let returns = match &m.return_type {
+                IRType::Class(c) if iter_facts.get(c).is_some_and(|f| f.has_next) => {
+                    Some(c.clone())
+                }
+                _ => None,
+            };
+            if let Some(c) = &returns {
+                class_iter_methods.insert((class.name.clone(), m.name.clone()), c.clone());
+            }
+            iter_methods
+                .entry(m.name.clone())
+                .and_modify(|seen| {
+                    if *seen != returns {
+                        *seen = None;
+                    }
+                })
+                .or_insert(returns);
+        }
+    }
+    let iter_methods: HashMap<String, String> = iter_methods
+        .into_iter()
+        .filter_map(|(m, c)| Some((m, c?)))
+        .collect();
+    // The declared classes of module variables and of class variables, the
+    // receivers a method call may name without a local.
+    let mut declared: HashMap<String, String> = HashMap::new();
+    for var in &module.variables {
+        if let Some(IRType::Class(c)) = &var.var_type {
+            declared.insert(var.name.clone(), c.clone());
+        }
+    }
+    for class in &module.classes {
+        for var in &class.class_vars {
+            if let Some(IRType::Class(c)) = &var.var_type {
+                declared.insert(format!("{}.{}", class.name, var.name), c.clone());
+            }
+        }
+    }
     let mut drains = BTreeSet::new();
     let mut decides = BTreeSet::new();
     let mut errors = Vec::new();
@@ -306,6 +357,9 @@ pub fn transform_generators(module: &mut IRModule) -> Result<()> {
         let mut desugarer = Desugarer {
             gen_fns: &gen_classes,
             iter_fns: &iter_fns,
+            iter_methods: &iter_methods,
+            class_iter_methods: &class_iter_methods,
+            declared: &declared,
             yields: &yields,
             tuple_iters: HashMap::new(),
             facts: &iter_facts,
@@ -510,6 +564,14 @@ struct Desugarer<'a> {
     /// Functions declared to return an iterator class (a wrapper that checks
     /// its arguments and returns a generator), to that class.
     iter_fns: &'a HashMap<String, String>,
+    /// Methods declared to return an iterator class by every class that
+    /// defines them, to that class.
+    iter_methods: &'a HashMap<String, String>,
+    /// `(class, method)` declared to return an iterator class, to that class.
+    class_iter_methods: &'a HashMap<(String, String), String>,
+    /// Module variables and class variables (`Class.var`) declared as an
+    /// instance of a class, to the class.
+    declared: &'a HashMap<String, String>,
     /// What a generator class whose function declares it yields
     /// (`-> Iterator[Tuple[K, Group]]`).
     yields: &'a HashMap<String, IRType>,
@@ -575,6 +637,26 @@ impl Desugarer<'_> {
                 method_name,
                 ..
             } => {
+                let known = match &**object {
+                    IRExpr::Variable(n) | IRExpr::Param(n) => self
+                        .instances
+                        .get(n)
+                        .or_else(|| self.declared.get(n))
+                        .cloned(),
+                    IRExpr::Attribute { object, attribute } => match &**object {
+                        IRExpr::Variable(c) => {
+                            self.declared.get(&format!("{c}.{attribute}")).cloned()
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(class) = known.and_then(|c| self.method_iterator(&c, method_name)) {
+                    return Some(class);
+                }
+                if let Some(class) = self.iter_methods.get(method_name) {
+                    return Some(class.clone());
+                }
                 let receiver = match &**object {
                     IRExpr::Variable(n) | IRExpr::Param(n) => self.instances.get(n)?.clone(),
                     IRExpr::FunctionCall { function_name, .. }
@@ -589,6 +671,28 @@ impl Desugarer<'_> {
             }
             _ => None,
         }
+    }
+
+    /// The iterator class `class.method` is declared to return, found on the
+    /// class or a base.
+    fn method_iterator(&self, class: &str, method: &str) -> Option<String> {
+        let mut pending = vec![class.to_string()];
+        let mut seen = HashSet::new();
+        while let Some(c) = pending.pop() {
+            if !seen.insert(c.clone()) {
+                continue;
+            }
+            if let Some(found) = self
+                .class_iter_methods
+                .get(&(c.clone(), method.to_string()))
+            {
+                return Some(found.clone());
+            }
+            if let Some(bases) = self.class_bases.get(&c) {
+                pending.extend(bases.iter().rev().cloned());
+            }
+        }
+        None
     }
 
     /// The generator function behind `class.method`, found on the class or
@@ -1004,6 +1108,28 @@ impl Desugarer<'_> {
             return;
         }
         for_each_child(expr, &mut |child| self.rewrite_expr(child, vars));
+        // A `next()` around a pull this pass wrapped already.
+        if let IRExpr::FunctionCall {
+            function_name,
+            arguments,
+        } = expr
+        {
+            if function_name == NEXT_FN {
+                if let [IRExpr::FunctionCall {
+                    function_name: inner,
+                    arguments: pull,
+                }] = arguments.as_mut_slice()
+                {
+                    if inner == NEXT_FN {
+                        *expr = IRExpr::FunctionCall {
+                            function_name: NEXT_FN.to_string(),
+                            arguments: std::mem::take(pull),
+                        };
+                        return;
+                    }
+                }
+            }
+        }
 
         // `len()` of an iterator is a TypeError in Python; it read the
         // iterator object's first word as a length (#133).
@@ -1057,6 +1183,8 @@ impl Desugarer<'_> {
                 if let Some(class) = self.iterator_class(&arguments[0], vars) {
                     let kind = if self.facts.get(&class).is_some_and(|f| f.synthetic) {
                         "generator".to_string()
+                    } else if class == "re._FindIter" || class == "re._BFindIter" {
+                        "callable_iterator".to_string()
                     } else {
                         class
                     };
@@ -1092,10 +1220,16 @@ impl Desugarer<'_> {
         }
         let mut call_args = vec![(**object).clone()];
         call_args.append(arguments);
-        let replacement = IRExpr::FunctionCall {
+        let mut replacement = IRExpr::FunctionCall {
             function_name: format!("{class}::{method_name}"),
             arguments: call_args,
         };
+        if matches!(method_name.as_str(), "__next__" | "send") {
+            replacement = IRExpr::FunctionCall {
+                function_name: NEXT_FN.to_string(),
+                arguments: vec![replacement],
+            };
+        }
         *expr = replacement;
     }
 }

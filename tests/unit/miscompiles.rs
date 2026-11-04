@@ -5515,3 +5515,196 @@ fn main_block_refusals() {
     let err = try_compile(returns).unwrap_err();
     assert!(err.contains("'return' outside a function"), "{err}");
 }
+
+/// `next()` of an exhausted iterator raises StopIteration (it answered 0):
+/// caught where a `try` catches it, ending the caller's iteration when a
+/// `__next__` calls it, and RuntimeError in a generator's body (PEP 479).
+#[test]
+fn next_raises_stop_iteration() {
+    let run = run_main(
+        &dedent(
+            r#"
+            class Count:
+                def __init__(self, n: int):
+                    self.i = 0
+                    self.n = n
+                def __iter__(self) -> "Count":
+                    return self
+                def __next__(self) -> int:
+                    if self.i >= self.n:
+                        raise StopIteration
+                    self.i += 1
+                    return self.i
+
+            class Wrap:
+                def __init__(self, inner: Count):
+                    self.inner = inner
+                def __iter__(self) -> "Wrap":
+                    return self
+                def __next__(self) -> int:
+                    return next(self.inner) * 10
+
+            class Safe:
+                def __init__(self, inner: Count):
+                    self.inner = inner
+                    self.done = False
+                def __iter__(self) -> "Safe":
+                    return self
+                def __next__(self) -> int:
+                    try:
+                        return next(self.inner)
+                    except StopIteration:
+                        if self.done:
+                            raise StopIteration
+                        self.done = True
+                        return -1
+
+            def pairs(c: Count):
+                while True:
+                    a = next(c)
+                    yield a
+
+            def careful(c: Count):
+                while True:
+                    try:
+                        a = next(c)
+                    except StopIteration:
+                        return
+                    yield a
+
+            if __name__ == "__main__":
+                print([x for x in Wrap(Count(3))])
+                print([x for x in Safe(Count(2))])
+                print(list(careful(Count(3))))
+                try:
+                    for x in pairs(Count(2)):
+                        print("got", x)
+                except RuntimeError as e:
+                    print("RuntimeError:", e)
+                c = Count(1)
+                print(next(c))
+                try:
+                    next(c)
+                except StopIteration as e:
+                    print("stop", repr(e), e.args)
+                print(type(careful(Count(0))))
+                g = careful(Count(0))
+                try:
+                    next(g)
+                except StopIteration:
+                    print("gen stop")
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(run.stderr, "");
+    assert_eq!(
+        run.stdout,
+        r#"[10, 20, 30]
+[1, 2, -1]
+[1, 2, 3]
+got 1
+got 2
+RuntimeError: generator raised StopIteration
+1
+stop StopIteration() ()
+<class 'generator'>
+gen stop
+"#
+    );
+}
+
+/// A type flag in a scoped group replaces the pattern's (`_combine_flags`): `(?u:\w)` in an ASCII pattern matches Unicode word characters. The ASCII flag was kept, so it matched ASCII ones.
+#[test]
+fn re_scoped_type_flags() {
+    let run = run_main(
+        &dedent(
+            r#"
+            import re
+
+            if __name__ == "__main__":
+                print(re.compile(r"(?a:\w)(\w)").findall("éé aé"))
+                print(re.compile(r"(?a)(?u:\w)+").findall("é1 x"))
+                print(re.compile(rb"(?a:\w)+").findall(b"ab"))
+                print(re.compile(r"(?i)(?a:\w)").findall("K\u212a"))
+                print(re.findall(r"(?a:\b)x", "éx"))
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(run.stderr, "");
+    assert_eq!(
+        run.stdout,
+        r#"['é']
+['é1', 'x']
+[b'ab']
+['K']
+['x']
+"#
+    );
+}
+
+/// A closure passed where a parameter is declared `Callable[[...], R]` returns an `R`: `lambda m: m.group() + "!"` as `re.sub`'s `repl` was refused, since its result was typed with no classes in view, and one returning another type than `R` compiled and faulted, the result read as a string.
+#[test]
+fn a_lambda_result_is_typed_from_its_callable_parameter() {
+    let run = run_main(
+        &dedent(
+            r#"
+            import re
+            from typing import Callable
+
+            def apply(f: Callable[[int], str], x: int) -> str:
+                return f(x)
+
+            def twice(f: Callable[[str], str], s: str) -> str:
+                return f(f(s))
+
+            WORD = re.compile(r"[a-z]+")
+
+            def shout(s: str) -> str:
+                p = re.compile(r"[a-z]+")
+                return p.sub(lambda m: m.group().upper() + "!", s)
+
+            if __name__ == "__main__":
+                print(re.sub(r"\d+", lambda m: m.group() + "!", "1 22"))
+                print(re.compile(rb"\d+").sub(lambda m: m.group() + b"!", b"1 22"))
+                print(WORD.subn(lambda m: m.group().upper(), "ab 1 cd"))
+                print(apply(lambda n: str(n) + "?", 4))
+                print(twice(lambda s: s + s[0], "ab"))
+                print(shout("ab 1 cd"))
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(run.stderr, "");
+    assert_eq!(
+        run.stdout,
+        "1! 22!\nb'1! 22!'\n('AB 1 CD', 2)\n4?\nabaa\nAB! 1 CD!\n"
+    );
+
+    for body in [
+        r#"re.sub(r"\d+", lambda m: len(m.group()), "1 22")"#,
+        r#"apply(lambda n: n + 1, 4)"#,
+    ] {
+        let source = dedent(&format!(
+            r#"
+            import re
+            from typing import Callable
+
+            def apply(f: Callable[[int], str], x: int) -> str:
+                return f(x)
+
+            def run() -> str:
+                return {body}
+            "#
+        ));
+        let err = try_compile(&source).expect_err("a result that is not the declared one");
+        assert!(
+            err.contains("a 'int' is returned from a function declared to return 'str'"),
+            "{body}: {err}"
+        );
+    }
+}

@@ -2521,6 +2521,27 @@ fn type_annotation_to_ir_type(expr: &Expr) -> Result<IRType> {
             _ => Ok(IRType::Any),
         },
         Expr::Subscript(subscript) => {
+            // `re.Pattern[bytes]` and `Match[str]`: the class for that text,
+            // which the `re` pass names.
+            let re_class = match &*subscript.value {
+                Expr::Attribute(a)
+                    if matches!(&*a.value, Expr::Name(m) if m.id.as_str() == "re")
+                        && matches!(a.attr.as_str(), "Pattern" | "Match") =>
+                {
+                    Some(format!("re.{}", a.attr))
+                }
+                Expr::Name(n) if matches!(n.id.as_str(), "Pattern" | "Match") => {
+                    Some(n.id.to_string())
+                }
+                _ => None,
+            };
+            if let Some(class) = re_class {
+                return match type_annotation_to_ir_type(&subscript.slice)? {
+                    IRType::String => Ok(IRType::Class(class)),
+                    IRType::Bytes => Ok(IRType::Class(format!("{class}[bytes]"))),
+                    _ => Err(anyhow!("{class}[...] takes str or bytes")),
+                };
+            }
             // `Counter[str]`, `collections.deque[int]`, `typing.DefaultDict[str,
             // int]`: the class specialized by those types.
             let generic = match &*subscript.value {
@@ -4544,13 +4565,17 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                     }
 
                     // next(it) advances an iterator: lower to the protocol
-                    // method so the generator pass can dispatch it statically.
+                    // method so the generator pass can dispatch it statically,
+                    // inside the intrinsic that raises its StopIteration.
                     if function_name == "next" && call.args.len() == 1 {
                         let object = lower_expr(&call.args[0], memory_layout)?;
-                        return Ok(IRExpr::MethodCall {
-                            object: Box::new(object),
-                            method_name: "__next__".to_string(),
-                            arguments: Vec::new(),
+                        return Ok(IRExpr::FunctionCall {
+                            function_name: crate::ir::NEXT_FN.to_string(),
+                            arguments: vec![IRExpr::MethodCall {
+                                object: Box::new(object),
+                                method_name: "__next__".to_string(),
+                                arguments: Vec::new(),
+                            }],
                         });
                     }
 

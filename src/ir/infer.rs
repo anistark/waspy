@@ -94,6 +94,7 @@ impl Types {
                 }
                 match function_name.as_str() {
                     "str" | "repr" | "chr" | "input" => IRType::String,
+                    "bytes" => IRType::Bytes,
                     "int" | "len" | "ord" => IRType::Int,
                     "float" => IRType::Float,
                     "sorted" | "__sorted_desc" => match arguments.first() {

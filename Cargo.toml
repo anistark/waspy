@@ -39,6 +39,9 @@ serde_json = "1.0"
 chrono = "0.4"
 regex = "1.11"
 regex-syntax = "0.8"
+# Character names for `\N{...}` in re patterns (already a dependency of
+# rustpython-parser); filtered to CPython 3.13's Unicode 15.1.
+unicode_names2 = "1.3"
 
 [dev-dependencies]
 wasmi = "0.31"
