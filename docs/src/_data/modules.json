@@ -1181,7 +1181,19 @@
         "test": "stdlib::re_runtime"
       },
       {
-        "name": "re module: patterns computed at run time, bytes patterns, \\N{name} escapes, Pattern.groupindex, finditer as a lazy iterator (refused today)",
+        "name": "re module: Pattern.groupindex (a read-only mappingproxy), \\N{name} escapes (CPython 3.13's names and aliases), finditer as a lazy iterator (a callable_iterator)",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::re_groupindex_names_finditer"
+      },
+      {
+        "name": "re module: bytes patterns (matched by ASCII's classes and case, bytes groups, findall, split, sub, escape, re.Pattern[bytes] and re.Match[bytes])",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::re_bytes_patterns"
+      },
+      {
+        "name": "re module: patterns computed at run time (refused today)",
         "status": "todo"
       },
       {

@@ -1334,6 +1334,78 @@ pub(crate) fn build_str_chars(ctx: &CompilationContext) -> Function {
     f
 }
 
+/// `(list) -> b | 0`: `bytes(ints)`, or 0 for an int out of range(0, 256).
+pub(crate) fn build_bytes_of(ctx: &CompilationContext) -> Function {
+    use crate::compiler::context::{COLLECTION_DATA, COLLECTION_SLOT};
+    let mut f = function(&[ValType::I32; 5]);
+    let list = 0;
+    let (n, data, i, out, x) = (1, 2, 3, 4, 5);
+    emit!(
+        f,
+        I::LocalGet(list),
+        I::I32Load(w32(0)),
+        I::LocalSet(n),
+        I::LocalGet(list),
+        I::I32Load(w32(COLLECTION_DATA as u64)),
+        I::LocalSet(data)
+    );
+    alloc_string(&mut f, ctx, n, out);
+    emit!(
+        f,
+        I::Block(BlockType::Empty),
+        I::Loop(BlockType::Empty),
+        I::LocalGet(i),
+        I::LocalGet(n),
+        I::I32GeU,
+        I::BrIf(1),
+        I::LocalGet(data),
+        I::LocalGet(i),
+        I::I32Const(COLLECTION_SLOT as i32),
+        I::I32Mul,
+        I::I32Add,
+        I::I32Load(w32(0)),
+        I::LocalTee(x),
+        I::I32Const(255),
+        I::I32GtU,
+        I::If(BlockType::Empty),
+        I::I32Const(0),
+        I::Return,
+        I::End,
+        I::LocalGet(out),
+        I::LocalGet(i),
+        I::I32Add,
+        I::LocalGet(x),
+        I::I32Store8(byte()),
+        I::LocalGet(i),
+        I::I32Const(1),
+        I::I32Add,
+        I::LocalSet(i),
+        I::Br(0),
+        I::End,
+        I::End,
+        I::LocalGet(out),
+        I::End
+    );
+    f
+}
+
+/// `(n) -> b`: `n` zero bytes.
+pub(crate) fn build_bytes_zero(ctx: &CompilationContext) -> Function {
+    let mut f = function(&[ValType::I32; 1]);
+    let (n, out) = (0, 1);
+    alloc_string(&mut f, ctx, n, out);
+    emit!(
+        f,
+        I::LocalGet(out),
+        I::I32Const(0),
+        I::LocalGet(n),
+        I::MemoryFill(0),
+        I::LocalGet(out),
+        I::End
+    );
+    f
+}
+
 /// `(s) -> cp`: the code point of the string's first character, for `ord`.
 pub(crate) fn build_first_code_point() -> Function {
     let mut f = function(&[ValType::I32; 2]);

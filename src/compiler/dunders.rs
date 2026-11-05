@@ -2278,24 +2278,27 @@ fn rewrite_optional_text_compare(expr: &IRExpr, ctx: &CompilationContext) -> Opt
             right,
             op: IROp::Add,
         } => {
+            let bytes = |e: &IRExpr| matches!(infer_value_type(e, ctx), IRType::Bytes);
             if optional_text(left) && text(right) {
+                let message = if bytes(right) {
+                    "unsupported operand type(s) for +: 'NoneType' and 'bytes'"
+                } else {
+                    "unsupported operand type(s) for +: 'NoneType' and 'str'"
+                };
                 Some(IRExpr::BinaryOp {
-                    left: Box::new(some(
-                        left,
-                        "unsupported operand type(s) for +: 'NoneType' and 'str'",
-                        "TypeError",
-                    )),
+                    left: Box::new(some(left, message, "TypeError")),
                     right: right.clone(),
                     op: IROp::Add,
                 })
             } else if text(left) && optional_text(right) {
+                let message = if bytes(left) {
+                    "can't concat NoneType to bytes"
+                } else {
+                    "can only concatenate str (not \"NoneType\") to str"
+                };
                 Some(IRExpr::BinaryOp {
                     left: left.clone(),
-                    right: Box::new(some(
-                        right,
-                        "can only concatenate str (not \"NoneType\") to str",
-                        "TypeError",
-                    )),
+                    right: Box::new(some(right, message, "TypeError")),
                     op: IROp::Add,
                 })
             } else {

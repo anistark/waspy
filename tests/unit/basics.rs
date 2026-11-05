@@ -821,3 +821,44 @@ fn chained_comparison_over_a_call_is_refused() {
     .expect_err("a call in the middle of a chain is refused");
     assert!(err.contains("chained comparison"), "{err}");
 }
+
+/// `bytes()`, `bytes(n)`, and `bytes(ints)` (ValueError out of range), and `sep.join()` of bytes, which were refused.
+#[test]
+fn bytes_constructor_and_join() {
+    let run = run_main(
+        &dedent(
+            r#"
+            def build(xs: list[int]) -> bytes:
+                return bytes(xs)
+
+            if __name__ == "__main__":
+                print(bytes([72, 105]), bytes(), bytes(3), build([0, 255]))
+                print(b"-".join([b"a", b"bc", b""]), b"".join([]), b", ".join((b"x", b"y")))
+                parts: list[bytes] = []
+                for k in range(3):
+                    parts.append(bytes([97 + k]))
+                print(b"".join(parts), len(b"".join(parts)))
+                try:
+                    print(bytes([256]))
+                except ValueError as e:
+                    print("ValueError", e)
+                try:
+                    print(bytes(-1))
+                except ValueError as e:
+                    print("ValueError", e)
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(run.stderr, "");
+    assert_eq!(
+        run.stdout,
+        r#"b'Hi' b'' b'\x00\x00\x00' b'\x00\xff'
+b'a-bc-' b'' b'x, y'
+b'abc' 3
+ValueError bytes must be in range(0, 256)
+ValueError negative count
+"#
+    );
+}

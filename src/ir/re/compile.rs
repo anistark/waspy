@@ -224,7 +224,7 @@ impl Compiler {
 
     fn literal(&mut self, c: u32, flags: u32, negate: bool) {
         let ignore = flags & FLAG_IGNORECASE != 0;
-        let ascii = flags & FLAG_ASCII != 0;
+        let ascii = flags & FLAG_UNICODE == 0;
         if !ignore {
             self.emit(if negate { op::NOTCHAR } else { op::CHAR });
             self.emit(c as i32);
@@ -290,7 +290,7 @@ impl Compiler {
     /// IN_UNI_IGNORE.
     fn charset(&mut self, items: &[SetItem], flags: u32) {
         let ignore = flags & FLAG_IGNORECASE != 0;
-        let ascii = flags & FLAG_ASCII != 0;
+        let ascii = flags & FLAG_UNICODE == 0;
         let mut negate = false;
         let mut members: Vec<u32> = Vec::new();
         let mut ranges: Vec<(u32, u32)> = Vec::new();
@@ -372,7 +372,7 @@ impl Compiler {
             Node::At(a) => {
                 self.emit(op::AT);
                 let multiline = flags & FLAG_MULTILINE != 0;
-                let ascii = flags & FLAG_ASCII != 0;
+                let ascii = flags & FLAG_UNICODE == 0;
                 self.emit(match a {
                     At::Beginning if multiline => at::BEGINNING_LINE,
                     At::Beginning => at::BEGINNING,
@@ -415,7 +415,13 @@ impl Compiler {
                 del,
                 body,
             } => {
-                let inner = (flags | add) & !del;
+                // _combine_flags: a type flag added replaces the others.
+                let base = if add & (FLAG_ASCII | FLAG_LOCALE | FLAG_UNICODE) != 0 {
+                    flags & !(FLAG_ASCII | FLAG_LOCALE | FLAG_UNICODE)
+                } else {
+                    flags
+                };
+                let inner = (base | add) & !del;
                 if let Some(g) = group {
                     self.emit(op::SAVE);
                     self.emit((2 * g) as i32);
@@ -465,7 +471,7 @@ impl Compiler {
             }
             Node::GroupRef(g) => {
                 let ignore = flags & FLAG_IGNORECASE != 0;
-                let code = match (ignore, flags & FLAG_ASCII != 0) {
+                let code = match (ignore, flags & FLAG_UNICODE == 0) {
                     (false, _) => op::GROUPREF,
                     (true, true) => op::GROUPREF_IA,
                     (true, false) => {

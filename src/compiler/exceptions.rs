@@ -602,6 +602,22 @@ pub(crate) fn build_class_name(ctx: &CompilationContext, by_id: Option<bool>) ->
                 .split_once('.')
                 .map_or(name.as_str(), |(_, n)| n)
                 .to_string(),
+            // A generator's state class is CPython's `generator`.
+            Some(true) if name.starts_with("__Gen_") => "<class 'generator'>".to_string(),
+            _ if name.starts_with("__Gen_") => "generator".to_string(),
+            Some(true) if name == "re._FindIter" || name == "re._BFindIter" => {
+                "<class 'callable_iterator'>".to_string()
+            }
+            _ if name == "re._FindIter" || name == "re._BFindIter" => {
+                "callable_iterator".to_string()
+            }
+            // A bytes pattern's classes are CPython's Pattern and Match.
+            Some(true) if name.starts_with("re._BPattern") => "<class 're.Pattern'>".to_string(),
+            _ if name.starts_with("re._BPattern") => "Pattern".to_string(),
+            Some(true) if name == "re._BMatch" => "<class 're.Match'>".to_string(),
+            _ if name == "re._BMatch" => "Match".to_string(),
+            Some(true) if name == "re._GroupIndex" => "<class 'mappingproxy'>".to_string(),
+            _ if name == "re._GroupIndex" => "mappingproxy".to_string(),
             Some(true) if name == "PatternError" => "<class 're.PatternError'>".to_string(),
             Some(true) if name.starts_with("re._Pattern") => "<class 're.Pattern'>".to_string(),
             _ if name.starts_with("re._Pattern") => "Pattern".to_string(),

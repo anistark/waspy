@@ -245,6 +245,34 @@ fn cased_test(s: &str, this: Class, other: Class) -> bool {
     cased
 }
 
+/// Aliases Unicode 16.0 added (corrections of names CPython 3.13's Unicode
+/// 15.1 has), which `unicode_names2`'s 16.0 data finds and CPython does not.
+const ALIASES_AFTER_15_1: &[&str] = &[
+    "CUNEIFORM SIGN KALAM",
+    "BAMUM LETTER PHASE-A MAEMGBIEE",
+    "MENDE KIKAKUI SYLLABLE M172 MBO",
+    "MENDE KIKAKUI SYLLABLE M174 MBOO",
+];
+
+/// `unicodedata.lookup(name)` for a single character, as CPython 3.13 finds
+/// it: a character's name or alias, case-insensitively (the names of Hangul
+/// syllables and CJK unified ideographs, which it computes, only as written
+/// in capitals), or None.
+pub fn lookup_name(name: &str) -> Option<char> {
+    let upper = name.to_ascii_uppercase();
+    if ALIASES_AFTER_15_1.contains(&upper.as_str()) {
+        return None;
+    }
+    let computed = ["HANGUL SYLLABLE ", "CJK UNIFIED IDEOGRAPH-"];
+    if computed.iter().any(|p| upper.starts_with(p)) && upper != name {
+        return None;
+    }
+    let c = unicode_names2::character(name)?;
+    let cp = c as u32;
+    let i = t::NAMED.partition_point(|&(_, end)| end < cp);
+    (i < t::NAMED.len() && t::NAMED[i].0 <= cp).then_some(c)
+}
+
 /// `str.strip()` and its one-sided forms: whitespace, or the characters of
 /// `chars`, removed from the chosen ends.
 pub fn strip<'a>(s: &'a str, chars: Option<&str>, left: bool, right: bool) -> &'a str {
@@ -290,5 +318,24 @@ mod tests {
         assert!(Predicate::Numeric.test("½"));
         assert!(Predicate::Space.test("\u{a0}\u{1c}\u{3000}"));
         assert_eq!(strip("\u{1c} hi\u{a0}", None, true, true), "hi");
+    }
+
+    #[test]
+    fn names_match_cpython() {
+        assert_eq!(lookup_name("EM DASH"), Some('\u{2014}'));
+        assert_eq!(lookup_name("em dash"), Some('\u{2014}'));
+        assert_eq!(lookup_name("LINE FEED"), Some('\n'));
+        assert_eq!(lookup_name("CJK UNIFIED IDEOGRAPH-4E00"), Some('\u{4e00}'));
+        assert_eq!(lookup_name("HANGUL SYLLABLE GAG"), Some('\u{ac01}'));
+        assert_eq!(lookup_name("hangul syllable gag"), None);
+        assert_eq!(lookup_name("CJK UNIFIED IDEOGRAPH-4e00"), None);
+        // New in Unicode 16.0, which CPython 3.13 does not have.
+        assert_eq!(lookup_name("GARAY VOWEL SIGN A"), None);
+        assert_eq!(lookup_name("CUNEIFORM SIGN KALAM"), None);
+        assert_eq!(lookup_name("NO SUCH NAME"), None);
+        assert_eq!(
+            lookup_name("LATIN CAPITAL LETTER A WITH MACRON AND GRAVE"),
+            None
+        );
     }
 }

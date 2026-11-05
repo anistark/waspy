@@ -458,6 +458,29 @@ pub(crate) fn lookup_field(
     Some((offset, ty))
 }
 
+/// What reading `attribute` of an instance of `class` answers when it is a
+/// `@property`: its getter's declared result.
+pub(crate) fn property_type(
+    ctx: &CompilationContext,
+    class: &str,
+    attribute: &str,
+) -> Option<IRType> {
+    let ci = ctx.get_class_info(class)?;
+    if !matches!(
+        ci.method_kinds.get(attribute),
+        Some(crate::ir::MethodKind::PropertyGetter)
+    ) {
+        return None;
+    }
+    let owner = ci
+        .method_owner
+        .get(attribute)
+        .cloned()
+        .unwrap_or_else(|| class.to_string());
+    ctx.get_function_info(&format!("{owner}::{attribute}"))
+        .map(|f| f.return_type.clone())
+}
+
 /// Store instruction for a field of the given type (f64 for floats, i32 else).
 fn store_field_instr(ty: &IRType, offset: u64) -> Instruction<'static> {
     let mem = MemArg {
@@ -604,6 +627,7 @@ pub(crate) fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRTy
                     },
                     IRType::Class(class) => lookup_field(ctx, &class, attribute)
                         .map(|(_, t)| t)
+                        .or_else(|| property_type(ctx, &class, attribute))
                         .unwrap_or(IRType::Unknown),
                     // A class variable read through its class.
                     IRType::ClassRef(class) => {
@@ -615,6 +639,13 @@ pub(crate) fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRTy
                 }
             }),
         },
+        // A `next()` answers what its pull does.
+        IRExpr::FunctionCall {
+            function_name,
+            arguments,
+        } if function_name == crate::ir::NEXT_FN => arguments
+            .first()
+            .map_or(IRType::Unknown, |pull| infer_value_type(pull, ctx)),
         // An optional instance, checked for None, is the instance.
         IRExpr::FunctionCall {
             function_name,
@@ -732,6 +763,11 @@ pub(crate) fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRTy
                 Some(IRType::List(e)) => IRType::VarTuple(e),
                 _ => IRType::VarTuple(Box::new(IRType::Unknown)),
             }
+        }
+        IRExpr::FunctionCall { function_name, .. }
+            if function_name == "bytes" && ctx.get_function_info(function_name).is_none() =>
+        {
+            IRType::Bytes
         }
         // The builtins that answer a str.
         IRExpr::FunctionCall { function_name, .. }

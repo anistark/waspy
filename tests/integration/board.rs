@@ -3573,6 +3573,50 @@ mod stdlib {
         );
     }
 
+    /// re module: Pattern.groupindex (a read-only mappingproxy), \N{name} escapes (CPython 3.13's names and aliases), finditer as a lazy iterator (a callable_iterator)
+    #[test]
+    fn re_groupindex_names_finditer() {
+        check(
+            r#"
+            import re
+
+            DATE = re.compile(r"(?P<year>\d{4})-(?P<month>\d\d)")
+
+
+            def f() -> str:
+                gi = DATE.groupindex
+                parts = [str(gi), repr(gi), str(gi["month"]), str("year" in gi), str(list(gi.items()))]
+                parts.append(str(re.findall(r"\N{EM DASH}+|\N{line feed}", "a\u2014\u2014b\nc")))
+                it = re.finditer(r"\d+", "1 22 333")
+                parts.append(str(type(it)) + " " + next(it).group())
+                parts.append(str([m.group() for m in it]) + str(list(it)))
+                return " ".join(parts)
+        "#,
+            &[("f", Want::Str("{'year': 1, 'month': 2} mappingproxy({'year': 1, 'month': 2}) 2 True [('year', 1), ('month', 2)] ['——', '\\n'] <class 'callable_iterator'> 1 ['22', '333'][]"))],
+        );
+    }
+
+    /// re module: bytes patterns (matched by ASCII's classes and case, bytes groups, findall, split, sub, escape, re.Pattern[bytes] and re.Match[bytes])
+    #[test]
+    fn re_bytes_patterns() {
+        check(
+            r#"
+            import re
+
+            KV = re.compile(rb"(?P<k>\w+)=(?P<v>\w*)")
+
+
+            def f() -> str:
+                m = KV.search(b"-- a=1 b=")
+                parts = [str(m), str(m.groupdict()), str(KV.findall(b"x=1 y=")), str(re.split(rb"[,;]", b"a,b;c"))]
+                parts.append(str(KV.sub(rb"\g<v>:\g<k>", b"a=1,b=2")))
+                parts.append(str(re.findall(rb"(?i)\w+", b"Caf\xe9 X")) + str(re.escape(b"a.b")))
+                return " ".join(parts)
+        "#,
+            &[("f", Want::Str("<re.Match object; span=(3, 6), match=b'a=1'> {'k': b'a', 'v': b'1'} [(b'x', b'1'), (b'y', b'')] [b'a', b'b', b'c'] b'1:a,2:b' [b'Caf', b'X']b'a\\\\.b'"))],
+        );
+    }
+
     /// collections module: namedtuple and typing.NamedTuple (classes whose fields take their types from the calls), deque, Counter, OrderedDict, defaultdict, ChainMap, each a class specialized by its element types
     #[test]
     fn collections_classes() {

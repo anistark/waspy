@@ -13,10 +13,19 @@
 //! A parameter whose calls disagree, or that is never called where this can
 //! see, stays untyped, which is what it was: an untyped place holds only ints,
 //! bools, and None, and every call through a value checks what it passes.
+//!
+//! A closure passed where a parameter is declared `Callable[[...], R]` (the
+//! `repl` of `re.sub`, or a function of the program's own) takes the declared
+//! parameter types for its open parameters and `R` for a result it leaves
+//! unannotated, so `lambda m: m.group() + "!"` returns a str. The result is
+//! then checked against the body's returns as any annotated one is, so a body
+//! that returns something else is refused rather than read as an `R`.
 
 use crate::compiler::context::CompilationContext;
 use crate::compiler::function::{infer_value_type, resolve_return_type, scan_and_allocate_locals};
-use crate::ir::{IRConstant, IRExpr, IRFunction, IRModule, IRType};
+use crate::ir::{
+    IRClass, IRConstant, IRExpr, IRFunction, IRModule, IRStatement, IRType, IRVariable,
+};
 use std::collections::HashMap;
 
 /// What each environment cell of a lifted closure holds, keyed by the closure
@@ -78,6 +87,13 @@ pub(crate) fn type_closures(module: &IRModule) -> (IRModule, CaptureTypes) {
         })
         .collect();
 
+    // Which closures leave their result unannotated, and so take a declared
+    // `Callable`'s.
+    let open_returns: Vec<bool> = closures
+        .iter()
+        .map(|&i| matches!(module.functions[i].return_type, IRType::Unknown))
+        .collect();
+
     let mut captures = CaptureTypes::new();
     // Each round can type a value a later closure is called with; three
     // settle any nesting a real program has.
@@ -104,6 +120,7 @@ pub(crate) fn type_closures(module: &IRModule) -> (IRModule, CaptureTypes) {
             .iter()
             .map(|(name, open)| (name.clone(), vec![Seen::Nothing; open.len()]))
             .collect();
+        let mut results: HashMap<String, Seen> = HashMap::new();
         let mut next = CaptureTypes::new();
         // Every creator before the closures it makes.
         let mut bodies: Vec<&IRFunction> = typed
@@ -113,14 +130,30 @@ pub(crate) fn type_closures(module: &IRModule) -> (IRModule, CaptureTypes) {
             .collect();
         bodies.extend(typed.classes.iter().flat_map(|c| c.methods.iter()));
         bodies.extend(closures.iter().map(|&i| &typed.functions[i]));
-        let classes: Vec<String> = typed.classes.iter().map(|c| c.name.clone()).collect();
+        let known = Known {
+            functions: &typed.functions,
+            classes: &typed.classes,
+            variables: &typed.variables,
+            params: &params,
+            returns: &returns,
+        };
         for f in bodies {
-            observe(f, &classes, &params, &returns, &mut next, &mut seen);
+            observe(f, &known, &mut next, &mut seen, &mut results);
         }
 
         let mut changed = next != captures;
-        for &i in &closures {
+        for (&i, &open_return) in closures.iter().zip(&open_returns) {
             let f = &mut typed.functions[i];
+            if open_return {
+                let ty = results
+                    .get(&f.name)
+                    .map(Seen::resolved)
+                    .unwrap_or(IRType::Unknown);
+                if f.return_type != ty {
+                    f.return_type = ty;
+                    changed = true;
+                }
+            }
             let (Some(open), Some(seen)) = (open.get(&f.name), seen.get(&f.name)) else {
                 continue;
             };
@@ -143,27 +176,37 @@ pub(crate) fn type_closures(module: &IRModule) -> (IRModule, CaptureTypes) {
     (typed, captures)
 }
 
+/// What the module declares that a body's calls are read against.
+struct Known<'a> {
+    functions: &'a [IRFunction],
+    classes: &'a [IRClass],
+    variables: &'a [IRVariable],
+    params: &'a HashMap<String, Vec<IRType>>,
+    returns: &'a HashMap<String, IRType>,
+}
+
 /// Read `func`'s body for what it tells about closures: the type of each cell
-/// it stores, the cells of each closure it makes, and the arguments of each
-/// call to one.
+/// it stores, the cells of each closure it makes, the arguments of each call
+/// to one, and the `Callable` each is passed as.
 fn observe(
     func: &IRFunction,
-    classes: &[String],
-    params: &HashMap<String, Vec<IRType>>,
-    returns: &HashMap<String, IRType>,
+    known: &Known,
     captures: &mut CaptureTypes,
     seen: &mut HashMap<String, Vec<Seen>>,
+    results: &mut HashMap<String, Seen>,
 ) {
+    let params = known.params;
+    let returns = known.returns;
     let mut ctx = CompilationContext::new();
     // The classes, so a constructor call makes an instance of its class (and
     // a list of them a list of instances), which a key is called with. Only
     // the names: nothing is laid out yet.
-    for class in classes {
+    for class in known.classes {
         ctx.add_class(crate::compiler::context::ClassInfo {
-            name: class.clone(),
+            name: class.name.clone(),
             base: None,
             class_id: 0,
-            mro: vec![class.clone()],
+            mro: vec![class.name.clone()],
             methods: HashMap::new(),
             method_owner: HashMap::new(),
             method_kinds: HashMap::new(),
@@ -212,6 +255,31 @@ fn observe(
                 let user = arguments.len().saturating_sub(1);
                 for (slot, arg) in slots.iter_mut().zip(arguments.iter().take(user)) {
                     slot.record(argument_type(arg, &ctx));
+                }
+            }
+            // A closure passed to a function of the module, where its
+            // parameter is declared `Callable`.
+            IRExpr::FunctionCall {
+                function_name,
+                arguments,
+            } if module_function(known, function_name).is_some() => {
+                let callee = module_function(known, function_name).expect("checked");
+                observe_callables(&callee.params, arguments, seen, results);
+            }
+            // A closure passed to a method, found from the receiver's class.
+            IRExpr::MethodCall {
+                object,
+                method_name,
+                arguments,
+            } if arguments
+                .iter()
+                .any(|a| matches!(closure_of(a), Some(IRExpr::ClosureMake { .. }))) =>
+            {
+                if let Some(method) = receiver_class(object, func, &ctx, known)
+                    .and_then(|class| find_method(known.classes, &class, method_name))
+                {
+                    let declared = method.params.get(1..).unwrap_or_default();
+                    observe_callables(declared, arguments, seen, results);
                 }
             }
             // `min(xs, key=lambda x: ...)` calls the key with each element.
@@ -292,6 +360,135 @@ fn observe(
             }
         }
     }
+}
+
+/// Record what each closure passed among `arguments` is declared to be, where
+/// its parameter in `declared` is a `Callable`: its parameters' types, and the
+/// result.
+fn observe_callables(
+    declared: &[crate::ir::IRParam],
+    arguments: &[IRExpr],
+    seen: &mut HashMap<String, Vec<Seen>>,
+    results: &mut HashMap<String, Seen>,
+) {
+    let mut position = 0;
+    for arg in arguments {
+        let param = match arg {
+            IRExpr::Keyword { name, .. } => declared.iter().find(|p| p.name == *name),
+            _ => {
+                position += 1;
+                declared.get(position - 1)
+            }
+        };
+        let (
+            Some(IRExpr::ClosureMake { lambda_name, .. }),
+            Some(IRType::Callable {
+                params,
+                return_type,
+            }),
+        ) = (closure_of(arg), param.map(|p| &p.param_type))
+        else {
+            continue;
+        };
+        if let Some(slots) = seen.get_mut(lambda_name.as_str()) {
+            for (slot, ty) in slots.iter_mut().zip(params) {
+                slot.record(ty.clone());
+            }
+        }
+        if !matches!(return_type.as_ref(), IRType::Unknown | IRType::Any) {
+            results
+                .entry(lambda_name.clone())
+                .or_insert(Seen::Nothing)
+                .record(return_type.as_ref().clone());
+        }
+    }
+}
+
+/// The closure an argument passes, by position or by name.
+fn closure_of(arg: &IRExpr) -> Option<&IRExpr> {
+    match arg {
+        IRExpr::Keyword { value, .. } => Some(value.as_ref()),
+        other => Some(other),
+    }
+}
+
+/// The module function `name`, outside the closures themselves (whose calls
+/// are typed from their arguments instead).
+fn module_function<'a>(known: &Known<'a>, name: &str) -> Option<&'a IRFunction> {
+    known
+        .functions
+        .iter()
+        .find(|f| f.name == name && !f.name.starts_with("__lambda_"))
+}
+
+/// The class of the instance a method is called on: what its type is known to
+/// be, or what the module declares for the variable or class variable it is.
+fn receiver_class(
+    object: &IRExpr,
+    func: &IRFunction,
+    ctx: &CompilationContext,
+    known: &Known,
+) -> Option<String> {
+    match argument_type(object, ctx) {
+        IRType::Class(class) => return Some(class),
+        IRType::Unknown => {}
+        _ => return None,
+    }
+    // A local the function assigns at its top level, every time with an
+    // instance of one class.
+    if let IRExpr::Variable(name) = object {
+        let mut assigned = func.body.statements.iter().filter_map(|stmt| match stmt {
+            IRStatement::Assign { target, value, .. } if target == name => {
+                Some(declared_class(value, known, 0))
+            }
+            _ => None,
+        });
+        if let Some(first) = assigned.next() {
+            return first.filter(|class| assigned.all(|c| c.as_ref() == Some(class)));
+        }
+    }
+    declared_class(object, known, 0)
+}
+
+/// The class of the instance `expr` makes or names, read from the module's
+/// declarations: a constructor call, or a module variable or class variable
+/// annotated with a class or holding such a value.
+fn declared_class(expr: &IRExpr, known: &Known, depth: u32) -> Option<String> {
+    let var = |vars: &[IRVariable], name: &str| -> Option<String> {
+        let var = vars.iter().find(|v| v.name == name)?;
+        match &var.var_type {
+            Some(IRType::Class(class)) => Some(class.clone()),
+            _ if depth < 4 => declared_class(&var.value, known, depth + 1),
+            _ => None,
+        }
+    };
+    match expr {
+        IRExpr::FunctionCall { function_name, .. }
+            if known.classes.iter().any(|c| c.name == *function_name) =>
+        {
+            Some(function_name.clone())
+        }
+        IRExpr::Variable(name) => var(known.variables, name),
+        IRExpr::Attribute { object, attribute } => match object.as_ref() {
+            IRExpr::Variable(class) => {
+                let class = known.classes.iter().find(|c| c.name == *class)?;
+                var(&class.class_vars, attribute)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The method `name` a class has, its own or the first of its bases'.
+fn find_method<'a>(classes: &'a [IRClass], class: &str, name: &str) -> Option<&'a IRFunction> {
+    let class = classes.iter().find(|c| c.name == class)?;
+    class.methods.iter().find(|m| m.name == name).or_else(|| {
+        class
+            .bases
+            .iter()
+            .find_map(|base| find_method(classes, base, name))
+    })
 }
 
 /// Type a lambda passed to `reduce` from the sequence and initial value.

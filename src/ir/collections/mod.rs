@@ -304,9 +304,13 @@ pub(crate) fn namedtuple_class(
     })
 }
 
-/// Whether `class` is a named tuple.
+/// Whether `class` is a named tuple: its view is the tuple of its fields
+/// (another class with a view, as `re`'s `mappingproxy`, declares another).
 pub(crate) fn is_namedtuple(class: &crate::ir::IRClass) -> bool {
-    class.methods.iter().any(|m| m.name == VIEW_METHOD)
+    class
+        .methods
+        .iter()
+        .any(|m| m.name == VIEW_METHOD && matches!(m.return_type, IRType::Tuple(_)))
 }
 
 /// Type each named tuple's untyped fields from the module's calls of it, and

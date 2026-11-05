@@ -10,7 +10,8 @@
 //!
 //! A pattern is written as a literal, a module constant, or a compiled
 //! pattern; one computed at run time is refused, as its program could not be
-//! compiled.
+//! compiled. A bytes pattern has classes of its own (`classes::Text`), as its
+//! subject, groups, and replacements are bytes.
 
 mod classes;
 mod compile;
@@ -20,6 +21,7 @@ mod vm;
 use crate::ir::build::*;
 use crate::ir::{IRBody, IRConstant, IRExpr, IRModule, IROp, IRStatement, IRType, IRVariable};
 use anyhow::Result;
+use classes::Text;
 use std::collections::HashMap;
 
 /// The prefix of the functions the pass makes; they are internal.
@@ -96,31 +98,61 @@ impl Bindings {
     }
 }
 
+/// A pattern as written: a str, or bytes.
+#[derive(Clone, PartialEq)]
+enum Source {
+    Str(String),
+    Bytes(Vec<u8>),
+}
+
+impl Source {
+    fn text(&self) -> Text {
+        match self {
+            Source::Str(_) => Text::Str,
+            Source::Bytes(_) => Text::Bytes,
+        }
+    }
+    /// What the parser reads: the str, or the bytes' latin-1 decoding.
+    fn decoded(&self) -> String {
+        match self {
+            Source::Str(s) => s.clone(),
+            Source::Bytes(b) => b.iter().map(|&c| c as char).collect(),
+        }
+    }
+    fn value(&self) -> IRExpr {
+        match self {
+            Source::Str(s) => text(s),
+            Source::Bytes(b) => classes::bytes_const(b),
+        }
+    }
+}
+
 /// The patterns compiled, each once.
 struct Cache {
-    entries: Vec<(String, u32)>,
+    entries: Vec<(Source, u32)>,
     compiled: Vec<IRVariable>,
 }
 
 impl Cache {
     /// The cached pattern object for a pattern and its flags.
-    fn pattern(&mut self, pattern: &str, flags: u32, call: &str) -> Result<IRExpr> {
-        let key = (pattern.to_string(), flags);
+    fn pattern(&mut self, pattern: &Source, flags: u32, call: &str) -> Result<IRExpr> {
+        let key = (pattern.clone(), flags);
         let k = match self.entries.iter().position(|e| *e == key) {
             Some(k) => k,
             None => {
-                let parsed =
-                    parse::parse_pattern(pattern, flags).map_err(|e| re_error(call, &e))?;
+                let t = pattern.text();
+                let parsed = parse::parse_pattern(&pattern.decoded(), flags, t == Text::Str)
+                    .map_err(|e| re_error(call, &e))?;
                 let program = compile::compile(&parsed).map_err(|e| re_error(call, &e))?;
-                let class = match parsed.groups - 1 {
+                let class = t.short(match parsed.groups - 1 {
                     0 => classes::PATTERN0,
                     1 => classes::PATTERN1,
                     _ => classes::PATTERN_N,
-                };
+                });
                 let value = call_class(
-                    class,
+                    &class,
                     vec![
-                        text(pattern),
+                        pattern.value(),
                         int(parsed.flags as i32),
                         int(parsed.groups as i32),
                         IRExpr::ListLiteral(program.code.iter().map(|&c| int(c)).collect()),
@@ -143,13 +175,29 @@ impl Cache {
                 self.compiled.push(IRVariable {
                     name: format!("p{}", self.entries.len()),
                     value,
-                    var_type: Some(classes::ty(class)),
+                    var_type: Some(classes::ty(&class)),
                 });
                 self.entries.push(key);
                 self.entries.len() - 1
             }
         };
         Ok(attr(v(&class_name("_Cache")), &format!("p{k}")))
+    }
+
+    /// The text a cached pattern matches, by its class variable.
+    fn text_of(&self, expr: &IRExpr) -> Option<Text> {
+        let IRExpr::Attribute { object, attribute } = expr else {
+            return None;
+        };
+        if !matches!(object.as_ref(), IRExpr::Variable(c) if *c == class_name("_Cache")) {
+            return None;
+        }
+        let k: usize = attribute.strip_prefix('p')?.parse().ok()?;
+        Some(self.entries.get(k)?.0.text())
+    }
+
+    fn uses_bytes(&self) -> bool {
+        self.entries.iter().any(|(p, _)| p.text() == Text::Bytes)
     }
 }
 
@@ -158,6 +206,9 @@ fn call_class(short: &str, args: Vec<IRExpr>) -> IRExpr {
 }
 
 fn re_error(call: &str, message: &str) -> anyhow::Error {
+    if let Some(why) = message.strip_prefix("unsupported: ") {
+        return refused(format!("re.{call}(): {why}"));
+    }
     let (class, text) = match message.split_once(": ") {
         Some((c @ ("ValueError" | "OverflowError" | "IndexError"), rest)) => (c, rest),
         _ => ("re.error", message),
@@ -188,10 +239,14 @@ fn argument(arguments: &[IRExpr], n: usize, name: &str) -> Option<IRExpr> {
 
 struct Pass<'a> {
     b: &'a Bindings,
-    /// Module constants that are strings.
-    strings: HashMap<String, String>,
-    /// Module variables holding a compiled pattern.
-    patterns: Vec<String>,
+    /// Module constants that are strings or bytes.
+    strings: HashMap<String, Source>,
+    /// Module variables holding a compiled pattern, and the text it matches.
+    patterns: HashMap<String, Text>,
+    /// Whether `re.escape` is given bytes.
+    escapes_bytes: bool,
+    /// The parameters of the function being rewritten, by their types.
+    params: HashMap<String, IRType>,
     cache: Cache,
     /// The module's functions, which `sub` can be given.
     functions: Vec<String>,
@@ -228,7 +283,8 @@ impl Pass<'_> {
     /// constant, or the compiled pattern a module variable holds.
     fn pattern(&mut self, e: Option<IRExpr>, flags: u32, call: &str) -> Result<IRExpr> {
         let text = match &e {
-            Some(IRExpr::Const(IRConstant::String(s))) => Some(s.clone()),
+            Some(IRExpr::Const(IRConstant::String(s))) => Some(Source::Str(s.clone())),
+            Some(IRExpr::Const(IRConstant::Bytes(b))) => Some(Source::Bytes(b.clone())),
             Some(IRExpr::Variable(n)) => self.strings.get(n).cloned(),
             _ => None,
         };
@@ -236,7 +292,7 @@ impl Pass<'_> {
             return self.cache.pattern(&text, flags, call);
         }
         if let Some(IRExpr::Variable(n)) = &e {
-            if self.patterns.contains(n) {
+            if self.patterns.contains_key(n) {
                 if flags != 0 {
                     return Err(refused(format!(
                         "re.{call}() with flags and a compiled pattern raises ValueError: cannot \
@@ -251,6 +307,25 @@ impl Pass<'_> {
              constant (or a pattern compiled from one), as patterns are compiled with the \
              program"
         )))
+    }
+
+    /// CPython's TypeError for a str subject of a bytes pattern, or the
+    /// reverse, where the subject is written out.
+    fn check_subject(&self, pattern: &IRExpr, string: &IRExpr, call: &str) -> Result<()> {
+        let t = self.cache.text_of(pattern).or_else(|| match pattern {
+            IRExpr::Variable(n) => self.patterns.get(n).copied(),
+            _ => None,
+        });
+        let why = match (t, string) {
+            (Some(Text::Bytes), IRExpr::Const(IRConstant::String(_))) => {
+                "cannot use a bytes pattern on a string-like object"
+            }
+            (Some(Text::Str), IRExpr::Const(IRConstant::Bytes(_))) => {
+                "cannot use a string pattern on a bytes-like object"
+            }
+            _ => return Ok(()),
+        };
+        Err(refused(format!("re.{call}() raises TypeError: {why}")))
     }
 
     fn module_call(&mut self, name: &str, arguments: Vec<IRExpr>) -> Result<Option<IRExpr>> {
@@ -274,6 +349,7 @@ impl Pass<'_> {
                         "re.{name}() missing required argument: 'string'"
                     )));
                 };
+                self.check_subject(&p, &string, name)?;
                 mcall(p, name, vec![string])
             }
             "split" => {
@@ -283,6 +359,7 @@ impl Pass<'_> {
                 let flags = self.flags(keyword(&arguments, "flags").as_ref(), name)?;
                 let p = self.pattern(argument(&arguments, 0, "pattern"), flags, name)?;
                 let string = argument(&arguments, 1, "string").unwrap_or_else(|| text(""));
+                self.check_subject(&p, &string, name)?;
                 let maxsplit = keyword(&arguments, "maxsplit").unwrap_or_else(|| int(0));
                 mcall(p, "split", vec![string, maxsplit])
             }
@@ -294,10 +371,27 @@ impl Pass<'_> {
                 let p = self.pattern(argument(&arguments, 0, "pattern"), flags, name)?;
                 let repl = argument(&arguments, 1, "repl").unwrap_or_else(|| text(""));
                 let string = argument(&arguments, 2, "string").unwrap_or_else(|| text(""));
+                self.check_subject(&p, &string, name)?;
                 let count = keyword(&arguments, "count").unwrap_or_else(|| int(0));
                 mcall(p, name, vec![repl, string, count])
             }
-            "escape" => call(&fname("escape"), arguments),
+            // `re.escape(b)` of bytes answers bytes.
+            "escape" => {
+                let bytes = match positional(&arguments).first() {
+                    Some(IRExpr::Const(IRConstant::Bytes(_))) => true,
+                    Some(IRExpr::Variable(n)) => {
+                        matches!(self.strings.get(n), Some(Source::Bytes(_)))
+                            || matches!(self.params.get(n), Some(IRType::Bytes))
+                    }
+                    _ => false,
+                };
+                if bytes {
+                    self.escapes_bytes = true;
+                    call(&fname("b_escape"), arguments)
+                } else {
+                    call(&fname("escape"), arguments)
+                }
+            }
             "purge" => none(),
             _ => return Ok(None),
         }))
@@ -335,20 +429,28 @@ impl Pass<'_> {
             }
         }
         // `sub` with a function: its own method, the lambda's parameter a
-        // Match.
+        // Match (of bytes, for a bytes pattern).
         if let IRExpr::MethodCall {
+            object,
             method_name,
             arguments,
-            ..
         } = expr
         {
+            let t = self
+                .cache
+                .text_of(object)
+                .or_else(|| match object.as_ref() {
+                    IRExpr::Variable(n) => self.patterns.get(n).copied(),
+                    _ => None,
+                })
+                .unwrap_or(Text::Str);
             if matches!(method_name.as_str(), "sub" | "subn") {
                 if let Some(first) = arguments.first_mut() {
                     let function = match first {
                         IRExpr::Lambda { params, .. } => {
                             if let Some(p) = params.first_mut() {
                                 if matches!(p.param_type, IRType::Unknown | IRType::Any) {
-                                    p.param_type = IRType::Class(class_name("Match"));
+                                    p.param_type = t.cty("Match");
                                 }
                             }
                             true
@@ -372,15 +474,28 @@ impl Pass<'_> {
     }
 }
 
+/// `Pattern` and `Match` imported from `re` as the classes, and
+/// `Pattern[bytes]` / `Match[bytes]` (as `re.Pattern[bytes]`) as a bytes
+/// pattern's.
 fn rename_type(ty: &mut IRType, b: &Bindings) {
     match ty {
         IRType::Class(c) => {
-            if let Some(member) = b
-                .names
-                .get(c.as_str())
-                .filter(|m| matches!(m.as_str(), "Match" | "Pattern"))
-            {
-                *c = class_name(member);
+            let (name, of) = match c.split_once('[') {
+                Some((name, of)) => (name, of.trim_end_matches(']')),
+                None => (c.as_str(), "str"),
+            };
+            let member = match name.strip_prefix("re.") {
+                Some(m) => Some(m.to_string()),
+                None => b.names.get(name).cloned(),
+            }
+            .filter(|m| matches!(m.as_str(), "Match" | "Pattern"));
+            if let Some(member) = member {
+                let t = if of == "bytes" {
+                    Text::Bytes
+                } else {
+                    Text::Str
+                };
+                *c = t.class(&member);
             }
         }
         IRType::List(e) | IRType::Set(e) | IRType::VarTuple(e) | IRType::Optional(e) => {
@@ -423,7 +538,12 @@ pub fn lower_re(module: &mut IRModule) -> Result<()> {
         .variables
         .iter()
         .filter_map(|var| match &var.value {
-            IRExpr::Const(IRConstant::String(s)) => Some((var.name.clone(), s.clone())),
+            IRExpr::Const(IRConstant::String(s)) => {
+                Some((var.name.clone(), Source::Str(s.clone())))
+            }
+            IRExpr::Const(IRConstant::Bytes(b)) => {
+                Some((var.name.clone(), Source::Bytes(b.clone())))
+            }
             _ => None,
         })
         .collect();
@@ -431,7 +551,9 @@ pub fn lower_re(module: &mut IRModule) -> Result<()> {
     let mut pass = Pass {
         b: &b,
         strings,
-        patterns: Vec::new(),
+        patterns: HashMap::new(),
+        escapes_bytes: false,
+        params: HashMap::new(),
         cache: Cache {
             entries: Vec::new(),
             compiled: Vec::new(),
@@ -443,16 +565,19 @@ pub fn lower_re(module: &mut IRModule) -> Result<()> {
     // one of them compiled.
     for var in &mut module.variables {
         expr_body(&mut var.value, |body| pass.body(body))?;
-        if matches!(&var.value, IRExpr::Attribute { object, .. }
-            if matches!(object.as_ref(), IRExpr::Variable(c) if *c == class_name("_Cache")))
-        {
-            pass.patterns.push(var.name.clone());
+        if let Some(t) = pass.cache.text_of(&var.value) {
+            pass.patterns.insert(var.name.clone(), t);
         }
         if let Some(t) = &mut var.var_type {
             rename_type(t, &b);
         }
     }
     for f in &mut module.functions {
+        pass.params = f
+            .params
+            .iter()
+            .map(|p| (p.name.clone(), p.param_type.clone()))
+            .collect();
         pass.body(&mut f.body)?;
         f.params
             .iter_mut()
@@ -461,6 +586,11 @@ pub fn lower_re(module: &mut IRModule) -> Result<()> {
     }
     for c in &mut module.classes {
         for m in &mut c.methods {
+            pass.params = m
+                .params
+                .iter()
+                .map(|p| (p.name.clone(), p.param_type.clone()))
+                .collect();
             pass.body(&mut m.body)?;
             m.params
                 .iter_mut()
@@ -471,17 +601,26 @@ pub fn lower_re(module: &mut IRModule) -> Result<()> {
             expr_body(&mut var.value, |body| pass.body(body))?;
         }
     }
+    // A program with a bytes pattern (or one that escapes bytes) has the
+    // bytes classes as well; the bytes template parses as a str one.
+    let mut texts = vec![Text::Str];
+    if pass.cache.uses_bytes() || pass.escapes_bytes {
+        texts.push(Text::Bytes);
+    }
     let cache = std::mem::take(&mut pass.cache.compiled);
-    let mut classes = classes::all(cache, pass.replaces_by_function);
+    let mut classes = classes::all(cache, pass.replaces_by_function, &texts);
     classes.append(&mut module.classes);
     module.classes = classes;
     module.functions.extend(vm::functions());
-    module.functions.extend(classes::functions());
+    module.functions.extend(classes::functions(&texts));
 
     let mut strings = Vec::new();
+    let mut bytes = Vec::new();
     let mut collect = |e: &mut IRExpr| {
-        if let IRExpr::Const(IRConstant::String(s)) = e {
-            strings.push(s.clone());
+        match e {
+            IRExpr::Const(IRConstant::String(s)) => strings.push(s.clone()),
+            IRExpr::Const(IRConstant::Bytes(b)) => bytes.push(b.clone()),
+            _ => {}
         }
         Ok(())
     };
@@ -514,6 +653,9 @@ pub fn lower_re(module: &mut IRModule) -> Result<()> {
     }
     for s in strings {
         module.memory_layout.add_string(&s);
+    }
+    for b in bytes {
+        module.memory_layout.add_bytes(&b);
     }
     Ok(())
 }

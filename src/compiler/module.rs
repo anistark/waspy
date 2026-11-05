@@ -69,6 +69,15 @@ fn infer_field_value_type(
         IRExpr::FunctionCall { function_name, .. } if classes.contains(function_name) => {
             IRType::Class(function_name.clone())
         }
+        // A `next()` answers what its pull does.
+        IRExpr::FunctionCall {
+            function_name,
+            arguments,
+        } if function_name == crate::ir::NEXT_FN => {
+            arguments.first().map_or(IRType::Unknown, |pull| {
+                infer_field_value_type(pull, params, classes)
+            })
+        }
         // `C::method(...)`: what the method is declared to return.
         IRExpr::FunctionCall { function_name, .. } if function_name.contains("::") => params
             .get(&format!("{RETURNS_OF}{function_name}"))
@@ -795,7 +804,13 @@ fn scan_expr_calls(expr: &IRExpr, raises: &mut bool, calls: &mut HashSet<String>
             // `float(s)` likewise, for a string that does not spell a float.
             // `input()` raises EOFError at the end of input.
             // `input()` and `open()` (a missing file is FileNotFoundError).
-            if function_name == "input" || function_name == "open" {
+            // `next()` raises StopIteration on an exhausted iterator.
+            // `bytes(ints)` raises ValueError for one out of range(0, 256).
+            if function_name == "input"
+                || function_name == "open"
+                || function_name == "bytes"
+                || function_name == crate::ir::NEXT_FN
+            {
                 *raises = true;
             }
             if function_name == "int" || function_name == "float" {

@@ -3216,4 +3216,320 @@ fn re_refusals() {
     refused("re.sub('a', 'b', 'aa', 1)", "DeprecationWarning");
     refused("re.split(',', 'a,b', 1)", "DeprecationWarning");
     refused("re.compile('[[a]')", "FutureWarning");
+    // CPython: re.PatternError, at the escape.
+    refused(
+        r"re.compile('x\\N{NO SUCH NAME}')",
+        "re.error: undefined character name 'NO SUCH NAME' at position 1",
+    );
+    // New in Unicode 16.0, after CPython 3.13's 15.1.
+    refused(
+        r"re.compile('\\N{GARAY VOWEL SIGN A}')",
+        "undefined character name 'GARAY VOWEL SIGN A'",
+    );
+    refused(r"re.compile('\\N')", "re.error: missing { at position 2");
+    refused(
+        r"re.compile('\\N{}')",
+        "re.error: missing character name at position 3",
+    );
+    // CPython: TypeError: object of type 'callable_iterator' has no len().
+    refused(
+        "print(len(re.finditer('a', 'aa')))",
+        "object of type 'callable_iterator' has no len()",
+    );
+    // Bytes patterns, as CPython's parser refuses them.
+    refused(
+        r"re.compile(rb'\u0041')",
+        "re.error: bad escape \\u at position 0",
+    );
+    refused(
+        "re.compile(rb'(?u)a')",
+        "cannot use 'u' flag with a bytes pattern at position 3",
+    );
+    refused(
+        "re.compile(rb'a', re.U)",
+        "ValueError: cannot use UNICODE flag with a bytes pattern",
+    );
+    refused(
+        "re.compile(rb'a', re.L)",
+        "re.LOCALE matches a bytes pattern",
+    );
+    refused(
+        "re.search(rb'a', 'abc')",
+        "TypeError: cannot use a bytes pattern on a string-like object",
+    );
+    refused(
+        "re.search('a', b'abc')",
+        "TypeError: cannot use a string pattern on a bytes-like object",
+    );
+    // CPython: TypeError: 'mappingproxy' object does not support item
+    // assignment.
+    refused(
+        "gi = re.compile('(?P<k>a)').groupindex\n    gi['x'] = 3",
+        "does not support item assignment",
+    );
+}
+
+/// `Pattern.groupindex`: a read-only mappingproxy of the group names' numbers, new at each read, that reads as its dict and prints as CPython's (`str` the dict's, `repr` the proxy's).
+#[test]
+fn re_groupindex() {
+    prints(
+        r#"
+        import re
+
+        DATE = re.compile(r"(?P<year>\d{4})-(?P<month>\d\d)-(\d\d)")
+
+        def names(p: re.Pattern) -> list[str]:
+            return [n for n in p.groupindex]
+
+        if __name__ == "__main__":
+            print(names(DATE), DATE.groupindex is DATE.groupindex)
+            gi = DATE.groupindex
+            print(gi)
+            print(type(gi))
+            print(gi["year"], gi["month"], len(gi))
+            print("year" in gi, "day" in gi)
+            print(gi.get("month"), gi.get("day"))
+            print(list(gi.keys()), list(gi.values()), list(gi.items()))
+            for name in gi:
+                print(name, gi[name])
+            print(gi == {"year": 1, "month": 2})
+            print(re.compile(r"\d").groupindex)
+            print(sorted(gi))
+            print(str(gi), repr(gi))
+            print(dict(gi))
+            print(gi.copy())
+            try:
+                print(gi["nope"])
+            except KeyError as e:
+                print("KeyError", e)
+        "#,
+        r#"['year', 'month'] False
+{'year': 1, 'month': 2}
+<class 'mappingproxy'>
+1 2 2
+True False
+2 None
+['year', 'month'] [1, 2] [('year', 1), ('month', 2)]
+year 1
+month 2
+True
+{}
+['month', 'year']
+{'year': 1, 'month': 2} mappingproxy({'year': 1, 'month': 2})
+{'year': 1, 'month': 2}
+{'year': 1, 'month': 2}
+KeyError 'nope'
+"#,
+    );
+}
+
+/// `\N{name}` in a pattern and in a set: a character's name or alias, as CPython 3.13 looks it up.
+#[test]
+fn re_named_escapes() {
+    prints(
+        r#"
+        import re
+
+        DASH = re.compile(r"\N{EM DASH}+")
+
+        if __name__ == "__main__":
+            print(DASH.findall("a——b—c"))
+            print(re.sub(r"[\N{LEFT DOUBLE QUOTATION MARK}\N{right double quotation mark}]", '"', "“hi”"))
+            print(re.findall(r"\N{LATIN SMALL LETTER A}\N{DIGIT ONE}", "a1 b1 a1"))
+            print(re.search(r"\N{LINE FEED}", "x\ny").start())
+            print(re.match(r"\N{CJK UNIFIED IDEOGRAPH-4E00}", "一x") is not None)
+            print(re.search(r"(?i)\N{LATIN CAPITAL LETTER E WITH ACUTE}", "café").group())
+            print(re.compile(r"\N{EM DASH}"))
+        "#,
+        r#"['——', '—']
+"hi"
+['a1', 'a1']
+1
+True
+é
+re.compile('\\N{EM DASH}')
+"#,
+    );
+}
+
+/// `finditer` is a `callable_iterator`: each `next()` finds the next match, and a walked one is exhausted.
+#[test]
+fn re_finditer_is_lazy() {
+    prints(
+        r#"
+        import re
+
+        WORD = re.compile(r"\w+")
+
+        def starts(p: re.Pattern, s: str) -> list[int]:
+            return [m.start() for m in p.finditer(s)]
+
+        def first_two(s: str) -> list[str]:
+            it = WORD.finditer(s)
+            a = next(it)
+            b = next(it)
+            return [a.group(), b.group()]
+
+        if __name__ == "__main__":
+            print([m.group() for m in re.finditer(r"\d+", "1 22 333")])
+            for m in re.finditer(r"([A-Z])\w*", "Alice and Bob met Carol"):
+                print(m.group(1), m.span())
+            it = WORD.finditer("one two three")
+            print(type(it))
+            print(next(it).group())
+            print([m.group() for m in it])
+            print(list(it))
+            print(starts(WORD, "ab cd  ef"))
+            print(first_two("x y z"))
+            print([m.span() for m in re.finditer(r"a*", "baaac")])
+            print([m.group() for m in WORD.finditer("aa bb cc dd", 3, 8)])
+            print(list(re.finditer(r"x", "")))
+            e = re.finditer(r"q", "abc")
+            try:
+                next(e)
+            except StopIteration:
+                print("stop")
+            print(len(list(WORD.finditer("a b c"))))
+        "#,
+        r#"['1', '22', '333']
+A (0, 5)
+B (10, 13)
+C (18, 23)
+<class 'callable_iterator'>
+one
+['two', 'three']
+[]
+[0, 3, 7]
+['x', 'y']
+[(0, 0), (1, 4), (4, 4), (5, 5)]
+['bb', 'cc']
+[]
+stop
+3
+"#,
+    );
+}
+
+/// Bytes patterns: matched by ASCII's classes and case as CPython's `sre` matches them, with bytes groups, `findall`, `split`, `sub` (by a template or a function), `escape`, and reprs.
+#[test]
+fn re_bytes_patterns() {
+    prints(
+        r#"
+        import re
+
+        NUM = re.compile(rb"(\d+)-(?P<tail>\w+)")
+        SEP = b"[,;]"
+
+        if __name__ == "__main__":
+            m = NUM.search(b"xx 12-ab yy")
+            print(m)
+            print(m.group(), m.group(1), m.group("tail"), m.groups(), m.span(), m.groupdict())
+            print(m[0], m[2], m.start(1), m.end("tail"), m.lastindex, m.lastgroup)
+            print(type(NUM), NUM, NUM.pattern, NUM.flags, NUM.groups, NUM.groupindex)
+            print(re.findall(rb"\d", b"a1b2"), re.findall(rb"(a)(b)?", b"ab a"), NUM.findall(b"1-x 2-y"))
+            print(re.split(SEP, b"a,b;c"), re.split(rb"(,)", b"a,b"), re.split(rb"x", b"axb", maxsplit=1))
+            print(re.sub(rb"(\w)=(\w)", rb"\2=\1\n", b"a=b c=d"))
+            print(re.subn(rb"a", b"-", b"banana"))
+            print(re.sub(rb"\d+", lambda mm: b"<" + mm.group() + b">", b"1 22"))
+            print(re.fullmatch(rb"[a-z]+", b"abc") is not None, re.match(rb"b", b"abc"))
+            print([x.group() for x in re.finditer(rb"\w+", b"one two")])
+            print(re.escape(b"a.b*c"), re.escape("a.b"))
+            print(re.compile(rb"(?i)abc").match(b"ABC"), re.compile(rb"\w+").findall(b"caf\xe9 x"))
+            print(re.compile(rb"\s+").split(b"a \x85b\tc"), re.search(rb"\bx", b"\xe9x"))
+            print(re.compile(rb"a", re.I | re.M), re.compile(rb"a", re.A))
+            print(m.expand(rb"[\g<tail>|\1]"), m.string, m.re is NUM, m.pos, m.endpos)
+            print(re.search(rb"[\x80-\xff]+", b"ab\xc3\xa9cd").group())
+        "#,
+        r#"<re.Match object; span=(3, 8), match=b'12-ab'>
+b'12-ab' b'12' b'ab' (b'12', b'ab') (3, 8) {'tail': b'ab'}
+b'12-ab' b'ab' 3 8 2 tail
+<class 're.Pattern'> re.compile(b'(\\d+)-(?P<tail>\\w+)') b'(\\d+)-(?P<tail>\\w+)' 0 2 {'tail': 2}
+[b'1', b'2'] [(b'a', b'b'), (b'a', b'')] [(b'1', b'x'), (b'2', b'y')]
+[b'a', b'b', b'c'] [b'a', b',', b'b'] [b'a', b'b']
+b'b=a\n d=c\n'
+(b'b-n-n-', 3)
+b'<1> <22>'
+True None
+[b'one', b'two']
+b'a\\.b\\*c' a\.b
+<re.Match object; span=(0, 3), match=b'ABC'> [b'caf', b'x']
+[b'a', b'\x85b', b'c'] <re.Match object; span=(1, 2), match=b'x'>
+re.compile(b'a', re.IGNORECASE|re.MULTILINE) re.compile(b'a', re.ASCII)
+b'[ab|12]' b'xx 12-ab yy' True 0 11
+b'\xc3\xa9'
+"#,
+    );
+}
+
+/// Bytes patterns through `re.Pattern[bytes]` and `Match[bytes]` annotations, a bytes template's escapes and errors, and `Optional[bytes]` groups.
+#[test]
+fn re_bytes_in_functions() {
+    prints(
+        r#"
+        import re
+        from re import Match, Pattern
+
+        KV = re.compile(rb"(?P<k>\w+)=(?P<v>\w*)")
+        WORDS = re.compile(rb"[a-z]+")
+
+        def pairs(p: re.Pattern[bytes], data: bytes) -> dict[str, bytes]:
+            out: dict[str, bytes] = {}
+            for m in p.finditer(data):
+                out[str(m.start())] = m.group("v")
+            return out
+
+        def key(m: Match[bytes]) -> bytes:
+            return m.group("k")
+
+        def first(p: Pattern[bytes], data: bytes) -> bytes:
+            m = p.search(data)
+            if m is None:
+                return b"?"
+            return key(m)
+
+        def quoted(raw: bytes) -> bytes:
+            return re.escape(raw)
+
+        def swap(m: Match[bytes]) -> bytes:
+            a: bytes = m.group(1)
+            return m.group(2) + a
+
+        if __name__ == "__main__":
+            print(pairs(KV, b"a=1 b= c=3"))
+            print(first(KV, b"-- x=y"), first(KV, b"--"))
+            print(WORDS.findall(b"ab12cd"), quoted(b"1+1=2?"))
+            print(re.sub(rb"(\w)(\w)", swap, b"abcd"))
+            print(KV.sub(rb"\g<v>:\g<k>", b"a=1,b=2"), KV.sub(rb"\0\n\101", b"a=1"))
+            try:
+                print(b"x" + re.match(rb"(a)|b", b"b").group(1))
+            except TypeError as e:
+                print("TypeError", e)
+            try:
+                KV.sub(rb"\g<nope>", b"a=1")
+            except IndexError as e:
+                print("IndexError", e)
+            try:
+                KV.sub(rb"\g<\xe9>", b"a=1")
+            except re.error as e:
+                print("error", e)
+            try:
+                KV.sub(rb"\q", b"a=1")
+            except re.error as e:
+                print("error", e)
+            print(re.compile(rb"a.c", re.S).match(b"a\nc"), re.compile(rb"^b", re.M).findall(b"a\nb"))
+            print(re.fullmatch(rb"\d+", b"123x", 0) , KV.fullmatch(b"k=v"), KV.match(b"zz a=b", 3))
+        "#,
+        r#"{'0': b'1', '4': b'', '7': b'3'}
+b'x' b'?'
+[b'ab', b'cd'] b'1\\+1=2\\?'
+b'badc'
+b'1:a,2:b' b'\x00\nA'
+TypeError can't concat NoneType to bytes
+IndexError unknown group name 'nope'
+error bad character in group name '\\xe9' at position 3
+error bad escape \q at position 0
+<re.Match object; span=(0, 3), match=b'a\nc'> [b'b']
+None <re.Match object; span=(0, 3), match=b'k=v'> <re.Match object; span=(3, 6), match=b'a=b'>
+"#,
+    );
 }
