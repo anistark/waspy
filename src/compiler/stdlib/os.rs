@@ -58,6 +58,12 @@ pub enum OsFn {
     Abspath,
     /// `(p) -> filetype`: what the path names, -1 for nothing.
     Kind,
+    /// `(p) -> size`: `os.path.getsize`.
+    Size,
+    /// `(p)`: `os.remove`.
+    Remove,
+    /// `(a, b)`: `os.rename`.
+    Rename,
 }
 
 impl OsFn {
@@ -66,6 +72,8 @@ impl OsFn {
         match self {
             OsFn::Environ => (vec![], Some(I32)),
             OsFn::Join => (vec![I32, I32], Some(I32)),
+            OsFn::Remove => (vec![I32], None),
+            OsFn::Rename => (vec![I32, I32], None),
             _ => (vec![I32], Some(I32)),
         }
     }
@@ -296,8 +304,124 @@ pub(crate) fn build(ctx: &CompilationContext, routine: OsFn) -> Function {
             a.if_(errno.ne(0), |a| a.ret(-1));
             a.ret(E::from(STAT).load8(16));
         }
+        OsFn::Size => {
+            let p = a.param(0);
+            let dir = resolve(&mut a, ctx, p);
+            let resolved = crate::compiler::host::RESOLVED;
+            let errno = a.let_(no_directory());
+            a.if_(dir.ge(0), |a| {
+                a.set(
+                    errno,
+                    call(
+                        wasi(ctx, Wasi::PathFilestatGet),
+                        vec![
+                            dir.e(),
+                            1.into(), // follow symlinks
+                            E::from(resolved).load(Ty::I32, 0),
+                            E::from(resolved).load(Ty::I32, 4),
+                            STAT.into(),
+                        ],
+                        Some(Ty::I32),
+                    ),
+                );
+            });
+            a.if_(errno.ne(0), |a| {
+                a.run(os_error(ctx, repr(ctx, p), errno));
+                a.ret(0);
+            });
+            a.ret(E::from(STAT).load(Ty::I32, 32));
+        }
+        OsFn::Remove => {
+            let p = a.param(0);
+            let dir = resolve(&mut a, ctx, p);
+            let resolved = crate::compiler::host::RESOLVED;
+            let errno = a.let_(no_directory());
+            a.if_(dir.ge(0), |a| {
+                a.set(
+                    errno,
+                    call(
+                        wasi(ctx, Wasi::PathUnlinkFile),
+                        vec![
+                            dir.e(),
+                            E::from(resolved).load(Ty::I32, 0),
+                            E::from(resolved).load(Ty::I32, 4),
+                        ],
+                        Some(Ty::I32),
+                    ),
+                );
+            });
+            a.if_(errno.ne(0), |a| a.run(os_error(ctx, repr(ctx, p), errno)));
+        }
+        OsFn::Rename => {
+            let (from, to) = (a.param(0), a.param(1));
+            let resolved = crate::compiler::host::RESOLVED;
+            let errno = a.let_(no_directory());
+            let from_dir = resolve(&mut a, ctx, from);
+            // The resolved path is overwritten by the next resolution.
+            let rest = a.let_(E::from(resolved).load(Ty::I32, 0));
+            let rest_len = a.let_(E::from(resolved).load(Ty::I32, 4));
+            let to_dir = resolve(&mut a, ctx, to);
+            a.if_(from_dir.ge(0) & to_dir.ge(0), |a| {
+                a.set(
+                    errno,
+                    call(
+                        wasi(ctx, Wasi::PathRename),
+                        vec![
+                            from_dir.e(),
+                            rest.e(),
+                            rest_len.e(),
+                            to_dir.e(),
+                            E::from(resolved).load(Ty::I32, 0),
+                            E::from(resolved).load(Ty::I32, 4),
+                        ],
+                        Some(Ty::I32),
+                    ),
+                );
+            });
+            a.if_(errno.ne(0), |a| {
+                let arrow = call(
+                    ctx.helper(Helper::ExcText(" -> ".to_string())),
+                    vec![],
+                    Some(Ty::I32),
+                );
+                let concat = ctx.helper(Helper::Concat);
+                let left = call(concat, vec![repr(ctx, from), arrow], Some(Ty::I32));
+                let shown = call(concat, vec![left, repr(ctx, to)], Some(Ty::I32));
+                a.run(os_error(ctx, shown, errno));
+            });
+        }
     }
     a.finish()
+}
+
+/// The preopen `p` resolves against, with the rest of it at `RESOLVED`.
+fn resolve(a: &mut Asm, ctx: &CompilationContext, p: Var) -> Var {
+    a.let_(call(
+        ctx.helper(Helper::ResolvePath),
+        vec![p.e(), len(p)],
+        Some(Ty::I32),
+    ))
+}
+
+/// ENOENT, what a path no preopen holds answers.
+fn no_directory() -> E {
+    44.into()
+}
+
+fn repr(ctx: &CompilationContext, p: Var) -> E {
+    call(
+        ctx.helper(Helper::Repr(IRType::String)),
+        vec![p.e()],
+        Some(Ty::I32),
+    )
+}
+
+fn os_error(ctx: &CompilationContext, shown: E, errno: Var) -> E {
+    call(
+        ctx.helper(Helper::RaiseOsError),
+        vec![shown, errno.e()],
+        None,
+    )
 }
 
 /// Where `dirname(p)` ends: the head of `split(p)`, with its trailing
@@ -703,6 +827,32 @@ pub(crate) fn emit_call(
             }
             Some(IRType::Bool)
         }
+        "os.path.getsize" => {
+            if !one_str(func) {
+                emit!(func, I::I32Const(0));
+                return Some(IRType::Int);
+            }
+            emit!(func, helper(OsFn::Size));
+            emit_post_call_check(func, ctx);
+            Some(IRType::Int)
+        }
+        "os.remove" | "os.unlink" => {
+            if one_str(func) {
+                emit!(func, helper(OsFn::Remove));
+                emit_post_call_check(func, ctx);
+            }
+            Some(IRType::None)
+        }
+        "os.rename" | "os.replace" => {
+            if arity(qualified, arguments, 2, ctx)
+                && emit_str_word(qualified, &arguments[0], func, ctx, memory_layout)
+                && emit_str_word(qualified, &arguments[1], func, ctx, memory_layout)
+            {
+                emit!(func, helper(OsFn::Rename));
+                emit_post_call_check(func, ctx);
+            }
+            Some(IRType::None)
+        }
         "os.path.isabs" => {
             if !one_str(func) {
                 return Some(IRType::Bool);
@@ -741,7 +891,8 @@ pub(crate) fn result_type(qualified: &str, arguments: &[IRExpr]) -> Option<IRTyp
         }
         "os.getcwd" | "os.path.join" | "os.path.basename" | "os.path.dirname"
         | "os.path.normpath" | "os.path.abspath" => IRType::String,
-        "os.getpid" => IRType::Int,
+        "os.getpid" | "os.path.getsize" => IRType::Int,
+        "os.remove" | "os.unlink" | "os.rename" | "os.replace" => IRType::None,
         "os.urandom" => IRType::Bytes,
         "os.getenv" => IRType::Optional(Box::new(IRType::String)),
         "os.path.split" | "os.path.splitext" => IRType::Tuple(vec![IRType::String, IRType::String]),

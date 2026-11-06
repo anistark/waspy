@@ -3630,6 +3630,76 @@ mod stdlib {
         );
     }
 
+    /// logging module: exception() and exc_info (the exception's last line standing in for its traceback), extra= written out in the call and fields a filter sets, addLevelName, logging.config.dictConfig, logging.handlers' RotatingFileHandler, WatchedFileHandler, BufferingHandler, and MemoryHandler, and shutdown at exit
+    #[test]
+    fn logging_handlers_and_config() {
+        let run = run_main(
+            &dedent(
+                r#"
+                import logging
+                import logging.config
+                from logging.handlers import MemoryHandler
+
+                class Mark(logging.Handler):
+                    def close(self) -> None:
+                        print("closed")
+
+                if __name__ == "__main__":
+                    logging.addLevelName(25, "NOTICE")
+                    logging.config.dictConfig({
+                        "version": 1,
+                        "formatters": {"f": {"format": "%(levelname)s %(who)s %(message)s"}},
+                        "handlers": {"o": {"class": "logging.StreamHandler", "stream": "ext://sys.stdout", "formatter": "f"}},
+                        "root": {"level": "INFO", "handlers": ["o"]},
+                    })
+                    log = logging.getLogger("a")
+                    log.log(25, "custom", extra={"who": "me"})
+                    try:
+                        raise ValueError("bad")
+                    except ValueError:
+                        log.exception("failed", extra={"who": "you"})
+                    m = MemoryHandler(9, target=logging.getLogger().handlers[0])
+                    Mark()
+                    print(m.capacity)
+                "#,
+            ),
+            "",
+            &[],
+        );
+        assert_eq!(
+            run.stdout,
+            "NOTICE me custom\nERROR you failed\nValueError: bad\n9\nclosed\n"
+        );
+    }
+
+    /// os functions on files, through WASI: remove(), unlink(), rename(), replace(), and os.path.getsize(), raising CPython's OSError subclasses
+    #[test]
+    fn os_file_functions() {
+        let run = run_main(
+            &dedent(
+                r#"
+                import os
+                if __name__ == "__main__":
+                    with open("a.txt", "w") as f:
+                        f.write("abc")
+                    os.rename("a.txt", "b.txt")
+                    print(os.path.getsize("b.txt"), os.path.exists("a.txt"))
+                    os.remove("b.txt")
+                    try:
+                        os.remove("b.txt")
+                    except FileNotFoundError as e:
+                        print(e)
+                "#,
+            ),
+            "",
+            &[],
+        );
+        assert_eq!(
+            run.stdout,
+            "3 False\n[Errno 2] No such file or directory: 'b.txt'\n"
+        );
+    }
+
     /// collections module: UserDict, UserList, UserString, ordinary classes whose subclasses reach their overrides, with the methods that make an instance answering the subclass
     #[test]
     fn collections_user_classes() {

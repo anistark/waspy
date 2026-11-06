@@ -1251,7 +1251,19 @@
         "test": "stdlib::logging_module"
       },
       {
-        "name": "logging module: exception() and exc_info (a traceback in the record), extra=, addLevelName, logging.config, logging.handlers (refused today)",
+        "name": "logging module: exception() and exc_info (the exception's last line standing in for its traceback), extra= written out in the call and fields a filter sets, addLevelName, logging.config.dictConfig, logging.handlers' RotatingFileHandler, WatchedFileHandler, BufferingHandler, and MemoryHandler, and shutdown at exit",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::logging_handlers_and_config"
+      },
+      {
+        "name": "os functions on files, through WASI: remove(), unlink(), rename(), replace(), and os.path.getsize(), raising CPython's OSError subclasses",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::os_file_functions"
+      },
+      {
+        "name": "logging module: TimedRotatingFileHandler and logging.config.fileConfig (refused today)",
         "status": "todo"
       }
     ]

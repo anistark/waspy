@@ -11,7 +11,7 @@ use crate::ir::IRExpr;
 
 /// A record attribute a format can name, and how it reads.
 #[derive(Clone, Copy, PartialEq)]
-enum Field {
+pub(super) enum Field {
     Str,
     Int,
     Float,
@@ -19,7 +19,13 @@ enum Field {
     None,
 }
 
-fn field(name: &str) -> Result<Field, String> {
+/// The fields `extra=` gives records, by name.
+pub(super) type Extras = std::collections::BTreeMap<String, Field>;
+
+fn field(name: &str, extras: &Extras) -> Result<Field, String> {
+    if let Some(kind) = extras.get(name) {
+        return Ok(*kind);
+    }
     Ok(match name {
         "name" | "levelname" | "message" | "asctime" | "funcName" | "processName"
         | "threadName" | "msg" => Field::Str,
@@ -81,11 +87,11 @@ pub(super) struct Compiled {
     pub invalid: Option<String>,
 }
 
-pub(super) fn compile(fmt: &str, style: &str) -> Compiled {
+pub(super) fn compile(fmt: &str, style: &str, extras: &Extras) -> Compiled {
     match style {
-        "%" => percent(fmt),
-        "{" => braces(fmt),
-        _ => template(fmt),
+        "%" => percent(fmt, extras),
+        "{" => braces(fmt, extras),
+        _ => template(fmt, extras),
     }
 }
 
@@ -120,7 +126,7 @@ impl Parts {
 }
 
 /// `fmt % record.__dict__`.
-fn percent(fmt: &str) -> Compiled {
+fn percent(fmt: &str, extras: &Extras) -> Compiled {
     let chars: Vec<char> = fmt.chars().collect();
     let mut parts = Parts::new();
     let mut fields = 0;
@@ -190,7 +196,14 @@ fn percent(fmt: &str) -> Compiled {
         if render.is_err() {
             continue;
         }
-        match percent_field(&name, &flags, &width, precision.as_deref(), conversion) {
+        match percent_field(
+            &name,
+            &flags,
+            &width,
+            precision.as_deref(),
+            conversion,
+            extras,
+        ) {
             Ok(e) => parts.push(e),
             Err(why) => render = Err(why),
         }
@@ -208,8 +221,9 @@ fn percent_field(
     width: &str,
     precision: Option<&str>,
     conversion: char,
+    extras: &Extras,
 ) -> Result<IRExpr, String> {
-    let kind = field(name)?;
+    let kind = field(name, extras)?;
     let left = flags.contains('-');
     let sign = if flags.contains('+') {
         "+"
@@ -298,7 +312,7 @@ fn percent_field(
 }
 
 /// `fmt.format(**record.__dict__)`.
-fn braces(fmt: &str) -> Compiled {
+fn braces(fmt: &str, extras: &Extras) -> Compiled {
     let chars: Vec<char> = fmt.chars().collect();
     let mut parts = Parts::new();
     let mut fields = 0;
@@ -365,7 +379,7 @@ fn braces(fmt: &str) -> Compiled {
                     render = Err(format!("the field '{name}'"));
                     continue;
                 }
-                let kind = match field(name) {
+                let kind = match field(name, extras) {
                     Ok(k) => k,
                     Err(why) => {
                         render = Err(why);
@@ -397,7 +411,7 @@ fn braces(fmt: &str) -> Compiled {
 }
 
 /// `string.Template(fmt).substitute(**record.__dict__)`.
-fn template(fmt: &str) -> Compiled {
+fn template(fmt: &str, extras: &Extras) -> Compiled {
     let chars: Vec<char> = fmt.chars().collect();
     let mut parts = Parts::new();
     let mut fields = 0;
@@ -455,7 +469,7 @@ fn template(fmt: &str) -> Compiled {
         if render.is_err() {
             continue;
         }
-        match field(&name) {
+        match field(&name, extras) {
             Ok(kind) => parts.push(as_text(&name, kind, 's')),
             Err(why) => render = Err(why),
         }
