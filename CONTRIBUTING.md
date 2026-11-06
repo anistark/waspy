@@ -33,6 +33,7 @@ Thank you for your interest in contributing to Waspy! This document provides gui
    - [Just](https://github.com/casey/just#installation)
    - [Git](https://git-scm.com/downloads)
    - [Python](https://www.python.org/downloads/)
+   - [Node.js](https://nodejs.org/) and [wasmtime](https://wasmtime.dev/), for `just board-check`, `just verify-runtime`, and the website
 
 2. **Clone the Repository**
    ```sh
@@ -60,29 +61,22 @@ waspy/
 │   │   ├── imports.rs   - Import analysis
 │   │   ├── metadata.rs  - Project metadata extraction
 │   │   └── project.rs   - Project structure analysis
-│   ├── compiler/        - WASM generation using wasm-encoder
-│   │   ├── context.rs   - Compilation context
-│   │   ├── expression.rs - Expression compilation
-│   │   ├── function.rs  - Function compilation
-│   │   └── module.rs    - Module compilation
-│   ├── core/            - Core functionality
-│   │   ├── config.rs    - Project configuration
-│   │   ├── errors.rs    - Error handling
-│   │   ├── options.rs   - Compiler options
-│   │   └── parser.rs    - Python parsing using RustPython
-│   ├── ir/              - Intermediate representation
-│   │   ├── converter.rs - AST to IR conversion
-│   │   ├── decorators.rs - Function decorators
-│   │   ├── entry_points.rs - Entry point detection
-│   │   └── types.rs     - IR data structures
+│   ├── compiler/        - WASM generation using wasm-encoder, the runtime helpers, and the WASI imports
+│   │   └── stdlib/      - Codegen for math, random, os, json, and functools
+│   ├── core/            - Parser, compiler options, errors, project configuration, Unicode tables
+│   ├── ir/              - Intermediate representation: AST lowering and the module passes
 │   ├── optimize/        - Optimization tools
 │   │   └── wasm.rs      - WASM optimization using Binaryen
+│   ├── stdlib/          - The stdlib allowlist and its constants
 │   ├── utils/           - Utility functions
 │   │   ├── fs.rs        - File system utilities
 │   │   ├── logging.rs   - Logging utilities
 │   │   └── paths.rs     - Path utilities
-│   └── lib.rs           - Main library entry point
+│   ├── lib.rs           - Main library entry point
+│   └── wasmrun.rs       - wasmrun plugin (the `wasm-plugin` feature)
 ├── docs/                - The website (Eleventy + Tailwind; `just docs` serves it)
+├── playground/          - The wasm-bindgen wrapper the website's playground is built from
+├── scripts/             - Board, playground, and Unicode table scripts
 ├── tests/               - Test suite
 │   ├── integration/     - Integration tests
 │   ├── notebook/        - The standard-library talk, a notebook of slides (`just notebook` opens it)
@@ -91,6 +85,8 @@ waspy/
 ├── justfile             - Command runner configuration
 └── README.md            - Installation, quick start, and links to the docs site
 ```
+
+`AGENTS.md` has the file-by-file layout and the compilation pipeline.
 
 ## Building and Running Examples
 
@@ -239,8 +235,10 @@ Waspy uses a `justfile` to manage common development tasks:
 - `just format` - Format the code
 - `just format-check` - Check formatting without changes
 - `just lint` - Run linter
-- `just docs` - Generate and open documentation
+- `just docs` - Serve the website with live reload
+- `just docs-rs` - Generate and open the API documentation
 - `just docs-check` - Check documentation
+- `just board-check` - Check that every done feature on the board has a passing test
 - `just ci` - Run all CI checks locally
 - `just dev` - Run the full development workflow
 - `just compile <file>` - Compile a Python file to WebAssembly

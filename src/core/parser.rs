@@ -155,8 +155,8 @@ fn validate_module_level(body: &[Stmt], source: &str) -> Result<()> {
 
         return Err(unsupported(
             format!(
-                "{what} at module level are not supported: a WebAssembly module has no \
-                 top-level run step, so the statement would be compiled away and later reads \
+                "{what} at module level are not supported: only definitions run when a module \
+                 starts, so the statement would be compiled away and later reads \
                  would silently see the value from before it. Hint: move this into a function \
                  and call it, or drive it from 'if __name__ == \"__main__\":'. \
                  Module-level definitions (X = 1, X = helper(), X = ClassName()) do work"
@@ -231,7 +231,7 @@ fn validate_stmt(stmt: &Stmt, source: &str, function: Option<&str>) -> Result<()
     match stmt {
         Stmt::AsyncFunctionDef(def) => Err(unsupported(
             format!(
-                "'async def {}' — async functions are not supported (planned after 1.0). \
+                "'async def {}': async functions are not supported yet. \
                  Hint: define a regular 'def' function",
                 def.name
             ),
@@ -240,13 +240,13 @@ fn validate_stmt(stmt: &Stmt, source: &str, function: Option<&str>) -> Result<()
             function,
         )),
         Stmt::AsyncFor(stmt) => Err(unsupported(
-            "'async for' is not supported (planned after 1.0). Hint: use a regular 'for' loop",
+            "'async for' is not supported yet. Hint: use a regular 'for' loop",
             source,
             stmt.range.start().into(),
             function,
         )),
         Stmt::AsyncWith(stmt) => Err(unsupported(
-            "'async with' is not supported (planned after 1.0). Hint: use a regular 'with' block",
+            "'async with' is not supported yet. Hint: use a regular 'with' block",
             source,
             stmt.range.start().into(),
             function,
@@ -359,7 +359,7 @@ fn validate_stmt(stmt: &Stmt, source: &str, function: Option<&str>) -> Result<()
 fn validate_expr(expr: &Expr, source: &str, function: Option<&str>) -> Result<()> {
     match expr {
         Expr::Await(await_expr) => Err(unsupported(
-            "'await' is not supported (planned after 1.0). Hint: call the function directly",
+            "'await' is not supported yet. Hint: call the function directly",
             source,
             await_expr.range.start().into(),
             function,

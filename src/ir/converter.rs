@@ -5039,9 +5039,10 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
             &comp.generators,
             memory_layout,
         ),
-        // A generator expression is materialized eagerly as a list: every
-        // iterable here is finite and the consumers (sum(), for, in) only ever
-        // drain it fully, so eager evaluation is observationally equivalent.
+        // A generator expression is materialized eagerly as a list. That is
+        // CPython's answer for a consumer that drains it (sum(), in), but not
+        // for a `for` whose body interleaves with the source's side effects:
+        // those all run first here. Documented under Limitations.
         Expr::GeneratorExp(comp) => lower_comprehension(
             IRComprehensionKind::List,
             &comp.elt,

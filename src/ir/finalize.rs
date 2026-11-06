@@ -205,8 +205,8 @@ fn name_function_values(module: &mut IRModule) {
 /// Runs before the other module passes, which walk expressions with wildcard
 /// arms that would not descend into a keyword's value.
 pub fn resolve_keyword_arguments(module: &mut IRModule) -> Result<()> {
-    // A method call never places keywords, so a keyword-only parameter of a
-    // method could not be passed at all.
+    // A method's keywords are placed at codegen (`dunders::place_method_keywords`),
+    // which knows nothing of keyword-only parameters, so they stay refused here.
     for class in &module.classes {
         for method in &class.methods {
             if method.name == "__init__" {

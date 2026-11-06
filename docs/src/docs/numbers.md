@@ -1,7 +1,7 @@
 ---
 title: Numbers
 eyebrow: Language
-description: "How int and float behave, and the two places waspy deliberately answers differently from CPython."
+description: "How int and float behave, and where waspy deliberately answers differently from CPython."
 ---
 
 `int` is a 32-bit two's-complement integer, and `float` is an IEEE-754 double.
@@ -18,9 +18,9 @@ A program whose integer values stay inside that range gets Python's answers. One
 
 The alternative is to check every add, subtract, multiply, and power for overflow and trap. That makes the divergence loud, but it costs instructions on the hottest path in any program and rejects code that deliberately relies on wrapping (hashes, checksums, PRNGs). A 64-bit integer would only move the boundary rather than remove it: arbitrary precision needs heap-allocated digits and an allocator call on every operation, which is a different project.
 
-Everywhere else, waspy holds itself to the opposite standard: a construct either produces Python's answer or fails loudly, never a quietly different one. Integer width is one of two documented exceptions, so if your program's arithmetic can exceed 32 bits, it is not in the supported subset.
+Everywhere else, waspy holds itself to the opposite standard: a construct either produces Python's answer or fails loudly, never a quietly different one. Integer width is one of a few [documented exceptions](/docs/limitations/#where-the-answer-differs), so if your program's arithmetic can exceed 32 bits, it is not in the supported subset.
 
-The other is a NaN inside a collection. Floats are unboxed values here, not objects, so there is no identity for CPython's "same object, therefore equal" shortcut to find: with `x = float("nan")`, `(x,) == (x,)` and `[x] == [x]` are False, where CPython answers True. `x == x` is False in both.
+Another is a NaN inside a collection. Floats are unboxed values here, not objects, so there is no identity for CPython's "same object, therefore equal" shortcut to find: with `x = float("nan")`, `(x,) == (x,)` and `[x] == [x]` are False, where CPython answers True. `x == x` is False in both.
 
 Float division by zero and integer division or modulo by zero raise `ZeroDivisionError` rather than producing `inf` or trapping. `**` on floats is CPython's: `2.0 ** 0.5` and every special value give its answer, zero to a negative power raises `ZeroDivisionError`, and a result too large raises `OverflowError`. A negative float to a fractional power traps, since CPython's answer is a complex number. On ints, `**` multiplies (and wraps), and a negative integer exponent traps because Python's answer is a float an int result cannot hold. `float()` and `int()` of a string take ASCII digits and whitespace only: CPython also accepts other Unicode decimal digits and spaces, which trap here rather than raise. `round(x, n)` needs `0 <= n <= 22`.
 

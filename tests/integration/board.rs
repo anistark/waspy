@@ -1939,7 +1939,7 @@ mod collections {
         );
     }
 
-    /// Dict methods .get(key, default) (.get(key) on instance values, where None is distinct), .keys(), .values(), .items() - .items() as a value, not only a for iterable
+    /// Dict methods .get(key, default) (.get(key) on number and instance values, where None is distinct), .keys(), .values(), .items() - .items() as a value, not only a for iterable
     #[test]
     fn dict_methods() {
         check(
@@ -1953,8 +1953,13 @@ mod collections {
                     t += v * 100
                 items = d.items()
                 return t + len(items) * 1000
+
+            def g() -> int:
+                d = {"a": 1}
+                e = {"a": 1.5}
+                return (1 if d.get("q") is None else 0) + (10 if e.get("q") is None else 0)
         "#,
-            &[("f", Want::Int(2313))],
+            &[("f", Want::Int(2313)), ("g", Want::Int(11))],
         );
     }
 
@@ -2845,7 +2850,7 @@ mod builtins {
         );
     }
 
-    /// min() & max() over a single iterable, with key= and default=
+    /// min() & max() over a single iterable (a list, tuple, range, set, dict, or string), with key= and default=
     #[test]
     fn min_max_iterable() {
         check(
@@ -2862,11 +2867,19 @@ mod builtins {
             def h() -> int:
                 xs: List[int] = []
                 return min(xs, default=-1) + max(range(3, 10, 2)) * 10
+
+            def i() -> int:
+                return min({3, 1}) + max({3, 1}, key=lambda x: -x) * 10
+
+            def j() -> str:
+                return max("abc") + min("", default="z") + max({"a": 1, "bb": 2}, key=len)
         "#,
             &[
                 ("f", Want::Int(1)),
                 ("g", Want::Str("figbanana")),
                 ("h", Want::Int(89)),
+                ("i", Want::Int(11)),
+                ("j", Want::Str("czbb")),
             ],
         );
     }

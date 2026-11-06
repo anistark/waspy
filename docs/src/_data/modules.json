@@ -693,7 +693,7 @@
         "test": "collections::list_slicing"
       },
       {
-        "name": "Dict methods .get(key, default) (.get(key) on instance values, where None is distinct), .keys(), .values(), .items() - .items() as a value, not only a for iterable",
+        "name": "Dict methods .get(key, default) (.get(key) on number and instance values, where None is distinct), .keys(), .values(), .items() - .items() as a value, not only a for iterable",
         "status": "done",
         "version": "0.16.0",
         "test": "collections::dict_methods"
@@ -971,7 +971,7 @@
         "test": "builtins::min_max_arguments"
       },
       {
-        "name": "min() & max() over a single iterable (a list, tuple, or range), with key= (a lambda, a def, len, abs) and default=",
+        "name": "min() & max() over a single iterable (a list, tuple, range, set, dict, or string), with key= (a lambda, a def, len, abs) and default=",
         "status": "done",
         "version": "upcoming",
         "issue": 118,

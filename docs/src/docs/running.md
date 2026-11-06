@@ -16,7 +16,7 @@ console.log(instance.exports.factorial(5)); // 120
 
 ## The host interface
 
-A compiled program's side effects go through [WASI preview 1](https://github.com/WebAssembly/WASI/blob/main/legacy/preview1/docs.md), importing from `wasi_snapshot_preview1` exactly the functions it uses, so a program that prints nothing, reads nothing, and opens nothing imports nothing and instantiates with an empty import object, as above. The same module runs unchanged under `wasmtime run`, Node's `node:wasi`, or the small browser shim the playground ships ([`wasi.js`](https://github.com/anistark/waspy/blob/main/docs/playground/wasi.js)).
+A compiled program's side effects go through [WASI preview 1](https://github.com/WebAssembly/WASI/blob/main/legacy/preview1/docs.md), importing from `wasi_snapshot_preview1` exactly the functions it uses, so a program that prints nothing, reads nothing, and opens nothing imports nothing and instantiates with an empty import object, as above. The same module runs unchanged under `wasmtime run`, Node's `node:wasi`, or the small browser shim the playground ships ([`wasi.js`](https://github.com/anistark/waspy/blob/main/docs/src/playground/wasi.js)).
 
 | What the program does | Imports |
 |------|---------|
@@ -25,6 +25,10 @@ A compiled program's side effects go through [WASI preview 1](https://github.com
 | `sys.argv` | `args_sizes_get`, `args_get` |
 | a `__main__` block that can raise an exception it does not catch | `fd_write`, `proc_exit` |
 | `open()` and the file methods | `path_open`, `fd_prestat_get`, `fd_prestat_dir_name`, `fd_read`, `fd_write`, `fd_close` |
+| `os.path.exists()`, `isfile()`, `isdir()` | `path_filestat_get`, `fd_prestat_get`, `fd_prestat_dir_name` |
+| `random`, `os.urandom()` | `random_get` |
+| `os.environ`, `os.getenv()` | `environ_sizes_get`, `environ_get` |
+| reading the clock (`datetime`'s `now()` and `today()`, a log record's time) | `clock_time_get` |
 
 ## Running a program
 
