@@ -20,7 +20,8 @@ mod types;
 
 pub use collections::{
     lower_collections, COLLECTIONS_FN_PREFIX, DATA_METHOD, DELEGATES_VAR, FROM_METHOD, FROZEN_VAR,
-    VIEW_METHOD,
+    MAPPING_METHOD, REFUSED_VAR, REFUSE_COMPREHENSION, REFUSE_WALK, VIEW_METHOD, WALK_METHOD,
+    WRAP_METHOD,
 };
 pub use converter::*;
 pub use datetime::{lower_datetime, DATETIME_FN_PREFIX};

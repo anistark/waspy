@@ -14,7 +14,7 @@
 //! is left as a loop over the method's result, which code generation builds as
 //! a list.
 
-use super::build::{assign, call, cmp, int, mcall, v};
+use super::build::{assign, call, cmp, for_, idx, int, mcall, v};
 use super::collections::spec::{self, Kind};
 use super::infer::{bind, Types};
 use crate::ir::{
@@ -103,6 +103,15 @@ impl Classes {
             out.push(c);
         }
         out
+    }
+
+    /// Whether `class`'s `method` is `UserDict`'s, whose loops read each
+    /// value through `__getitem__` as they go.
+    fn reads_through_getitem(&self, class: &str, method: &str) -> bool {
+        self.lineage(class)
+            .iter()
+            .find(|c| self.views.get(*c).is_some_and(|v| v.contains(method)))
+            .is_some_and(|owner| spec::kind_of_class(owner) == Some(Kind::UserDict))
     }
 
     fn defines(&self, class: &str, method: &str) -> bool {
@@ -201,6 +210,53 @@ impl Pass<'_> {
         self.types.of(object, env)
     }
 
+    /// A loop over a `UserDict`'s view: over the keys it holds, reading each
+    /// value through `__getitem__` as the loop reaches it, as CPython's
+    /// `ItemsView` and `ValuesView` do.
+    fn walk_mapping(
+        &mut self,
+        object: IRExpr,
+        method: &str,
+        target: String,
+        body: IRBody,
+    ) -> Vec<IRStatement> {
+        let n = self.next;
+        self.next += 1;
+        let mapping = format!("__uview_{n}");
+        let hidden = format!("__ukey_{n}");
+        let read = |key: &str| idx(v(&mapping), v(key));
+        let mut statements = body.statements;
+        let (key, mut head) = match (method, statements.first()) {
+            ("keys", _) => (target, Vec::new()),
+            ("values", _) => (hidden.clone(), vec![assign(&target, read(&hidden))]),
+            (
+                _,
+                Some(IRStatement::TupleUnpack {
+                    targets,
+                    value: IRExpr::Variable(element),
+                    starred: None,
+                }),
+            ) if *element == target && targets.len() == 2 => {
+                let (key, value) = (targets[0].clone(), targets[1].clone());
+                statements.remove(0);
+                let head = vec![assign(&value, read(&key))];
+                (key, head)
+            }
+            _ => (
+                hidden.clone(),
+                vec![assign(
+                    &target,
+                    IRExpr::TupleLiteral(vec![v(&hidden), read(&hidden)]),
+                )],
+            ),
+        };
+        head.extend(statements);
+        vec![
+            assign(&mapping, object),
+            for_(&key, mcall(v(&mapping), VIEW_METHOD, Vec::new()), head),
+        ]
+    }
+
     /// The dict walk a loop becomes, or the statement back as it was.
     fn walk(&mut self, stmt: IRStatement, env: &HashMap<String, IRType>) -> Vec<IRStatement> {
         let IRStatement::For {
@@ -235,6 +291,9 @@ impl Pass<'_> {
         }
         let mut object = object;
         if let IRType::Class(class) = self.receiver(&object, env) {
+            if self.classes.reads_through_getitem(&class, &method_name) {
+                return self.walk_mapping(*object, &method_name, target, *body);
+            }
             if self.classes.defines(&class, &method_name) {
                 return vec![keep(object, method_name, arguments, body)];
             }

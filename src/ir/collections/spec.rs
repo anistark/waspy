@@ -17,6 +17,9 @@ pub(crate) enum Kind {
     OrderedDict,
     Deque,
     ChainMap,
+    UserDict,
+    UserList,
+    UserString,
 }
 
 impl Kind {
@@ -28,6 +31,9 @@ impl Kind {
             "OrderedDict" => Some(Kind::OrderedDict),
             "deque" | "Deque" => Some(Kind::Deque),
             "ChainMap" => Some(Kind::ChainMap),
+            "UserDict" => Some(Kind::UserDict),
+            "UserList" => Some(Kind::UserList),
+            "UserString" => Some(Kind::UserString),
             _ => None,
         }
     }
@@ -40,13 +46,22 @@ impl Kind {
             Kind::OrderedDict => "OrderedDict",
             Kind::Deque => "deque",
             Kind::ChainMap => "ChainMap",
+            Kind::UserDict => "UserDict",
+            Kind::UserList => "UserList",
+            Kind::UserString => "UserString",
         }
+    }
+
+    /// Whether the class is one programs subclass (`collections::user`).
+    pub(crate) fn is_user(self) -> bool {
+        matches!(self, Kind::UserDict | Kind::UserList | Kind::UserString)
     }
 
     /// How many type arguments it takes: the element, or the key and value.
     pub(crate) fn arity(self) -> usize {
         match self {
-            Kind::Counter | Kind::Deque => 1,
+            Kind::UserString => 0,
+            Kind::Counter | Kind::Deque | Kind::UserList => 1,
             _ => 2,
         }
     }
@@ -89,6 +104,9 @@ pub(crate) fn variant(base: &str, ty: &IRType) -> Option<String> {
 
 /// The class name of `kind` specialized by `args`.
 pub(crate) fn name(kind: Kind, args: &[IRType]) -> Option<String> {
+    if kind.arity() == 0 {
+        return Some(kind.name().to_string());
+    }
     Some(format!(
         "{}[{}]",
         kind.name(),
@@ -120,6 +138,9 @@ pub(crate) fn kind_of_class(class: &str) -> Option<Kind> {
 
 /// The kind and type arguments of a specialized class's name.
 pub(crate) fn parse(class: &str) -> Option<(Kind, Vec<IRType>)> {
+    if Kind::named(class).is_some_and(|k| k.arity() == 0) {
+        return Some((Kind::named(class)?, Vec::new()));
+    }
     let open = class.find('[')?;
     let kind = Kind::named(&class[..open])?;
     let mut p = Parser {

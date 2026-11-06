@@ -897,6 +897,22 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
                     Expr::Name(module) => Some(format!("{}.{}", module.id, attr.attr)),
                     _ => None,
                 },
+                // `UserDict[str, int]` is a class of its own, made for those
+                // types. Other subscripted bases (`Generic[T]`) say nothing
+                // of what the class does.
+                Expr::Subscript(subscript) => {
+                    let generic = match &*subscript.value {
+                        Expr::Name(n) => n.id.as_str(),
+                        Expr::Attribute(a) => a.attr.as_str(),
+                        _ => return None,
+                    };
+                    crate::ir::collections::spec::Kind::named(generic)
+                        .filter(|kind| kind.is_user())?;
+                    match type_annotation_to_ir_type(base) {
+                        Ok(IRType::Class(specialized)) => Some(specialized),
+                        _ => None,
+                    }
+                }
                 _ => None,
             })
             .collect();

@@ -417,3 +417,79 @@ fn open_mode_must_be_a_literal() {
         "{err}"
     );
 }
+
+/// What the `collections` user classes cannot answer is refused, not read as
+/// the data they hold.
+#[test]
+fn user_classes_refuse_what_they_cannot_answer() {
+    let cases: &[(&str, &str)] = &[
+        (
+            "from collections import UserDict\nclass I(UserDict[str, int]):\n    def __iter__(self):\n        return iter([\"x\"])\n",
+            "overrides how a UserDict is walked",
+        ),
+        (
+            "from collections import UserList\nclass O(UserList[int]):\n    def __getitem__(self, i):\n        return super().__getitem__(i - 1)\ndef f() -> int:\n    return sum(O([1]))\n",
+            "a sequence whose __getitem__ a subclass overrides",
+        ),
+        (
+            "from collections import UserDict\nclass D(UserDict[str, int]):\n    def __getitem__(self, k):\n        return super().__getitem__(k) * 2\ndef f(d: D) -> int:\n    return sum([v + 1 for v in d.values()])\n",
+            "a comprehension over a mapping's values",
+        ),
+        (
+            "from collections import UserDict\nclass T(UserDict[str, int]):\n    def __init__(self, a: int, b: int) -> None:\n        super().__init__()\ndef f(t: T) -> int:\n    return len(t | {\"a\": 1})\n",
+            "'T.__or__()' makes a new instance",
+        ),
+        (
+            "from collections import UserDict\nclass T(UserDict[str, int]):\n    def tag(self) -> None:\n        self.n = 1\ndef f(t: T) -> int:\n    return len(t.copy())\n",
+            "'T.copy()' makes a new instance",
+        ),
+        (
+            "from collections import UserDict\ndef f() -> bool:\n    d = UserDict({\"a\": 1})\n    return d.keys() == {\"a\"}\n",
+            "comparing a KeysView with ==",
+        ),
+        (
+            "from collections import UserDict\ndef f() -> int:\n    return len(list(reversed(UserDict({\"a\": 1}))))\n",
+            "is not reversible",
+        ),
+        (
+            "from collections import UserDict\nimport json\ndef f() -> str:\n    return json.dumps(UserDict({\"a\": 1}))\n",
+            "is not JSON serializable",
+        ),
+        (
+            "from collections import UserList\ndef f() -> int:\n    return len(UserList([1], [2]))\n",
+            "takes at most one positional argument",
+        ),
+        (
+            "from collections import UserDict\ndef f() -> int:\n    d: UserDict[int, int] = UserDict(a=3)\n    return len(d)\n",
+            "with keywords makes string keys",
+        ),
+        (
+            "from collections import UserList\nclass S(UserList):\n    def head(self):\n        return self[0]\n    def __contains__(self, item):\n        return True\ndef f(s: S) -> int:\n    return len(s)\n",
+            "derives from UserList without saying what it holds",
+        ),
+    ];
+    for (source, needle) in cases {
+        let message = compile_error(source);
+        assert!(message.contains(needle), "{source}\n{message}");
+    }
+}
+
+/// A list or tuple in a place declared to hold an instance would be read as
+/// one, its fields being whatever the collection's block holds.
+#[test]
+fn a_collection_is_refused_where_an_instance_is_declared() {
+    let class = "class A:\n    def __init__(self) -> None:\n        self.data = [1]\n";
+    for (call, needle) in [
+        (
+            "def f(a: A) -> int:\n    return len(a.data)\ndef g() -> int:\n    return f([1])\n",
+            "list is used where an instance of A is expected",
+        ),
+        (
+            "class B:\n    def m(self, a: A) -> int:\n        return len(a.data)\ndef g() -> int:\n    return B().m((1,))\n",
+            "tuple is used where an instance of A is expected",
+        ),
+    ] {
+        let message = compile_error(&format!("{class}{call}"));
+        assert!(message.contains(needle), "{message}");
+    }
+}
