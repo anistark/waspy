@@ -3630,6 +3630,36 @@ mod stdlib {
         );
     }
 
+    /// collections module: UserDict, UserList, UserString, ordinary classes whose subclasses reach their overrides, with the methods that make an instance answering the subclass
+    #[test]
+    fn collections_user_classes() {
+        check(
+            r#"
+            from collections import UserDict, UserList, UserString
+
+            class Lower(UserDict[str, int]):
+                def __setitem__(self, key, item):
+                    super().__setitem__(key.lower(), item)
+
+            class Stack(UserList[int]):
+                def peek(self) -> int:
+                    return self[-1]
+
+            class Shout(UserString):
+                def loud(self) -> str:
+                    return self.data.upper() + "!"
+
+            def f() -> str:
+                d = Lower({"A": 1})
+                d.update({"B": 2})
+                s = Stack([1, 2])
+                t = Shout("hi").strip()
+                return repr(d) + repr(s[0:1].peek()) + t.loud() + repr(sorted(d.items()))
+        "#,
+            &[("f", Want::Str("{'a': 1, 'b': 2}1HI![('a', 1), ('b', 2)]"))],
+        );
+    }
+
     /// collections module: namedtuple and typing.NamedTuple (classes whose fields take their types from the calls), deque, Counter, OrderedDict, defaultdict, ChainMap, each a class specialized by its element types
     #[test]
     fn collections_classes() {

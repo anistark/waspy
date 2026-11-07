@@ -1722,24 +1722,33 @@ fn resolve_class_facts(classes: &[IRClass]) -> HashMap<String, ClassFacts> {
 
     // Root-to-leaf chain of a class, following the (at most one) base that is
     // a class of this module. Bounded by the class count to survive cycles.
-    fn chain_of<'a>(
-        class: &'a IRClass,
-        by_name: &HashMap<&str, &'a IRClass>,
-        max_len: usize,
-    ) -> Vec<&'a IRClass> {
-        let mut chain = vec![class];
-        let mut current = class;
-        while let Some(base) = current
-            .bases
-            .iter()
-            .find_map(|b| by_name.get(b.as_str()).copied())
-        {
-            if chain.len() > max_len {
-                break;
+    /// The class and every base, root first: each base's line, left to
+    /// right, with a class shared by two lines where the later one reaches
+    /// it. The nearest `__init__` is then the one CPython's MRO finds, a
+    /// second base's included.
+    fn chain_of<'a>(class: &'a IRClass, by_name: &HashMap<&str, &'a IRClass>) -> Vec<&'a IRClass> {
+        fn walk<'a>(
+            class: &'a IRClass,
+            by_name: &HashMap<&str, &'a IRClass>,
+            path: &mut Vec<&'a str>,
+            out: &mut Vec<&'a IRClass>,
+        ) {
+            // A cycle is reported where the class layout is computed.
+            if path.contains(&class.name.as_str()) {
+                return;
             }
-            chain.push(base);
-            current = base;
+            path.push(&class.name);
+            out.retain(|c| c.name != class.name);
+            out.push(class);
+            for base in &class.bases {
+                if let Some(base) = by_name.get(base.as_str()).copied() {
+                    walk(base, by_name, path, out);
+                }
+            }
+            path.pop();
         }
+        let mut chain = Vec::new();
+        walk(class, by_name, &mut Vec::new(), &mut chain);
         chain.reverse();
         chain
     }
@@ -1753,7 +1762,7 @@ fn resolve_class_facts(classes: &[IRClass]) -> HashMap<String, ClassFacts> {
     classes
         .iter()
         .map(|class| {
-            let chain = chain_of(class, &by_name, classes.len());
+            let chain = chain_of(class, &by_name);
             let abc_enabled = chain
                 .iter()
                 .any(|c| c.bases.iter().any(|b| ABC_MARKERS.contains(&b.as_str())));

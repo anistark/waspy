@@ -43,7 +43,7 @@ pub(crate) fn iterable_sources(elem: &IRType, generators: &[(String, IRType)]) -
     out
 }
 
-fn me(class: &str) -> IRParam {
+pub(crate) fn me(class: &str) -> IRParam {
     param("self", &IRType::Class(class.to_string()))
 }
 
@@ -56,7 +56,12 @@ fn each(x: &str, src: IRExpr, body: Vec<IRStatement>) -> IRStatement {
     for_(x, src, body)
 }
 
-fn class(name: &str, bases: Vec<String>, methods: Vec<IRFunction>, delegates: &[&str]) -> IRClass {
+pub(crate) fn class(
+    name: &str,
+    bases: Vec<String>,
+    methods: Vec<IRFunction>,
+    delegates: &[&str],
+) -> IRClass {
     IRClass {
         name: name.to_string(),
         bases,
@@ -1566,5 +1571,8 @@ pub(crate) fn synthesize(
         Kind::OrderedDict => ordered_dict(name, &args[0], &args[1]),
         Kind::Deque => deque(name, &args[0], generators),
         Kind::ChainMap => chain_map(name, &args[0], &args[1]),
+        Kind::UserDict => super::user::user_dict(name, &args[0], &args[1]),
+        Kind::UserList => super::user::user_list(name, &args[0]),
+        Kind::UserString => super::user::user_string(name),
     }
 }

@@ -594,6 +594,14 @@ pub(crate) fn build_class_name(ctx: &CompilationContext, by_id: Option<bool>) ->
                 format!("<class 'collections.{}'>", kind.expect("checked").name())
             }
             _ if kind.is_some() => kind.expect("checked").name().to_string(),
+            // A view of a `UserDict` is a `collections.abc` class.
+            Some(true) if crate::ir::collections::is_view_class(name) => {
+                let view = name.split('<').next().unwrap_or(name);
+                format!("<class 'collections.abc.{view}'>")
+            }
+            _ if crate::ir::collections::is_view_class(name) => {
+                name.split('<').next().unwrap_or(name).to_string()
+            }
             // A `datetime` class is named in its module.
             Some(true) if name.starts_with("datetime.") || name.starts_with("logging.") => {
                 format!("<class '{name}'>")

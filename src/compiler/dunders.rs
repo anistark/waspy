@@ -163,6 +163,23 @@ fn view_kind(ctx: &CompilationContext, class: &str) -> Option<View> {
     }
 }
 
+/// Whether code generation refuses `what` on instances of `class` (its
+/// `<refused>` class variable names it).
+fn is_refused(ctx: &CompilationContext, class: &str, what: &str) -> bool {
+    let Some(ci) = ctx.get_class_info(class) else {
+        return false;
+    };
+    ci.mro.iter().any(|c| {
+        matches!(
+            ctx.get_class_info(c)
+                .and_then(|ci| ci.class_var_values.get(crate::ir::REFUSED_VAR)),
+            Some(IRExpr::TupleLiteral(items)) if items.iter().any(|i| {
+                matches!(i, IRExpr::Const(crate::ir::IRConstant::String(s)) if s == what)
+            })
+        )
+    })
+}
+
 /// What `class`'s view is: its view method's declared result.
 fn view_type(ctx: &CompilationContext, class: &str) -> Option<IRType> {
     let method = match view_kind(ctx, class)? {
@@ -201,6 +218,34 @@ fn view_of(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
         View::Copy => crate::ir::VIEW_METHOD,
     };
     Some(call(expr, method, Vec::new()))
+}
+
+/// `expr` as what walking it yields: its view, or `<walk>` when that is not
+/// what the view holds. CPython walks a sequence through `__getitem__`, so a
+/// subclass overriding it is refused rather than walked as its data.
+fn walk_of(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
+    let class = class_of(expr, ctx)?;
+    if is_refused(ctx, &class, crate::ir::REFUSE_WALK) {
+        ctx.report(format!(
+            "walking an instance of '{class}', a sequence whose __getitem__ a subclass overrides, \
+             is not supported: CPython walks it through that method. Hint: walk `.data`, or \
+             index it in a loop over range(len(x))"
+        ));
+    }
+    if has(ctx, &class, crate::ir::WALK_METHOD) {
+        return Some(call(expr, crate::ir::WALK_METHOD, Vec::new()));
+    }
+    view_of(expr, ctx)
+}
+
+/// `expr` as `dict(expr)` reads it: through `__getitem__` for a mapping that
+/// has one written for that, else its view.
+fn mapping_of(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
+    let class = class_of(expr, ctx)?;
+    if has(ctx, &class, crate::ir::MAPPING_METHOD) {
+        return Some(call(expr, crate::ir::MAPPING_METHOD, Vec::new()));
+    }
+    view_of(expr, ctx)
 }
 
 /// `expr`'s shared view: the container it holds, which a change goes to.
@@ -287,6 +332,36 @@ fn delegates(ctx: &CompilationContext, class: &str, method: &str) -> bool {
         .any(|i| matches!(i, IRExpr::Const(crate::ir::IRConstant::String(s)) if s == method))
 }
 
+/// Report a call of a method `class` refuses, and say whether it was one.
+fn refuse_method(class: &str, method: &str, ctx: &CompilationContext) -> bool {
+    if !is_refused(ctx, class, method) {
+        return false;
+    }
+    ctx.report(format!(
+        "'{class}.{method}()' makes a new instance through the class's own __init__ or copies \
+         its attributes, which is not supported here. Hint: define '{method}' in '{class}', or \
+         make the instance yourself"
+    ));
+    true
+}
+
+/// Whether `class` reaches a plain `method` defined further down its MRO than
+/// every variant of it, which then overrides them.
+fn overrides_variants(ctx: &CompilationContext, class: &str, method: &str) -> bool {
+    let Some(ci) = ctx.get_class_info(class) else {
+        return false;
+    };
+    let Some(plain) = ci.method_owner.get(method) else {
+        return false;
+    };
+    let at = |owner: &String| ci.mro.iter().position(|c| c == owner);
+    let prefix = format!("{method}<");
+    ci.method_owner
+        .iter()
+        .filter(|(m, _)| m.starts_with(&prefix))
+        .all(|(_, owner)| at(plain) < at(owner))
+}
+
 /// Whether `class` has a variant of `method` for some argument type.
 fn has_variants(ctx: &CompilationContext, class: &str, method: &str) -> bool {
     let prefix = format!("{method}<");
@@ -306,9 +381,50 @@ fn rewrite_variant(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
     else {
         return None;
     };
-    let class = class_of(object, ctx)?;
+    // `super().m(x)` picks among the variants of the class it reaches.
+    let is_super = matches!(object.as_ref(),
+        IRExpr::FunctionCall { function_name, arguments }
+            if function_name == "super" && arguments.is_empty());
+    let class = if is_super {
+        let current = ctx.current_class.as_ref()?;
+        ctx.get_class_info(current)?
+            .mro
+            .iter()
+            .skip(1)
+            .find(|c| has_variants(ctx, c, method_name))?
+            .clone()
+    } else {
+        class_of(object, ctx)?
+    };
     if !has_variants(ctx, &class, method_name) {
         return None;
+    }
+    if refuse_method(&class, method_name, ctx) {
+        return Some((**object).clone());
+    }
+    // A subclass's own method overrides the variants of the one it replaces.
+    if overrides_variants(ctx, &class, method_name) {
+        return None;
+    }
+    // `m.update(a=1)`: the keywords as the dict of strings they are.
+    if !arguments.is_empty()
+        && arguments
+            .iter()
+            .all(|a| matches!(a, IRExpr::Keyword { .. }))
+    {
+        let dict = IRExpr::DictLiteral(
+            arguments
+                .iter()
+                .filter_map(|a| match a {
+                    IRExpr::Keyword { name, value } => Some((
+                        IRExpr::Const(crate::ir::IRConstant::String(name.clone())),
+                        (**value).clone(),
+                    )),
+                    _ => None,
+                })
+                .collect(),
+        );
+        return Some(call(object, method_name, vec![dict]));
     }
     if let [arg] = arguments.as_slice() {
         if !matches!(arg, IRExpr::Keyword { .. }) {
@@ -321,7 +437,7 @@ fn rewrite_variant(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
                 return Some(call(object, &n, vec![arg.clone()]));
             }
             if let IRType::Class(c) = &ty {
-                if let (Some(vt), Some(view)) = (view_type(ctx, c), view_of(arg, ctx)) {
+                if let (Some(vt), Some(view)) = (view_type(ctx, c), mapping_of(arg, ctx)) {
                     if let Some(n) = named(&vt) {
                         return Some(call(object, &n, vec![view]));
                     }
@@ -395,6 +511,7 @@ fn fitting_variant(
             (IRType::Tuple(xs), IRType::Tuple(ys)) => {
                 xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| fits(x, y))
             }
+            (IRType::Tuple(xs), IRType::VarTuple(y)) => xs.iter().all(|x| fits(x, y)),
             _ => false,
         }
     }
@@ -492,7 +609,7 @@ fn view_arguments(arguments: &[IRExpr], ctx: &CompilationContext) -> Option<Vec<
         .iter()
         .map(|a| match a {
             IRExpr::Keyword { .. } => None,
-            other => reversed_walk(other, ctx).or_else(|| view_of(other, ctx)),
+            other => reversed_walk(other, ctx).or_else(|| walk_of(other, ctx)),
         })
         .collect();
     if views.iter().all(Option::is_none) {
@@ -528,6 +645,22 @@ fn rewrite_view(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
             step,
         } => {
             let class = class_of(container, ctx)?;
+            // A slice of a UserList or UserString is an instance of its class.
+            if has(ctx, &class, crate::ir::WRAP_METHOD) {
+                if refuse_method(&class, "__getitem__", ctx) {
+                    return Some((**container).clone());
+                }
+                return Some(call(
+                    container,
+                    crate::ir::WRAP_METHOD,
+                    vec![IRExpr::Slicing {
+                        container: Box::new(view_of(container, ctx)?),
+                        start: start.clone(),
+                        end: end.clone(),
+                        step: step.clone(),
+                    }],
+                ));
+            }
             if has(ctx, &class, "__getitem__") {
                 return None;
             }
@@ -568,12 +701,19 @@ fn rewrite_view(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
                 // as the value it reads as.
                 IRCompareOp::Eq | IRCompareOp::NotEq => {
                     let side = |e: &IRExpr, t: &IRType, other: &IRType| match t {
+                        IRType::Class(c) if is_refused(ctx, c, "__eq__") => {
+                            ctx.report(format!(
+                                "comparing a {} with == is not supported",
+                                c.split('<').next().unwrap_or(c)
+                            ));
+                            None
+                        }
                         IRType::Class(c)
                             if view_kind(ctx, c).is_some()
                                 && (!matches!(other, IRType::Class(_))
                                     || !has(ctx, c, "__eq__")) =>
                         {
-                            view_of(e, ctx)
+                            mapping_of(e, ctx)
                         }
                         _ => None,
                     };
@@ -587,7 +727,26 @@ fn rewrite_view(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
                         op: op.clone(),
                     })
                 }
-                _ => None,
+                // A UserList or UserString orders against the builtin value
+                // it holds as that value does.
+                _ => {
+                    let wrapped = |t: &IRType| matches!(t, IRType::Class(c) if has(ctx, c, crate::ir::WRAP_METHOD));
+                    if wrapped(&lt) == wrapped(&rt) {
+                        return None;
+                    }
+                    let side = |e: &IRExpr, t: &IRType| {
+                        if wrapped(t) {
+                            view_of(e, ctx)
+                        } else {
+                            Some(e.clone())
+                        }
+                    };
+                    Some(IRExpr::CompareOp {
+                        left: Box::new(side(left, &lt)?),
+                        right: Box::new(side(right, &rt)?),
+                        op: op.clone(),
+                    })
+                }
             }
         }
         // A named tuple concatenated or repeated is its tuple's.
@@ -613,6 +772,9 @@ fn rewrite_view(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
         } => {
             if let Some(class) = class_of(object, ctx) {
                 let kind = view_kind(ctx, &class)?;
+                if refuse_method(&class, method_name, ctx) {
+                    return Some((**object).clone());
+                }
                 if has(ctx, &class, method_name) {
                     return None;
                 }
@@ -651,9 +813,16 @@ fn rewrite_view(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
                     if let Some((module, name)) = ctx.stdlib_imports.get(t) {
                         if module == "collections" && order_free(value) {
                             let wanted = crate::ir::collections::spec::Kind::named(name)?;
-                            let is = class_of(value, ctx)
-                                .and_then(|c| crate::ir::collections::spec::kind_of_class(&c))
-                                == Some(wanted);
+                            // `collections` classes are subclassed through
+                            // the user classes, so look along the MRO.
+                            let is = class_of(value, ctx).is_some_and(|c| {
+                                ctx.get_class_info(&c).is_some_and(|ci| {
+                                    ci.mro.iter().any(|m| {
+                                        crate::ir::collections::spec::kind_of_class(m)
+                                            == Some(wanted)
+                                    })
+                                })
+                            });
                             return Some(IRExpr::Const(crate::ir::IRConstant::Bool(is)));
                         }
                     }
@@ -704,8 +873,24 @@ fn rewrite_view(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
             let views: Vec<Option<IRExpr>> = generators
                 .iter()
                 .map(|g| {
+                    // `list(x)` is a comprehension that does nothing else, so
+                    // nothing runs between the reads.
+                    let copies = generators.len() == 1
+                        && g.conditions.is_empty()
+                        && g.targets.len() == 1
+                        && matches!(element.as_ref(), IRExpr::Variable(e) if *e == g.targets[0]);
+                    if let Some(class) = class_of(&g.iterable, ctx).filter(|_| !copies) {
+                        if is_refused(ctx, &class, crate::ir::REFUSE_COMPREHENSION) {
+                            ctx.report(format!(
+                                "a comprehension over a mapping's values, when a subclass \
+                                 overrides __getitem__, is not supported: each value would be \
+                                 read before the comprehension runs ('{class}'). Hint: use a \
+                                 for loop"
+                            ));
+                        }
+                    }
                     reversed_walk(&g.iterable, ctx)
-                        .or_else(|| view_of(&g.iterable, ctx))
+                        .or_else(|| walk_of(&g.iterable, ctx))
                         .or_else(|| {
                             if g.targets.len() < 2 {
                                 return None;
@@ -1291,8 +1476,11 @@ fn reversed_walk(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
         | IRType::String
         | IRType::Range => arg.clone(),
         IRType::Dict(..) => call(arg, "keys", Vec::new()),
-        IRType::Class(_) => {
-            let view = view_of(arg, ctx)?;
+        IRType::Class(c) => {
+            if is_refused(ctx, &c, "__reversed__") {
+                ctx.report(format!("'{c}' object is not reversible"));
+            }
+            let view = walk_of(arg, ctx)?;
             return reversed_walk(
                 &IRExpr::FunctionCall {
                     function_name: function_name.clone(),
@@ -1515,6 +1703,9 @@ fn rewrite_dict_call(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> 
     match infer_value_type(arg, ctx) {
         IRType::Dict(..) => Some(call(arg, "copy", Vec::new())),
         IRType::Class(c) if matches!(view_type(ctx, &c), Some(IRType::Dict(..))) => {
+            if has(ctx, &c, crate::ir::MAPPING_METHOD) {
+                return mapping_of(arg, ctx);
+            }
             Some(call(&view_of(arg, ctx)?, "copy", Vec::new()))
         }
         IRType::List(e) | IRType::VarTuple(e) if matches!(&*e, IRType::Tuple(ms) if ms.len() == 2) =>
@@ -1578,7 +1769,7 @@ pub(crate) fn rewrite_statement(
                 body,
                 else_body,
             } => {
-                if let Some(view) = view_of(iterable, ctx) {
+                if let Some(view) = walk_of(iterable, ctx) {
                     return Some(IRStatement::For {
                         target: target.clone(),
                         iterable: view,
@@ -1592,7 +1783,7 @@ pub(crate) fn rewrite_statement(
                 value,
                 starred,
             } => {
-                if let Some(view) = view_of(value, ctx) {
+                if let Some(view) = walk_of(value, ctx) {
                     return Some(IRStatement::TupleUnpack {
                         targets: targets.clone(),
                         value: view,

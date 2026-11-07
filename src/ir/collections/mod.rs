@@ -13,6 +13,12 @@
 mod classes;
 mod ctor;
 pub(crate) mod spec;
+mod user;
+
+pub(crate) use user::is_view_class;
+pub use user::{
+    MAPPING_METHOD, REFUSED_VAR, REFUSE_COMPREHENSION, REFUSE_WALK, WALK_METHOD, WRAP_METHOD,
+};
 
 use super::build::*;
 use super::infer::{walk_body, Types};
@@ -344,6 +350,11 @@ pub fn lower_collections(module: &mut IRModule) -> Result<()> {
     for s in strings {
         module.memory_layout.add_string(&s);
     }
+    // A base comes before the classes deriving from it.
+    let is_user_base = |c: &crate::ir::IRClass| {
+        spec::kind_of_class(&c.name).is_some_and(spec::Kind::is_user) || is_view_class(&c.name)
+    };
+    module.classes.sort_by_key(|c| !is_user_base(c));
     Ok(())
 }
 

@@ -3533,3 +3533,556 @@ None <re.Match object; span=(0, 3), match=b'k=v'> <re.Match object; span=(3, 6),
 "#,
     );
 }
+
+// collections.UserDict, UserList, UserString: expected output is CPython 3.13's.
+
+#[test]
+fn user_dict_answers_as_cpython() {
+    prints(
+        r#"
+            from collections import UserDict
+            if __name__ == "__main__":
+                d = UserDict()
+                d["a"] = 1
+                d["b"] = 2
+                print(d, len(d), "a" in d, d["b"], d.get("z", 9), d.get("a"), d.get("z"))
+                for k in d:
+                    print(k)
+                for k, v in d.items():
+                    print(k, v)
+                print(list(d), sorted(d), [k for k in d], list(d.keys()), list(d.values()), list(d.items()))
+                print(d.keys(), d.values(), d.items(), len(d.keys()), "a" in d.keys(), 2 in d.values())
+                print(d.pop("a"), d.pop("zz", 5), d.setdefault("c", 3), d.setdefault("c", 4), d)
+                d.update({"e": 5})
+                d.update([("f", 6)])
+                d.update(g=7)
+                print(d, d.popitem(), d, bool(d), d.data)
+                e = d.copy()
+                e["x"] = 1
+                print(d, e, d == e, d == {"b": 2, "c": 3, "e": 5, "f": 6, "g": 7}, e != d)
+                print(d | {"z": 1}, {"z": 1} | d, d | e)
+                d |= {"q": 1}
+                print(d)
+                del d["q"]
+                d.clear()
+                print(d, bool(d), type(d), isinstance(d, UserDict), isinstance(d, dict))
+                try:
+                    d["nope"]
+                except KeyError as ex:
+                    print("KeyError", ex)
+                try:
+                    d.popitem()
+                except KeyError as ex:
+                    print("KeyError2", repr(ex))
+        "#,
+        r#"{'a': 1, 'b': 2} 2 True 2 9 1 None
+a
+b
+a 1
+b 2
+['a', 'b'] ['a', 'b'] ['a', 'b'] ['a', 'b'] [1, 2] [('a', 1), ('b', 2)]
+KeysView({'a': 1, 'b': 2}) ValuesView({'a': 1, 'b': 2}) ItemsView({'a': 1, 'b': 2}) 2 True True
+1 5 3 3 {'b': 2, 'c': 3}
+{'c': 3, 'e': 5, 'f': 6, 'g': 7} ('b', 2) {'c': 3, 'e': 5, 'f': 6, 'g': 7} True {'c': 3, 'e': 5, 'f': 6, 'g': 7}
+{'c': 3, 'e': 5, 'f': 6, 'g': 7} {'c': 3, 'e': 5, 'f': 6, 'g': 7, 'x': 1} False False True
+{'c': 3, 'e': 5, 'f': 6, 'g': 7, 'z': 1} {'z': 1, 'c': 3, 'e': 5, 'f': 6, 'g': 7} {'c': 3, 'e': 5, 'f': 6, 'g': 7, 'x': 1}
+{'c': 3, 'e': 5, 'f': 6, 'g': 7, 'q': 1}
+{} False <class 'collections.UserDict'> True False
+KeyError 'nope'
+KeyError2 KeyError()
+"#,
+    );
+}
+
+#[test]
+fn user_dict_subclasses_reach_their_overrides() {
+    prints(
+        r#"
+            from collections import UserDict
+            from typing import Optional
+            class Lower(UserDict[str, int]):
+                def __setitem__(self, key, item):
+                    super().__setitem__(key.lower(), item)
+                def __getitem__(self, key):
+                    return super().__getitem__(key.lower())
+                def __contains__(self, key):
+                    return super().__contains__(key.lower())
+            class Doubling(UserDict[str, int]):
+                def __getitem__(self, key: str) -> int:
+                    return super().__getitem__(key) * 2
+            class Miss(UserDict[str, int]):
+                def __missing__(self, key: str) -> int:
+                    return len(key)
+            def fill(d: UserDict[str, int]) -> None:
+                d["QQ"] = 7
+            if __name__ == "__main__":
+                a = Lower({"AB": 1}, CD=2)
+                a["EF"] = 3
+                a.update({"GH": 4})
+                fill(a)
+                print(a, a["ab"], "CD" in a, a.get("Ef"), a.get("nope", 0), a.pop("gh"), a.setdefault("QQ", 0))
+                print(isinstance(a, UserDict), type(a))
+                c = a.copy()
+                print(c, type(c), a == c)
+                b = Doubling({"x": 1})
+                print(b, b["x"], list(b.values()), list(b.items()), dict(b), b.get("x"), b == {"x": 2}, b == {"x": 1})
+                for k, v in b.items():
+                    print(k, v)
+                for v in b.values():
+                    print(v)
+                m = Miss()
+                print(m["abc"], "abc" in m, m.get("abc", 0))
+                print(Miss({"a": 1}) | {"b": 2}, type(Miss() | {"b": 2}))
+                print(UserDict.fromkeys(["a", "b"], 0), Miss.fromkeys(["a"], 1), type(Miss.fromkeys(["a"], 1)))
+                print([v for v in list(b.values())], sorted(b.items()))
+        "#,
+        r#"{'ab': 1, 'cd': 2, 'ef': 3, 'qq': 7} 1 True 3 0 4 7
+True <class '__main__.Lower'>
+{'ab': 1, 'cd': 2, 'ef': 3, 'qq': 7} <class '__main__.Lower'> True
+{'x': 1} 2 [2] [('x', 2)] {'x': 2} 2 True False
+x 2
+2
+3 False 0
+{'a': 1, 'b': 2} <class '__main__.Miss'>
+{'a': 0, 'b': 0} {'a': 1} <class '__main__.Miss'>
+[2] [('x', 2)]
+"#,
+    );
+}
+
+#[test]
+fn user_dict_bare_base_takes_its_types_from_use() {
+    prints(
+        r#"
+            from collections import UserDict
+            class Config(UserDict):
+                def __init__(self, name: str) -> None:
+                    super().__init__()
+                    self.name = name
+                def __setitem__(self, key: str, item: int) -> None:
+                    print("set", key)
+                    super().__setitem__(key, item)
+                def describe(self) -> str:
+                    return self.name + ":" + str(len(self))
+            class Auto(UserDict):
+                def total(self) -> int:
+                    t = 0
+                    for v in self.values():
+                        t += v
+                    return t
+            class Tagged(UserDict):
+                def tag(self):
+                    self["n"] = 1
+                    return self["n"]
+            if __name__ == "__main__":
+                c = Config("x")
+                c["a"] = 1
+                print(c.describe(), c, c.name)
+                t = Auto({"a": 1, "b": 2})
+                print(t.total(), t)
+                print(Tagged().tag())
+        "#,
+        r#"set a
+x:1 {'a': 1} x
+3 {'a': 1, 'b': 2}
+1
+"#,
+    );
+}
+
+#[test]
+fn user_dict_keywords_and_sources() {
+    prints(
+        r#"
+            from collections import UserDict
+            if __name__ == "__main__":
+                a = UserDict(x=1, y=2)
+                b = UserDict({"z": 0}, w=1)
+                c = UserDict([("p", 1)], q=2)
+                print(a, b, c, UserDict(a))
+                print(len(UserDict()), UserDict() == UserDict())
+        "#,
+        r#"{'x': 1, 'y': 2} {'z': 0, 'w': 1} {'p': 1, 'q': 2} {'x': 1, 'y': 2}
+0 True
+"#,
+    );
+}
+
+#[test]
+fn user_dict_loops_and_comprehensions() {
+    prints(
+        r#"
+            from collections import UserDict
+            if __name__ == "__main__":
+                d = UserDict({"a": 1, "b": 2})
+                for k, v in d.items():
+                    if k == "a":
+                        break
+                else:
+                    print("no")
+                for kv in d.items():
+                    print(kv)
+                print([k + str(v) for k, v in d.items()], {k: v for k, v in d.items()}, [v * 2 for v in d.values()], sum(v for v in d.values()))
+        "#,
+        r#"('a', 1)
+('b', 2)
+['a1', 'b2'] {'a': 1, 'b': 2} [2, 4] 3
+"#,
+    );
+}
+
+#[test]
+fn user_list_answers_as_cpython() {
+    prints(
+        r#"
+            from collections import UserList
+            if __name__ == "__main__":
+                l = UserList([3, 1, 2])
+                print(l, len(l), l[0], l[-1], 3 in l, l.data, l == [3, 1, 2], l != [1], l < [4], l >= [3], [4] > l)
+                l.append(4)
+                l.insert(0, 9)
+                print(l, l.pop(), l.pop(0), l)
+                l.remove(1)
+                l.extend([5, 6])
+                l.extend(range(2))
+                l.extend((7,))
+                print(l, l.count(5), l.index(5))
+                l.sort()
+                print(l)
+                l.sort(reverse=True)
+                l.reverse()
+                print(l, l[1:3], type(l[1:3]))
+                l[0] = 100
+                del l[0]
+                del l[0:1]
+                print(l, l + [1], [1] + l, l + (2,), l + UserList([3]), l * 2, 2 * l)
+                m = l.copy()
+                m += [1]
+                m += (2,)
+                m *= 2
+                print(m, l, m == l, m > l, type(m), bool(m), bool(UserList()))
+                print(list(l), sorted(l), sum(l), min(l), max(l), [x * 2 for x in l], tuple(l), set(l) == set(l.data))
+                for x in l:
+                    print(x)
+                a, b, *c = UserList([1, 2, 3, 4])
+                print(a, b, c, list(reversed(l)), isinstance(l, UserList), isinstance(l, list), type(l))
+                l.clear()
+                print(l, UserList(range(3)), UserList((1, 2)), UserList("ab"), UserList(UserList([1])), UserList({5}))
+                try:
+                    UserList([1]).pop(5)
+                except IndexError as e:
+                    print("IndexError", e)
+                try:
+                    UserList([1]).remove(5)
+                except ValueError as e:
+                    print("ValueError", e)
+        "#,
+        r#"[3, 1, 2] 3 3 2 True [3, 1, 2] True True True True True
+[3, 1, 2] 4 9 [3, 1, 2]
+[3, 2, 5, 6, 0, 1, 7] 1 2
+[0, 1, 2, 3, 5, 6, 7]
+[0, 1, 2, 3, 5, 6, 7] [1, 2] <class 'collections.UserList'>
+[2, 3, 5, 6, 7] [2, 3, 5, 6, 7, 1] [1, 2, 3, 5, 6, 7] [2, 3, 5, 6, 7, 2] [2, 3, 5, 6, 7, 3] [2, 3, 5, 6, 7, 2, 3, 5, 6, 7] [2, 3, 5, 6, 7, 2, 3, 5, 6, 7]
+[2, 3, 5, 6, 7, 1, 2, 2, 3, 5, 6, 7, 1, 2] [2, 3, 5, 6, 7] False True <class 'collections.UserList'> True False
+[2, 3, 5, 6, 7] [2, 3, 5, 6, 7] 23 2 7 [4, 6, 10, 12, 14] (2, 3, 5, 6, 7) True
+2
+3
+5
+6
+7
+1 2 [3, 4] [7, 6, 5, 3, 2] True False <class 'collections.UserList'>
+[] [0, 1, 2] [1, 2] ['a', 'b'] [1] [5]
+IndexError pop index out of range
+ValueError list.remove(x): x not in list
+"#,
+    );
+}
+
+#[test]
+fn user_list_subclasses_stay_their_class() {
+    prints(
+        r#"
+            from collections import UserList
+            class Stack(UserList[int]):
+                def push(self, x: int) -> None:
+                    self.append(x)
+                def peek(self) -> int:
+                    return self[-1]
+                def append(self, item):
+                    super().append(item * 2)
+            class Names(UserList):
+                def shout(self) -> str:
+                    return ",".join([n.upper() for n in self])
+            class Named(UserList[int]):
+                def __init__(self, initlist=None):
+                    super().__init__(initlist)
+                    self.tag = "t"
+            class Two(UserList[int]):
+                def __init__(self, a: int, b: int) -> None:
+                    super().__init__([a, b])
+            if __name__ == "__main__":
+                s = Stack([1])
+                s.push(2)
+                print(s, s.peek(), len(s), s[0:1], type(s[0:1]), type(s + [1]), type(s * 2), type(s.copy()), isinstance(s, UserList), s[0:1].peek())
+                print(Names(["a", "b"]).shout())
+                n = Named([1])
+                print(n, n.tag, n[0:1].tag, (n + [2]).tag)
+                print(Two(1, 2), len(Two(1, 2)))
+        "#,
+        r#"[1, 4] 4 2 [1] <class '__main__.Stack'> <class '__main__.Stack'> <class '__main__.Stack'> <class '__main__.Stack'> True 1
+A,B
+[1] t t t
+[1, 2] 2
+"#,
+    );
+}
+
+#[test]
+fn user_list_override_of_getitem_is_reached_by_index() {
+    prints(
+        r#"
+            from collections import UserList
+            class OneBased(UserList[int]):
+                def __getitem__(self, i):
+                    return super().__getitem__(i - 1)
+            if __name__ == "__main__":
+                o = OneBased([1, 2])
+                print(o[1], o.data, len(o), 2 in o, o)
+        "#,
+        r#"1 [1, 2] 2 True [1, 2]
+"#,
+    );
+}
+
+#[test]
+fn user_string_answers_as_cpython() {
+    prints(
+        r#"
+            from collections import UserString
+            class Shout(UserString):
+                def loud(self) -> str:
+                    return self.data.upper() + "!"
+                def __str__(self) -> str:
+                    return self.loud()
+            if __name__ == "__main__":
+                s = UserString("Hello")
+                print(s, repr(s), len(s), s[0], s[1:3], type(s[0]), type(s[1:3]), s.data, s == "Hello", s != "x", s < "Z", "A" < s, s == UserString("Hello"))
+                print(s.upper(), s.lower(), type(s.upper()), s.title(), s.capitalize(), s.strip("H"), s.lstrip("H"), s.rstrip("o"), UserString(" a ").strip(), s.center(9, "*"), s.ljust(7, "."), s.rjust(7), s.replace("l", "L"))
+                print(s + "!", "!" + s, s + UserString("x"), s * 2, 2 * s, type(s + "!"), type("!" + s))
+                print(s.count("l"), s.find("l"), s.index("e"), s.startswith("H"), s.endswith("o"), s.split("l"), s.isalpha(), s.isdigit(), "-".join(["a", "b"]), UserString("-").join(["a", "b"]), "ell" in s, "z" in s)
+                print(int(UserString("5")), float(UserString("1.5")), UserString(5), UserString(1.5), UserString(UserString("q")), bool(s), bool(UserString("")))
+                print([c for c in s], type([c for c in s][0]), list(s), sorted(s)[0], isinstance(s, UserString), isinstance(s, str), type(s))
+                for c in UserString("ab"):
+                    print(c, type(c))
+                print(f"{s}", "%s" % s, str(s))
+                t = Shout("abc")
+                print(t, t.loud(), t.upper(), type(t.upper()), t[0], type(t[0]), type(t + "x"), type(t.strip()), repr(t), str(t + "x"), [c for c in t][0], type([c for c in t][0]))
+        "#,
+        r#"Hello 'Hello' 5 H el <class 'collections.UserString'> <class 'collections.UserString'> Hello True True True True True
+HELLO hello <class 'collections.UserString'> Hello Hello ello ello Hell a **Hello** Hello..   Hello HeLLo
+Hello! !Hello Hellox HelloHello HelloHello <class 'collections.UserString'> <class 'collections.UserString'>
+2 2 1 True True ['He', '', 'o'] True False a-b a-b True False
+5 1.5 5 1.5 q True False
+['H', 'e', 'l', 'l', 'o'] <class 'collections.UserString'> ['H', 'e', 'l', 'l', 'o'] H True False <class 'collections.UserString'>
+a <class 'collections.UserString'>
+b <class 'collections.UserString'>
+Hello Hello Hello
+ABC! ABC! ABC! <class '__main__.Shout'> A! <class '__main__.Shout'> <class '__main__.Shout'> <class '__main__.Shout'> 'abc' ABCX! A! <class '__main__.Shout'>
+"#,
+    );
+}
+
+#[test]
+fn user_classes_in_fields_collections_and_signatures() {
+    prints(
+        r#"
+            from collections import UserDict, UserList, UserString
+            from typing import List, Dict
+            class Inv:
+                def __init__(self) -> None:
+                    self.stock: UserDict[str, int] = UserDict()
+                    self.log = UserList()
+                    self.label = UserString("inv")
+                def add(self, name: str, n: int) -> None:
+                    self.stock[name] = self.stock.get(name, 0) + n
+                    self.log.append(name)
+            def build() -> UserList[int]:
+                return UserList([1, 2])
+            def names(d: UserDict[str, int]) -> List[str]:
+                return sorted(d)
+            if __name__ == "__main__":
+                i = Inv()
+                i.add("a", 1)
+                i.add("a", 2)
+                print(i.stock, i.log, i.label, names(i.stock), build(), len(build()))
+                ls = [UserList([1]), UserList([2, 3])]
+                print(ls, [len(x) for x in ls], ls[1][0])
+                m: Dict[str, UserList[int]] = {"k": UserList([1])}
+                m["k"].append(2)
+                print(m["k"], m)
+                n: UserDict[str, UserList[int]] = UserDict()
+                n["a"] = UserList([1])
+                n["a"].append(5)
+                print(n, n["a"][1])
+                o: UserDict[str, List[int]] = UserDict()
+                o["z"] = [1]
+                o["z"].append(2)
+                print(o, o.get("z"), o.get("q"))
+                r: UserDict[int, float] = UserDict({1: 1.5})
+                r[2] = 2.5
+                print(r, r.get(9), r.get(1), sum(r.values()), r.pop(1, 0.0))
+        "#,
+        r#"{'a': 3} ['a', 'a'] inv ['a'] [1, 2] 2
+[[1], [2, 3]] [1, 2] 2
+[1, 2] {'k': [1, 2]}
+{'a': [1, 5]} 5
+{'z': [1, 2]} [1, 2] None
+{2: 2.5} None 1.5 4.0 1.5
+"#,
+    );
+}
+
+#[test]
+fn user_class_chains_and_overridden_variants() {
+    prints(
+        r#"
+            from collections import UserDict, UserList
+            class Base(UserDict[str, int]):
+                def show(self) -> str:
+                    return "base" + str(len(self))
+            class Mid(Base):
+                def __setitem__(self, key, item):
+                    super().__setitem__(key, item + 1)
+            class Leaf(Mid):
+                def show(self) -> str:
+                    return "leaf" + super().show()
+            class Upd(UserDict[str, int]):
+                def update(self, other):
+                    print("update")
+                    for k in other:
+                        self.data[k] = other[k] * 10
+            class Getter(UserDict[str, int]):
+                def get(self, key, default=None):
+                    print("get", key)
+                    return super().get(key, 0)
+            class Log(UserList[int]):
+                def __init__(self, initlist=None):
+                    super().__init__(initlist)
+                    self.count_ = 0
+                def extend(self, other):
+                    self.count_ += 1
+                    super().extend(other)
+            if __name__ == "__main__":
+                l = Leaf({"a": 1})
+                l["b"] = 2
+                print(l, l.show(), len(l), type(l.copy()), l.copy())
+                x: Base = l
+                x["c"] = 3
+                print(x, x.show(), Base({"z": 9}).show())
+                u = Upd({"a": 1})
+                print(u)
+                g = Getter({"a": 1})
+                print(g.get("a"), g.get("b"))
+                lg = Log([1])
+                lg.extend([2])
+                print(lg, lg.count_)
+        "#,
+        r#"{'a': 2, 'b': 3} leafbase2 2 <class '__main__.Leaf'> {'a': 3, 'b': 4}
+{'a': 2, 'b': 3, 'c': 4} leafbase3 base1
+update
+{'a': 10}
+get a
+get b
+1 0
+[1, 2] 1
+"#,
+    );
+}
+
+#[test]
+fn user_class_with_a_mixin_first() {
+    prints(
+        r#"
+            from collections import UserDict
+            class Mixin:
+                def hello(self) -> str:
+                    return "hi"
+            class C(Mixin, UserDict[str, int]):
+                def n(self) -> int:
+                    return len(self)
+            class D(UserDict):
+                def __init__(self, seed: int = 0) -> None:
+                    super().__init__()
+                    self["seed"] = seed
+                def bump(self) -> None:
+                    self["seed"] = self["seed"] + 1
+            if __name__ == "__main__":
+                c = C({"a": 1})
+                print(c.hello(), c.n(), c)
+                d = D(1)
+                d.bump()
+                print(d, D())
+        "#,
+        r#"hi 1 {'a': 1}
+{'seed': 2} {'seed': 0}
+"#,
+    );
+}
+
+#[test]
+fn user_classes_compare_with_builtins() {
+    prints(
+        r#"
+            from collections import UserList, UserString, UserDict
+            if __name__ == "__main__":
+                print(UserList([1]) == UserList([1]), UserList([1]) != [1], [1] == UserList([1]), UserList([1]) == (1,))
+                print(UserString("a") == "a", "a" == UserString("a"), UserString("a") != "b", UserString("a") < UserString("b"))
+                print(UserDict({"a": 1}) == {"a": 1}, {"a": 1} == UserDict({"a": 1}), UserDict({"a": 1}) != {"a": 2})
+        "#,
+        r#"True False True False
+True True True True
+True True True
+"#,
+    );
+}
+
+#[test]
+fn user_list_across_calls_and_recursion() {
+    prints(
+        r#"
+            from collections import UserList, UserDict
+            def rec(n: int, acc: UserList[int]) -> int:
+                if n == 0:
+                    return len(acc)
+                acc.append(n)
+                return rec(n - 1, acc)
+            def fresh() -> int:
+                l = UserList([1])
+                l.append(2)
+                return len(l)
+            if __name__ == "__main__":
+                print(rec(3, UserList()), fresh(), fresh())
+        "#,
+        r#"3 2 2
+"#,
+    );
+}
+
+#[test]
+fn user_classes_through_the_module_name() {
+    prints(
+        r#"
+            import collections
+            import json
+            class C(collections.UserDict):
+                pass
+            def f(d: collections.UserDict[str, int]) -> int:
+                return len(d)
+            if __name__ == "__main__":
+                c = C({"a": 1})
+                print(f(c), collections.UserList([1]), collections.UserString("x"), c)
+        "#,
+        r#"1 [1] x {'a': 1}
+"#,
+    );
+}

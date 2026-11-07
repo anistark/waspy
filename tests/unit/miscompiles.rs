@@ -5708,3 +5708,64 @@ fn a_lambda_result_is_typed_from_its_callable_parameter() {
         );
     }
 }
+
+/// `list.index` and `list.remove` each raise their own message; they had each
+/// other's.
+#[test]
+fn list_index_and_remove_raise_their_own_message() {
+    let run = run_main(
+        &dedent(
+            r#"
+            if __name__ == "__main__":
+                try:
+                    [1].index(5)
+                except ValueError as e:
+                    print(e)
+                try:
+                    ["a"].index("b")
+                except ValueError as e:
+                    print(e)
+                try:
+                    [1.5].index(2.5)
+                except ValueError as e:
+                    print(e)
+                try:
+                    [1].remove(5)
+                except ValueError as e:
+                    print(e)
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(
+        run.stdout,
+        "5 is not in list\n'b' is not in list\n2.5 is not in list\nlist.remove(x): x not in list\n"
+    );
+}
+
+/// A class whose `__init__` comes from its second base takes that signature:
+/// `C()` left the defaulted arguments out, an invalid module.
+#[test]
+fn an_init_from_a_second_base_fills_its_defaults() {
+    let run = run_main(
+        &dedent(
+            r#"
+            class U:
+                def __init__(self, a: int = 7) -> None:
+                    self.data = a
+            class Mixin:
+                def hello(self) -> str:
+                    return "hi"
+            class C(Mixin, U):
+                pass
+            if __name__ == "__main__":
+                c = C()
+                print(c.hello(), c.data, C(3).data)
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(run.stdout, "hi 7 3\n");
+}

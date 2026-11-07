@@ -1215,8 +1215,10 @@
         "test": "stdlib::collections_classes"
       },
       {
-        "name": "collections module: UserDict, UserList, UserString (refused today)",
-        "status": "todo"
+        "name": "collections module: UserDict, UserList, UserString, ordinary classes whose subclasses reach their overrides, with the methods that make an instance answering the subclass",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::collections_user_classes"
       },
       {
         "name": "itertools module: count, cycle, repeat, chain, compress, dropwhile, filterfalse, groupby, islice, starmap, takewhile, tee, zip_longest, product, permutations, combinations, combinations_with_replacement, accumulate, batched, pairwise, lowered to generators (tee and zip_longest over sequences)",

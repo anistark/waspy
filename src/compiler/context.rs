@@ -759,6 +759,25 @@ impl CompilationContext {
                 return;
             }
         }
+        // A builtin collection where an instance is expected would be read as
+        // one, its fields being whatever the collection's block holds.
+        if let IRType::Class(c) = slot {
+            if matches!(
+                value,
+                IRType::List(_)
+                    | IRType::Dict(..)
+                    | IRType::Set(_)
+                    | IRType::Tuple(_)
+                    | IRType::VarTuple(_)
+                    | IRType::Range
+            ) {
+                self.report(format!(
+                    "{} is used where an instance of {c} is expected ({what})",
+                    crate::compiler::operators::python_type_name(value)
+                ));
+                return;
+            }
+        }
         // A class where an instance is expected, or the other way round: one
         // would be read as the other.
         if let (IRType::ClassRef(c), IRType::Class(_)) | (IRType::Class(c), IRType::ClassRef(_)) =

@@ -9711,7 +9711,13 @@ fn emit_function_call_expr(
 
     // `from json import dumps` then `dumps(x)`: a call into the module.
     if ctx.get_function_info(function_name).is_none() {
-        if let Some((module, attribute)) = ctx.stdlib_imports.get(function_name).cloned() {
+        let is_class = ctx.get_class_info(function_name).is_some();
+        if let Some((module, attribute)) = ctx
+            .stdlib_imports
+            .get(function_name)
+            .filter(|_| !is_class)
+            .cloned()
+        {
             return emit_expr(
                 &IRExpr::MethodCall {
                     object: Box::new(module_path_expr(&module)),
@@ -14436,16 +14442,11 @@ pub fn emit_list_method_call(
                 func.instruction(&Instruction::I32Const(0));
                 func.instruction(&Instruction::I32GeS);
                 func.instruction(&Instruction::If(BlockType::Empty));
-                let needle = if matches!(value_type, IRType::Float) {
-                    ctx.temp_local_f64
-                } else {
-                    ctx.temp_local + 1
-                };
                 emit_raise(
                     func,
                     ctx,
                     "ValueError",
-                    crate::compiler::exceptions::ExcArg::NotInList(needle, value_type.clone()),
+                    crate::compiler::exceptions::ExcArg::Text("list.remove(x): x not in list"),
                     1,
                 );
                 func.instruction(&Instruction::End);
@@ -14534,11 +14535,16 @@ pub fn emit_list_method_call(
                 func.instruction(&Instruction::I32Const(-1));
                 func.instruction(&Instruction::I32Eq);
                 func.instruction(&Instruction::If(BlockType::Empty));
+                let needle = if matches!(value_type, IRType::Float) {
+                    ctx.temp_local_f64
+                } else {
+                    ctx.temp_local + 1
+                };
                 emit_raise(
                     func,
                     ctx,
                     "ValueError",
-                    crate::compiler::exceptions::ExcArg::Text("list.remove(x): x not in list"),
+                    crate::compiler::exceptions::ExcArg::NotInList(needle, value_type.clone()),
                     1,
                 );
                 func.instruction(&Instruction::End);
