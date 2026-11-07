@@ -162,6 +162,8 @@ pub enum Helper {
     FileOpen,
     /// `(path, len) -> dirfd`: the preopen a path resolves against.
     ResolvePath,
+    /// `(shown, errno) -> ()`: leave a path operation's exception pending.
+    RaiseOsError,
     FileRead,
     FileWrite,
     FileClose,
@@ -230,6 +232,7 @@ pub fn signature(helper: &Helper) -> (Vec<ValType>, Vec<ValType>) {
         Helper::FileOpen | Helper::FileRead | Helper::FileWrite => (vec![I32; 3], vec![I32]),
         Helper::FileClose => (vec![I32], vec![I32]),
         Helper::ResolvePath => (vec![I32, I32], vec![I32]),
+        Helper::RaiseOsError => (vec![I32, I32], vec![]),
         Helper::DictKeys | Helper::ClassName | Helper::ClassNameOf { .. } => (vec![I32], vec![I32]),
         Helper::ExcText(_) => (vec![], vec![I32]),
         Helper::RaiseText(_) => (vec![I32], vec![]),
@@ -345,6 +348,7 @@ pub fn build(helper: &Helper, ctx: &CompilationContext) -> Function {
         Helper::ClassName => crate::compiler::exceptions::build_class_name(ctx, None),
         Helper::FileOpen => crate::compiler::host::build_file_open(ctx),
         Helper::ResolvePath => crate::compiler::host::build_resolve_path(ctx),
+        Helper::RaiseOsError => crate::compiler::host::build_raise_os_error(ctx),
         Helper::FileRead => crate::compiler::host::build_file_read(ctx),
         Helper::FileWrite => crate::compiler::host::build_file_write(ctx),
         Helper::FileClose => crate::compiler::host::build_file_close(ctx),

@@ -9645,6 +9645,23 @@ fn emit_function_call_expr(
         ctx.release_held();
         return IRType::Bool;
     }
+    // The exception the innermost `except` block caught.
+    if function_name == crate::ir::CAUGHT_EXC_FN {
+        match ctx.reraise_codes.last() {
+            Some((_, _, value)) => {
+                func.instruction(&Instruction::LocalGet(*value));
+            }
+            None => {
+                ctx.report(
+                    "exception() and exc_info=True log the exception being handled, which is \
+                     known here only inside an except block. Hint: call it there, or pass the \
+                     exception as exc_info=e",
+                );
+                func.instruction(&Instruction::I32Const(0));
+            }
+        }
+        return IRType::Class("BaseException".to_string());
+    }
     if function_name == crate::ir::SOME_FN && ctx.get_function_info(function_name).is_none() {
         let (Some(value), Some(IRExpr::Const(IRConstant::String(attribute)))) =
             (arguments.first(), arguments.get(1))

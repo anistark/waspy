@@ -25,7 +25,9 @@ A compiled program's side effects go through [WASI preview 1](https://github.com
 | `sys.argv` | `args_sizes_get`, `args_get` |
 | a `__main__` block that can raise an exception it does not catch | `fd_write`, `proc_exit` |
 | `open()` and the file methods | `path_open`, `fd_prestat_get`, `fd_prestat_dir_name`, `fd_read`, `fd_write`, `fd_close` |
-| `os.path.exists()`, `isfile()`, `isdir()` | `path_filestat_get`, `fd_prestat_get`, `fd_prestat_dir_name` |
+| `os.path.exists()`, `isfile()`, `isdir()`, `getsize()` | `path_filestat_get`, `fd_prestat_get`, `fd_prestat_dir_name` |
+| `os.remove()`, `os.unlink()` | `path_unlink_file`, `fd_prestat_get`, `fd_prestat_dir_name` |
+| `os.rename()`, `os.replace()` | `path_rename`, `fd_prestat_get`, `fd_prestat_dir_name` |
 | `random`, `os.urandom()` | `random_get` |
 | `os.environ`, `os.getenv()` | `environ_sizes_get`, `environ_get` |
 | reading the clock (`datetime`'s `now()` and `today()`, a log record's time) | `clock_time_get` |

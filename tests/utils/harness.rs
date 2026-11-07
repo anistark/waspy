@@ -466,6 +466,7 @@ pub fn link_host(linker: &mut Linker<Host>) {
                     .to_string();
                 // The preopen is a directory, a file is a regular file, and
                 // a prefix of a file's name is a directory holding it.
+                let size = host.files.get(&name).map_or(0, Vec::len) as u64;
                 let filetype = if name == "." || name.is_empty() {
                     3
                 } else if host.files.contains_key(&name) {
@@ -481,10 +482,64 @@ pub fn link_host(linker: &mut Linker<Host>) {
                 };
                 data[out as usize..out as usize + 64].fill(0);
                 data[out as usize + 16] = filetype;
+                data[out as usize + 32..out as usize + 40].copy_from_slice(&size.to_le_bytes());
                 0
             },
         )
         .expect("link path_filestat_get");
+    linker
+        .func_wrap(
+            wasi,
+            "path_unlink_file",
+            |mut caller: Caller<'_, Host>, dir: i32, path: i32, len: i32| -> i32 {
+                if dir != PREOPEN_FD {
+                    return 8; // EBADF
+                }
+                let memory = memory_of(&mut caller);
+                let (data, host) = memory.data_and_store_mut(&mut caller);
+                let name = String::from_utf8_lossy(&data[path as usize..(path + len) as usize])
+                    .trim_start_matches("./")
+                    .to_string();
+                match host.files.remove(&name) {
+                    Some(_) => 0,
+                    None => 44, // ENOENT
+                }
+            },
+        )
+        .expect("link path_unlink_file");
+    linker
+        .func_wrap(
+            wasi,
+            "path_rename",
+            |mut caller: Caller<'_, Host>,
+             dir: i32,
+             old: i32,
+             old_len: i32,
+             new_dir: i32,
+             new: i32,
+             new_len: i32|
+             -> i32 {
+                if dir != PREOPEN_FD || new_dir != PREOPEN_FD {
+                    return 8; // EBADF
+                }
+                let memory = memory_of(&mut caller);
+                let (data, host) = memory.data_and_store_mut(&mut caller);
+                let text = |at: i32, n: i32| {
+                    String::from_utf8_lossy(&data[at as usize..(at + n) as usize])
+                        .trim_start_matches("./")
+                        .to_string()
+                };
+                let (from, to) = (text(old, old_len), text(new, new_len));
+                match host.files.remove(&from) {
+                    Some(bytes) => {
+                        host.files.insert(to, bytes);
+                        0
+                    }
+                    None => 44, // ENOENT
+                }
+            },
+        )
+        .expect("link path_rename");
     linker
         .func_wrap(
             wasi,
