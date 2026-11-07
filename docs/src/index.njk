@@ -28,7 +28,7 @@ scripts: ["/assets/js/home.js"]
     { title: "Language coverage", text: "Classes with multiple inheritance, closures, lambdas, generators, comprehensions, exceptions, f-strings, and decorators.", tag: "python 3 syntax", accent: "--c-teal" },
     { title: "Small Rust API", text: "compile_python_to_wasm() for one source, compile_python_file() for an entry file and its imports, compile_python_project() for a directory.", tag: "rust crate", accent: "--c-green" },
     { title: "Project compilation", text: "Multi-file input with import resolution, __main__.py entry detection, and pyproject.toml config, linked into one .wasm. User modules resolve from disk, each compiled once.", tag: "one .wasm out", accent: "--c-amber" },
-    { title: "Standard library", text: "Module constants, sys streams, argv and exit, re.sub and re.escape folded over constant arguments, and the functools decorators. Every other stdlib call is refused at compile time.", tag: "stdlib subset", accent: "--c-red" }
+    { title: "Standard library", text: "math, random, sys, os, json, re, datetime, logging, collections, itertools, and functools run on runtime values, checked against CPython 3.13. What is not implemented is refused at compile time, by name.", tag: "stdlib subset", accent: "--c-red" }
 ] %}
 
 {% set implementations = ["Waspy", "CPython", "MicroPython", "PyPy", "HPy"] %}
@@ -39,7 +39,7 @@ scripts: ["/assets/js/home.js"]
     { label: "Universal runtime", cells: [["Browser, server, edge", "yes"], ["OS dependent", "partial"], ["Hardware specific", "no"], ["OS dependent", "partial"], ["OS dependent", "partial"]] },
     { label: "Startup time", cells: [["Instant", "yes"], ["Module loading", "partial"], ["Fast", "yes"], ["JIT warmup", "no"], ["Import overhead", "partial"]] },
     { label: "Memory usage", cells: [["Minimal", "yes"], ["Standard", "partial"], ["Ultra-low", "yes"], ["Higher (JIT)", "no"], ["Standard", "partial"]] },
-    { label: "Standard library", cells: [["Small subset", "partial"], ["Complete", "yes"], ["Subset", "partial"], ["Complete", "yes"], ["Complete", "yes"]] },
+    { label: "Standard library", cells: [["Subset", "partial"], ["Complete", "yes"], ["Subset", "partial"], ["Complete", "yes"], ["Complete", "yes"]] },
     { label: "Security", cells: [["Sandboxed WASM", "yes"], ["Full system access", "no"], ["Hardware limited", "partial"], ["Full system access", "no"], ["Full system access", "no"]] },
     { label: "Use case", cells: [["Web apps, serverless"], ["General purpose"], ["IoT, embedded"], ["CPU-intensive apps"], ["C extension API"]] }
 ] %}

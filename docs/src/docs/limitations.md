@@ -4,13 +4,24 @@ eyebrow: Language
 description: "What the compiler refuses, or traps on, rather than answering differently from CPython."
 ---
 
-Each of these is refused at compile time, or traps, rather than answering differently from CPython.
+Each of these is refused at compile time, or traps, rather than answering differently from CPython, apart from the few listed first.
+
+## Where the answer differs
+
+These answer differently from CPython without an error. Each is known, and anything else is a bug:
+
+- `int` is 32 bits and wraps instead of growing (see [Numbers](/docs/numbers/))
+- A NaN inside a collection does not equal itself: `(x,) == (x,)` is False for `x = float("nan")`, where CPython answers True (see [Numbers](/docs/numbers/))
+- Object lifetime: memory is never reclaimed, so `__del__` never runs, and a generator abandoned mid-iteration runs its `finally` blocks only on `close()`
+- A traceback is not kept: a `__main__` block's uncaught exception writes only the last line of CPython's report
+- A generator expression is built as a list before anything reads it, so in `for x in (f(y) for y in g()):` every side effect of `f` and `g` comes before the loop's body, where CPython interleaves them
+- `json.loads()` of an integer where a float is declared gives that float: `1.0`, where CPython keeps the int `1`
 
 ## Types
 
 - A place with no type holds a single word read back as an int: an unannotated parameter or return value, and the elements of a bare `list`, `set`, or `dict` parameter or return. Only ints, bools, None, and functions pass through one; a string, float, collection, or instance is refused with a hint to annotate, since it would lose its length, width, or type on the way. A bare annotation on a variable or field is fine: its elements take the type of the value assigned. `len()` of an untyped value is refused for the same reason
 - None is the word 0, which an untyped value can also be, so `x is None` on an untyped value is refused. An `Optional[int]`, `Optional[bool]`, or `Optional[float]` is boxed, so None is told apart from 0: `is None`, `==`, truthiness, `str()`, and `dict.get(key)` on number values give CPython's answer, and arithmetic or an ordering on None raises its `TypeError`. An optional number passed or returned where a plain one is declared (past an `is None` test, typically) is its number, and None there traps, since CPython would pass the None on and the place cannot hold it. Arithmetic between two optional numbers is refused
-- `dict.get(key)` without a default is refused where the values are ints, floats, or strings, since a missing key answers None, which those values have no distinct word for; pass a default
+- `dict.get(key)` without a default is refused unless the values are numbers or instances, since a missing key answers None, which a string, bytes, or collection value has no distinct word for; pass a default
 - Reading an attribute through a value whose type is not known, most often an unannotated parameter, is a compile error with a hint to annotate it. The rich comparison methods are the exception: an unannotated `other` in `__eq__`/`__lt__`/... is typed as the class. A field the class does not have is refused too
 - A variable, field, or collection that holds instances of more than one class is typed as their nearest common base for the whole function, so a method call on it dispatches on each instance's own class. Types are not tracked per program point, so reading a field that only one of the subclasses has through it is refused, and so is a method call on instances with no common base. Storing an instance where an annotation names an unrelated class (a `Rect` passed to a `Circle` parameter, or returned from `-> Circle`) is refused rather than dispatched as the annotated class
 - Annotations are taken as the type a place holds: an int, bool, float, str, or bytes stored where a different one of these is declared (an int passed to a `str` or `Optional[str]` parameter, a str assigned to a field typed `int`, or a local bound to an int and later to a str) is refused, since the place would read it as the declared kind. CPython keeps the value whatever the annotation says. That includes an int or a bool where a float is declared, and a bool where an int is: the place would hold it as the declared kind and print `5.0` or `1` where CPython prints `5` or `True`, so `x: float = 0` is refused with a hint to write `0.0`, and `f(n)` for an int `n` with one to write `float(n)`. Where only the number is used (compared with a float, computed with, or passed to a `math` function or a `datetime` class), an int converts with CPython's answer
@@ -24,6 +35,7 @@ Each of these is refused at compile time, or traps, rather than answering differ
 - Comparing two collections needs both to have the same, known element types: `(1, 2) == (1.0, 2)` (True in CPython) and a comparison with an untyped list are refused rather than read at the wrong width. Comparing two empty literals (`{} == {}`, `[] == []`), whose element types nothing gives, comparing collections whose elements are sets, and a list, dict, or set as a set member or dict key (unhashable in CPython) are refused; two sets compare directly (`==`, and `<=`/`<` as subset tests). A class that defines `__eq__` cannot be a set member or dict key, since calling a user `__hash__` is not supported; a named tuple can, as it hashes as its tuple
 - A method called with the wrong number of arguments is a compile error: `xs.append(3, 4)` and `xs.clear(9)` are refused. The optional forms Python accepts compile, so `pop()`, `pop(i)`, `sort()`, and `sort(reverse=True)` all work
 - `for k, v in x.items()` (and `.keys()` / `.values()`) calls the method when `x` is known to be an instance of a class defining it (a local, a parameter, a field, or a call's declared result). Where the instance comes from something whose class is not known at the loop, such as another method's result, the loop is refused with a hint to assign it to an annotated local first
+- A comprehension over a dict literal with string keys written in place (`[k for k in {"a": 1}]`) is refused; assign the dict to a variable first
 - A chained comparison (`0 <= x <= 100`) needs its middle operands to be names or constants; one that is a call or an attribute is refused, since it would be read twice. Assign it to a variable first
 
 ## Functions and classes

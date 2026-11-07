@@ -46,7 +46,7 @@ permalink: /docs/programs/
             <span class="hex grid size-8 shrink-0 place-items-center bg-red/15 font-mono text-sm font-bold text-red" aria-hidden="true">&ne;</span>
             <h3 class="font-display text-base font-semibold">Answers differently</h3>
         </div>
-        <p class="mt-3 text-sm leading-relaxed text-ink-1">Two documented cases: <code>int</code> is 32 bits and wraps instead of growing, and a NaN inside a collection does not equal itself. Everywhere else the rule is Python's answer or a loud failure.</p>
+        <p class="mt-3 text-sm leading-relaxed text-ink-1">A short documented list, led by <code>int</code>, which is 32 bits and wraps instead of growing, and a NaN inside a collection, which does not equal itself: see <a href="/docs/limitations/#where-the-answer-differs">Where the answer differs</a>. Everywhere else the rule is Python's answer or a loud failure.</p>
     </div>
 </div>
 
@@ -132,7 +132,7 @@ def empty_cart_total() -> float:
         <dd class="-mt-3.5 text-[0.94rem] leading-relaxed text-ink-1 sm:mt-0">Parameter and return annotations pick the WebAssembly value types. A collection passed into or out of a function needs the parameterised form, <code>List[str]</code> rather than a bare <code>list</code>: the parameterised form is what gives the compiler an element type. Calls may pass arguments by keyword, and functions and <code>__init__</code> collect extras with <code>*args: T</code> and <code>**kwargs: T</code>.</dd>
 
         <dt class="font-mono text-xs font-semibold tracking-wider text-amber uppercase sm:pt-0.5">Entry points</dt>
-        <dd class="-mt-3.5 text-[0.94rem] leading-relaxed text-ink-1 sm:mt-0">Every module-level <code>def</code> is exported. There is no top-level run step, so module level holds definitions only; put the code that runs in a function, or under <code>if __name__ == "__main__":</code>, which makes the module a WASI command that <code>wasmtime run</code> runs like <code>python3</code>.</dd>
+        <dd class="-mt-3.5 text-[0.94rem] leading-relaxed text-ink-1 sm:mt-0">Every module-level <code>def</code> is exported. Only definitions run at module level; put the code that runs in a function, or under <code>if __name__ == "__main__":</code>, which makes the module a WASI command that <code>wasmtime run</code> runs like <code>python3</code>.</dd>
 
         <dt class="font-mono text-xs font-semibold tracking-wider text-amber uppercase sm:pt-0.5">Imports</dt>
         <dd class="-mt-3.5 text-[0.94rem] leading-relaxed text-ink-1 sm:mt-0"><code>import mod</code> and <code>from mod import f</code> resolve sibling <code>.py</code> files (and <code>pkg/mod.py</code> packages) from disk and link them into the one output module, each compiled once. No PyPI packages: beyond your own modules, the supported subset is standard-library only.</dd>
@@ -171,7 +171,7 @@ def empty_cart_total() -> float:
 
 <div class="callout">
     <p><strong>The rule the compiler holds itself to:</strong> a construct either produces Python's answer or fails loudly. It never quietly produces a different one.</p>
-    <p>There are two documented exceptions. Integer width is the first: <code>int</code> is a 32-bit two's-complement value, so <code>1000000 * 1000000</code> wraps to <code>-727379968</code> where CPython answers <code>1000000000000</code>. If your arithmetic can exceed 32 bits, your program is not in the supported subset. The second is a NaN inside a collection, which does not equal itself (see the list below). Both are explained under <a href="/docs/numbers/">Numbers</a>.</p>
+    <p>There are a few documented exceptions. Integer width is the first: <code>int</code> is a 32-bit two's-complement value, so <code>1000000 * 1000000</code> wraps to <code>-727379968</code> where CPython answers <code>1000000000000</code>. If your arithmetic can exceed 32 bits, your program is not in the supported subset. Another is a NaN inside a collection, which does not equal itself. Both are explained under <a href="/docs/numbers/">Numbers</a>, and <a href="/docs/limitations/#where-the-answer-differs">Limitations</a> has the full list.</p>
 </div>
 
 <h2 id="shapes">Shapes that do not compile</h2>
@@ -182,7 +182,7 @@ def empty_cart_total() -> float:
 <ul class="divide-y divide-line">
 
 {% call shape("Module-level statements other than definitions", ["refused", "workaround"]) %}
-A loop, <code>if</code>, <code>try</code>, bare call, augmented assignment, tuple unpacking, or write through a subscript or attribute at module level. A WebAssembly module has no top-level run step, so the statement would be compiled away. <code>X = 1</code>, <code>X = helper()</code>, <code>X = ClassName()</code>, <code>def</code>, <code>class</code>, and imports (a <code>try</code>/<code>except ImportError</code> guarded import included) do work, and a definition that is not a plain constant is evaluated once, at instantiation, in source order, so every function shares the same list or instance. Move the rest into a function, or under <code>if __name__ == "__main__":</code>.
+A loop, <code>if</code>, <code>try</code>, bare call, augmented assignment, tuple unpacking, or write through a subscript or attribute at module level. Only definitions run when a module starts, so the statement would be compiled away. <code>X = 1</code>, <code>X = helper()</code>, <code>X = ClassName()</code>, <code>def</code>, <code>class</code>, and imports (a <code>try</code>/<code>except ImportError</code> guarded import included) do work, and a definition that is not a plain constant is evaluated once, at instantiation, in source order, so every function shares the same list or instance. Move the rest into a function, or under <code>if __name__ == "__main__":</code>.
 {% endcall %}
 
 {% call shape("<code>async def</code>, <code>await</code>, <code>async for</code>, <code>async with</code>", ["refused"]) %}
@@ -218,7 +218,7 @@ Tuples and lists compare by value, and a tuple works as a set member or a dict k
 {% endcall %}
 
 {% call shape("Mixing types in one collection", ["refused", "workaround"]) %}
-Every slot in a collection is read at one width, so a literal mixing types no one type holds (<code>[1, "a"]</code>, <code>[1, True]</code>) is refused; use a class or a tuple for a record. An int written into a float collection is widened for you (<code>xs.append(3)</code> on a <code>List[float]</code>). The other direction is refused, because storing <code>2.5</code> where the slot is read as an integer would truncate it. Make the elements one type.
+Every slot in a collection is read at one width, so a literal mixing types no one type holds (<code>[1, "a"]</code>, <code>[1, True]</code>) is refused; use a class or a tuple for a record. An int written into a float collection is refused too, since CPython keeps the int (<code>xs.append(3)</code> on a <code>List[float]</code>). So is the other direction, because storing <code>2.5</code> where the slot is read as an integer would truncate it. Make the elements one type.
 {% endcall %}
 
 {% call shape("Reading a field through an unannotated parameter", ["refused", "workaround"]) %}
@@ -230,15 +230,15 @@ An unannotated parameter or return, and the elements of a bare <code>list</code>
 {% endcall %}
 
 {% call shape("<code>x is None</code> on an untyped value, and <code>dict.get(key)</code> without a default", ["refused", "workaround"]) %}
-<code>None</code> is the word 0, which an untyped value can also be, so the test cannot be answered there. An <code>Optional[int]</code>, <code>Optional[bool]</code>, or <code>Optional[float]</code> is boxed, so <code>is None</code>, <code>==</code>, and truthiness on one give CPython's answer; arithmetic between two optional numbers is refused. <code>dict.get(key)</code> with no default is refused where the values are ints, floats, or strings, which have no distinct word for the <code>None</code> a missing key answers; pass a default.
+<code>None</code> is the word 0, which an untyped value can also be, so the test cannot be answered there. An <code>Optional[int]</code>, <code>Optional[bool]</code>, or <code>Optional[float]</code> is boxed, so <code>is None</code>, <code>==</code>, and truthiness on one give CPython's answer; arithmetic between two optional numbers is refused. <code>dict.get(key)</code> with no default is refused unless the values are numbers or instances, since a string or collection has no distinct word for the <code>None</code> a missing key answers; pass a default.
 {% endcall %}
 
 {% call shape("<code>str.format</code> or <code>%</code> on a format string built at run time", ["refused"]) %}
 The whole format specification mini-language works in f-strings, <code>format()</code>, <code>.format()</code>, and <code>%</code>, digit for digit with CPython. <code>.format()</code> and <code>%</code> need a literal format string, and a <code>*</code> width or precision in <code>%</code>, or a precision on <code>%d</code>, <code>%x</code>, or <code>%o</code>, is refused. A spec CPython rejects is a compile error carrying CPython's message when it is a literal, and traps when it is built at run time.
 {% endcall %}
 
-{% call shape("<code>**</code> with a fractional or negative exponent", ["traps"]) %}
-Powers are computed by repeated multiplication. <code>2.0 ** 0.5</code> traps, because it needs exp/log this runtime does not carry, and a negative integer exponent traps because Python's answer is a float an int cannot hold. <code>float()</code> and <code>int()</code> of a string with non-ASCII digits or spaces trap too, where CPython would accept them.
+{% call shape("<code>**</code> with a negative int exponent, or a negative float to a fractional power", ["traps"]) %}
+Float powers are CPython's, so <code>2.0 ** 0.5</code> works. A negative integer exponent traps because Python's answer is a float an int cannot hold, and a negative float to a fractional power traps because its answer is a complex number. <code>float()</code> and <code>int()</code> of a string with non-ASCII digits or spaces trap too, where CPython would accept them.
 {% endcall %}
 
 {% call shape("Two modules defining the same function name", ["refused", "workaround"]) %}
@@ -257,8 +257,16 @@ With <code>x = float("nan")</code>, <code>(x,) == (x,)</code> and <code>[x] == [
 No traceback is kept. An exception a <code>__main__</code> block does not catch writes only the last line of CPython's report (<code>ValueError: boom</code>) to standard error and exits with status 1.
 {% endcall %}
 
-{% call shape("Third-party packages, and most of the standard library", ["refused"]) %}
-No PyPI. Standard-library support is small so far: the module constants (<code>math.pi</code>, <code>os.sep</code>, ...), <code>sys.stdin</code>, <code>sys.stdout</code>, <code>sys.stderr</code>, <code>sys.argv</code>, and <code>sys.exit()</code>, <code>re.sub</code> and <code>re.escape</code> on constant arguments, and the <code>functools</code> decorators. Every other function in <code>sys</code>, <code>os</code>, <code>os.path</code>, <code>math</code>, <code>random</code>, <code>json</code>, <code>re</code>, <code>datetime</code>, <code>logging</code>, <code>collections</code>, <code>itertools</code>, and <code>functools</code> is refused at compile time, and each is tracked on the <a class="link" href="/modules/">modules board</a>.
+{% call shape("A generator expression with side effects", ["differs"]) %}
+A generator expression is built as a list before anything reads it, so in <code>for x in (f(y) for y in g()):</code> every side effect of <code>f</code> and <code>g</code> comes before the loop's body, where CPython interleaves them. A list comprehension is the same in both, so write one if the order matters.
+{% endcall %}
+
+{% call shape("An integer read into a float by <code>json.loads()</code>", ["differs"]) %}
+<code>x: float = json.loads("1")</code> holds <code>1.0</code>, where CPython keeps the int <code>1</code>.
+{% endcall %}
+
+{% call shape("Third-party packages, and what the standard library does not implement", ["refused"]) %}
+No PyPI. <code>sys</code>, <code>os</code>, <code>os.path</code>, <code>math</code>, <code>random</code>, <code>json</code>, <code>re</code>, <code>datetime</code>, <code>logging</code>, <code>collections</code>, <code>itertools</code>, and <code>functools</code> run on runtime values, checked against CPython 3.13. What is not implemented is refused at compile time, by name: the <a href="/modules/">modules board</a> tracks each feature, and <a href="/docs/limitations/#the-standard-library">Limitations</a> has the rules these modules follow.
 {% endcall %}
 
 </ul>
