@@ -36,6 +36,10 @@ pub const LOG_TEXT_ARG: &str = "__log_text";
 /// Why a logging call's message cannot be formatted, in its place.
 pub const LOG_TEXT_ERROR_ARG: &str = "__log_text_error";
 pub const LOG_ARG_PREFIX: &str = "__log_arg";
+/// The hidden keyword holding a logging call's `extra=` as a `logging._Extra`.
+pub const LOG_EXTRA_ARG: &str = "__log_extra";
+/// The exception the innermost `except` block caught, as a value.
+pub const CAUGHT_EXC_FN: &str = "__waspy_caught";
 /// The methods of a `logging.Logger` that log, and the module's functions
 /// of the same names.
 pub const LOG_METHODS: &[&str] = &[
@@ -71,12 +75,18 @@ fn logging_imports(ast: &Suite) -> Option<std::collections::HashSet<String>> {
         for stmt in body {
             match stmt {
                 Stmt::Import(i) => {
-                    if i.names.iter().any(|a| a.name.as_str() == "logging") {
+                    if i.names
+                        .iter()
+                        .any(|a| a.name.as_str() == "logging" || a.name.starts_with("logging."))
+                    {
                         *found = true;
                     }
                 }
                 Stmt::ImportFrom(i) => {
-                    if i.module.as_deref() == Some("logging") {
+                    if i.module
+                        .as_deref()
+                        .is_some_and(|m| m == "logging" || m.starts_with("logging."))
+                    {
                         *found = true;
                         for a in &i.names {
                             if LOG_METHODS.contains(&a.name.as_str()) {
@@ -2522,6 +2532,13 @@ fn type_annotation_to_ir_type(expr: &Expr) -> Result<IRType> {
         },
         // `datetime.date`: a module's class, named through the module.
         Expr::Attribute(attr) => match &*attr.value {
+            // `logging.handlers.MemoryHandler`.
+            Expr::Attribute(sub)
+                if sub.attr.as_str() == "handlers"
+                    && matches!(&*sub.value, Expr::Name(m) if m.id.as_str() == "logging") =>
+            {
+                Ok(IRType::Class(format!("logging.handlers.{}", attr.attr)))
+            }
             Expr::Name(module)
                 if matches!(module.id.as_str(), "datetime" | "json" | "logging" | "re") =>
             {

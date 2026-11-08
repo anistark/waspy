@@ -2939,10 +2939,12 @@ fn logging_refusals() {
         assert!(err.contains(why), "{body}: {err}");
         assert_eq!(err.matches(why).count(), 1, "reported once: {err}");
     };
-    refused("logging.exception('x')", "logs the traceback");
+    refused("logging.exception('x')", "only inside an except block");
     refused("log.warn('x')", "DeprecationWarning");
-    refused("log.info('x', extra={'a': 1})", "extra=");
-    refused("log.error('x', exc_info=True)", "exc_info");
+    refused(
+        "log.error('x', exc_info=True)",
+        "only inside an except block",
+    );
     refused("logging.Formatter('%(pathname)s')", "names the source file");
     refused(
         "logging.Formatter('%(nothing)s')",
@@ -2952,7 +2954,6 @@ fn logging_refusals() {
         "logging.basicConfig(colour=1)",
         "Unrecognised argument(s): colour",
     );
-    refused("logging.addLevelName(5, 'TRACE')", "logging.addLevelName");
     refused(
         "log.info('%d %d', 1)",
         "not enough arguments for format string",
@@ -4083,6 +4084,485 @@ fn user_classes_through_the_module_name() {
                 print(f(c), collections.UserList([1]), collections.UserString("x"), c)
         "#,
         r#"1 [1] x {'a': 1}
+"#,
+    );
+}
+
+// logging: expected output is CPython 3.13's, with a traceback's frames left
+// out: what stands in for one is its last line.
+
+#[test]
+fn logging_add_level_name() {
+    prints(
+        r#"
+            import logging, sys
+            TRACE = 5
+            NOTICE = 25
+            if __name__ == "__main__":
+                logging.addLevelName(TRACE, "TRACE")
+                logging.addLevelName(NOTICE, "NOTICE")
+                logging.addLevelName(30, "WARN!")
+                h = logging.StreamHandler(sys.stdout)
+                h.setFormatter(logging.Formatter("%(levelname)s %(levelno)d %(message)s"))
+                log = logging.getLogger("x")
+                log.addHandler(h)
+                log.setLevel("TRACE")
+                log.log(TRACE, "t")
+                log.log(NOTICE, "n %d", 1)
+                log.warning("w")
+                log.info("i")
+                print(logging.getLevelName(NOTICE), logging.getLevelName(5), logging.getLevelName(35), logging.getLevelName(30), log.getEffectiveLevel(), log)
+        "#,
+        r#"TRACE 5 t
+NOTICE 25 n 1
+WARN! 30 w
+INFO 20 i
+NOTICE TRACE Level 35 WARN! 5 <Logger x (TRACE)>
+"#,
+    );
+}
+
+#[test]
+fn logging_exception_and_exc_info() {
+    prints(
+        r#"
+            import logging, sys
+            class MyErr(Exception):
+                pass
+            def bad() -> int:
+                raise ValueError("boom")
+            if __name__ == "__main__":
+                h = logging.StreamHandler(sys.stdout)
+                h.setFormatter(logging.Formatter("%(levelname)s:%(message)s"))
+                log = logging.getLogger("x")
+                log.addHandler(h)
+                log.propagate = False
+                try:
+                    bad()
+                except ValueError as e:
+                    log.exception("failed %d", 1)
+                    log.error("again", exc_info=True)
+                    log.warning("w", exc_info=e)
+                    log.error("no", exc_info=False)
+                try:
+                    raise MyErr()
+                except MyErr:
+                    log.exception("empty")
+                try:
+                    raise KeyError("k")
+                except Exception:
+                    log.exception("key")
+                    logging.getLogger("x").critical("c", exc_info=True)
+                e2 = ZeroDivisionError("z")
+                log.info("skipped", exc_info=e2)
+                log.error("given", exc_info=e2)
+        "#,
+        r#"ERROR:failed 1
+ValueError: boom
+ERROR:again
+ValueError: boom
+WARNING:w
+ValueError: boom
+ERROR:no
+ERROR:empty
+MyErr
+ERROR:key
+KeyError: 'k'
+CRITICAL:c
+KeyError: 'k'
+ERROR:given
+ZeroDivisionError: z
+"#,
+    );
+}
+
+#[test]
+fn logging_rotating_file_handler() {
+    prints(
+        r#"
+            import logging
+            import logging.handlers
+            import os
+            def show(n: str) -> None:
+                if os.path.exists(n):
+                    with open(n) as f:
+                        print(n, repr(f.read()))
+                else:
+                    print(n, "missing")
+            if __name__ == "__main__":
+                for n in ["r.log", "r.log.1", "r.log.2", "r.log.3"]:
+                    if os.path.exists(n):
+                        os.remove(n)
+                h = logging.handlers.RotatingFileHandler("r.log", maxBytes=20, backupCount=2)
+                h.setFormatter(logging.Formatter("%(message)s"))
+                log = logging.getLogger("r")
+                log.addHandler(h)
+                log.setLevel(logging.INFO)
+                log.propagate = False
+                for i in range(6):
+                    log.info("message number %d", i)
+                print(type(h), h.maxBytes, h.backupCount)
+                show("r.log")
+                show("r.log.1")
+                show("r.log.2")
+                show("r.log.3")
+                h2 = logging.handlers.RotatingFileHandler("r2.log", mode="w")
+                h2.doRollover()
+                print(os.path.exists("r2.log"))
+                os.remove("r2.log")
+                for n in ["r.log", "r.log.1", "r.log.2"]:
+                    os.remove(n)
+        "#,
+        r#"<class 'logging.handlers.RotatingFileHandler'> 20 2
+r.log 'message number 5\n'
+r.log.1 'message number 4\n'
+r.log.2 'message number 3\n'
+r.log.3 missing
+True
+"#,
+    );
+}
+
+#[test]
+fn logging_memory_and_buffering_handlers_flush_at_exit() {
+    prints(
+        r#"
+            import logging, sys
+            from logging.handlers import MemoryHandler, BufferingHandler
+            class Keep(BufferingHandler):
+                def __init__(self) -> None:
+                    super().__init__(2)
+                    self.flushed = 0
+                def flush(self) -> None:
+                    self.flushed += len(self.buffer)
+                    print("flush", [r.getMessage() for r in self.buffer])
+                    super().flush()
+            class Closer(logging.Handler):
+                def emit(self, record: logging.LogRecord) -> None:
+                    print("emit", record.getMessage())
+                def close(self) -> None:
+                    print("closed")
+                def flush(self) -> None:
+                    print("flushed")
+            if __name__ == "__main__":
+                out = logging.StreamHandler(sys.stdout)
+                out.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+                m = MemoryHandler(3, flushLevel=logging.ERROR, target=out)
+                log = logging.getLogger("m")
+                log.addHandler(m)
+                log.setLevel(logging.DEBUG)
+                log.propagate = False
+                log.info("one")
+                log.info("two")
+                print("held", len(m.buffer))
+                log.error("three")
+                print("held", len(m.buffer))
+                log.info("a")
+                log.info("b")
+                log.info("c")
+                print("held", len(m.buffer))
+                log.info("left for exit")
+                k = Keep()
+                l2 = logging.getLogger("k")
+                l2.addHandler(k)
+                l2.propagate = False
+                l2.error("x")
+                l2.error("y")
+                l2.error("z")
+                print(k.flushed, len(k.buffer), type(m), type(k))
+                l3 = logging.getLogger("c")
+                l3.addHandler(Closer())
+                l3.propagate = False
+                l3.error("to closer")
+                print("end of main")
+        "#,
+        r#"held 2
+INFO one
+INFO two
+ERROR three
+held 0
+INFO a
+INFO b
+INFO c
+held 0
+flush ['x', 'y']
+2 1 <class 'logging.handlers.MemoryHandler'> <class '__main__.Keep'>
+emit to closer
+end of main
+flushed
+closed
+flush ['z']
+flush []
+INFO left for exit
+"#,
+    );
+}
+
+#[test]
+fn logging_dict_config() {
+    prints(
+        r#"
+            import logging
+            import logging.config
+            LOGGING = {
+                "version": 1,
+                "disable_existing_loggers": False,
+                "formatters": {
+                    "plain": {"format": "%(levelname)s:%(name)s:%(message)s"},
+                    "brace": {"format": "{name} {message}", "style": "{"},
+                },
+                "filters": {"only_a": {"name": "app.a"}},
+                "handlers": {
+                    "out": {"class": "logging.StreamHandler", "stream": "ext://sys.stdout", "formatter": "plain", "level": "INFO"},
+                    "b": {"class": "logging.StreamHandler", "stream": "ext://sys.stdout", "formatter": "brace", "filters": ["only_a"]},
+                    "mem": {"class": "logging.handlers.MemoryHandler", "capacity": 2, "flushLevel": "ERROR", "target": "out"},
+                    "nul": {"class": "logging.NullHandler"},
+                },
+                "loggers": {
+                    "app": {"level": "DEBUG", "handlers": ["out", "b"], "propagate": False},
+                    "buf": {"level": 10, "handlers": ["mem"], "propagate": False},
+                },
+                "root": {"level": "WARNING", "handlers": ["nul"]},
+            }
+            if __name__ == "__main__":
+                before = logging.getLogger("before")
+                logging.config.dictConfig(LOGGING)
+                a = logging.getLogger("app.a")
+                a.info("through a")
+                a.debug("below out")
+                logging.getLogger("app.b").warning("through b")
+                bf = logging.getLogger("buf")
+                bf.info("held")
+                bf.info("released")
+                print(logging.getLogger("app").level, logging.getLogger().level, before.disabled, logging.getLogger("app").propagate, len(logging.getLogger().handlers))
+        "#,
+        r#"INFO:app.a:through a
+app.a through a
+app.a below out
+WARNING:app.b:through b
+INFO:buf:held
+INFO:buf:released
+10 30 False False 1
+"#,
+    );
+}
+
+#[test]
+fn logging_dict_config_existing_loggers() {
+    prints(
+        r#"
+            from logging.config import dictConfig
+            import logging
+            if __name__ == "__main__":
+                keep = logging.getLogger("keep")
+                child = logging.getLogger("named.child")
+                child.setLevel(logging.ERROR)
+                dictConfig({"version": 1, "loggers": {"named": {"level": "INFO"}}, "formatters": {"f": {"format": "%(message)s"}}, "handlers": {"h": {"class": "logging.StreamHandler", "stream": "ext://sys.stdout", "formatter": "f"}}, "root": {"handlers": ["h"], "level": "DEBUG"}})
+                print(keep.disabled, child.disabled, child.level, logging.getLogger("named").disabled)
+                keep.error("not shown")
+                child.info("shown")
+        "#,
+        r#"True False 0 False
+shown
+"#,
+    );
+}
+
+#[test]
+fn logging_dict_config_factories() {
+    prints(
+        r#"
+            import logging, logging.config
+            class Tag(logging.Filter):
+                def __init__(self, tag: str) -> None:
+                    super().__init__()
+                    self.tag = tag
+                def filter(self, record: logging.LogRecord) -> bool:
+                    return record.levelno >= 30
+            class Print(logging.Handler):
+                def emit(self, record: logging.LogRecord) -> None:
+                    print("P", record.getMessage())
+            def setup() -> None:
+                logging.config.dictConfig({
+                    "version": 1,
+                    "filters": {"t": {"()": Tag, "tag": "x"}},
+                    "handlers": {"p": {"()": Print, "filters": ["t"]}},
+                    "root": {"level": "INFO", "handlers": ["p"]},
+                })
+            if __name__ == "__main__":
+                setup()
+                logging.info("no")
+                logging.warning("yes")
+                logging.getLogger("z").error("child")
+        "#,
+        r#"P yes
+P child
+"#,
+    );
+}
+
+#[test]
+fn logging_dict_config_added_level() {
+    prints(
+        r#"
+            import logging.config
+            import logging
+            if __name__ == "__main__":
+                logging.addLevelName(25, "NOTICE")
+                logging.config.dictConfig({"version": 1, "formatters": {"f": {"format": "%(levelname)s %(message)s"}}, "handlers": {"o": {"class": "logging.StreamHandler", "stream": "ext://sys.stdout", "formatter": "f", "level": "NOTICE"}}, "loggers": {"a": {"handlers": ["o"], "level": "NOTICE"}}})
+                a = logging.getLogger("a")
+                a.log(25, "shown")
+                a.info("hidden")
+                print(a.getEffectiveLevel())
+        "#,
+        r#"NOTICE shown
+25
+"#,
+    );
+}
+
+#[test]
+fn logging_filter_adds_a_record_field() {
+    prints(
+        r#"
+            import logging, sys
+            class Ctx(logging.Filter):
+                def filter(self, record: logging.LogRecord) -> bool:
+                    record.ip = "1.2.3.4"
+                    return True
+            if __name__ == "__main__":
+                h = logging.StreamHandler(sys.stdout)
+                h.setFormatter(logging.Formatter("%(ip)s %(message)s"))
+                log = logging.getLogger("x")
+                log.addHandler(h)
+                log.addFilter(Ctx())
+                log.propagate = False
+                log.warning("hi")
+        "#,
+        r#"1.2.3.4 hi
+"#,
+    );
+}
+
+#[test]
+fn logging_handlers_alone() {
+    prints(
+        r#"
+            import logging.handlers
+            import sys
+            if __name__ == "__main__":
+                log = logging.getLogger("only")
+                log.addHandler(logging.StreamHandler(sys.stdout))
+                log.propagate = False
+                log.warning("line %d", 3)
+                print(logging.handlers.MemoryHandler(1).capacity)
+        "#,
+        r#"line 3
+1
+"#,
+    );
+}
+
+#[test]
+fn logging_handlers_through_aliases() {
+    prints(
+        r#"
+            import logging
+            import logging.handlers
+            import logging.handlers as lh
+            from logging import handlers
+            import sys
+            class MyMem(lh.MemoryHandler):
+                def shouldFlush(self, record: logging.LogRecord) -> bool:
+                    return True
+            class T(handlers.BufferingHandler):
+                pass
+            def f(h: logging.handlers.MemoryHandler) -> int:
+                return h.capacity
+            if __name__ == "__main__":
+                out = logging.StreamHandler(sys.stdout)
+                m = MyMem(9, target=out)
+                log = logging.getLogger("a")
+                log.addHandler(m)
+                log.propagate = False
+                log.warning("direct")
+                print(f(m), type(m), T(1).capacity)
+        "#,
+        r#"direct
+9 <class '__main__.MyMem'> 1
+"#,
+    );
+}
+
+/// A format naming a field a record lacks is CPython's logging error on
+/// standard error, and the program goes on; its traceback is left out.
+#[test]
+fn logging_extra_fields() {
+    streams(
+        r#"
+            import logging, sys
+            class F(logging.Filter):
+                def filter(self, record: logging.LogRecord) -> bool:
+                    return record.user != "skip"
+            if __name__ == "__main__":
+                h = logging.StreamHandler(sys.stdout)
+                h.setFormatter(logging.Formatter("%(user)s/%(n)03d/%(r).1f %(message)s"))
+                h.addFilter(F())
+                log = logging.getLogger("x")
+                log.addHandler(h)
+                log.propagate = False
+                log.warning("hi", extra={"user": "ann", "n": 7, "r": 1.25})
+                log.warning("no", extra={"user": "skip", "n": 7, "r": 1.25})
+                u = "bob"
+                log.warning("two %d", 2, extra={"user": u, "n": len(u), "r": 2.0})
+                h2 = logging.StreamHandler(sys.stdout)
+                h2.setFormatter(logging.Formatter("{user:>5} {message}", style="{"))
+                l2 = logging.getLogger("y")
+                l2.addHandler(h2)
+                l2.propagate = False
+                l2.error("b", extra={"user": "c", "n": 0, "r": 0.0})
+                l2.error("n", extra=None)
+        "#,
+        r#"ann/007/1.2 hi
+bob/003/2.0 two 2
+    c b
+"#,
+        "--- Logging error ---\nKeyError: 'user'\nMessage: 'n'\nArguments: ()\n",
+    );
+}
+
+#[test]
+fn os_remove_rename_and_getsize() {
+    prints(
+        r#"
+            import os
+            if __name__ == "__main__":
+                with open("t1.txt", "w") as f:
+                    f.write("hello")
+                print(os.path.getsize("t1.txt"), os.path.exists("t1.txt"))
+                os.rename("t1.txt", "t2.txt")
+                print(os.path.exists("t1.txt"), os.path.exists("t2.txt"), os.path.getsize("t2.txt"))
+                os.remove("t2.txt")
+                print(os.path.exists("t2.txt"))
+                try:
+                    os.remove("nope.txt")
+                except FileNotFoundError as e:
+                    print(e)
+                try:
+                    os.rename("a.txt", "b.txt")
+                except OSError as e:
+                    print(type(e), e)
+                try:
+                    print(os.path.getsize("nope.txt"))
+                except OSError as e:
+                    print(e)
+        "#,
+        r#"5 True
+False True 5
+False
+[Errno 2] No such file or directory: 'nope.txt'
+<class 'FileNotFoundError'> [Errno 2] No such file or directory: 'a.txt' -> 'b.txt'
+[Errno 2] No such file or directory: 'nope.txt'
 "#,
     );
 }

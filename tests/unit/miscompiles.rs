@@ -4203,8 +4203,8 @@ fn from_imported_constants_and_undefined_names() {
         std::f64::consts::PI + std::f64::consts::E
     );
     refused(
-        "from logging import addLevelName\n\ndef f() -> int:\n    addLevelName(5, 'TRACE')\n    return 1\n",
-        "'logging.addLevelName()'",
+        "from logging import setLoggerClass\n\ndef f() -> int:\n    setLoggerClass(5)\n    return 1\n",
+        "'logging.setLoggerClass()'",
     );
     refused(
         "def f() -> int:\n    return missing + 1\n",

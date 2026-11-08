@@ -37,6 +37,8 @@ pub enum Wasi {
     EnvironSizesGet,
     EnvironGet,
     PathFilestatGet,
+    PathRename,
+    PathUnlinkFile,
     ClockTimeGet,
 }
 
@@ -58,6 +60,8 @@ impl Wasi {
             Wasi::EnvironSizesGet => "environ_sizes_get",
             Wasi::EnvironGet => "environ_get",
             Wasi::PathFilestatGet => "path_filestat_get",
+            Wasi::PathRename => "path_rename",
+            Wasi::PathUnlinkFile => "path_unlink_file",
             Wasi::ClockTimeGet => "clock_time_get",
         }
     }
@@ -90,6 +94,10 @@ impl Wasi {
             Wasi::RandomGet | Wasi::EnvironSizesGet | Wasi::EnvironGet => (vec![I32; 2], vec![I32]),
             // (fd, lookupflags, path, path_len, filestat_out) -> errno
             Wasi::PathFilestatGet => (vec![I32; 5], vec![I32]),
+            // (fd, old_path, old_len, new_fd, new_path, new_len) -> errno
+            Wasi::PathRename => (vec![I32; 6], vec![I32]),
+            // (fd, path, path_len) -> errno
+            Wasi::PathUnlinkFile => (vec![I32; 3], vec![I32]),
             // (clock id, precision, time_out) -> errno
             Wasi::ClockTimeGet => (vec![I32, ValType::I64, I32], vec![I32]),
         }
@@ -167,11 +175,19 @@ pub(crate) fn wasi_needed(module: &IRModule, main_can_raise: bool) -> Vec<Wasi> 
             // unless the program seeded it.
             ("random", _) | ("os", "urandom") => &[Wasi::RandomGet],
             ("os", "environ" | "getenv") => &[Wasi::EnvironSizesGet, Wasi::EnvironGet],
-            ("os.path", "exists" | "isfile" | "isdir") => &[
+            ("os.path", "exists" | "isfile" | "isdir" | "getsize") => &[
                 Wasi::PathFilestatGet,
                 Wasi::FdPrestatGet,
                 Wasi::FdPrestatDirName,
             ],
+            ("os", "remove" | "unlink") => &[
+                Wasi::PathUnlinkFile,
+                Wasi::FdPrestatGet,
+                Wasi::FdPrestatDirName,
+            ],
+            ("os", "rename" | "replace") => {
+                &[Wasi::PathRename, Wasi::FdPrestatGet, Wasi::FdPrestatDirName]
+            }
             _ => &[],
         }
     };
@@ -315,6 +331,37 @@ fn raise_open_error(
         I::I32Const(-1),
         I::Return
     );
+}
+
+/// `(shown, errno) -> ()`: leave CPython's exception for the WASI `errno` a
+/// path operation answered pending. `shown` is what its message ends with.
+pub(crate) fn build_raise_os_error(ctx: &CompilationContext) -> Function {
+    let (shown, errno) = (0, 1);
+    let mut f = function(&[]);
+    let raise = |f: &mut Function, class: &str, number: i32, text: &str| {
+        emit!(
+            f,
+            I::Call(ctx.helper(Helper::ExcText(format!("[Errno {number}] {text}: ")))),
+            I::LocalGet(shown),
+            I::Call(ctx.helper(Helper::Concat)),
+            I::Call(ctx.helper(Helper::RaiseText(class.to_string()))),
+            I::Return
+        );
+    };
+    for (wasi_errno, class, number, text) in OPEN_ERRORS {
+        emit!(
+            f,
+            I::LocalGet(errno),
+            I::I32Const(*wasi_errno),
+            I::I32Eq,
+            I::If(BlockType::Empty)
+        );
+        raise(&mut f, class, *number, text);
+        emit!(f, I::End);
+    }
+    raise(&mut f, "OSError", 5, "Input/output error");
+    emit!(f, I::End);
+    f
 }
 
 /// `(path, path_len, flags) -> fd`: `open()` through WASI. The path is

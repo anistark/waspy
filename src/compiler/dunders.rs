@@ -2029,6 +2029,7 @@ fn is_log_keyword(e: &IRExpr) -> bool {
             crate::ir::LOG_FUNC_ARG,
             crate::ir::LOG_TEXT_ARG,
             crate::ir::LOG_TEXT_ERROR_ARG,
+            crate::ir::LOG_EXTRA_ARG,
         ]
         .contains(&name.as_str()))
 }
@@ -2127,24 +2128,24 @@ fn log_parts(expr: &IRExpr, ctx: &CompilationContext, statement: bool) -> Option
                 IRExpr::Const(IRConstant::String(String::new())),
                 IRExpr::Const(IRConstant::Int(0)),
                 IRExpr::Const(IRConstant::String(String::new())),
+                IRExpr::Const(IRConstant::None),
+                IRExpr::Const(IRConstant::None),
             ],
         })
     };
-    match method_name.as_str() {
-        "warn" => {
-            return refused(format!(
-                "{shown} is deprecated, and CPython prints a DeprecationWarning for it, which is \
-                 not supported. Hint: call warning()"
-            ))
-        }
-        "exception" => {
-            return refused(format!(
-                "{shown} logs the traceback of the exception being handled, which is not \
-                 supported. Hint: log the exception with error(\"%s\", e)"
-            ))
-        }
-        _ => {}
+    if method_name == "warn" {
+        return refused(format!(
+            "{shown} is deprecated, and CPython prints a DeprecationWarning for it, which is \
+             not supported. Hint: call warning()"
+        ));
     }
+    // `logger.exception()` is `error()` with `exc_info=True`.
+    let caught = || IRExpr::FunctionCall {
+        function_name: crate::ir::CAUGHT_EXC_FN.to_string(),
+        arguments: Vec::new(),
+    };
+    let mut exc_of = (method_name == "exception").then(caught);
+    let mut extra = None;
     let (mut line, mut func, mut formatted, mut unformattable) = (None, None, None, None);
     for a in arguments {
         let IRExpr::Keyword { name, value } = a else {
@@ -2161,15 +2162,23 @@ fn log_parts(expr: &IRExpr, ctx: &CompilationContext, statement: bool) -> Option
             (n, IRExpr::Const(IRConstant::String(why))) if n == crate::ir::LOG_TEXT_ERROR_ARG => {
                 unformattable = Some(why.clone())
             }
-            (
-                "exc_info" | "stack_info",
-                IRExpr::Const(IRConstant::Bool(false) | IRConstant::None),
-            ) => {}
+            (n, made) if n == crate::ir::LOG_EXTRA_ARG => extra = Some(made.clone()),
+            ("exc_info", IRExpr::Const(IRConstant::Bool(false) | IRConstant::None)) => {
+                exc_of = None
+            }
+            ("stack_info", IRExpr::Const(IRConstant::Bool(false) | IRConstant::None)) => {}
             ("stacklevel", IRExpr::Const(IRConstant::Int(1))) => {}
-            ("exc_info", _) => {
-                return refused(format!(
-                    "{shown} with exc_info logs a traceback, which is not supported"
-                ))
+            ("exc_info", IRExpr::Const(IRConstant::Bool(true))) => exc_of = Some(caught()),
+            ("exc_info", e) => {
+                let instance = matches!(infer_value_type(e, ctx),
+                    IRType::Class(c) if crate::compiler::exceptions::is_exception_class(ctx, &c));
+                if !instance {
+                    return refused(format!(
+                        "{shown}'s exc_info is True, False, or an exception here, not a \
+                         value known only at run time or a tuple"
+                    ));
+                }
+                exc_of = Some(e.clone());
             }
             ("stack_info", _) => {
                 return refused(format!(
@@ -2181,9 +2190,12 @@ fn log_parts(expr: &IRExpr, ctx: &CompilationContext, statement: bool) -> Option
                     "{shown} with a stacklevel other than 1 is not supported"
                 ))
             }
+            ("extra", IRExpr::Const(IRConstant::None)) => {}
+            ("extra", IRExpr::DictLiteral(_)) => {}
             ("extra", _) => {
                 return refused(format!(
-                    "{shown}'s extra= adds attributes to the record, which is not supported"
+                    "{shown}'s extra= is a dict written out in the call here, whose keys say \
+                     which fields records have. Hint: write the dict in the call"
                 ))
             }
             (other, _) => {
@@ -2206,7 +2218,7 @@ fn log_parts(expr: &IRExpr, ctx: &CompilationContext, statement: bool) -> Option
         "debug" => IRExpr::Const(IRConstant::Int(10)),
         "info" => IRExpr::Const(IRConstant::Int(20)),
         "warning" => IRExpr::Const(IRConstant::Int(30)),
-        "error" => IRExpr::Const(IRConstant::Int(40)),
+        "error" | "exception" => IRExpr::Const(IRConstant::Int(40)),
         "critical" | "fatal" => IRExpr::Const(IRConstant::Int(50)),
         _ => {
             if positional.is_empty() {
@@ -2272,8 +2284,19 @@ fn log_parts(expr: &IRExpr, ctx: &CompilationContext, statement: bool) -> Option
     let args: Vec<IRExpr> = args
         .into_iter()
         .enumerate()
-        .map(|(k, a)| held(a, k + 3, &mut setup))
+        .map(|(k, a)| held(a, k + 4, &mut setup))
         .collect();
+    let extra = match extra {
+        Some(made) => held(made, 3, &mut setup),
+        None => IRExpr::Const(IRConstant::None),
+    };
+    let exc_text = match exc_of {
+        Some(e) => IRExpr::FunctionCall {
+            function_name: format!("{}exc_line", crate::ir::LOGGING_FN_PREFIX),
+            arguments: vec![e],
+        },
+        None => IRExpr::Const(IRConstant::None),
+    };
     if module_root {
         receiver = held(receiver, 0, &mut setup);
     }
@@ -2309,6 +2332,8 @@ fn log_parts(expr: &IRExpr, ctx: &CompilationContext, statement: bool) -> Option
             text,
             IRExpr::Const(IRConstant::Int(line)),
             IRExpr::Const(IRConstant::String(func)),
+            exc_text,
+            extra,
         ],
     })
 }

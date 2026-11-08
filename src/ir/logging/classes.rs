@@ -130,12 +130,434 @@ fn filterer(short: &str) -> Vec<IRFunction> {
     ]
 }
 
-pub(super) fn all() -> Vec<IRClass> {
+/// The default a field of `extra=` holds in a record without it.
+fn extra_default(t: &IRType) -> IRExpr {
+    match t {
+        IRType::String => text(""),
+        IRType::Float => float(0.0),
+        IRType::Bool => boolean(false),
+        _ => int(0),
+    }
+}
+
+/// `logging._Extra`, what a call's `extra=` is made into: the keys it gave,
+/// and a field for every key the program's calls give.
+fn extra_class(extras: &[(String, IRType)]) -> IRClass {
+    let keys = IRType::List(Box::new(s()));
+    let mut params = vec![me("_Extra"), param("keys", &keys)];
+    let mut body = vec![set_my_typed("keys", v("keys"), &keys)];
+    for (key, t) in extras {
+        params.push(param_default(key, t, extra_default(t)));
+        body.push(set_my_typed(&format!("_x_{key}"), v(key), t));
+    }
+    class(
+        "_Extra",
+        None,
+        vec![method("__init__", params, IRType::None, body)],
+        Vec::new(),
+    )
+}
+
+/// What a `LogRecord` holds of `extra=`: `_take_extra`, and each key as a
+/// property that raises AttributeError on a record not given it.
+fn extra_methods(extras: &[(String, IRType)]) -> Vec<IRFunction> {
+    let mut take = Vec::new();
+    let mut given = Vec::new();
+    for (key, t) in extras {
+        let field = format!("_x_{key}");
+        take.push(set_my_typed(&field, extra_default(t), t));
+        given.push(set_attr(v("self"), &field, attr(v("given"), &field)));
+    }
+    let mut out = Vec::new();
+    take.push(if_(cmp(v("extra"), IRCompareOp::IsNot, none()), {
+        let mut then = vec![
+            assign_typed("given", v("extra"), &ty("_Extra")),
+            set_attr(v("self"), "_extra_keys", attr(v("given"), "keys")),
+        ];
+        then.extend(given);
+        then
+    }));
+    out.push(method(
+        "_take_extra",
+        vec![me("LogRecord"), param("extra", &oty("_Extra"))],
+        IRType::None,
+        take,
+    ));
+    for (key, t) in extras {
+        let mut read = method(
+            key,
+            vec![me("LogRecord")],
+            t.clone(),
+            vec![
+                if_(
+                    cmp(text(key), IRCompareOp::NotIn, my("_extra_keys")),
+                    vec![
+                        set_state("missing", text(key)),
+                        raise_expr(
+                            "AttributeError",
+                            text(&format!("'LogRecord' object has no attribute '{key}'")),
+                        ),
+                    ],
+                ),
+                ret_val(my(&format!("_x_{key}"))),
+            ],
+        );
+        read.decorators = vec!["property".to_string()];
+        out.push(read);
+        // `record.ip = ...` in a filter gives the record the attribute.
+        let mut write = method(
+            key,
+            vec![me("LogRecord"), param("value", t)],
+            IRType::None,
+            vec![
+                if_(
+                    cmp(text(key), IRCompareOp::NotIn, my("_extra_keys")),
+                    vec![expr_stmt(mcall(
+                        my("_extra_keys"),
+                        "append",
+                        vec![text(key)],
+                    ))],
+                ),
+                set_attr(v("self"), &format!("_x_{key}"), v("value")),
+            ],
+        );
+        write.decorators = vec![format!("{key}.setter")];
+        out.push(write);
+    }
+    out
+}
+
+/// The classes of `logging.handlers`.
+pub(super) fn handlers() -> Vec<IRClass> {
     vec![
+        rotating_handler(),
+        watched_handler(),
+        buffering_handler(),
+        memory_handler(),
+    ]
+}
+
+fn rotating_handler() -> IRClass {
+    const NAME: &str = "handlers.RotatingFileHandler";
+    let me_r = || me(NAME);
+    let rec = || param("record", &ty("LogRecord"));
+    let os_call = |name: &str, args: Vec<IRExpr>| mcall(v("os"), name, args);
+    let path_call = |name: &str, args: Vec<IRExpr>| mcall(attr(v("os"), "path"), name, args);
+    let numbered = |n: IRExpr| concat(vec![my("_path"), text("."), call("str", vec![n])]);
+    class(
+        NAME,
+        Some("FileHandler"),
+        vec![
+            method(
+                "__init__",
+                vec![
+                    me_r(),
+                    param("filename", &s()),
+                    param_default("mode", &s(), text("a")),
+                    param_default("maxBytes", &i(), int(0)),
+                    param_default("backupCount", &i(), int(0)),
+                    param_default("encoding", &os(), none()),
+                    param_default("delay", &b(), boolean(false)),
+                ],
+                IRType::None,
+                vec![
+                    // A file growing past maxBytes is only ever appended to.
+                    if_(
+                        cmp(v("maxBytes"), IRCompareOp::Gt, int(0)),
+                        vec![assign("mode", text("a"))],
+                    ),
+                    super_init(vec![v("filename"), v("mode"), v("encoding"), v("delay")]),
+                    set_my_typed("maxBytes", v("maxBytes"), &i()),
+                    set_my_typed("backupCount", v("backupCount"), &i()),
+                    set_my_typed("delay", v("delay"), &b()),
+                ],
+            ),
+            method(
+                "shouldRollover",
+                vec![me_r(), rec()],
+                b(),
+                vec![
+                    if_(
+                        not(my("_opened")),
+                        vec![expr_stmt(mcall(v("self"), "_open", Vec::new()))],
+                    ),
+                    if_(
+                        cmp(my("maxBytes"), IRCompareOp::Gt, int(0)),
+                        vec![
+                            assign_typed("pos", path_call("getsize", vec![my("_path")]), &i()),
+                            // gh-116263: an empty file is never rolled over.
+                            if_(
+                                cmp(v("pos"), IRCompareOp::Eq, int(0)),
+                                vec![ret_val(boolean(false))],
+                            ),
+                            assign_typed(
+                                "msg",
+                                bin(
+                                    mcall(v("self"), "format", vec![v("record")]),
+                                    IROp::Add,
+                                    text("\n"),
+                                ),
+                                &s(),
+                            ),
+                            if_(
+                                cmp(
+                                    bin(v("pos"), IROp::Add, len(v("msg"))),
+                                    IRCompareOp::GtE,
+                                    my("maxBytes"),
+                                ),
+                                vec![
+                                    // bpo-45401: only a regular file.
+                                    if_(
+                                        and(
+                                            path_call("exists", vec![my("_path")]),
+                                            not(path_call("isfile", vec![my("_path")])),
+                                        ),
+                                        vec![ret_val(boolean(false))],
+                                    ),
+                                    ret_val(boolean(true)),
+                                ],
+                            ),
+                        ],
+                    ),
+                    ret_val(boolean(false)),
+                ],
+            ),
+            method(
+                "doRollover",
+                vec![me_r()],
+                IRType::None,
+                vec![
+                    set_attr(v("self"), "_opened", boolean(false)),
+                    if_(
+                        cmp(my("backupCount"), IRCompareOp::Gt, int(0)),
+                        vec![
+                            assign("k", bin(my("backupCount"), IROp::Sub, int(1))),
+                            while_(
+                                cmp(v("k"), IRCompareOp::Gt, int(0)),
+                                vec![
+                                    assign_typed("sfn", numbered(v("k")), &s()),
+                                    assign_typed(
+                                        "dfn",
+                                        numbered(bin(v("k"), IROp::Add, int(1))),
+                                        &s(),
+                                    ),
+                                    if_(
+                                        path_call("exists", vec![v("sfn")]),
+                                        vec![
+                                            if_(
+                                                path_call("exists", vec![v("dfn")]),
+                                                vec![expr_stmt(os_call("remove", vec![v("dfn")]))],
+                                            ),
+                                            expr_stmt(os_call("rename", vec![v("sfn"), v("dfn")])),
+                                        ],
+                                    ),
+                                    assign("k", bin(v("k"), IROp::Sub, int(1))),
+                                ],
+                            ),
+                            assign_typed("first", numbered(int(1)), &s()),
+                            if_(
+                                path_call("exists", vec![v("first")]),
+                                vec![expr_stmt(os_call("remove", vec![v("first")]))],
+                            ),
+                            // A delayed file may not exist yet.
+                            if_(
+                                path_call("exists", vec![my("_path")]),
+                                vec![expr_stmt(os_call("rename", vec![my("_path"), v("first")]))],
+                            ),
+                        ],
+                    ),
+                    if_(
+                        not(my("delay")),
+                        vec![expr_stmt(mcall(v("self"), "_open", Vec::new()))],
+                    ),
+                ],
+            ),
+            method("emit", vec![me_r(), rec()], IRType::None, {
+                let mut body = format_or_report();
+                body.push(if_(
+                    mcall(v("self"), "shouldRollover", vec![v("record")]),
+                    vec![expr_stmt(mcall(v("self"), "doRollover", Vec::new()))],
+                ));
+                body.push(expr_stmt(mcall(
+                    call("super", Vec::new()),
+                    "emit",
+                    vec![v("record")],
+                )));
+                body
+            }),
+        ],
+        Vec::new(),
+    )
+}
+
+/// A `FileHandler` reopens its file for every record here, which is what
+/// this class exists to do when the file was moved.
+fn watched_handler() -> IRClass {
+    class(
+        "handlers.WatchedFileHandler",
+        Some("FileHandler"),
+        Vec::new(),
+        Vec::new(),
+    )
+}
+
+fn buffering_handler() -> IRClass {
+    const NAME: &str = "handlers.BufferingHandler";
+    let me_b = || me(NAME);
+    let rec = || param("record", &ty("LogRecord"));
+    class(
+        NAME,
+        Some("Handler"),
+        vec![
+            method(
+                "__init__",
+                vec![me_b(), param("capacity", &i())],
+                IRType::None,
+                vec![
+                    super_init(vec![int(0)]),
+                    set_my_typed("capacity", v("capacity"), &i()),
+                    set_my_typed(
+                        "buffer",
+                        IRExpr::ListLiteral(Vec::new()),
+                        &list_of("LogRecord"),
+                    ),
+                ],
+            ),
+            method(
+                "shouldFlush",
+                vec![me_b(), rec()],
+                b(),
+                vec![ret_val(cmp(
+                    len(my("buffer")),
+                    IRCompareOp::GtE,
+                    my("capacity"),
+                ))],
+            ),
+            method(
+                "emit",
+                vec![me_b(), rec()],
+                IRType::None,
+                vec![
+                    expr_stmt(mcall(my("buffer"), "append", vec![v("record")])),
+                    if_(
+                        mcall(v("self"), "shouldFlush", vec![v("record")]),
+                        vec![expr_stmt(mcall(v("self"), "flush", Vec::new()))],
+                    ),
+                ],
+            ),
+            method(
+                "flush",
+                vec![me_b()],
+                IRType::None,
+                vec![expr_stmt(mcall(my("buffer"), "clear", Vec::new()))],
+            ),
+            method(
+                "close",
+                vec![me_b()],
+                IRType::None,
+                vec![expr_stmt(mcall(v("self"), "flush", Vec::new()))],
+            ),
+        ],
+        Vec::new(),
+    )
+}
+
+fn memory_handler() -> IRClass {
+    const NAME: &str = "handlers.MemoryHandler";
+    let me_m = || me(NAME);
+    let rec = || param("record", &ty("LogRecord"));
+    class(
+        NAME,
+        Some("handlers.BufferingHandler"),
+        vec![
+            method(
+                "__init__",
+                vec![
+                    me_m(),
+                    param("capacity", &i()),
+                    param_default("flushLevel", &i(), int(40)),
+                    param_default("target", &oty("Handler"), none()),
+                    param_default("flushOnClose", &b(), boolean(true)),
+                ],
+                IRType::None,
+                vec![
+                    super_init(vec![v("capacity")]),
+                    set_my_typed("flushLevel", v("flushLevel"), &i()),
+                    set_my_typed("target", v("target"), &oty("Handler")),
+                    set_my_typed("flushOnClose", v("flushOnClose"), &b()),
+                ],
+            ),
+            method(
+                "shouldFlush",
+                vec![me_m(), rec()],
+                b(),
+                vec![ret_val(or(
+                    cmp(len(my("buffer")), IRCompareOp::GtE, my("capacity")),
+                    cmp(
+                        attr(v("record"), "levelno"),
+                        IRCompareOp::GtE,
+                        my("flushLevel"),
+                    ),
+                ))],
+            ),
+            method(
+                "setTarget",
+                vec![me_m(), param("target", &oty("Handler"))],
+                IRType::None,
+                vec![set_attr(v("self"), "target", v("target"))],
+            ),
+            method(
+                "flush",
+                vec![me_m()],
+                IRType::None,
+                vec![
+                    assign_typed("held", my("target"), &oty("Handler")),
+                    if_(
+                        cmp(v("held"), IRCompareOp::IsNot, none()),
+                        vec![
+                            assign_typed("target", v("held"), &ty("Handler")),
+                            for_(
+                                "record",
+                                my("buffer"),
+                                vec![expr_stmt(mcall(v("target"), "handle", vec![v("record")]))],
+                            ),
+                            expr_stmt(mcall(my("buffer"), "clear", Vec::new())),
+                        ],
+                    ),
+                ],
+            ),
+            method(
+                "close",
+                vec![me_m()],
+                IRType::None,
+                vec![
+                    if_(
+                        my("flushOnClose"),
+                        vec![expr_stmt(mcall(v("self"), "flush", Vec::new()))],
+                    ),
+                    set_attr(v("self"), "target", none()),
+                ],
+            ),
+            method(
+                "_flush_on_close",
+                vec![me_m()],
+                b(),
+                vec![ret_val(my("flushOnClose"))],
+            ),
+        ],
+        Vec::new(),
+    )
+}
+
+pub(super) fn all(extras: &[(String, IRType)]) -> Vec<IRClass> {
+    let mut record = record();
+    record.methods.extend(extra_methods(extras));
+    vec![
+        extra_class(extras),
         state_class(),
         logger(),
         root_logger(),
-        record(),
+        record,
         filter(),
         formatter(),
         handler(),
@@ -154,6 +576,12 @@ fn state_class() -> IRClass {
         None,
         Vec::new(),
         vec![
+            // Every handler, in the order made, for `shutdown()`.
+            var(
+                "all_handlers",
+                IRExpr::ListLiteral(Vec::new()),
+                Some(list_of("Handler")),
+            ),
             var(
                 "start_us",
                 call(crate::ir::DATETIME_CLOCK_FN, Vec::new()),
@@ -180,6 +608,19 @@ fn state_class() -> IRClass {
                 call(&class_name("Formatter"), Vec::new()),
                 Some(ty("Formatter")),
             ),
+            // `addLevelName()`'s names, read before the module's own.
+            var(
+                "level_names",
+                IRExpr::DictLiteral(Vec::new()),
+                Some(IRType::Dict(Box::new(i()), Box::new(s()))),
+            ),
+            var(
+                "name_levels",
+                IRExpr::DictLiteral(Vec::new()),
+                Some(IRType::Dict(Box::new(s()), Box::new(i()))),
+            ),
+            // The field of `extra=` a record was just found not to have.
+            var("missing", text(""), Some(s())),
         ],
     )
 }
@@ -259,6 +700,8 @@ fn logger() -> IRClass {
             param("text", &s()),
             param("line", &i()),
             param("func", &s()),
+            param("exc", &os()),
+            param("extra", &oty("_Extra")),
         ]
     };
     let make_record = || {
@@ -271,6 +714,8 @@ fn logger() -> IRClass {
                 v("text"),
                 v("line"),
                 v("func"),
+                v("exc"),
+                v("extra"),
             ],
         )
     };
@@ -459,9 +904,18 @@ fn record() -> IRClass {
                     param("text", &s()),
                     param("line", &i()),
                     param("func", &s()),
+                    param_default("exc", &os(), none()),
+                    param_default("extra", &oty("_Extra"), none()),
                 ],
                 IRType::None,
                 vec![
+                    set_my_typed("exc_text", v("exc"), &os()),
+                    set_my_typed(
+                        "_extra_keys",
+                        IRExpr::ListLiteral(Vec::new()),
+                        &IRType::List(Box::new(s())),
+                    ),
+                    expr_stmt(mcall(v("self"), "_take_extra", vec![v("extra")])),
                     set_my_typed("name", v("name"), &s()),
                     set_my_typed("msg", v("msg"), &s()),
                     set_my_typed("_text", v("text"), &s()),
@@ -734,7 +1188,23 @@ fn formatter() -> IRClass {
                             mcall(v("self"), "formatTime", vec![v("record"), my("datefmt")]),
                         )],
                     ),
-                    ret_val(mcall(v("self"), "formatMessage", vec![v("record")])),
+                    assign_typed(
+                        "out",
+                        mcall(v("self"), "formatMessage", vec![v("record")]),
+                        &s(),
+                    ),
+                    assign_typed("exc", attr(v("record"), "exc_text"), &os()),
+                    if_(
+                        cmp(v("exc"), IRCompareOp::IsNot, none()),
+                        vec![
+                            if_(
+                                not(mcall(v("out"), "endswith", vec![text("\n")])),
+                                vec![add_to("out", text("\n"))],
+                            ),
+                            add_to("out", v("exc")),
+                        ],
+                    ),
+                    ret_val(v("out")),
                 ],
             ),
         ],
@@ -751,6 +1221,7 @@ fn handler_init() -> Vec<IRStatement> {
             IRExpr::ListLiteral(Vec::new()),
             &list_of("Filter"),
         ),
+        expr_stmt(mcall(state("all_handlers"), "append", vec![v("self")])),
     ]
 }
 
@@ -809,6 +1280,13 @@ fn handler() -> IRClass {
         ),
         method("flush", vec![me_h()], IRType::None, vec![ret()]),
         method("close", vec![me_h()], IRType::None, vec![ret()]),
+        // `getattr(h, 'flushOnClose', True)`, which `shutdown()` asks.
+        method(
+            "_flush_on_close",
+            vec![me_h()],
+            b(),
+            vec![ret_val(boolean(true))],
+        ),
         method(
             "__repr__",
             vec![me_h()],
@@ -826,6 +1304,47 @@ fn handler() -> IRClass {
 }
 
 /// The record, formatted and terminated, written to stream `fd`.
+/// `msg = self.format(record)`, or the end of `emit` when the format names a
+/// field of `extra=` this record lacks, which CPython reports on standard
+/// error, going on with the next record. Its report has a traceback, which
+/// nothing here keeps: the rest of it is written.
+fn format_or_report() -> Vec<IRStatement> {
+    let report = concat(vec![
+        text("--- Logging error ---\nKeyError: "),
+        call("repr", vec![state("missing")]),
+        text("\nMessage: "),
+        call("repr", vec![attr(v("record"), "msg")]),
+        text("\nArguments: ()\n"),
+    ]);
+    vec![
+        assign_typed("msg", text(""), &s()),
+        IRStatement::TryExcept {
+            try_body: Box::new(IRBody {
+                statements: vec![assign("msg", mcall(v("self"), "format", vec![v("record")]))],
+            }),
+            except_handlers: vec![crate::ir::IRExceptHandler {
+                exception_types: vec!["AttributeError".to_string()],
+                name: None,
+                body: IRBody {
+                    statements: vec![
+                        if_(
+                            cmp(state("missing"), IRCompareOp::Eq, text("")),
+                            vec![IRStatement::Raise {
+                                exception: None,
+                                cause: None,
+                            }],
+                        ),
+                        expr_stmt(mcall(attr(v("sys"), "stderr"), "write", vec![report])),
+                        set_state("missing", text("")),
+                        ret(),
+                    ],
+                },
+            }],
+            finally_body: None,
+        },
+    ]
+}
+
 fn write_to(fd: IRExpr) -> Vec<IRStatement> {
     let write = |stream: &str| {
         expr_stmt(mcall(
@@ -834,14 +1353,13 @@ fn write_to(fd: IRExpr) -> Vec<IRStatement> {
             vec![bin(v("msg"), IROp::Add, my("terminator"))],
         ))
     };
-    vec![
-        assign_typed("msg", mcall(v("self"), "format", vec![v("record")]), &s()),
-        if_else(
-            cmp(fd, IRCompareOp::Eq, int(1)),
-            vec![write("stdout")],
-            vec![write("stderr")],
-        ),
-    ]
+    let mut out = format_or_report();
+    out.push(if_else(
+        cmp(fd, IRCompareOp::Eq, int(1)),
+        vec![write("stdout")],
+        vec![write("stderr")],
+    ));
+    out
 }
 
 fn stream_handler() -> IRClass {
@@ -959,21 +1477,36 @@ fn file_handler() -> IRClass {
                 "emit",
                 vec![me_fh(), param("record", &ty("LogRecord"))],
                 IRType::None,
-                vec![
-                    if_(
+                {
+                    let mut body = vec![if_(
                         not(my("_opened")),
                         vec![expr_stmt(mcall(v("self"), "_open", Vec::new()))],
-                    ),
-                    assign_typed("msg", mcall(v("self"), "format", vec![v("record")]), &s()),
-                    open(
+                    )];
+                    body.extend(format_or_report());
+                    body.push(open(
                         text("a"),
                         vec![expr_stmt(mcall(
                             v("fh"),
                             "write",
                             vec![bin(v("msg"), IROp::Add, my("terminator"))],
                         ))],
-                    ),
-                ],
+                    ));
+                    body
+                },
+            ),
+            method(
+                "__repr__",
+                vec![me_fh()],
+                s(),
+                vec![ret_val(concat(vec![
+                    text("<"),
+                    attr(call("type", vec![v("self")]), "__name__"),
+                    text(" "),
+                    mcall(attr(v("os"), "path"), "abspath", vec![my("_path")]),
+                    text(" ("),
+                    fcall("level_name", vec![my("level")]),
+                    text(")>"),
+                ]))],
             ),
         ],
         Vec::new(),
@@ -1035,22 +1568,27 @@ pub(super) fn functions() -> Vec<IRFunction> {
     let loggers = || state("loggers");
     vec![
         function("level_name", vec![param("level", &i())], s(), {
-            let mut body: Vec<IRStatement> = [
-                (50, "CRITICAL"),
-                (40, "ERROR"),
-                (30, "WARNING"),
-                (20, "INFO"),
-                (10, "DEBUG"),
-                (0, "NOTSET"),
-            ]
-            .into_iter()
-            .map(|(n, name)| {
-                if_(
-                    cmp(v("level"), IRCompareOp::Eq, int(n)),
-                    vec![ret_val(text(name))],
-                )
-            })
-            .collect();
+            let mut body: Vec<IRStatement> = vec![if_(
+                cmp(v("level"), IRCompareOp::In, state("level_names")),
+                vec![ret_val(idx(state("level_names"), v("level")))],
+            )];
+            body.extend(
+                [
+                    (50, "CRITICAL"),
+                    (40, "ERROR"),
+                    (30, "WARNING"),
+                    (20, "INFO"),
+                    (10, "DEBUG"),
+                    (0, "NOTSET"),
+                ]
+                .into_iter()
+                .map(|(n, name)| {
+                    if_(
+                        cmp(v("level"), IRCompareOp::Eq, int(n)),
+                        vec![ret_val(text(name))],
+                    )
+                }),
+            );
             body.push(ret_val(bin(
                 text("Level "),
                 IROp::Add,
@@ -1058,25 +1596,39 @@ pub(super) fn functions() -> Vec<IRFunction> {
             )));
             body
         }),
+        function(
+            "add_level_name",
+            vec![param("level", &i()), param("name", &s())],
+            IRType::None,
+            vec![
+                set_item(state("level_names"), v("level"), v("name")),
+                set_item(state("name_levels"), v("name"), v("level")),
+            ],
+        ),
         function("level_of", vec![param("name", &s())], i(), {
-            let mut body: Vec<IRStatement> = [
-                ("CRITICAL", 50),
-                ("FATAL", 50),
-                ("ERROR", 40),
-                ("WARNING", 30),
-                ("WARN", 30),
-                ("INFO", 20),
-                ("DEBUG", 10),
-                ("NOTSET", 0),
-            ]
-            .into_iter()
-            .map(|(name, n)| {
-                if_(
-                    cmp(v("name"), IRCompareOp::Eq, text(name)),
-                    vec![ret_val(int(n))],
-                )
-            })
-            .collect();
+            let mut body: Vec<IRStatement> = vec![if_(
+                cmp(v("name"), IRCompareOp::In, state("name_levels")),
+                vec![ret_val(idx(state("name_levels"), v("name")))],
+            )];
+            body.extend(
+                [
+                    ("CRITICAL", 50),
+                    ("FATAL", 50),
+                    ("ERROR", 40),
+                    ("WARNING", 30),
+                    ("WARN", 30),
+                    ("INFO", 20),
+                    ("DEBUG", 10),
+                    ("NOTSET", 0),
+                ]
+                .into_iter()
+                .map(|(name, n)| {
+                    if_(
+                        cmp(v("name"), IRCompareOp::Eq, text(name)),
+                        vec![ret_val(int(n))],
+                    )
+                }),
+            );
             body.push(raise_expr(
                 "ValueError",
                 bin(
@@ -1087,6 +1639,44 @@ pub(super) fn functions() -> Vec<IRFunction> {
             ));
             body
         }),
+        // The last line of what CPython's traceback module writes for an
+        // exception, which is what stands in for the traceback here.
+        function(
+            "exc_line",
+            vec![param("e", &IRType::Class("BaseException".to_string()))],
+            s(),
+            vec![
+                assign_typed("shown", call("str", vec![call("type", vec![v("e")])]), &s()),
+                assign_typed(
+                    "name",
+                    IRExpr::Slicing {
+                        container: Box::new(v("shown")),
+                        start: Some(Box::new(int(8))),
+                        end: Some(Box::new(int(-2))),
+                        step: None,
+                    },
+                    &s(),
+                ),
+                if_(
+                    mcall(v("name"), "startswith", vec![text("__main__.")]),
+                    vec![assign(
+                        "name",
+                        IRExpr::Slicing {
+                            container: Box::new(v("name")),
+                            start: Some(Box::new(int(9))),
+                            end: None,
+                            step: None,
+                        },
+                    )],
+                ),
+                assign_typed("said", call("str", vec![v("e")]), &s()),
+                if_(
+                    cmp(len(v("said")), IRCompareOp::Eq, int(0)),
+                    vec![ret_val(v("name"))],
+                ),
+                ret_val(concat(vec![v("name"), text(": "), v("said")])),
+            ],
+        ),
         function(
             "default_format",
             vec![param("style", &s())],
@@ -1338,7 +1928,94 @@ pub(super) fn functions() -> Vec<IRFunction> {
             IRType::None,
             vec![set_state("disable", v("level"))],
         ),
-        function("shutdown", Vec::new(), IRType::None, vec![ret()]),
+        // Newest first, as `shutdown()` walks its list reversed.
+        function(
+            "shutdown",
+            Vec::new(),
+            IRType::None,
+            vec![
+                assign("k", bin(len(state("all_handlers")), IROp::Sub, int(1))),
+                while_(
+                    cmp(v("k"), IRCompareOp::GtE, int(0)),
+                    vec![
+                        assign_typed("h", idx(state("all_handlers"), v("k")), &ty("Handler")),
+                        if_(
+                            mcall(v("h"), "_flush_on_close", Vec::new()),
+                            vec![expr_stmt(mcall(v("h"), "flush", Vec::new()))],
+                        ),
+                        expr_stmt(mcall(v("h"), "close", Vec::new())),
+                        assign("k", bin(v("k"), IROp::Sub, int(1))),
+                    ],
+                ),
+            ],
+        ),
+        // `dictConfig()`'s `_clearExistingHandlers()`.
+        function(
+            "config_reset",
+            Vec::new(),
+            IRType::None,
+            vec![
+                expr_stmt(fcall("shutdown", Vec::new())),
+                expr_stmt(mcall(state("all_handlers"), "clear", Vec::new())),
+            ],
+        ),
+        function(
+            "drop_handlers",
+            vec![param("logger", &ty("Logger"))],
+            IRType::None,
+            vec![expr_stmt(mcall(
+                attr(v("logger"), "handlers"),
+                "clear",
+                Vec::new(),
+            ))],
+        ),
+        // `_handle_existing_loggers()`: what `dictConfig()` does to the
+        // loggers it does not name. A child of a named logger is reset, and
+        // the others are disabled as `disable_existing_loggers` says.
+        function(
+            "config_existing",
+            vec![
+                param("named", &IRType::List(Box::new(s()))),
+                param("disable", &b()),
+            ],
+            IRType::None,
+            vec![for_(
+                "key",
+                state("loggers"),
+                vec![
+                    if_(
+                        cmp(v("key"), IRCompareOp::In, v("named")),
+                        vec![IRStatement::Continue],
+                    ),
+                    assign_typed("logger", idx(state("loggers"), v("key")), &ty("Logger")),
+                    assign("child", boolean(false)),
+                    for_(
+                        "parent",
+                        v("named"),
+                        vec![if_(
+                            and(
+                                cmp(len(v("parent")), IRCompareOp::Gt, int(0)),
+                                mcall(
+                                    v("key"),
+                                    "startswith",
+                                    vec![bin(v("parent"), IROp::Add, text("."))],
+                                ),
+                            ),
+                            vec![assign("child", boolean(true))],
+                        )],
+                    ),
+                    if_else(
+                        v("child"),
+                        vec![
+                            expr_stmt(mcall(v("logger"), "setLevel", vec![int(0)])),
+                            expr_stmt(mcall(attr(v("logger"), "handlers"), "clear", Vec::new())),
+                            set_attr(v("logger"), "propagate", boolean(true)),
+                        ],
+                        vec![set_attr(v("logger"), "disabled", v("disable"))],
+                    ),
+                ],
+            )],
+        ),
         // `s.rfind(".")`.
         function(
             "last_dot",

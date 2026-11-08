@@ -493,3 +493,58 @@ fn a_collection_is_refused_where_an_instance_is_declared() {
         assert!(message.contains(needle), "{message}");
     }
 }
+
+/// What `logging` cannot do here is refused by name.
+#[test]
+fn logging_refuses_what_it_cannot_do() {
+    let cases: &[(&str, &str)] = &[
+        (
+            "import logging\ndef f() -> None:\n    logging.getLogger(\"x\").exception(\"outside\")\n",
+            "known here only inside an except block",
+        ),
+        (
+            "from logging.handlers import SocketHandler\ndef f() -> None:\n    SocketHandler(\"h\", 1)\n",
+            "logging.handlers.SocketHandler needs a socket",
+        ),
+        (
+            "from logging.handlers import TimedRotatingFileHandler\ndef f() -> None:\n    TimedRotatingFileHandler(\"a\")\n",
+            "logging.handlers.TimedRotatingFileHandler is not supported yet",
+        ),
+        (
+            "import logging.config\ndef f() -> None:\n    logging.config.fileConfig(\"x.ini\")\n",
+            "logging.config.fileConfig() is not supported",
+        ),
+        (
+            "import logging\ndef f() -> None:\n    logging.warning(\"x\", extra={\"name\": \"y\"})\n",
+            "Attempt to overwrite 'name' in LogRecord",
+        ),
+        (
+            "import logging\ndef f(d: dict[str, int]) -> None:\n    logging.warning(\"x\", extra=d)\n",
+            "extra= is a dict written out in the call",
+        ),
+        (
+            "import logging\ndef f() -> None:\n    logging.warning(\"x\", extra={\"a\": 1})\n    logging.warning(\"y\", extra={\"a\": \"b\"})\n",
+            "given values of two types",
+        ),
+        (
+            "import logging.config\ndef f() -> None:\n    c = {\"version\": 1}\n    logging.config.dictConfig(c)\n",
+            "reads its dict at compile time",
+        ),
+        (
+            "import logging.config\ndef f() -> None:\n    logging.config.dictConfig({\"root\": {}})\n",
+            "doesn't specify a version",
+        ),
+        (
+            "import logging.config\ndef f() -> None:\n    logging.config.dictConfig({\"version\": 1, \"incremental\": True})\n",
+            "incremental=True is not supported",
+        ),
+        (
+            "import logging.config\ndef f() -> None:\n    logging.config.dictConfig({\"version\": 1, \"root\": {\"handlers\": [\"nope\"]}})\n",
+            "Unable to add handler",
+        ),
+    ];
+    for (source, needle) in cases {
+        let message = compile_error(source);
+        assert!(message.contains(needle), "{source}\n{message}");
+    }
+}

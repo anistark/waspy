@@ -607,7 +607,7 @@ pub(crate) fn build_class_name(ctx: &CompilationContext, by_id: Option<bool>) ->
                 format!("<class '{name}'>")
             }
             _ if name.starts_with("datetime.") || name.starts_with("logging.") => name
-                .split_once('.')
+                .rsplit_once('.')
                 .map_or(name.as_str(), |(_, n)| n)
                 .to_string(),
             // A generator's state class is CPython's `generator`.

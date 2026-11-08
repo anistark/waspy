@@ -1,7 +1,8 @@
 // A small WASI preview 1 host for compiled waspy modules, in the browser and
 // in Node alike: the calls a waspy program can import (fd_write, fd_read,
 // args_sizes_get, args_get, environ_sizes_get, environ_get, proc_exit,
-// random_get, and for open() and os.path path_open, path_filestat_get,
+// random_get, and for open(), os.remove, os.rename, and os.path path_open,
+// path_filestat_get, path_unlink_file, path_rename,
 // fd_prestat_get, fd_prestat_dir_name, fd_close), standard output and error
 // handed to callbacks as text, standard input served from bytes, an exit
 // raised as a WasiExit the caller can catch, and files kept in a Map (one
@@ -200,6 +201,21 @@ export function createWasi({
             else return ENOENT;
             bytes().fill(0, out, out + 64);
             bytes()[out + 16] = filetype;
+            view().setBigUint64(out + 32, BigInt(files.get(name)?.length ?? 0), true);
+            return ESUCCESS;
+        },
+        path_unlink_file(dir, path, len) {
+            if (dir !== PREOPEN_FD) return EBADF;
+            const name = new TextDecoder().decode(bytes().subarray(path, path + len)).replace(/^\.\//, '');
+            return files.delete(name) ? ESUCCESS : ENOENT;
+        },
+        path_rename(dir, oldPath, oldLen, newDir, newPath, newLen) {
+            if (dir !== PREOPEN_FD || newDir !== PREOPEN_FD) return EBADF;
+            const text = (at, n) => new TextDecoder().decode(bytes().subarray(at, at + n)).replace(/^\.\//, '');
+            const from = text(oldPath, oldLen);
+            if (!files.has(from)) return ENOENT;
+            files.set(text(newPath, newLen), files.get(from));
+            files.delete(from);
             return ESUCCESS;
         },
         fd_close(fd) {

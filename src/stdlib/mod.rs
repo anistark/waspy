@@ -58,7 +58,10 @@ pub fn is_stdlib_module_path(name: &str) -> bool {
 }
 
 pub fn is_stdlib_submodule(module: &str, submodule: &str) -> bool {
-    matches!((module, submodule), ("os", "path"))
+    matches!(
+        (module, submodule),
+        ("os", "path") | ("logging", "handlers") | ("logging", "config")
+    )
 }
 
 /// Resolve an attribute on a stdlib submodule, e.g. `os.path.sep`.
