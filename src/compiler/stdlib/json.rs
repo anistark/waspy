@@ -26,6 +26,7 @@ use crate::compiler::asm::{call, Asm, Ty, Var, E, X};
 use crate::compiler::context::{
     CompilationContext, CALL_DEPTH_GLOBAL, COLLECTION_CAP, COLLECTION_DATA,
 };
+use crate::compiler::emit::Function;
 use crate::compiler::expression::{emit_expr, emit_value, recover_str_pair, wasm_value_type};
 use crate::compiler::function::{emit_call_depth_step, emit_post_call_check, infer_value_type};
 use crate::compiler::runtime::Helper;
@@ -33,7 +34,7 @@ use crate::ir::json::{
     DECODER_CLASS, ENCODER_CLASS, INDENT_FIELD, OBJECT_HOOK_FIELD, OBJECT_HOOK_TYPE_METHOD,
 };
 use crate::ir::{IRConstant, IRExpr, IRType, MemoryLayout};
-use wasm_encoder::{Function, Instruction as I, ValType};
+use wasm_encoder::{Instruction as I, ValType};
 
 /// The writer's options, a block made at run time: the indentation's text
 /// (0 for one line), the separators, the flags, and the hook's word (the
@@ -242,7 +243,7 @@ fn hex_digit(d: E) -> E {
 /// Build the helper for `f`.
 pub(crate) fn build(ctx: &CompilationContext, f: &JsonFn) -> Function {
     use Ty::I32;
-    let alloc = ctx.alloc_func_index;
+    let alloc = ctx.alloc_fn();
     let (params, _) = f.signature();
     let mut a = Asm::new(&params);
     match f {
@@ -742,7 +743,7 @@ fn build_dump(a: &mut Asm, ctx: &CompilationContext, ty: &IRType, hook: Option<&
             h(ctx, JsonFn::BufStr),
             vec![
                 buf.into(),
-                call(ctx.i32_to_str_func_index, vec![v.into()], Some(I32)),
+                call(ctx.i32_to_str_fn(), vec![v.into()], Some(I32)),
             ],
             None,
         )),
@@ -816,7 +817,7 @@ fn build_dump(a: &mut Asm, ctx: &CompilationContext, ty: &IRType, hook: Option<&
             });
             let data = a.let_(v.load(I32, COLLECTION_DATA as u64));
             // The entries' order: as stored, or sorted by key.
-            let order = a.let_(call(ctx.alloc_func_index, vec![n * 4], Some(I32)));
+            let order = a.let_(call(ctx.alloc_fn(), vec![n * 4], Some(I32)));
             let i = a.local(I32);
             a.for_(i, 0, n, false, |a, _| a.store(I32, order + i * 4, 0, i));
             a.if_(opts.load(I32, OPT_SORT_KEYS), |a| {
@@ -841,10 +842,7 @@ fn build_dump(a: &mut Asm, ctx: &CompilationContext, ty: &IRType, hook: Option<&
                         put_byte(a, ctx, buf, b'"' as i32);
                         a.run(call(
                             h(ctx, JsonFn::BufStr),
-                            vec![
-                                buf.into(),
-                                call(ctx.i32_to_str_func_index, vec![key], Some(I32)),
-                            ],
+                            vec![buf.into(), call(ctx.i32_to_str_fn(), vec![key], Some(I32))],
                             None,
                         ));
                         put_byte(a, ctx, buf, b'"' as i32);
@@ -957,7 +955,7 @@ fn build_fail(a: &mut Asm, ctx: &CompilationContext, message: &str) {
         },
     );
     let b = a.let_(call(h(ctx, JsonFn::BufNew), vec![], Some(I32)));
-    let int = |v: Var| call(ctx.i32_to_str_func_index, vec![v.into()], Some(I32));
+    let int = |v: Var| call(ctx.i32_to_str_fn(), vec![v.into()], Some(I32));
     for piece in [
         text(ctx, &format!("{message}: line ")),
         int(line),
@@ -992,7 +990,7 @@ fn build_mismatch(a: &mut Asm, ctx: &CompilationContext, ty: &IRType) {
         h(ctx, JsonFn::BufStr),
         vec![
             b.into(),
-            call(ctx.i32_to_str_func_index, vec![pos.into()], Some(I32)),
+            call(ctx.i32_to_str_fn(), vec![pos.into()], Some(I32)),
         ],
         None,
     ));
@@ -1045,7 +1043,7 @@ fn build_hook_mismatch(a: &mut Asm, ctx: &CompilationContext, gives: &IRType, wa
         h(ctx, JsonFn::BufStr),
         vec![
             b.into(),
-            call(ctx.i32_to_str_func_index, vec![pos.into()], Some(I32)),
+            call(ctx.i32_to_str_fn(), vec![pos.into()], Some(I32)),
         ],
         None,
     ));
@@ -1446,7 +1444,7 @@ fn build_load(a: &mut Asm, ctx: &CompilationContext, ty: &IRType, hook: Option<&
             match fits(ctx, hook.gives(), ty) {
                 Some(Fit::Same) => a.ret(result),
                 Some(Fit::Boxed) => {
-                    let cell = a.let_(call(ctx.alloc_func_index, vec![E::I32(8)], Some(I32)));
+                    let cell = a.let_(call(ctx.alloc_fn(), vec![E::I32(8)], Some(I32)));
                     a.store(params_ty(hook.gives()), cell, 0, result);
                     a.ret(cell);
                 }
@@ -1575,7 +1573,7 @@ fn build_load(a: &mut Asm, ctx: &CompilationContext, ty: &IRType, hook: Option<&
             if floaty {
                 // The digits as a str, parsed as `float()` parses them.
                 let len = a.let_(i - pos);
-                let blob = a.let_(call(ctx.alloc_func_index, vec![len + 5], Some(I32)));
+                let blob = a.let_(call(ctx.alloc_fn(), vec![len + 5], Some(I32)));
                 a.store(I32, blob, 0, len);
                 memcpy(a, blob + 4, s + pos, len);
                 a.store8(blob + len + 4, 0, 0);
@@ -1641,7 +1639,7 @@ fn build_load(a: &mut Asm, ctx: &CompilationContext, ty: &IRType, hook: Option<&
             match inner.as_ref() {
                 // An optional number is a cell holding it.
                 IRType::Int | IRType::Bool | IRType::Float => {
-                    let cell = a.let_(call(ctx.alloc_func_index, vec![E::I32(8)], Some(I32)));
+                    let cell = a.let_(call(ctx.alloc_fn(), vec![E::I32(8)], Some(I32)));
                     a.store(params_ty(inner), cell, 0, value);
                     a.ret(cell);
                 }
@@ -1735,7 +1733,7 @@ fn build_load(a: &mut Asm, ctx: &CompilationContext, ty: &IRType, hook: Option<&
                 });
             }
             // The slots are the list's data block.
-            let header = a.let_(call(ctx.alloc_func_index, vec![E::I32(16)], Some(I32)));
+            let header = a.let_(call(ctx.alloc_fn(), vec![E::I32(16)], Some(I32)));
             a.store(I32, header, 0, count);
             a.store(I32, header, COLLECTION_CAP as u64, slots.load(I32, 4) >> 3);
             a.store(I32, header, COLLECTION_DATA as u64, slots.load(I32, 8));
@@ -1839,7 +1837,7 @@ fn build_load(a: &mut Asm, ctx: &CompilationContext, ty: &IRType, hook: Option<&
                     a.cont(l);
                 });
             });
-            let header = a.let_(call(ctx.alloc_func_index, vec![E::I32(16)], Some(I32)));
+            let header = a.let_(call(ctx.alloc_fn(), vec![E::I32(16)], Some(I32)));
             a.store(I32, header, 0, count);
             a.store(
                 I32,

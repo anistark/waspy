@@ -5769,3 +5769,49 @@ fn an_init_from_a_second_base_fills_its_defaults() {
     );
     assert_eq!(run.stdout, "hi 7 3\n");
 }
+
+/// A tuple sort key whose members the key's function could not type was
+/// compared member by member as bare words: a string by its address, a float
+/// by half its bits. The names came out in the order their strings were
+/// allocated in. The members are typed from what the lambda captured, and
+/// a key with a member of no known type is refused.
+#[test]
+fn a_tuple_sort_key_through_a_captured_object_compares_its_members() {
+    let run = run_main(
+        &dedent(
+            r#"
+            from typing import Dict, List
+
+
+            class Book:
+                def __init__(self) -> None:
+                    self.by_student: Dict[str, List[float]] = {}
+
+                def add(self, name: str, score: float) -> None:
+                    if name not in self.by_student:
+                        self.by_student[name] = []
+                    self.by_student[name].append(score)
+
+                def average(self, name: str) -> float:
+                    scores = self.by_student[name]
+                    return sum(scores) / len(scores)
+
+
+            def ranked(book: Book) -> List[str]:
+                return sorted(book.by_student, key=lambda n: (-book.average(n), n))
+
+
+            if __name__ == "__main__":
+                b = Book()
+                b.add("Bob", 81.5)
+                b.add("Ada", 91.75)
+                b.add("Cy", 81.5)
+                b.add("Dee", 59.75)
+                print(ranked(b))
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(run.stdout, "['Ada', 'Bob', 'Cy', 'Dee']\n");
+}

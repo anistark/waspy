@@ -11,9 +11,10 @@
 //! (`wasmtime`, `node:wasi`, a browser shim).
 
 use crate::compiler::context::CompilationContext;
+use crate::compiler::emit::Function;
 use crate::compiler::runtime::{alloc_string, byte, function, w32, Helper};
 use crate::ir::{IRBody, IRExpr, IRModule};
-use wasm_encoder::{BlockType, Function, Instruction as I, ValType};
+use wasm_encoder::{BlockType, Instruction as I, ValType};
 
 macro_rules! emit {
     ($f:expr, $($i:expr),* $(,)?) => {{
@@ -129,6 +130,9 @@ pub(crate) const RESOLVED: i32 = HOST + 48;
 pub(crate) const CLOCK_OUT: i32 = HOST + 56;
 const STDIN_CHUNK: i32 = 4096;
 const _: () = assert!(HOST + 64 <= crate::compiler::context::COLLECTION_HEAP_BASE as i32);
+/// The words above, which the collector reads as roots: standard input's
+/// buffer, `sys.argv`, and `sys.path` are objects.
+pub(crate) const STATE: (i32, i32) = (HOST, HOST + 64);
 
 /// Whether `expr` names one of the standard streams (`sys.stdout`,
 /// `sys.stderr`, `sys.stdin`), and which file descriptor it is.
@@ -423,7 +427,7 @@ pub(crate) fn build_resolve_path(ctx: &CompilationContext) -> Function {
         I::LocalTee(nlen),
         I::I32Const(1),
         I::I32Add,
-        I::Call(ctx.alloc_func_index),
+        I::Call(ctx.alloc_fn()),
         I::LocalSet(name),
         I::LocalGet(fd),
         I::LocalGet(name),
@@ -946,7 +950,7 @@ fn emit_refill(f: &mut Function, ctx: &CompilationContext, keep: u32, n: u32, bu
         I::I32Eqz,
         I::If(BlockType::Empty),
         I::I32Const(STDIN_CHUNK),
-        I::Call(ctx.alloc_func_index),
+        I::Call(ctx.alloc_fn()),
         I::LocalSet(buf),
         I::I32Const(STDIN_BUF),
         I::LocalGet(buf),
@@ -1064,7 +1068,7 @@ fn emit_append(
         I::Select,
         I::LocalSet(cap),
         I::LocalGet(cap),
-        I::Call(ctx.alloc_func_index),
+        I::Call(ctx.alloc_fn()),
         I::LocalTee(tmp),
         I::LocalGet(line),
         I::LocalGet(line_len),
@@ -1488,12 +1492,12 @@ pub(crate) fn build_argv(ctx: &CompilationContext) -> Function {
         I::LocalGet(argc),
         I::I32Const(4),
         I::I32Mul,
-        I::Call(ctx.alloc_func_index),
+        I::Call(ctx.alloc_fn()),
         I::LocalSet(ptrs),
         I::LocalGet(size),
         I::I32Const(1),
         I::I32Add,
-        I::Call(ctx.alloc_func_index),
+        I::Call(ctx.alloc_fn()),
         I::LocalSet(bytes),
         I::LocalGet(ptrs),
         I::LocalGet(bytes),
@@ -1505,7 +1509,7 @@ pub(crate) fn build_argv(ctx: &CompilationContext) -> Function {
         I::I32Mul,
         I::I32Const(COLLECTION_HEADER as i32),
         I::I32Add,
-        I::Call(ctx.alloc_func_index),
+        I::Call(ctx.alloc_fn()),
         I::LocalTee(list),
         I::LocalGet(argc),
         I::I32Store(w32(0)),
@@ -1607,12 +1611,12 @@ pub(crate) fn build_read_lines(ctx: &CompilationContext) -> Function {
         I::I32Const(8),
         I::LocalSet(cap),
         I::I32Const(COLLECTION_HEADER as i32),
-        I::Call(ctx.alloc_func_index),
+        I::Call(ctx.alloc_fn()),
         I::LocalSet(list),
         I::LocalGet(cap),
         I::I32Const(COLLECTION_SLOT as i32),
         I::I32Mul,
-        I::Call(ctx.alloc_func_index),
+        I::Call(ctx.alloc_fn()),
         I::LocalSet(data)
     );
     emit!(f, I::Block(BlockType::Empty), I::Loop(BlockType::Empty));
@@ -1636,7 +1640,7 @@ pub(crate) fn build_read_lines(ctx: &CompilationContext) -> Function {
         I::LocalTee(cap),
         I::I32Const(COLLECTION_SLOT as i32),
         I::I32Mul,
-        I::Call(ctx.alloc_func_index),
+        I::Call(ctx.alloc_fn()),
         I::LocalTee(grown),
         I::LocalGet(data),
         I::LocalGet(count),
@@ -1689,6 +1693,11 @@ pub(crate) fn build_start(ctx: &CompilationContext) -> Function {
         .or_else(|| ctx.get_function_info("main"))
         .expect("_start is exported only with an entry function");
     let mut f = function(&[ValType::I32; 2]);
+    // As the program ends, what is still alive is finalized, the way CPython
+    // finalizes a module's objects as it shuts down: after the traceback of
+    // an exception nothing caught, and before the process exits.
+    let finalize = (!ctx.finalizer_reach.is_empty())
+        .then(|| ctx.helper(Helper::Gc(crate::compiler::gc::GcFn::Exit)));
     // Every function answers one word, None included. Below a call the
     // runtime counts, an exception main does not catch returns here rather
     // than trapping.
@@ -1702,12 +1711,19 @@ pub(crate) fn build_start(ctx: &CompilationContext) -> Function {
     );
     if ctx.get_class_info("BaseException").is_some() && ctx.wasi.contains_key(&Wasi::FdWrite) {
         let write = ctx.helper(Helper::WriteFd);
-        crate::compiler::exceptions::emit_report_uncaught(&mut f, ctx, Some(write));
+        crate::compiler::exceptions::emit_report_uncaught(&mut f, ctx, Some(write), finalize);
+    }
+    if let Some(finalize) = finalize {
+        emit!(f, I::Call(finalize));
     }
     if let Some(&exit) = ctx.wasi.get(&Wasi::ProcExit) {
         emit!(f, I::I32Const(1), I::Call(exit));
     }
-    emit!(f, I::Unreachable, I::End, I::End);
+    emit!(f, I::Unreachable, I::End);
+    if let Some(finalize) = finalize {
+        emit!(f, I::Call(finalize));
+    }
+    emit!(f, I::End);
     f
 }
 
@@ -1728,7 +1744,7 @@ pub(crate) fn build_sys_path(ctx: &CompilationContext) -> Function {
         I::Return,
         I::End,
         I::I32Const(COLLECTION_HEADER as i32),
-        I::Call(ctx.alloc_func_index),
+        I::Call(ctx.alloc_fn()),
         I::LocalTee(list),
         I::LocalGet(list),
         I::I32Const(COLLECTION_HEADER as i32),

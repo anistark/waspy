@@ -24,9 +24,10 @@
 //! `__eq__`) may use the scratch run.
 
 use crate::compiler::context::CompilationContext;
+use crate::compiler::emit::Function;
 use crate::compiler::expression::{emit_slot_eq_needle, mem_off, slot_arg};
 use crate::ir::{IRType, STRING_LEN_PREFIX};
-use wasm_encoder::{BlockType, Function, Instruction, MemArg};
+use wasm_encoder::{BlockType, Instruction, MemArg};
 
 pub(crate) const SET_HEADER: u32 = 24;
 pub(crate) const SET_CAP: u32 = 4;
@@ -598,13 +599,15 @@ fn emit_new_buckets(func: &mut Function, ctx: &CompilationContext, size: u32) {
     func.instruction(&Instruction::LocalGet(size));
     func.instruction(&Instruction::I32Const(SET_BUCKET as i32));
     func.instruction(&Instruction::I32Mul);
-    func.instruction(&Instruction::Call(ctx.alloc_func_index));
+    func.instruction(&Instruction::Call(ctx.alloc_fn()));
     func.instruction(&Instruction::LocalTee(block));
     func.instruction(&Instruction::I32Const(0));
     func.instruction(&Instruction::LocalGet(size));
     func.instruction(&Instruction::I32Const(SET_BUCKET as i32));
     func.instruction(&Instruction::I32Mul);
     func.instruction(&Instruction::MemoryFill(0));
+    // A set lets go of its members in table order.
+    crate::compiler::expression::emit_mark_forward(func, ctx, block);
     func.instruction(&Instruction::LocalGet(block));
     release(ctx, 1);
 }
@@ -614,7 +617,7 @@ pub(crate) fn emit_new_set(func: &mut Function, ctx: &CompilationContext) {
     let set = word(ctx);
     let size = word(ctx);
     func.instruction(&Instruction::I32Const(SET_HEADER as i32));
-    func.instruction(&Instruction::Call(ctx.alloc_func_index));
+    func.instruction(&Instruction::Call(ctx.alloc_fn()));
     func.instruction(&Instruction::LocalSet(set));
     // The header's words start at zero: count, fill, finger.
     func.instruction(&Instruction::LocalGet(set));
@@ -1105,6 +1108,7 @@ pub(crate) fn emit_discard(
     push_bucket(func, data, found);
     func.instruction(&Instruction::I32Const(SET_DEAD));
     func.instruction(&Instruction::I32Store(at(0)));
+    emit_forget_bucket_value(func, data, found);
     func.instruction(&Instruction::LocalGet(set));
     func.instruction(&Instruction::LocalGet(set));
     func.instruction(&Instruction::I32Load(at(0)));
@@ -1437,6 +1441,15 @@ pub(crate) fn emit_clear(func: &mut Function, ctx: &CompilationContext, set: u32
     release(ctx, 1);
 }
 
+/// Clear the member a tombstone's bucket still holds. Nothing reads it, but
+/// the collector reads the whole table, and would keep the removed member
+/// alive for as long as the set is.
+fn emit_forget_bucket_value(func: &mut Function, data: u32, index: u32) {
+    push_bucket(func, data, index);
+    func.instruction(&Instruction::I64Const(0));
+    func.instruction(&Instruction::I64Store(at(SET_BUCKET_VALUE)));
+}
+
 /// `set_pop`: remove and push the member at or after the finger, in table
 /// order, wrapping around; the finger then rests just past it. The caller has
 /// checked the set is not empty.
@@ -1480,6 +1493,7 @@ pub(crate) fn emit_pop(func: &mut Function, ctx: &CompilationContext, set: u32, 
     push_bucket(func, data, i);
     func.instruction(&Instruction::I32Const(SET_DEAD));
     func.instruction(&Instruction::I32Store(at(0)));
+    emit_forget_bucket_value(func, data, i);
     func.instruction(&Instruction::LocalGet(set));
     func.instruction(&Instruction::LocalGet(set));
     func.instruction(&Instruction::I32Load(at(0)));
@@ -1595,7 +1609,7 @@ pub(crate) fn emit_members_as_list(func: &mut Function, ctx: &CompilationContext
     func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
     func.instruction(&Instruction::I32Mul);
     func.instruction(&Instruction::I32Add);
-    func.instruction(&Instruction::Call(ctx.alloc_func_index));
+    func.instruction(&Instruction::Call(ctx.alloc_fn()));
     func.instruction(&Instruction::LocalSet(list));
     crate::compiler::expression::store_runtime_data_ptr(func, list);
     for offset in [0, COLLECTION_CAP] {

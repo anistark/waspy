@@ -3,6 +3,7 @@ use crate::compiler::context::{
     common_class_base, ClassInfo, CompilationContext, EXC_TYPE_GLOBAL, FIRST_MODULE_GLOBAL,
     MODULE_INIT_FN,
 };
+use crate::compiler::emit::Function;
 use crate::compiler::function::{compile_function, resolve_return_type};
 use crate::core::errors::WaspyError;
 use crate::ir::{
@@ -12,7 +13,7 @@ use crate::ir::{
 use std::collections::{HashMap, HashSet};
 use wasm_encoder::{
     BlockType, CodeSection, ConstExpr, CustomSection, DataSection, ElementSection, Elements,
-    EntityType, ExportSection, Function, FunctionSection, GlobalSection, GlobalType, ImportSection,
+    EntityType, ExportSection, FunctionSection, GlobalSection, GlobalType, ImportSection,
     Instruction, MemorySection, MemoryType, Module, RefType, StartSection, TableSection, TableType,
     TypeSection, ValType,
 };
@@ -1227,95 +1228,6 @@ fn written_class_vars(module: &IRModule) -> HashSet<String> {
         }
     }
     out
-}
-
-/// Build the runtime bump allocator `__alloc(size: i32) -> i32`.
-///
-/// The next-free pointer lives in global 0 (initialized to the post-codegen
-/// high-water mark). Each call rounds `size` up to 8 bytes, grows linear memory
-/// if the request would run past the current end, advances the global, and
-/// returns the old pointer. There is no `free`; this is a monotonic bump
-/// allocator backing runtime-built strings/bytes (e.g. concatenation results).
-fn build_alloc_function() -> Function {
-    // locals 1..4 (local 0 is the `size` parameter): aligned size, old ptr,
-    // new ptr, current memory size in bytes.
-    let mut f = Function::new([(4u32, ValType::I32)]);
-
-    // aligned = (size + 7) & ~7  -> local 1
-    f.instruction(&Instruction::LocalGet(0));
-    f.instruction(&Instruction::I32Const(7));
-    f.instruction(&Instruction::I32Add);
-    f.instruction(&Instruction::I32Const(!7));
-    f.instruction(&Instruction::I32And);
-    f.instruction(&Instruction::LocalSet(1));
-
-    // old = global 0 -> local 2
-    f.instruction(&Instruction::GlobalGet(0));
-    f.instruction(&Instruction::LocalSet(2));
-
-    // new = old + aligned -> local 3
-    f.instruction(&Instruction::LocalGet(2));
-    f.instruction(&Instruction::LocalGet(1));
-    f.instruction(&Instruction::I32Add);
-    f.instruction(&Instruction::LocalSet(3));
-
-    // cur_bytes = memory.size * 65536 -> local 4
-    f.instruction(&Instruction::MemorySize(0));
-    f.instruction(&Instruction::I32Const(16));
-    f.instruction(&Instruction::I32Shl);
-    f.instruction(&Instruction::LocalSet(4));
-
-    // if new > cur_bytes: grow by ceil((new - cur_bytes) / 65536) pages
-    f.instruction(&Instruction::LocalGet(3));
-    f.instruction(&Instruction::LocalGet(4));
-    f.instruction(&Instruction::I32GtU);
-    f.instruction(&Instruction::If(BlockType::Empty));
-    f.instruction(&Instruction::LocalGet(3));
-    f.instruction(&Instruction::LocalGet(4));
-    f.instruction(&Instruction::I32Sub);
-    f.instruction(&Instruction::I32Const(65535));
-    f.instruction(&Instruction::I32Add);
-    f.instruction(&Instruction::I32Const(16));
-    f.instruction(&Instruction::I32ShrU);
-    f.instruction(&Instruction::MemoryGrow(0));
-    f.instruction(&Instruction::Drop); // grow failure (-1) is left to trap on use
-    f.instruction(&Instruction::End);
-
-    // global 0 = new; return old
-    f.instruction(&Instruction::LocalGet(3));
-    f.instruction(&Instruction::GlobalSet(0));
-    f.instruction(&Instruction::LocalGet(2));
-    f.instruction(&Instruction::End);
-    f
-}
-
-/// Build `__alloc_obj(size: i32, class_id: i32) -> i32`: allocate an instance
-/// via `__alloc` and stamp `class_id` into the tag word at offset 0 (the slot
-/// every instance layout reserves), returning the instance pointer. Doing the
-/// stamp in a helper keeps the `ClassName(...)` call sequence stack-only, so
-/// nested instantiations compose without any scratch local.
-fn build_alloc_obj_function(alloc_func_index: u32) -> Function {
-    // local 2 (locals 0-1 are the parameters): the allocated pointer.
-    let mut f = Function::new([(1u32, ValType::I32)]);
-
-    // ptr = __alloc(size) -> local 2
-    f.instruction(&Instruction::LocalGet(0));
-    f.instruction(&Instruction::Call(alloc_func_index));
-    f.instruction(&Instruction::LocalSet(2));
-
-    // *(ptr + 0) = class_id
-    f.instruction(&Instruction::LocalGet(2));
-    f.instruction(&Instruction::LocalGet(1));
-    f.instruction(&Instruction::I32Store(wasm_encoder::MemArg {
-        offset: 0,
-        align: 2,
-        memory_index: 0,
-    }));
-
-    // return ptr
-    f.instruction(&Instruction::LocalGet(2));
-    f.instruction(&Instruction::End);
-    f
 }
 
 /// Build `__i32_to_str(value: i32) -> i32`: render `value` as decimal digits
@@ -2730,6 +2642,24 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
         }
     }
 
+    ctx.finalizer_reach = ctx.classes_reaching_finalizers();
+
+    // The functions that return a reference: each leaves its result on the
+    // root stack for its caller, which is how a caller knows a call left a
+    // temporary to drop.
+    ctx.returns_reference = std::rc::Rc::new(
+        ctx.function_map
+            .values()
+            .filter(|info| {
+                !matches!(
+                    info.return_type,
+                    IRType::Int | IRType::Bool | IRType::Float | IRType::None
+                )
+            })
+            .map(|info| info.index)
+            .collect(),
+    );
+
     let raisers = functions_that_can_raise(ir_module);
     ctx.can_raise = raisers
         .iter()
@@ -2758,7 +2688,7 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
     // creating it stored, so it is compiled after that function: every other
     // function and method first, then the closures, outermost first. The code
     // section is still written in index order.
-    let mut compiled_functions: Vec<Option<Function>> =
+    let mut compiled_functions: Vec<Option<crate::compiler::function::CompiledFunction>> =
         (0..ir_module.functions.len()).map(|_| None).collect();
     let mut compiled_init = compiled_init;
     for (i, func_ir) in ir_module.functions.iter().enumerate() {
@@ -2805,22 +2735,9 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
         ));
     }
 
-    for compiled in compiled_functions.iter().flatten() {
-        codes.function(compiled);
-    }
-    for compiled in &compiled_methods {
-        codes.function(compiled);
-    }
-
-    // Runtime helpers, last so their indices match `ctx.alloc_func_index`,
-    // `ctx.alloc_obj_func_index`, and `ctx.i32_to_str_func_index`.
-    codes.function(&build_alloc_function());
-    codes.function(&build_alloc_obj_function(ctx.alloc_func_index));
-    codes.function(&build_i32_to_str_function(ctx.alloc_func_index));
-
     // The start function: run `__module_init`, and trap if it left an
     // exception pending, as any exception nothing catches does.
-    let start_function_index = start_type_index.map(|_| {
+    let start_function = start_type_index.map(|_| {
         let init_index = ctx
             .get_function_info(MODULE_INIT_FN)
             .map(|f| f.index)
@@ -2833,21 +2750,87 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
         start.instruction(&Instruction::Unreachable);
         start.instruction(&Instruction::End);
         start.instruction(&Instruction::End);
-        codes.function(&start);
-        import_count + total_function_count as u32 + 3
+        start
     });
+    let start_function_index =
+        start_type_index.map(|_| import_count + total_function_count as u32 + 3);
 
     // The runtime helpers the code called, each built once; a helper may call
-    // others, which join the end of the list.
-    let mut built = 0;
-    while built < ctx.helpers.borrow().len() {
-        let helper = ctx.helpers.borrow()[built].clone();
-        let (params, results) = crate::compiler::runtime::signature(&helper);
+    // others, which join the end of the list. Whether the module allocates
+    // is known once they are built, and three things wait for that: the
+    // safepoint, each function's prologue and exit, and the allocator's own
+    // three functions (which have fixed indices ahead of the helpers). A
+    // module that never allocates carries none of the collector.
+    let mut built_helpers: Vec<Option<Function>> = Vec::new();
+    let build_helpers = |built: &mut Vec<Option<Function>>, deferred: bool| loop {
+        let requested = ctx.helpers.borrow().len();
+        built.resize_with(requested, || None);
+        let mut progressed = false;
+        for (i, slot) in built.iter_mut().enumerate() {
+            let helper = ctx.helpers.borrow()[i].clone();
+            let waits = matches!(
+                helper,
+                crate::compiler::runtime::Helper::Gc(
+                    crate::compiler::gc::GcFn::Safepoint | crate::compiler::gc::GcFn::Root
+                )
+            );
+            if slot.is_none() && (deferred || !waits) {
+                *slot = Some(crate::compiler::runtime::build(&helper, &ctx));
+                progressed = true;
+            }
+        }
+        if !progressed && ctx.helpers.borrow().len() == requested {
+            break;
+        }
+    };
+    build_helpers(&mut built_helpers, false);
+    let collects = ctx.alloc_used.get();
+    let compiled_functions: Vec<Function> = compiled_functions
+        .into_iter()
+        .flatten()
+        .map(|compiled| compiled.finish(&ctx, collects))
+        .collect();
+    let compiled_methods: Vec<Function> = compiled_methods
+        .into_iter()
+        .map(|compiled| compiled.finish(&ctx, collects))
+        .collect();
+    let allocator = if collects {
+        [
+            crate::compiler::gc::build_alloc(&ctx),
+            crate::compiler::gc::build_alloc_obj(&ctx),
+            build_i32_to_str_function(ctx.alloc_func_index),
+        ]
+    } else {
+        [
+            crate::compiler::gc::build_unused(1),
+            crate::compiler::gc::build_unused(2),
+            crate::compiler::gc::build_unused(1),
+        ]
+    };
+    build_helpers(&mut built_helpers, true);
+    for helper in ctx.helpers.borrow().iter() {
+        let (params, results) = crate::compiler::runtime::signature(helper);
         let type_index = types.len();
         types.ty().function(params, results);
         functions.function(type_index);
-        codes.function(&crate::compiler::runtime::build(&helper, &ctx));
-        built += 1;
+    }
+
+    for compiled in &compiled_functions {
+        codes.function(compiled.as_wasm());
+    }
+    for compiled in &compiled_methods {
+        codes.function(compiled.as_wasm());
+    }
+    // In index order: the allocator's functions, the start function, then
+    // the helpers.
+    for function in &allocator {
+        codes.function(function.as_wasm());
+    }
+    if let Some(start) = &start_function {
+        codes.function(start.as_wasm());
+    }
+    for helper in built_helpers.iter().flatten() {
+        codes.function(helper.as_wasm());
     }
 
     module.section(&types);
@@ -2872,7 +2855,9 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
     for (at, bytes) in crate::compiler::libm::data_for(&ctx.helpers.borrow()) {
         data.active(0, &ConstExpr::i32_const(at as i32), bytes);
     }
-    let min_pages = (((runtime_heap_base as u64) + 65535) / 65536).max(2);
+    let min_pages =
+        (((runtime_heap_base as u64) + crate::compiler::gc::BINS_BYTES as u64 + 8 + 65535) / 65536)
+            .max(2);
     let mut memories = MemorySection::new();
     memories.memory(MemoryType {
         minimum: min_pages,
@@ -2882,16 +2867,24 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
         page_size_log2: None,
     });
 
-    // Global 0: the runtime allocator's next-free pointer.
+    // The heap starts past the static data, after the words the allocator
+    // keeps its per-size free lists in.
+    let bins_base = (runtime_heap_base + 7) & !7;
+    let heap_base = bins_base + crate::compiler::gc::BINS_BYTES;
+    let i32_global = |globals: &mut GlobalSection, value: i32| {
+        globals.global(
+            GlobalType {
+                val_type: ValType::I32,
+                mutable: true,
+                shared: false,
+            },
+            &ConstExpr::i32_const(value),
+        );
+    };
+
+    // Global 0: the end of the heap, where the allocator extends it.
     let mut globals = GlobalSection::new();
-    globals.global(
-        GlobalType {
-            val_type: ValType::I32,
-            mutable: true,
-            shared: false,
-        },
-        &ConstExpr::i32_const(runtime_heap_base as i32),
-    );
+    i32_global(&mut globals, heap_base as i32);
 
     // Global 1: the StopIteration flag. Set by `raise StopIteration` (which
     // also returns from the raising function) and read-and-cleared by the
@@ -2943,6 +2936,17 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
         },
         &ConstExpr::i32_const(0),
     );
+
+    // Globals 5 up to the first module definition: the allocator's and
+    // collector's state, in the order `compiler::gc` names them. All start
+    // at zero but where the heap begins, the collection threshold, and where
+    // the free lists are.
+    for index in crate::compiler::gc::HEAP_BASE_GLOBAL..crate::compiler::gc::RUNTIME_GLOBALS {
+        i32_global(
+            &mut globals,
+            crate::compiler::gc::initial_global(index, heap_base, bins_base),
+        );
+    }
 
     // One global per module definition that is evaluated once, in index
     // order, typed by what its initializer produced in `__module_init` (an f64

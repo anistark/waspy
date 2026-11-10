@@ -21,9 +21,10 @@
 //! collection is refused rather than miscompiled.
 
 use crate::compiler::context::{CompilationContext, COLLECTION_DATA, COLLECTION_SLOT, DICT_ENTRY};
+use crate::compiler::emit::Function;
 use crate::compiler::expression::{emit_str_content_eq, emit_user_call, emit_virtual_compare};
 use crate::ir::{IRCompareOp, IRType, STRING_LEN_PREFIX};
-use wasm_encoder::{BlockType, Function, Instruction, MemArg};
+use wasm_encoder::{BlockType, Instruction, MemArg};
 
 fn mem(offset: u64) -> MemArg {
     MemArg {

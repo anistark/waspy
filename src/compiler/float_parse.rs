@@ -14,10 +14,11 @@
 //! unwinds.
 
 use crate::compiler::context::CompilationContext;
+use crate::compiler::emit::Function;
 use crate::compiler::runtime::{
     byte, function, w32, Helper, BIG_R, BIG_S, BIG_T, BIG_Z, TEXT, TEXT_BYTES,
 };
-use wasm_encoder::{BlockType, Function, Instruction as I, ValType};
+use wasm_encoder::{BlockType, Instruction as I, ValType};
 
 macro_rules! emit {
     ($f:expr, $($i:expr),* $(,)?) => {{

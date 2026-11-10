@@ -6,11 +6,12 @@
 //! funcref table, as a lambda's call goes.
 
 use crate::compiler::context::{CompilationContext, COLLECTION_DATA};
+use crate::compiler::emit::Function;
 use crate::compiler::exceptions::ExcArg;
 use crate::compiler::expression::{emit_as_sequence, emit_expr, recover_str_pair, wasm_value_type};
 use crate::compiler::function::{emit_call_depth_step, emit_post_call_check, emit_raise};
 use crate::ir::{IRExpr, IRType, MemoryLayout};
-use wasm_encoder::{BlockType, Function, Instruction as I, MemArg, ValType};
+use wasm_encoder::{BlockType, Instruction as I, MemArg, ValType};
 
 macro_rules! emit {
     ($f:expr, $($i:expr),* $(,)?) => {{

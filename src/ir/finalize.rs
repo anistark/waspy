@@ -35,6 +35,291 @@ struct ClassFacts {
     init_params: Vec<IRParam>,
 }
 
+/// Refuse a program that could read a name after `del` unbound it.
+///
+/// CPython raises NameError (or UnboundLocalError) there. A compiled
+/// variable has no unbound state to raise from, so the read would answer
+/// whatever the variable was cleared to. Within a function the check follows
+/// the statements in order with the set of names that may be unbound: a
+/// branch may unbind what the other does not, and a loop's body may run again
+/// after its own `del`. A module variable deleted in one function and read in
+/// another is refused outright, since nothing here orders the two.
+///
+/// Runs before every other pass, on the names the program wrote.
+pub(crate) fn check_deleted_names(module: &mut IRModule) -> Result<()> {
+    // The module variables some function deletes, with that function.
+    let mut deleted_globals: Vec<(String, String)> = Vec::new();
+    let mut bodies: Vec<(String, &mut IRBody)> = Vec::new();
+    for function in &mut module.functions {
+        bodies.push((function.name.clone(), &mut function.body));
+    }
+    for class in &mut module.classes {
+        for method in &mut class.methods {
+            bodies.push((format!("{}.{}", class.name, method.name), &mut method.body));
+        }
+    }
+    for (name, body) in bodies.iter_mut() {
+        let deleted = deleted_in(body)?;
+        if deleted.is_empty() {
+            continue;
+        }
+        check_reads_after_del(body, &mut HashSet::new())?;
+        let globals = declared_globals(body);
+        deleted_globals.extend(
+            deleted
+                .into_iter()
+                .filter(|d| globals.contains(d))
+                .map(|d| (d, name.clone())),
+        );
+    }
+    for (global, deleter) in &deleted_globals {
+        for (name, body) in bodies.iter_mut() {
+            if name == deleter {
+                continue;
+            }
+            // A function that assigns the name without declaring it global
+            // has a local of its own by that name.
+            if assigned_names(body).contains(global) && !declared_globals(body).contains(global) {
+                continue;
+            }
+            let mut reads = false;
+            visit_body(body, &mut |e| {
+                if matches!(e, IRExpr::Variable(n) | IRExpr::Param(n) if n == global) {
+                    reads = true;
+                }
+                Ok(())
+            })?;
+            if reads {
+                return Err(crate::core::errors::unsupported_feature(
+                    format!(
+                        "'del {global}' deletes a module variable that '{name}' also uses, where \
+                         Python raises NameError once it is deleted. Hint: assign None to \
+                         '{global}' instead of deleting it"
+                    ),
+                    None,
+                )
+                .into());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The names `del` unbinds anywhere in `body`.
+fn deleted_in(body: &mut IRBody) -> Result<HashSet<String>> {
+    let mut deleted = HashSet::new();
+    visit_body(body, &mut |e| {
+        if let IRExpr::FunctionCall {
+            function_name,
+            arguments,
+        } = e
+        {
+            if function_name == crate::ir::DEL_NAME_FN {
+                if let Some(IRExpr::Variable(name)) = arguments.first() {
+                    deleted.insert(name.clone());
+                }
+            }
+        }
+        Ok(())
+    })?;
+    Ok(deleted)
+}
+
+/// The names `body` declares `global`, at any depth.
+fn declared_globals(body: &IRBody) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for_each_statement(body, &mut |stmt| {
+        if let IRStatement::Global(declared) = stmt {
+            names.extend(declared.iter().cloned());
+        }
+    });
+    names
+}
+
+/// The names `body` assigns, at any depth.
+fn assigned_names(body: &IRBody) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for_each_statement(body, &mut |stmt| match stmt {
+        IRStatement::Assign { target, .. }
+        | IRStatement::AugAssign { target, .. }
+        | IRStatement::For { target, .. } => {
+            names.insert(target.clone());
+        }
+        IRStatement::TupleUnpack { targets, .. } => names.extend(targets.iter().cloned()),
+        _ => {}
+    });
+    names
+}
+
+/// Every statement of `body`, nested ones included.
+fn for_each_statement(body: &IRBody, f: &mut impl FnMut(&IRStatement)) {
+    for stmt in &body.statements {
+        f(stmt);
+        match stmt {
+            IRStatement::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                for_each_statement(then_body, f);
+                if let Some(else_body) = else_body {
+                    for_each_statement(else_body, f);
+                }
+            }
+            IRStatement::While { body, .. } | IRStatement::With { body, .. } => {
+                for_each_statement(body, f)
+            }
+            IRStatement::For {
+                body, else_body, ..
+            } => {
+                for_each_statement(body, f);
+                if let Some(else_body) = else_body {
+                    for_each_statement(else_body, f);
+                }
+            }
+            IRStatement::TryExcept {
+                try_body,
+                except_handlers,
+                finally_body,
+            } => {
+                for_each_statement(try_body, f);
+                for handler in except_handlers {
+                    for_each_statement(&handler.body, f);
+                }
+                if let Some(finally_body) = finally_body {
+                    for_each_statement(finally_body, f);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// An error if `expr` reads a name in `unbound`.
+fn read_after_del(expr: &mut IRExpr, unbound: &HashSet<String>) -> Result<()> {
+    visit_expr(expr, &mut |e| match e {
+        IRExpr::Variable(name) | IRExpr::Param(name) if unbound.contains(name) => {
+            Err(crate::core::errors::unsupported_feature(
+                format!(
+                    "'{name}' is used after 'del {name}' may have run, where Python raises \
+                     NameError. Hint: assign it again first, or assign None instead of deleting \
+                     it"
+                ),
+                None,
+            )
+            .into())
+        }
+        _ => Ok(()),
+    })
+}
+
+/// Walk `body` in order with the names that may be unbound, refusing a read
+/// of one.
+fn check_reads_after_del(body: &mut IRBody, unbound: &mut HashSet<String>) -> Result<()> {
+    for stmt in &mut body.statements {
+        match stmt {
+            IRStatement::Expression(IRExpr::FunctionCall {
+                function_name,
+                arguments,
+            }) if function_name == crate::ir::DEL_NAME_FN => {
+                if let Some(IRExpr::Variable(name)) = arguments.first() {
+                    read_after_del(&mut IRExpr::Variable(name.clone()), unbound)?;
+                    unbound.insert(name.clone());
+                }
+            }
+            IRStatement::Assign { target, value, .. } => {
+                read_after_del(value, unbound)?;
+                unbound.remove(target);
+            }
+            IRStatement::TupleUnpack { targets, value, .. } => {
+                read_after_del(value, unbound)?;
+                for target in targets.iter() {
+                    unbound.remove(target);
+                }
+            }
+            IRStatement::AugAssign { target, value, .. } => {
+                read_after_del(value, unbound)?;
+                read_after_del(&mut IRExpr::Variable(target.clone()), unbound)?;
+            }
+            IRStatement::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                read_after_del(condition, unbound)?;
+                let mut other = unbound.clone();
+                check_reads_after_del(then_body, unbound)?;
+                if let Some(else_body) = else_body {
+                    check_reads_after_del(else_body, &mut other)?;
+                }
+                unbound.extend(other);
+            }
+            IRStatement::While { condition, body } => {
+                // Twice: the second pass reads what the first unbound.
+                for _ in 0..2 {
+                    read_after_del(condition, unbound)?;
+                    check_reads_after_del(body, unbound)?;
+                }
+                read_after_del(condition, unbound)?;
+            }
+            IRStatement::For {
+                target,
+                iterable,
+                body,
+                else_body,
+            } => {
+                read_after_del(iterable, unbound)?;
+                for _ in 0..2 {
+                    unbound.remove(target);
+                    check_reads_after_del(body, unbound)?;
+                }
+                if let Some(else_body) = else_body {
+                    check_reads_after_del(else_body, unbound)?;
+                }
+            }
+            IRStatement::TryExcept {
+                try_body,
+                except_handlers,
+                finally_body,
+            } => {
+                // A handler runs after any part of the body.
+                let before = unbound.clone();
+                check_reads_after_del(try_body, unbound)?;
+                unbound.extend(before);
+                let mut after = unbound.clone();
+                for handler in except_handlers.iter_mut() {
+                    let mut in_handler = unbound.clone();
+                    check_reads_after_del(&mut handler.body, &mut in_handler)?;
+                    after.extend(in_handler);
+                }
+                *unbound = after;
+                if let Some(finally_body) = finally_body {
+                    check_reads_after_del(finally_body, unbound)?;
+                }
+            }
+            IRStatement::With {
+                context_expr, body, ..
+            } => {
+                read_after_del(context_expr, unbound)?;
+                check_reads_after_del(body, unbound)?;
+            }
+            // A nested function has names of its own. One it shares with
+            // this function lives in a cell, and deleting that is refused
+            // where the `del` is compiled.
+            IRStatement::FunctionDef(def) => {
+                check_reads_after_del(&mut def.body, &mut HashSet::new())?;
+            }
+            other => visit_stmt(other, &mut |e| match e {
+                IRExpr::Variable(name) | IRExpr::Param(name) if unbound.contains(name) => {
+                    read_after_del(&mut IRExpr::Variable(name.clone()), unbound)
+                }
+                _ => Ok(()),
+            })?,
+        }
+    }
+    Ok(())
+}
+
 /// Run the post-pass: reject abstract instantiations and splice parameter
 /// defaults into calls that omit trailing arguments.
 pub fn finalize_module(module: &mut IRModule) -> Result<()> {

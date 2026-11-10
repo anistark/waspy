@@ -15,9 +15,10 @@
 //! every argument is a str (`__exc_args`, with `__exc_all_str`).
 
 use crate::compiler::context::{CompilationContext, EXC_TYPE_GLOBAL};
+use crate::compiler::emit::Function;
 use crate::compiler::runtime::{function, w32, Helper};
 use crate::ir::{IRBody, IRExpr, IRFunction, IRModule, IRParam, IRStatement, IRType, ParamStar};
-use wasm_encoder::{BlockType, Function, Instruction as I, ValType};
+use wasm_encoder::{BlockType, Instruction as I, ValType};
 
 macro_rules! emit {
     ($f:expr, $($i:expr),* $(,)?) => {{
@@ -340,7 +341,7 @@ pub(crate) fn emit_fill_args(
         emit!(
             func,
             I::I32Const(COLLECTION_HEADER as i32 + args.len() as i32 * COLLECTION_SLOT as i32),
-            I::Call(ctx.alloc_func_index),
+            I::Call(ctx.alloc_fn()),
             I::LocalTee(tuple),
             I::I32Const(args.len() as i32),
             I::I32Store(w32(0)),
@@ -491,7 +492,7 @@ fn alloc_exception(f: &mut Function, ctx: &CompilationContext, class: &str, obj:
         f,
         I::I32Const(info.instance_size as i32),
         I::I32Const(info.class_id),
-        I::Call(ctx.alloc_obj_func_index),
+        I::Call(ctx.alloc_obj_fn()),
         I::LocalSet(obj)
     );
 }
@@ -657,6 +658,7 @@ pub(crate) fn emit_report_uncaught(
     f: &mut Function,
     ctx: &CompilationContext,
     write_fd: Option<u32>,
+    before_exit: Option<u32>,
 ) {
     let Some(write_fd) = write_fd else {
         return;
@@ -686,7 +688,14 @@ pub(crate) fn emit_report_uncaught(
             I::Call(ctx.helper(Helper::ExcText("\n".to_string()))),
             I::Call(concat),
             I::Call(write_fd),
-            I::End,
+            I::End
+        );
+        // What runs as the interpreter shuts down runs before it exits.
+        if let Some(before_exit) = before_exit {
+            emit!(f, I::Call(before_exit));
+        }
+        emit!(
+            f,
             I::GlobalGet(EXC_VALUE_GLOBAL),
             I::I32Load(w32(code)),
             I::Call(exit),

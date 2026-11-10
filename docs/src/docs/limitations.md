@@ -12,7 +12,10 @@ These answer differently from CPython without an error. Each is known, and anyth
 
 - `int` is 32 bits and wraps instead of growing (see [Numbers](/docs/numbers/))
 - A NaN inside a collection does not equal itself: `(x,) == (x,)` is False for `x = float("nan")`, where CPython answers True (see [Numbers](/docs/numbers/))
-- Object lifetime: memory is never reclaimed, so `__del__` never runs, and a generator abandoned mid-iteration runs its `finally` blocks only on `close()`
+- A temporary lives to the end of its statement: in `print(Res().name)` the `Res` is finalized after the line is printed, where CPython finalizes it as soon as `.name` is read. What a variable, a field, or a collection holds, a function's own locals, and the arguments of a call to a function, a method, or a constructor are let go of exactly where CPython lets go of them
+- An object in a reference cycle is finalized when the collector next runs (after enough has been allocated, or as the program ends), which is not the allocation count CPython's collector runs at. Both finalize what is left at exit; a module with no `__main__` block has no exit, so nothing is finalized when its host drops it
+- A number that happens to equal an object's address keeps the object alive while it is held, since the collector reads memory without knowing what each word is, so that object's `__del__` can run later than CPython's
+- An exception `__del__` raises is discarded, without the `Exception ignored in` report CPython writes to standard error
 - A traceback is not kept: a `__main__` block's uncaught exception writes only the last line of CPython's report, `logger.exception()` and `exc_info=` log that same line (`ValueError: bad`) in place of the traceback, and a logging error on standard error leaves its traceback out
 - A generator expression is built as a list before anything reads it, so in `for x in (f(y) for y in g()):` every side effect of `f` and `g` comes before the loop's body, where CPython interleaves them
 - `json.loads()` of an integer where a float is declared gives that float: `1.0`, where CPython keeps the int `1`
@@ -86,6 +89,8 @@ These answer differently from CPython without an error. Each is known, and anyth
 
 ## Memory, modules, and files
 
-- Memory is never reclaimed: the bump allocator has no `free`, there is no garbage collection or reference counting, every object lives until the module is torn down, and `__del__` is not invoked
+- Memory is reclaimed by a mark-and-sweep collector that runs between statements once enough has been allocated, so a program that builds and drops objects in a loop runs in the memory its live objects need. It does not move objects or give pages back to the host, and it reads memory conservatively: a number that looks like an address keeps what it points at. Nothing is counted, so there is no cost on a store, and a module that never allocates carries no allocator or collector at all
+- A value an exported function returns to the host (a string, a list, an instance) is kept for the life of the instance, since nothing says when the host is done with it. A host that calls such a function without end holds everything it was ever handed
+- `del` of an attribute (`del obj.x`) is refused. `del name` is supported where the name is not read again before it is assigned: CPython raises `NameError` there, which a compiled variable cannot, so that program is refused, as is deleting a module variable another function uses or a variable a nested function shares
 - Imported user modules share one flat namespace in the output module, so two modules defining the same function name is a compile error naming both files
 - `f.read()` without a size reads up to 64 KiB per call; `open()` modes must be string literals

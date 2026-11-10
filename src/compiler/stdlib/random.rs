@@ -15,13 +15,14 @@
 
 use crate::compiler::asm::{call, Asm, Ty, Var, E, X};
 use crate::compiler::context::{CompilationContext, COLLECTION_DATA, COLLECTION_HEADER};
+use crate::compiler::emit::Function;
 use crate::compiler::exceptions::ExcArg;
 use crate::compiler::expression::{emit_as_sequence, emit_expr, recover_str_pair};
 use crate::compiler::function::{emit_post_call_check, emit_raise};
 use crate::compiler::libm::Libm;
 use crate::compiler::runtime::Helper;
 use crate::ir::{IRConstant, IRExpr, IRType, MemoryLayout};
-use wasm_encoder::{BlockType, Function, Instruction as I, MemArg};
+use wasm_encoder::{BlockType, Instruction as I, MemArg};
 
 macro_rules! emit {
     ($f:expr, $($i:expr),* $(,)?) => {{
@@ -364,7 +365,7 @@ fn sample(a: &mut Asm, ctx: &CompilationContext) {
         );
         a.ret(0);
     });
-    let alloc = |size: E| call(ctx.alloc_func_index, vec![size], Some(Ty::I32));
+    let alloc = |size: E| call(ctx.alloc_fn(), vec![size], Some(Ty::I32));
     let result = a.let_(alloc(k * 8 + COLLECTION_HEADER as i32));
     a.store(Ty::I32, result, 0, k);
     a.store(

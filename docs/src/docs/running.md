@@ -14,6 +14,8 @@ const { instance } = await WebAssembly.instantiate(wasmBuffer);
 console.log(instance.exports.factorial(5)); // 120
 ```
 
+A function that returns a string, a collection, or an instance answers its address in the module's memory. What it points at is kept for the life of the instance, however much later calls allocate and collect, so the address can be read at any time and passed back to another export.
+
 ## The host interface
 
 A compiled program's side effects go through [WASI preview 1](https://github.com/WebAssembly/WASI/blob/main/legacy/preview1/docs.md), importing from `wasi_snapshot_preview1` exactly the functions it uses, so a program that prints nothing, reads nothing, and opens nothing imports nothing and instantiates with an empty import object, as above. The same module runs unchanged under `wasmtime run`, Node's `node:wasi`, or the small browser shim the playground ships ([`wasi.js`](https://github.com/anistark/waspy/blob/main/docs/src/playground/wasi.js)).

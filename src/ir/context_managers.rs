@@ -453,6 +453,7 @@ fn expand_with(
 
     // `__enter__` runs even without an `as` clause; its result is bound to a
     // throwaway local so the value is consumed exactly once.
+    let hidden_value = optional_vars.is_none().then(|| format!("__with_val_{seq}"));
     let bound = optional_vars.unwrap_or_else(|| format!("__with_val_{seq}"));
     if let IRType::Class(name) = &enter_returns {
         env.insert(bound.clone(), name.clone());
@@ -532,6 +533,14 @@ fn expand_with(
         }),
         else_body: None,
     });
+    // The statement held the manager (and, with no `as`, what `__enter__`
+    // answered), and lets go of them here.
+    for hidden in std::iter::once(manager).chain(hidden_value) {
+        out.push(IRStatement::Expression(IRExpr::FunctionCall {
+            function_name: crate::ir::DEL_NAME_FN.to_string(),
+            arguments: vec![IRExpr::Variable(hidden)],
+        }));
+    }
 
     Ok(out)
 }

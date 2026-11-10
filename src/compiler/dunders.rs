@@ -14,13 +14,14 @@
 //! a subclass of the left's class that overrides the reflected method.
 
 use crate::compiler::context::CompilationContext;
+use crate::compiler::emit::Function;
 use crate::compiler::exceptions::ExcArg;
 use crate::compiler::expression::emit_user_call;
 use crate::compiler::function::{
     emit_call_depth_step, emit_post_call_check, emit_raise, infer_value_type,
 };
 use crate::ir::{IRCompareOp, IRExpr, IROp, IRStatement, IRType, IRUnaryOp, MethodKind};
-use wasm_encoder::{BlockType, Function, Instruction as I, MemArg};
+use wasm_encoder::{BlockType, Instruction as I, MemArg};
 
 /// Every special method an operator, a truth test, or a builtin calls.
 pub(crate) const PROTOCOL_METHODS: &[&str] = &[

@@ -4,19 +4,161 @@ use crate::compiler::context::{
     COLLECTION_SLOT, DICT_ENTRY, EXC_TYPE_GLOBAL, HELD_F64_LOCALS, HELD_I64_LOCALS, HELD_LOCALS,
     SCRATCH_LOCALS,
 };
+use crate::compiler::emit::Function;
 use crate::compiler::exceptions::EXC_VALUE_GLOBAL;
 use crate::compiler::expression::emit_expr;
 use crate::ir::{IRBody, IRConstant, IRExpr, IRFunction, IROp, IRStatement, IRType, MemoryLayout};
-use wasm_encoder::{BlockType, Function, Instruction, MemArg, ValType};
+use wasm_encoder::{BlockType, Instruction, MemArg, ValType};
 
-/// Compile an IR function into a WebAssembly function
+/// A function of the program whose body is compiled, waiting to be given
+/// its prologue and exit. What those have to do depends on the whole module
+/// (one that never allocates has no root stack to keep), so every body is
+/// compiled first.
+pub struct CompiledFunction {
+    locals: Vec<(u32, ValType)>,
+    result: ValType,
+    frame: crate::compiler::emit::Frame,
+    /// The locals the frame's offset and the end of its slots are kept in.
+    frame_local: u32,
+    temps_local: u32,
+    /// Where on the root stack what the function owns starts: its
+    /// arguments' temporaries when its caller handed them over, else its
+    /// frame.
+    args_local: u32,
+    /// A spare word, and locals to hold the result (as a word, or a float)
+    /// across the exit.
+    spare_local: u32,
+    result_local: u32,
+    result_f64_local: u32,
+    /// Whether the function's result can be a reference, which it then
+    /// leaves on the root stack for its caller.
+    returns_reference: bool,
+    /// Whether a local of the function, or something it evaluates, can be
+    /// the last reference to an object with a finalizer: its exit then
+    /// checks for one to run, as its locals go.
+    drops_finalizable: bool,
+}
+
+impl CompiledFunction {
+    /// The finished function. `collects` says whether the module allocates
+    /// at all.
+    pub fn finish(self, ctx: &CompilationContext, collects: bool) -> Function {
+        use crate::compiler::gc::{
+            GcFn, ARGS_BASE_GLOBAL, COLLECT_DROPPED, FIN_LIVE_GLOBAL, NO_ARGS, RS_TOP_GLOBAL,
+        };
+        use crate::compiler::runtime::Helper;
+        // In a module with finalizers every function takes over what its
+        // caller pushed for its arguments, so that they go when it returns.
+        let owns_args = collects && !ctx.finalizer_reach.is_empty();
+        let check_exit = self.drops_finalizable && owns_args;
+        let (spare_local, result_local, result_f64_local) =
+            (self.spare_local, self.result_local, self.result_f64_local);
+        let slot_bytes = (self.frame.slots * 4) as i32;
+        let framed = collects && (self.frame.slots > 0 || self.frame.runtime_calls || owns_args);
+        // What the exit pops the root stack back to.
+        let base_local = if owns_args {
+            self.args_local
+        } else {
+            self.frame_local
+        };
+        let enter = (framed && slot_bytes > 0).then(|| ctx.helper(Helper::Gc(GcFn::Enter)));
+        let root = (collects && self.returns_reference).then(|| ctx.helper(Helper::Gc(GcFn::Root)));
+        let (frame_local, temps_local) = (self.frame_local, self.temps_local);
+        crate::compiler::emit::assemble(
+            self.locals,
+            self.result,
+            &self.frame.body,
+            |f| {
+                if !framed {
+                    return;
+                }
+                if owns_args {
+                    f.instruction(&Instruction::GlobalGet(ARGS_BASE_GLOBAL));
+                    f.instruction(&Instruction::LocalSet(base_local));
+                    f.instruction(&Instruction::I32Const(NO_ARGS));
+                    f.instruction(&Instruction::GlobalSet(ARGS_BASE_GLOBAL));
+                    // No arguments were handed over: it owns from its frame.
+                    f.instruction(&Instruction::LocalGet(base_local));
+                    f.instruction(&Instruction::GlobalGet(RS_TOP_GLOBAL));
+                    f.instruction(&Instruction::I32GtU);
+                    f.instruction(&Instruction::If(BlockType::Empty));
+                    f.instruction(&Instruction::GlobalGet(RS_TOP_GLOBAL));
+                    f.instruction(&Instruction::LocalSet(base_local));
+                    f.instruction(&Instruction::End);
+                }
+                match enter {
+                    // A frame with slots is zeroed and may need room made.
+                    Some(enter) => {
+                        f.instruction(&Instruction::I32Const(slot_bytes));
+                        f.instruction(&Instruction::Call(enter));
+                        f.instruction(&Instruction::LocalTee(frame_local));
+                        f.instruction(&Instruction::I32Const(slot_bytes));
+                        f.instruction(&Instruction::I32Add);
+                        f.instruction(&Instruction::LocalSet(temps_local));
+                    }
+                    // One without only marks where its temporaries start.
+                    None => {
+                        f.instruction(&Instruction::GlobalGet(RS_TOP_GLOBAL));
+                        f.instruction(&Instruction::LocalTee(frame_local));
+                        f.instruction(&Instruction::LocalSet(temps_local));
+                    }
+                }
+            },
+            |f| {
+                if framed && check_exit {
+                    // What this function owns is what it drops as it leaves, in
+                    // the order CPython clears a frame: its arguments, then
+                    // its locals. The result is kept.
+                    let collect = ctx.helper(Helper::Gc(GcFn::Collect));
+                    let float = self.result == ValType::F64;
+                    f.instruction(&Instruction::LocalSet(if float {
+                        result_f64_local
+                    } else {
+                        result_local
+                    }));
+                    f.instruction(&Instruction::GlobalGet(RS_TOP_GLOBAL));
+                    f.instruction(&Instruction::LocalSet(spare_local));
+                    f.instruction(&Instruction::LocalGet(base_local));
+                    f.instruction(&Instruction::GlobalSet(RS_TOP_GLOBAL));
+                    f.instruction(&Instruction::GlobalGet(FIN_LIVE_GLOBAL));
+                    f.instruction(&Instruction::If(BlockType::Empty));
+                    f.instruction(&Instruction::LocalGet(base_local));
+                    f.instruction(&Instruction::LocalGet(spare_local));
+                    f.instruction(&Instruction::I32Const(COLLECT_DROPPED));
+                    if float {
+                        f.instruction(&Instruction::I32Const(0));
+                    } else {
+                        f.instruction(&Instruction::LocalGet(result_local));
+                    }
+                    f.instruction(&Instruction::Call(collect));
+                    f.instruction(&Instruction::End);
+                    f.instruction(&Instruction::LocalGet(if float {
+                        result_f64_local
+                    } else {
+                        result_local
+                    }));
+                } else if framed {
+                    f.instruction(&Instruction::LocalGet(base_local));
+                    f.instruction(&Instruction::GlobalSet(RS_TOP_GLOBAL));
+                }
+                // The result outlives the frame that held it: it is the
+                // caller's temporary from here.
+                if let Some(root) = root {
+                    f.instruction(&Instruction::Call(root));
+                }
+            },
+        )
+    }
+}
+
+/// Compile an IR function's body
 pub fn compile_function(
     ir_func: &IRFunction,
     ctx: &mut CompilationContext,
     memory_layout: &MemoryLayout,
     return_type: &IRType,
     owning_class: Option<&str>,
-) -> Function {
+) -> CompiledFunction {
     ctx.locals_map.clear();
     ctx.local_count = 0;
     // Errors reported from expression codegen are located by this name.
@@ -110,6 +252,16 @@ pub fn compile_function(
     ctx.assign_container_local = ctx.add_local("__assign_container", IRType::Int);
     ctx.assign_key_local = ctx.add_local("__assign_key", IRType::Int);
     ctx.assign_key_f64_local = ctx.add_local("__assign_key_f64", IRType::Float);
+    // What the root stack is worked through (see `compiler::gc`).
+    ctx.rs_frame_local = ctx.add_local("__rs_frame", IRType::Int);
+    ctx.rs_temps_local = ctx.add_local("__rs_temps", IRType::Int);
+    ctx.rs_spare_local = ctx.add_local("__rs_spare", IRType::Int);
+    ctx.dropped_finalizable.set(false);
+    ctx.touched_finalizable.set(false);
+    ctx.function_drops.set(false);
+    let args_local = ctx.add_local("__rs_args", IRType::Int);
+    let result_local = ctx.add_local("__rs_result", IRType::Int);
+    let result_f64_local = ctx.add_local("__rs_result_f64", IRType::Float);
 
     // Declare locals in index order, coalescing adjacent same-type runs. The
     // local index assigned by `add_local` must match the WASM declaration
@@ -129,7 +281,29 @@ pub fn compile_function(
         }
     }
 
-    let mut func = Function::new(locals);
+    // The locals that can hold a reference: every parameter and named local
+    // that is one word and is not typed as a number. A store to one is
+    // mirrored in the function's frame on the root stack, where the collector
+    // can see it. A local typed as a number is only ever read as one, so
+    // whatever it holds is never followed.
+    // A closure cell's local is declared an int by the pass that makes it,
+    // and holds the cell's address.
+    let eligible: std::collections::HashSet<u32> = ctx
+        .locals_map
+        .iter()
+        .filter(|(name, info)| {
+            info.index < ctx.temp_local
+                && (name.starts_with("__cell_")
+                    || !matches!(info.var_type, IRType::Int | IRType::Bool | IRType::Float))
+        })
+        .map(|(_, info)| info.index)
+        .collect();
+    let mut func = Function::user(
+        eligible,
+        ctx.rs_frame_local,
+        ctx.alloc_func_index,
+        ctx.returns_reference.clone(),
+    );
 
     // Replay the same for-loop numbering used by the scan above so codegen
     // resolves the matching iterator helper locals.
@@ -213,9 +387,54 @@ pub fn compile_function(
         }
     }
 
-    func.instruction(&Instruction::End);
+    // A local typed as a number when the function began and as a reference
+    // now would have been left out of the frame.
+    for (name, info) in &ctx.locals_map {
+        let reference = !matches!(
+            info.var_type,
+            IRType::Int | IRType::Bool | IRType::Float | IRType::None | IRType::Unknown
+        );
+        if info.index < ctx.temp_local && reference && !func.is_eligible(info.index) {
+            ctx.report(format!(
+                "'{name}' is typed as a number where the function begins and as a {} later, \
+                 so the collector would not see what it holds; this is a compiler bug",
+                crate::type_to_string(&info.var_type)
+            ));
+        }
+    }
 
-    func
+    // Its arguments, its own locals, and whatever its statements let go of.
+    let drops_finalizable = ctx.function_drops.get()
+        || ctx
+            .locals_map
+            .values()
+            .any(|info| info.index < ctx.temp_local && ctx.reaches_finalizer(&info.var_type));
+    if drops_finalizable {
+        func.note_root_use();
+    }
+
+    CompiledFunction {
+        locals,
+        result: if matches!(return_type, IRType::Float) {
+            ValType::F64
+        } else {
+            ValType::I32
+        },
+        frame: func.into_frame(),
+        frame_local: ctx.rs_frame_local,
+        temps_local: ctx.rs_temps_local,
+        args_local,
+        spare_local: ctx.rs_spare_local,
+        result_local,
+        result_f64_local,
+        drops_finalizable,
+        // `__init__` answers the instance its caller made, and holds.
+        returns_reference: !ctx.return_self
+            && !matches!(
+                return_type,
+                IRType::Int | IRType::Bool | IRType::Float | IRType::None
+            ),
+    }
 }
 
 /// Whether `emitted` is `held` with some of its unknown members known: the
@@ -302,6 +521,24 @@ fn enter_handler(func: &mut Function, ctx: &mut CompilationContext, name: Option
     func.instruction(&Instruction::GlobalSet(EXC_VALUE_GLOBAL));
     ctx.reraise_codes
         .push((name.cloned(), code_local, value_local));
+}
+
+/// A handler's end: the exception it caught is let go of, as CPython unbinds
+/// the `as` name there. Only a program with finalizers can tell.
+fn leave_handler(func: &mut Function, ctx: &mut CompilationContext, name: Option<&String>) {
+    if ctx.finalizer_reach.is_empty() {
+        return;
+    }
+    let Some((_, _, value_local)) = ctx.reraise_codes.last().cloned() else {
+        return;
+    };
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::LocalSet(value_local));
+    if let Some(info) = name.and_then(|n| ctx.get_local_info(n)).cloned() {
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::LocalSet(info.index));
+        ctx.note_drop(&info.var_type);
+    }
 }
 
 /// The local the next handler's `as` name lives in, numbered with the loops
@@ -1258,6 +1495,7 @@ fn scan_expr_locals(expr: &IRExpr, ctx: &mut CompilationContext, depth: u32) {
                 ensure_local(ctx, &comp_gen_local_name("ptr", depth, g), IRType::Int);
                 ensure_local(ctx, &comp_gen_local_name("idx", depth, g), IRType::Int);
                 ensure_local(ctx, &comp_gen_local_name("len", depth, g), IRType::Int);
+                ensure_local(ctx, &comp_gen_local_name("mark", depth, g), IRType::Int);
                 // The iterable first: a comprehension inside it types its own
                 // target, which the element type here may be read through.
                 scan_expr_locals(&generator.iterable, ctx, depth + 1);
@@ -1745,7 +1983,14 @@ pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
                         bind_alias(ctx, name, &local)
                     });
                     ensure_local(ctx, &caught_code_local(ctx.except_scan_depth), IRType::Int);
-                    ensure_local(ctx, &caught_value_local(ctx.except_scan_depth), IRType::Int);
+                    // The exception object, which only this local holds once
+                    // the handler has taken it: typed as a reference so the
+                    // collector sees it.
+                    ensure_local(
+                        ctx,
+                        &caught_value_local(ctx.except_scan_depth),
+                        IRType::Unknown,
+                    );
                     ctx.except_scan_depth += 1;
                     scan_and_allocate_locals(&handler.body, ctx);
                     ctx.except_scan_depth -= 1;
@@ -1794,6 +2039,106 @@ pub fn compile_body(
     memory_layout: &MemoryLayout,
 ) {
     for stmt in &body.statements {
+        let calls = func.runtime_calls();
+        let outer_dropped = ctx.dropped_finalizable.replace(false);
+        let outer_touched = ctx.touched_finalizable.replace(false);
+        compile_statement(stmt, func, ctx, memory_layout);
+        let touched = ctx.touched_finalizable.replace(outer_touched);
+        let dropped = ctx.dropped_finalizable.replace(outer_dropped);
+        // A statement that stores may have overwritten the last reference
+        // to whatever it handled.
+        let dropped = dropped || (touched && stores(stmt));
+        if dropped {
+            ctx.function_drops.set(true);
+        }
+        end_statement(func, ctx, calls, dropped);
+    }
+}
+
+/// Whether a statement can overwrite or remove a reference: an assignment
+/// of any kind, or a call of a method that takes something out of a
+/// collection.
+fn stores(stmt: &IRStatement) -> bool {
+    match stmt {
+        IRStatement::Assign { .. }
+        | IRStatement::AttributeAssign { .. }
+        | IRStatement::IndexAssign { .. }
+        | IRStatement::TupleUnpack { .. }
+        | IRStatement::AugAssign { .. }
+        | IRStatement::AttributeAugAssign { .. } => true,
+        IRStatement::Expression(IRExpr::MethodCall { method_name, .. }) => matches!(
+            method_name.as_str(),
+            "pop"
+                | "popitem"
+                | "popleft"
+                | "clear"
+                | "remove"
+                | "discard"
+                | "update"
+                | "difference_update"
+                | "intersection_update"
+                | "symmetric_difference_update"
+                | crate::ir::DEL_ITEM_METHOD
+                | crate::ir::DEL_SLICE_METHOD
+        ),
+        _ => false,
+    }
+}
+
+/// What follows a statement's code: the temporaries it left on the root
+/// stack are dropped, which is safe because no expression of this function
+/// is being evaluated any more, and a collection runs if one is due.
+///
+/// `calls` is the count of runtime calls before the statement. One that made
+/// none allocated nothing and read nothing out of the heap, so it has nothing
+/// to drop. `dropped` says the statement may have let go of the last
+/// reference to an object with a finalizer, which is then run now, as
+/// CPython runs it.
+pub(crate) fn end_statement(
+    func: &mut Function,
+    ctx: &CompilationContext,
+    calls: u32,
+    dropped: bool,
+) {
+    use crate::compiler::gc::{
+        GcFn, COLLECT_DROPPED, FIN_LIVE_GLOBAL, GC_PENDING_GLOBAL, RS_TOP_GLOBAL,
+    };
+    use crate::compiler::runtime::Helper;
+    let called = func.runtime_calls() > calls;
+    if dropped && !ctx.finalizer_reach.is_empty() {
+        // The frame's locals are used whether or not anything was called.
+        func.note_root_use();
+        let collect = ctx.helper(Helper::Gc(GcFn::Collect));
+        func.instruction(&Instruction::GlobalGet(RS_TOP_GLOBAL));
+        func.instruction(&Instruction::LocalSet(ctx.rs_spare_local));
+        crate::compiler::emit::emit_drop_temporaries(func, ctx.rs_temps_local);
+        func.instruction(&Instruction::GlobalGet(FIN_LIVE_GLOBAL));
+        func.instruction(&Instruction::If(BlockType::Empty));
+        func.instruction(&Instruction::LocalGet(ctx.rs_temps_local));
+        func.instruction(&Instruction::LocalGet(ctx.rs_spare_local));
+        func.instruction(&Instruction::I32Const(COLLECT_DROPPED));
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::Call(collect));
+        func.instruction(&Instruction::End);
+    } else if called {
+        crate::compiler::emit::emit_drop_temporaries(func, ctx.rs_temps_local);
+    }
+    if called {
+        let safepoint = ctx.helper(Helper::Gc(GcFn::Safepoint));
+        func.instruction(&Instruction::GlobalGet(GC_PENDING_GLOBAL));
+        func.instruction(&Instruction::If(BlockType::Empty));
+        func.instruction(&Instruction::Call(safepoint));
+        func.instruction(&Instruction::End);
+    }
+}
+
+fn compile_statement(
+    stmt: &IRStatement,
+    func: &mut Function,
+    ctx: &mut CompilationContext,
+    memory_layout: &MemoryLayout,
+) {
+    {
         // `c[k] = v` and `a += b` on an instance call its special methods.
         let rewritten = crate::compiler::dunders::rewrite_statement(stmt, ctx);
         let stmt = rewritten.as_ref().unwrap_or(stmt);
@@ -1960,6 +2305,7 @@ pub fn compile_body(
                     ));
                 }
                 func.instruction(&Instruction::GlobalSet(global));
+                ctx.note_drop(&ty);
                 if ctx.in_module_init {
                     ctx.module_global_types.insert(target.clone(), ty);
                 }
@@ -2055,7 +2401,15 @@ pub fn compile_body(
                     }
                 }
 
+                if let Some(info) = ctx.get_local_info(target) {
+                    ctx.note_drop(&info.var_type);
+                }
                 if let Some(local_idx) = ctx.get_local_index(target) {
+                    // Whatever the scan typed the local as, it holds a
+                    // reference now, which the collector has to see.
+                    if crate::compiler::expression::is_reference(&value_type) {
+                        func.make_eligible(local_idx);
+                    }
                     // A string/bytes value is an (offset, length) pair with the
                     // length on top of the stack. Store the length into the
                     // companion local first, then the offset into the named one.
@@ -2068,7 +2422,15 @@ pub fn compile_body(
                             None => func.instruction(&Instruction::Drop),
                         };
                     }
-                    func.instruction(&Instruction::LocalSet(local_idx));
+                    // A number into one of the program's own variables. A
+                    // name the compiler made is left to the general rule: a
+                    // closure's cell is typed as an int and is an address.
+                    if matches!(value_type, IRType::Int | IRType::Bool) && !target.starts_with("__")
+                    {
+                        func.set_number_local(local_idx);
+                    } else {
+                        func.instruction(&Instruction::LocalSet(local_idx));
+                    }
                 } else {
                     // Handle the case where the variable is not found in the context
                     panic!("Variable {target} not found in context");
@@ -2204,7 +2566,7 @@ pub fn compile_body(
                     func.instruction(&Instruction::I32Mul);
                     func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
                     func.instruction(&Instruction::I32Add);
-                    func.instruction(&Instruction::Call(ctx.alloc_func_index));
+                    func.instruction(&Instruction::Call(ctx.alloc_fn()));
                     func.instruction(&Instruction::LocalSet(mid_ptr));
                     func.instruction(&Instruction::LocalGet(mid_ptr));
                     func.instruction(&Instruction::LocalGet(mid_len));
@@ -2424,7 +2786,7 @@ pub fn compile_body(
                         }
                     }
                     func.instruction(&Instruction::Return);
-                    continue;
+                    return;
                 }
 
                 // A bare `raise` raises again what the innermost handler
@@ -2451,7 +2813,7 @@ pub fn compile_body(
                             0,
                         ),
                     }
-                    continue;
+                    return;
                 };
                 let emit_exception =
                     |expr: &IRExpr, func: &mut Function, ctx: &mut CompilationContext| {
@@ -2492,7 +2854,7 @@ pub fn compile_body(
                 let Some(obj) = ctx.hold() else {
                     ctx.report("a raise is nested too deep to compile");
                     func.instruction(&Instruction::Drop);
-                    continue;
+                    return;
                 };
                 func.instruction(&Instruction::LocalSet(obj));
                 // `raise X from Y`: Y (or None) is X's `__cause__`.
@@ -2531,10 +2893,15 @@ pub fn compile_body(
                 // Condition check: exit the loop when the condition is false.
                 // Emitted before the inner continue block so this `BrIf(1)` still
                 // targets the outer break block from inside the loop.
+                let calls = func.runtime_calls();
                 let cond_ty = emit_expr(condition, func, ctx, memory_layout, Some(&IRType::Bool));
                 crate::compiler::expression::emit_truthiness(func, ctx, &cond_ty);
                 func.instruction(&Instruction::I32Eqz);
                 func.instruction(&Instruction::BrIf(1));
+                // What the condition left on the root stack goes before the
+                // body, or a loop whose body leaves nothing would never drop
+                // it.
+                end_statement(func, ctx, calls, false);
 
                 // Inner block: `continue` branches to its end, which falls through
                 // to the back-edge below and re-evaluates the loop condition.
@@ -2683,7 +3050,7 @@ pub fn compile_body(
                         crate::compiler::expression::emit_user_call(func, ctx, setter_idx);
                         // The setter's WASM result (implicit 0) is unused.
                         func.instruction(&Instruction::Drop);
-                        continue;
+                        return;
                     }
                 }
 
@@ -2876,7 +3243,7 @@ pub fn compile_body(
                         "augmented assignment to '.{attribute}' of a computed object is not \
                          supported. Hint: assign the object to a variable first"
                     ));
-                    continue;
+                    return;
                 }
                 let field_ty = static_path_type(object, ctx)
                     .and_then(|ty| match ty {
@@ -2921,14 +3288,14 @@ pub fn compile_body(
                             crate::compiler::expression::operator_symbol(op),
                             crate::type_to_string(&field_ty)
                         ));
-                        continue;
+                        return;
                     }
                     (IRType::Int | IRType::Bool, IROp::Div) => {
                         ctx.report(format!(
                             "'.{attribute} /= ...' makes the field a float, but it holds an int. \
                              Hint: start it as a float, or use '//=' for floor division"
                         ));
-                        continue;
+                        return;
                     }
                     _ => IRStatement::AttributeAssign {
                         object: object.clone(),
@@ -2979,6 +3346,10 @@ pub fn compile_body(
                 let target_idx = ctx
                     .get_local_index(target)
                     .expect("Target variable not found");
+                // Each iteration drops what the loop's own code left on the
+                // root stack (the iterable is kept by its local, and the
+                // target by its own) before the body runs.
+                let calls = func.runtime_calls();
 
                 // `for line in sys.stdin`: a line at a time, newline kept,
                 // until the end of input.
@@ -2986,6 +3357,7 @@ pub fn compile_body(
                     if let Some(info) = ctx.locals_map.get_mut(target) {
                         info.var_type = IRType::String;
                     }
+                    func.make_eligible(target_idx);
                     let len_companion = ctx.get_local_index(&strlen_local_name(target));
                     let read_line = ctx.helper(crate::compiler::runtime::Helper::ReadLine {
                         keep_newline: true,
@@ -3015,6 +3387,7 @@ pub fn compile_body(
                         }));
                         func.instruction(&Instruction::LocalSet(len_idx));
                     }
+                    end_statement(func, ctx, calls, false);
                     func.instruction(&Instruction::Block(BlockType::Empty));
                     ctx.block_depth += 1;
                     let continue_level = ctx.block_depth;
@@ -3031,7 +3404,7 @@ pub fn compile_body(
                     func.instruction(&Instruction::End);
                     ctx.block_depth -= 1;
                     func.instruction(&Instruction::End);
-                    continue;
+                    return;
                 }
 
                 // Evaluate the iterable (should return a pointer to list or value).
@@ -3081,11 +3454,15 @@ pub fn compile_body(
                             let is_str = matches!(elem, IRType::String | IRType::Bytes);
                             if is_str || matches!(info.var_type, IRType::Unknown) {
                                 info.var_type = elem;
+                                // A variable the scan typed as a number
+                                // holds a reference from here on.
+                                func.make_eligible(target_idx);
                             }
                         }
                     }
                 }
 
+                let walked = iterable_type.clone();
                 match iterable_type {
                     IRType::String => {
                         // `for ch in s` binds each character as its own
@@ -3099,9 +3476,15 @@ pub fn compile_body(
                         // runs, so the scratch locals are free to use here.
                         func.instruction(&Instruction::LocalSet(list_length_idx));
                         func.instruction(&Instruction::LocalSet(iterator_ptr_idx));
+                        // The iterable is in its own local now: what working
+                        // it out left on the root stack goes once, here, and
+                        // each time round only what binding the target left.
+                        end_statement(func, ctx, calls, false);
+                        let calls = func.runtime_calls();
                         if let Some(info) = ctx.locals_map.get_mut(target) {
                             info.var_type = IRType::String;
                         }
+                        func.make_eligible(target_idx);
                         let len_companion = ctx.get_local_index(&strlen_local_name(target));
 
                         func.instruction(&Instruction::I32Const(0));
@@ -3132,6 +3515,7 @@ pub fn compile_body(
                             None => func.instruction(&Instruction::Drop),
                         };
                         func.instruction(&Instruction::LocalSet(target_idx));
+                        end_statement(func, ctx, calls, false);
 
                         func.instruction(&Instruction::Block(BlockType::Empty));
                         ctx.block_depth += 1;
@@ -3183,6 +3567,11 @@ pub fn compile_body(
                             matches!(get_local_type_by_index(ctx, target_idx), IRType::Float);
                         // Store the pointer to the list/string
                         func.instruction(&Instruction::LocalSet(iterator_ptr_idx));
+                        // The iterable is in its own local now: what working
+                        // it out left on the root stack goes once, here, and
+                        // each time round only what binding the target left.
+                        end_statement(func, ctx, calls, false);
+                        let calls = func.runtime_calls();
 
                         // Get list length: load from memory at ptr+0
                         func.instruction(&Instruction::LocalGet(iterator_ptr_idx));
@@ -3263,6 +3652,8 @@ pub fn compile_body(
                             }
                         }
 
+                        end_statement(func, ctx, calls, false);
+
                         // Inner block: `continue` lands at its end, which falls
                         // through to the counter increment below.
                         func.instruction(&Instruction::Block(BlockType::Empty));
@@ -3302,6 +3693,11 @@ pub fn compile_body(
                         }
                         // Range object layout: [start:i32][stop:i32][step:i32][current:i32]
                         func.instruction(&Instruction::LocalSet(iterator_ptr_idx));
+                        // The iterable is in its own local now: what working
+                        // it out left on the root stack goes once, here, and
+                        // each time round only what binding the target left.
+                        end_statement(func, ctx, calls, false);
+                        let calls = func.runtime_calls();
 
                         // The loop counts in its own local from start, and the
                         // target is bound to each value as the body begins:
@@ -3358,7 +3754,8 @@ pub fn compile_body(
                         func.instruction(&Instruction::End);
                         func.instruction(&Instruction::BrIf(1)); // Break if true
                         func.instruction(&Instruction::LocalGet(loop_counter_idx));
-                        func.instruction(&Instruction::LocalSet(target_idx));
+                        func.set_number_local(target_idx);
+                        end_statement(func, ctx, calls, false);
 
                         // Inner block: `continue` lands at its end, which falls
                         // through to the step increment below.
@@ -3412,6 +3809,12 @@ pub fn compile_body(
                              value, for example ': List[int]'"
                         ));
                     }
+                }
+                // The loop held what it walked, and lets go of it here.
+                if !ctx.finalizer_reach.is_empty() {
+                    func.instruction(&Instruction::I32Const(0));
+                    func.instruction(&Instruction::LocalSet(iterator_ptr_idx));
+                    ctx.note_drop(&walked);
                 }
             }
 
@@ -3479,6 +3882,7 @@ pub fn compile_body(
                     if catch_all {
                         enter_handler(func, ctx, handler.name.as_ref());
                         compile_body(&handler.body, func, ctx, memory_layout);
+                        leave_handler(func, ctx, handler.name.as_ref());
                         ctx.reraise_codes.pop();
                         unbind(ctx, alias);
                         // Nothing after a catch-all can run.
@@ -3502,6 +3906,7 @@ pub fn compile_body(
 
                     enter_handler(func, ctx, handler.name.as_ref());
                     compile_body(&handler.body, func, ctx, memory_layout);
+                    leave_handler(func, ctx, handler.name.as_ref());
                     ctx.reraise_codes.pop();
                     unbind(ctx, alias);
 

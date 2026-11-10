@@ -14,12 +14,13 @@
 //! built at run time can reach the trap.
 
 use crate::compiler::context::CompilationContext;
+use crate::compiler::emit::Function;
 use crate::compiler::runtime::{
     alloc_string, byte, emit_float_scale, float_locals, function, return_text, w32, Helper, BIG_R,
     BIG_S, BIG_T, BIG_Z, DIGITS, DIG_COUNT, DIG_K, DIG_MODE, DIG_N, SPEC, TEXT,
 };
 use crate::ir::IRType;
-use wasm_encoder::{BlockType, Function, Instruction as I, ValType};
+use wasm_encoder::{BlockType, Instruction as I, ValType};
 
 /// Emit a sequence of instructions into a function.
 macro_rules! emit {
@@ -2280,7 +2281,7 @@ fn sign_text(f: &mut Function, ctx: &CompilationContext, neg: u32, out: u32, len
         I::LocalGet(len),
         I::If(BlockType::Empty),
         I::I32Const(6),
-        I::Call(ctx.alloc_func_index),
+        I::Call(ctx.alloc_fn()),
         I::LocalTee(out),
         I::I32Const(1),
         I::I32Store(w32(0)),
