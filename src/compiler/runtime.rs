@@ -14,8 +14,9 @@
 use crate::compiler::context::{
     CompilationContext, COLLECTION_DATA, COLLECTION_HEAP_BASE, COLLECTION_SLOT, DICT_ENTRY,
 };
+use crate::compiler::emit::Function;
 use crate::ir::IRType;
-use wasm_encoder::{BlockType, Function, Instruction, MemArg, ValType};
+use wasm_encoder::{BlockType, Instruction, MemArg, ValType};
 
 /// The runtime helpers.
 #[derive(Clone, Debug, PartialEq)]
@@ -38,6 +39,8 @@ pub enum Helper {
     BigMulPow10,
     /// `(r, s) -> d`: `d = r // s` for a quotient under 10, leaving `r % s`.
     BigQuoRem,
+    /// The allocator's and collector's own functions (`compiler::gc`).
+    Gc(crate::compiler::gc::GcFn),
     /// `(v: f64) -> str`: `repr(v)`, which is also `str(v)`.
     FloatRepr,
     /// `(v) -> str`: `str(v)` for a value of the type (an f64 for a float, a
@@ -187,6 +190,7 @@ pub fn signature(helper: &Helper) -> (Vec<ValType>, Vec<ValType>) {
         }
         Helper::BigAdd | Helper::BigSub => (vec![I32, I32, I32], vec![]),
         Helper::BigCmp | Helper::BigQuoRem => (vec![I32, I32], vec![I32]),
+        Helper::Gc(function) => crate::compiler::gc::signature(function),
         Helper::FloatRepr => (vec![F64], vec![I32]),
         Helper::Str(ty) | Helper::Repr(ty) => (
             vec![if matches!(ty, IRType::Float) {
@@ -294,6 +298,7 @@ pub fn build(helper: &Helper, ctx: &CompilationContext) -> Function {
         Helper::BigCmp => build_big_cmp(),
         Helper::BigMulPow10 => build_big_mul_pow10(ctx),
         Helper::BigQuoRem => build_big_quorem(ctx),
+        Helper::Gc(function) => crate::compiler::gc::build(function, ctx),
         Helper::FloatRepr => crate::compiler::format::build_float_repr(ctx),
         Helper::ShortestDigits => build_shortest_digits(ctx),
         Helper::FixedDigits => crate::compiler::format::build_fixed_digits(ctx),
@@ -731,7 +736,7 @@ pub(crate) fn alloc_string(f: &mut Function, ctx: &CompilationContext, len: u32,
     f.instruction(&Instruction::LocalGet(len));
     f.instruction(&Instruction::I32Const(5));
     f.instruction(&Instruction::I32Add);
-    f.instruction(&Instruction::Call(ctx.alloc_func_index));
+    f.instruction(&Instruction::Call(ctx.alloc_fn()));
     f.instruction(&Instruction::LocalTee(out));
     f.instruction(&Instruction::LocalGet(len));
     f.instruction(&Instruction::I32Store(w32(0)));
@@ -1558,7 +1563,7 @@ fn build_str(ctx: &CompilationContext, ty: &IRType, repr: bool) -> Function {
         _ => {
             let mut f = function(&[]);
             f.instruction(&Instruction::LocalGet(0));
-            f.instruction(&Instruction::Call(ctx.i32_to_str_func_index));
+            f.instruction(&Instruction::Call(ctx.i32_to_str_fn()));
             f.instruction(&Instruction::End);
             f
         }
@@ -1575,7 +1580,7 @@ fn build_range_repr(ctx: &CompilationContext) -> Function {
     for (local, offset) in [(a, 0), (b, 4), (c, 8)] {
         f.instruction(&Instruction::LocalGet(r));
         f.instruction(&Instruction::I32Load(w32(offset)));
-        f.instruction(&Instruction::Call(ctx.i32_to_str_func_index));
+        f.instruction(&Instruction::Call(ctx.i32_to_str_fn()));
         f.instruction(&Instruction::LocalSet(local));
     }
     let length = |f: &mut Function, piece: u32| {
@@ -1653,7 +1658,7 @@ fn build_container_repr(ctx: &CompilationContext, ty: &IRType) -> Function {
     f.instruction(&Instruction::LocalGet(n));
     f.instruction(&Instruction::I32Const(4 * per_entry));
     f.instruction(&Instruction::I32Mul);
-    f.instruction(&Instruction::Call(ctx.alloc_func_index));
+    f.instruction(&Instruction::Call(ctx.alloc_fn()));
     f.instruction(&Instruction::LocalSet(pieces));
     // total = brackets + separators, then each piece's length.
     f.instruction(&Instruction::LocalGet(n));
@@ -2265,7 +2270,7 @@ fn build_dict_keys(ctx: &CompilationContext) -> Function {
             Instruction::I32Mul,
             Instruction::I32Const(COLLECTION_HEADER as i32),
             Instruction::I32Add,
-            Instruction::Call(ctx.alloc_func_index),
+            Instruction::Call(ctx.alloc_fn()),
             Instruction::LocalTee(list),
             Instruction::LocalGet(count),
             Instruction::I32Store(w32(0)),

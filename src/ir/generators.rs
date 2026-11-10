@@ -882,7 +882,7 @@ impl Desugarer<'_> {
                             target,
                             value: IRExpr::FunctionCall {
                                 function_name: format!("{it_class}::__next__"),
-                                arguments: vec![IRExpr::Variable(it_var)],
+                                arguments: vec![IRExpr::Variable(it_var.clone())],
                             },
                             var_type: None,
                         },
@@ -894,6 +894,12 @@ impl Desugarer<'_> {
                     ];
                     loop_body.extend(for_body.statements);
                     out.push(while_true(loop_body));
+                    // The loop held the iterator, and lets go of it here, as
+                    // CPython's does: a generator left mid-way is closed.
+                    out.push(IRStatement::Expression(IRExpr::FunctionCall {
+                        function_name: crate::ir::DEL_NAME_FN.to_string(),
+                        arguments: vec![IRExpr::Variable(it_var)],
+                    }));
                 }
                 IRStatement::Assign {
                     target,
@@ -1508,6 +1514,21 @@ fn build_state_class(
             IRType::Class(class_name.to_string()),
         ),
     ];
+    // A generator that can be suspended inside a `try` has clean-up to run
+    // when it is abandoned there: CPython closes a generator as it is
+    // reclaimed. One with no such point has nothing `close()` would run.
+    let mut methods = methods;
+    if !throw_points.is_empty() {
+        methods.push(method(
+            "__del__",
+            vec![self_param()],
+            vec![IRStatement::Expression(IRExpr::FunctionCall {
+                function_name: format!("{class_name}::close"),
+                arguments: vec![self_var()],
+            })],
+            IRType::None,
+        ));
+    }
 
     Ok(IRClass {
         name: class_name.to_string(),

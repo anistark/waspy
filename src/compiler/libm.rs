@@ -23,8 +23,8 @@
 
 use crate::compiler::asm::{call, fbits, words, Asm, Ty, Var, E, X};
 use crate::compiler::context::CompilationContext;
+use crate::compiler::emit::Function;
 use crate::compiler::runtime::Helper;
-use wasm_encoder::Function;
 
 /// The routines.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

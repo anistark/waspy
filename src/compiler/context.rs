@@ -42,9 +42,10 @@ pub const HELD_I64_LOCALS: u32 = 12;
 pub const MODULE_INIT_FN: &str = "__module_init";
 
 /// Index of the first WASM global holding a module-level definition; the
-/// globals below it are the runtime's own (allocator, StopIteration, the
-/// pending exception's class, call depth, the pending exception).
-pub const FIRST_MODULE_GLOBAL: u32 = 5;
+/// globals below it are the runtime's own (the end of the heap,
+/// StopIteration, the pending exception's class, call depth, the pending
+/// exception, and the allocator's and collector's state, `compiler::gc`).
+pub const FIRST_MODULE_GLOBAL: u32 = crate::compiler::gc::RUNTIME_GLOBALS;
 
 /// Where the runtime heap starts: every collection, instance, and runtime
 /// string is an `__alloc` block from here up. Sits above the string (from 0)
@@ -145,6 +146,26 @@ pub fn common_class_base(
         current = base_of(&name);
     }
     None
+}
+
+/// Whether a value of type `ty` can be, or hold, an instance of one of
+/// `classes`.
+fn type_reaches(ty: &IRType, classes: &HashSet<String>) -> bool {
+    match ty {
+        IRType::Class(name) => classes.contains(name),
+        IRType::List(inner)
+        | IRType::Set(inner)
+        | IRType::VarTuple(inner)
+        | IRType::Optional(inner)
+        | IRType::Generator(inner) => type_reaches(inner, classes),
+        IRType::Dict(key, value) => type_reaches(key, classes) || type_reaches(value, classes),
+        IRType::Tuple(members) | IRType::Union(members) => {
+            members.iter().any(|m| type_reaches(m, classes))
+        }
+        // A closure holds whatever it captured.
+        IRType::Callable { .. } => true,
+        _ => false,
+    }
 }
 
 pub fn strlen_local_name(name: &str) -> String {
@@ -441,6 +462,31 @@ pub struct CompilationContext {
     /// Emitted after all user functions/methods, so callers (e.g. string/bytes
     /// concatenation) reference it by this index. Set during module assembly.
     pub alloc_func_index: u32,
+    /// Whether anything compiled so far allocates. A module that never does
+    /// carries no allocator and no collector.
+    pub alloc_used: Cell<bool>,
+    /// The locals of the function being compiled that the root stack is
+    /// worked through: its frame's offset, the end of the frame's slots
+    /// (where its temporaries start), and a spare word. See `compiler::gc`.
+    pub rs_frame_local: u32,
+    pub rs_temps_local: u32,
+    pub rs_spare_local: u32,
+    /// The functions of the program that return a reference, by WASM index.
+    pub returns_reference: std::rc::Rc<HashSet<u32>>,
+    /// Each class that can reach an object with a finalizer through its
+    /// fields, the classes with a `__del__` themselves included. Empty when
+    /// no class of the module has one.
+    pub finalizer_reach: HashSet<String>,
+    /// Set while a statement is compiled, when it may have dropped the last
+    /// reference to an object with a finalizer.
+    pub dropped_finalizable: Cell<bool>,
+    /// Set while a statement is compiled, when it handled a value that can
+    /// be or hold an object with a finalizer. A statement that stores, and
+    /// did, may have overwritten the last reference to one.
+    pub touched_finalizable: Cell<bool>,
+    /// The same for the function being compiled as a whole: something in it
+    /// may drop such a reference, so its exit checks.
+    pub function_drops: Cell<bool>,
     /// WASM function index of `__alloc_obj(size, class_id) -> ptr`, which
     /// allocates an instance and stamps its class id into the tag word at
     /// offset 0. A separate helper (rather than inline stamping) keeps the
@@ -587,6 +633,15 @@ impl CompilationContext {
             expr_block_depth: Cell::new(0),
             numeric_operand: Cell::new(false),
             alloc_func_index: 0,
+            alloc_used: Cell::new(false),
+            rs_frame_local: 0,
+            rs_temps_local: 0,
+            rs_spare_local: 0,
+            returns_reference: std::rc::Rc::new(HashSet::new()),
+            finalizer_reach: HashSet::new(),
+            dropped_finalizable: Cell::new(false),
+            touched_finalizable: Cell::new(false),
+            function_drops: Cell::new(false),
             alloc_obj_func_index: 0,
             i32_to_str_func_index: 0,
             lambda_slots: HashMap::new(),
@@ -1007,6 +1062,117 @@ impl CompilationContext {
             }
         };
         self.helper_base + position as u32
+    }
+
+    /// The function index of `__alloc`, for a call to it.
+    pub fn alloc_fn(&self) -> u32 {
+        self.alloc_used.set(true);
+        self.alloc_func_index
+    }
+
+    /// The function index of `__alloc_obj`, for a call to it.
+    pub fn alloc_obj_fn(&self) -> u32 {
+        self.alloc_used.set(true);
+        self.alloc_obj_func_index
+    }
+
+    /// The function index of `__i32_to_str`, for a call to it.
+    pub fn i32_to_str_fn(&self) -> u32 {
+        self.alloc_used.set(true);
+        self.i32_to_str_func_index
+    }
+
+    /// The `__del__` each class with a finalizer resolves to: its class id,
+    /// the function, and what the function returns. In class id order.
+    pub fn finalizers(&self) -> Vec<(i32, u32, IRType)> {
+        let mut found: Vec<(i32, u32, IRType)> = self
+            .class_map
+            .values()
+            .filter_map(|info| {
+                let function = *info.methods.get("__del__")?;
+                let owner = info.method_owner.get("__del__")?;
+                let result = self
+                    .get_function_info(&format!("{owner}::__del__"))
+                    .map(|f| f.return_type.clone())
+                    .unwrap_or(IRType::None);
+                Some((info.class_id, function, result))
+            })
+            .collect();
+        found.sort_by_key(|(id, _, _)| *id);
+        found
+    }
+
+    /// The class ids whose instances are finalized.
+    pub fn finalizable_class_ids(&self) -> Vec<i32> {
+        self.finalizers().into_iter().map(|(id, _, _)| id).collect()
+    }
+
+    /// The module globals that can hold a reference, in the order their
+    /// definitions run: every one that is a word and not typed as a number.
+    pub fn reference_globals(&self) -> Vec<u32> {
+        let mut globals: Vec<u32> = self
+            .module_global_index
+            .iter()
+            .filter(|(name, _)| {
+                !matches!(
+                    self.module_global_types.get(*name),
+                    Some(IRType::Float | IRType::Int | IRType::Bool)
+                )
+            })
+            .map(|(_, index)| *index)
+            .collect();
+        globals.sort_unstable();
+        globals
+    }
+
+    /// Whether a value of this type can hold, or be, an object with a
+    /// finalizer. An untyped place holds only numbers, None, and functions.
+    pub fn reaches_finalizer(&self, ty: &IRType) -> bool {
+        !self.finalizer_reach.is_empty() && type_reaches(ty, &self.finalizer_reach)
+    }
+
+    /// The classes a value typed as one can reach an object with a finalizer
+    /// through: a class with a `__del__`, a base of one (a variable of the
+    /// base may hold the subclass), and a class with a field of a type that
+    /// reaches one. Empty when no class has a finalizer.
+    pub fn classes_reaching_finalizers(&self) -> HashSet<String> {
+        let mut reach: HashSet<String> = self
+            .class_map
+            .values()
+            .filter(|info| info.methods.contains_key("__del__"))
+            .map(|info| info.name.clone())
+            .collect();
+        if reach.is_empty() {
+            return reach;
+        }
+        loop {
+            let found: Vec<String> = self
+                .class_map
+                .values()
+                .filter(|info| !reach.contains(&info.name))
+                .filter(|info| {
+                    reach
+                        .iter()
+                        .any(|sub| self.is_class_or_subclass(sub, &info.name))
+                        || info.field_types.values().any(|t| type_reaches(t, &reach))
+                })
+                .map(|info| info.name.clone())
+                .collect();
+            if found.is_empty() {
+                return reach;
+            }
+            reach.extend(found);
+        }
+    }
+
+    /// Note that the statement being compiled stores to, or lets go of, a
+    /// value of type `ty`: if that can be an object with a finalizer, the
+    /// statement is followed by a check for one to run.
+    pub fn note_drop(&self, ty: &IRType) {
+        if self.reaches_finalizer(ty) {
+            self.dropped_finalizable.set(true);
+            self.function_drops.set(true);
+        }
     }
 
     /// Add a local variable to the context

@@ -246,7 +246,7 @@ Merged modules share one namespace, so <code>utils.format</code> next to <code>r
 {% endcall %}
 
 {% call shape("Object lifetime", ["differs"]) %}
-The allocator has no <code>free</code>: every instance lives until the module is torn down, and <code>__del__</code> is never invoked. A long-running program that allocates in a loop will grow its memory, and a generator abandoned mid-iteration does not run its <code>finally</code> blocks until <code>close()</code> is called.
+Memory is reclaimed, and <code>__del__</code> runs when the last reference goes: as a function returns, a name is rebound or deleted, or a collection lets go of what it held, in CPython's order. A generator abandoned mid-iteration runs its <code>finally</code> blocks then too. What differs is a temporary, which lives to the end of its statement (so <code>print(Res().name)</code> prints before the finalizer runs), and an object in a reference cycle, which is finalized whenever the collector next runs rather than at CPython's count.
 {% endcall %}
 
 {% call shape("A NaN inside a collection", ["differs"]) %}

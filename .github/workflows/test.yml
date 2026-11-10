@@ -47,6 +47,15 @@ jobs:
           --test unit_miscompiles
           --test integration_wasmrun_plugin
 
+      # The same suite with a collection forced at every statement and freed
+      # memory overwritten: a reference the collector cannot see (held only in
+      # a local it does not know of, say) then reads garbage and fails a test,
+      # where an ordinary run would pass by luck.
+      - name: Tests under collector stress (required gate)
+        run: cargo test --all-features
+        env:
+          WASPY_GC_STRESS: 1
+
       # Every done feature on the development board is backed by a passing
       # test in tests/integration/board.rs, and no open feature's test passes.
       - name: Board check (required gate)

@@ -11,7 +11,7 @@ mod math;
 mod os;
 mod random;
 
-pub(crate) use os::{emit_environ, OsFn};
+pub(crate) use os::{emit_environ, OsFn, STATE as OS_STATE};
 
 pub(crate) use random::RandomFn;
 
@@ -24,8 +24,8 @@ pub(crate) fn build_os(ctx: &CompilationContext, routine: OsFn) -> Function {
 }
 
 use crate::compiler::context::CompilationContext;
+use crate::compiler::emit::Function;
 use crate::ir::{IRExpr, IRType, MemoryLayout};
-use wasm_encoder::Function;
 
 /// Emit a call to the dotted stdlib function (`math.sqrt`), or `None` when
 /// it is not implemented.

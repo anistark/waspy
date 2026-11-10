@@ -126,6 +126,10 @@ name = "unit_miscompiles"
 path = "tests/unit/miscompiles.rs"
 
 [[test]]
+name = "unit_reclamation"
+path = "tests/unit/reclamation.rs"
+
+[[test]]
 name = "unit_language"
 path = "tests/unit/language.rs"
 

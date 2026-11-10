@@ -11,7 +11,8 @@
 //! Nothing here allocates or calls back into user code: a helper built this
 //! way is a pure function of its parameters and the memory it is pointed at.
 
-use wasm_encoder::{BlockType, Function, Instruction as I, MemArg, ValType};
+use crate::compiler::emit::Function;
+use wasm_encoder::{BlockType, Instruction as I, MemArg, ValType};
 
 /// The value types an expression can have.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,6 +115,10 @@ pub enum E {
     Load8(Box<E>, u64),
     /// Store the value in the local, and give it.
     Tee(u32, Ty, Box<E>),
+    /// The value of an i32 global.
+    Global(u32),
+    /// The size of memory, in bytes.
+    MemBytes,
 }
 
 /// A local (or parameter) of a helper being built.
@@ -164,7 +169,7 @@ pub fn fbits(bits: u64) -> E {
 impl E {
     pub fn ty(&self) -> Ty {
         match self {
-            E::I32(_) | E::Load8(..) => Ty::I32,
+            E::I32(_) | E::Load8(..) | E::Global(_) | E::MemBytes => Ty::I32,
             E::I64(_) => Ty::I64,
             E::F64(_) => Ty::F64,
             E::Get(_, t) | E::Tee(_, t, _) | E::Load(t, _, _) => *t,
@@ -231,6 +236,12 @@ impl E {
             E::I64(v) => f.push(I::I64Const(*v)),
             E::F64(v) => f.push(I::F64Const((*v).into())),
             E::Get(l, _) => f.push(I::LocalGet(*l)),
+            E::Global(g) => f.push(I::GlobalGet(*g)),
+            E::MemBytes => {
+                f.push(I::MemorySize(0));
+                f.push(I::I32Const(16));
+                f.push(I::I32Shl);
+            }
             E::Tee(l, _, v) => {
                 v.emit(f);
                 f.push(I::LocalTee(*l));
@@ -674,6 +685,35 @@ impl Asm {
             align: 0,
             memory_index: 0,
         }));
+    }
+
+    pub fn set_global(&mut self, global: u32, value: impl Into<E>) {
+        value.into().emit(&mut self.code);
+        self.code.push(I::GlobalSet(global));
+    }
+
+    /// `memory.fill(addr, byte, len)`.
+    pub fn fill(&mut self, addr: impl Into<E>, byte: i32, len: impl Into<E>) {
+        addr.into().emit(&mut self.code);
+        self.code.push(I::I32Const(byte));
+        len.into().emit(&mut self.code);
+        self.code.push(I::MemoryFill(0));
+    }
+
+    /// `memory.copy(dst, src, len)`.
+    pub fn copy(&mut self, dst: impl Into<E>, src: impl Into<E>, len: impl Into<E>) {
+        dst.into().emit(&mut self.code);
+        src.into().emit(&mut self.code);
+        len.into().emit(&mut self.code);
+        self.code.push(I::MemoryCopy {
+            src_mem: 0,
+            dst_mem: 0,
+        });
+    }
+
+    /// Return from a helper with no result.
+    pub fn ret_void(&mut self) {
+        self.code.push(I::Return);
     }
 
     pub fn ret(&mut self, value: impl Into<E>) {

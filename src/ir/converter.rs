@@ -21,6 +21,11 @@ pub const ZIP_VALUE_PREFIX: &str = "__zipv_";
 /// The method calls `del xs[i]` / `del d[k]` and `del xs[a:b]` lower to,
 /// implemented per receiver in expression codegen.
 pub const DEL_ITEM_METHOD: &str = "__delitem__";
+/// The call `del name` is lowered to: it unbinds the name, which lets go of
+/// what it held. Code generation clears the variable, and
+/// `finalize::check_deleted_names` refuses a program that could read the
+/// name again before assigning it, where CPython raises NameError.
+pub const DEL_NAME_FN: &str = "__waspy_del";
 pub const DEL_SLICE_METHOD: &str = "__delslice__";
 
 /// The name a `logging` call's line travels under, from the converter to
@@ -454,6 +459,9 @@ fn lower_module(ast: &Suite) -> Result<IRModule> {
     // synthesizes classes and constructor bodies the later passes must still
     // see), then whole-module checks and rewrites (abstract-class
     // instantiation, call-site parameter defaults).
+    // First, while every name is still the program's own: a name read after
+    // its `del` is refused.
+    crate::ir::finalize::check_deleted_names(&mut module)?;
     crate::ir::lower_logging(&mut module)?;
     crate::ir::lower_re(&mut module)?;
     crate::ir::lower_json(&mut module)?;
@@ -3156,9 +3164,16 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
             Stmt::Delete(delete) => {
                 // `del xs[i]`, `del xs[a:b]`, `del d[k]`, one target at a time.
                 for target in &delete.targets {
+                    if let Expr::Name(name) = target {
+                        ir_statements.push(IRStatement::Expression(IRExpr::FunctionCall {
+                            function_name: DEL_NAME_FN.to_string(),
+                            arguments: vec![IRExpr::Variable(name.id.to_string())],
+                        }));
+                        continue;
+                    }
                     let Expr::Subscript(subscript) = target else {
                         return Err(crate::core::errors::unsupported_feature(
-                            "'del' of a name or an attribute is not supported",
+                            "'del' of an attribute is not supported. Hint: assign None to it",
                             None,
                         )
                         .into());

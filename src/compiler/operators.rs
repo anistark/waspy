@@ -16,12 +16,13 @@
 use crate::compiler::context::{
     CompilationContext, COLLECTION_CAP, COLLECTION_HEADER, COLLECTION_SLOT, DICT_ENTRY,
 };
+use crate::compiler::emit::Function;
 use crate::compiler::expression::{
     byte_arg, emit_data_base, emit_slot_eq_needle, mem_off, operator_symbol, slot_arg,
     store_runtime_data_ptr,
 };
 use crate::ir::{IRCompareOp, IRConstant, IRExpr, IROp, IRType, IRUnaryOp, STRING_LEN_PREFIX};
-use wasm_encoder::{BlockType, Function, Instruction};
+use wasm_encoder::{BlockType, Instruction};
 
 /// The name CPython gives a value of this type in a `TypeError` message.
 pub(crate) fn python_type_name(ty: &IRType) -> String {
@@ -360,7 +361,7 @@ fn emit_text_repeat(func: &mut Function, ctx: &CompilationContext, ty: &IRType) 
         STRING_LEN_PREFIX as i32 + i32::from(is_string),
     ));
     func.instruction(&Instruction::I32Add);
-    func.instruction(&Instruction::Call(ctx.alloc_func_index));
+    func.instruction(&Instruction::Call(ctx.alloc_fn()));
     func.instruction(&Instruction::LocalTee(data));
     func.instruction(&Instruction::LocalGet(total));
     func.instruction(&Instruction::I32Store(slot_arg()));
@@ -390,7 +391,7 @@ fn emit_new_sequence(func: &mut Function, ctx: &CompilationContext, len: u32, re
     func.instruction(&Instruction::I32Mul);
     func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
     func.instruction(&Instruction::I32Add);
-    func.instruction(&Instruction::Call(ctx.alloc_func_index));
+    func.instruction(&Instruction::Call(ctx.alloc_fn()));
     func.instruction(&Instruction::LocalTee(region));
     func.instruction(&Instruction::LocalGet(len));
     func.instruction(&Instruction::I32Store(slot_arg()));
@@ -582,7 +583,7 @@ fn emit_dict_merge(func: &mut Function, ctx: &CompilationContext, key: &IRType) 
     func.instruction(&Instruction::I32Mul);
     func.instruction(&Instruction::I32Const(COLLECTION_HEADER as i32));
     func.instruction(&Instruction::I32Add);
-    func.instruction(&Instruction::Call(ctx.alloc_func_index));
+    func.instruction(&Instruction::Call(ctx.alloc_fn()));
     func.instruction(&Instruction::LocalTee(result));
     func.instruction(&Instruction::LocalGet(cap));
     func.instruction(&Instruction::I32Store(mem_off(COLLECTION_CAP as u64)));

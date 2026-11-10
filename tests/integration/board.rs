@@ -5673,6 +5673,249 @@ mod memory {
             &[("f", Want::Int(101))],
         );
     }
+
+    /// Whether the suite is being run with a collection at every statement
+    /// (`just test-gc-stress`), where a loop of thousands of rounds takes
+    /// hours and says nothing about how memory grows between collections.
+    fn stressed() -> bool {
+        std::env::var_os("WASPY_GC_STRESS").is_some()
+    }
+
+    /// Run `func()` and answer what it returned with the pages of memory the
+    /// module has afterwards.
+    fn pages_after(source: &str, func: &str) -> (i32, usize) {
+        let (instance, mut store) = instantiate(&dedent(source));
+        let answer = instance
+            .get_typed_func::<(), i32>(&store, func)
+            .unwrap_or_else(|_| panic!("exported fn `{func}`"))
+            .call(&mut store, ())
+            .expect("call");
+        let memory = instance
+            .get_memory(&store, "memory")
+            .expect("exported `memory`");
+        (answer, memory.data(&store).len() / 65536)
+    }
+
+    /// Garbage collection: a mark-and-sweep collector frees what is unreachable, reference cycles included
+    #[test]
+    fn garbage_collection() {
+        // Each ring is twenty objects referring round to the first, with a
+        // list each; nothing but the ring refers to it once `ring` returns.
+        let source = r#"
+            from typing import List, Optional
+
+
+            class Link:
+                def __init__(self, n: int):
+                    self.n = n
+                    self.next: Optional["Link"] = None
+                    self.pad: List[int] = [n] * 64
+
+
+            def ring(size: int) -> int:
+                first = Link(0)
+                last = first
+                for i in range(1, size):
+                    link = Link(i)
+                    last.next = link
+                    last = link
+                last.next = first
+                return last.n
+
+
+            def rings(rounds: int) -> int:
+                total = 0
+                for r in range(rounds):
+                    total += ring(20)
+                return total
+
+
+            def few() -> int:
+                return rings(2)
+
+
+            def some() -> int:
+                return rings(200)
+
+
+            def many() -> int:
+                return rings(4000)
+        "#;
+        assert_eq!(pages_after(source, "few").0, 38);
+        if stressed() {
+            return;
+        }
+        let (answer, after_some) = pages_after(source, "some");
+        assert_eq!(answer, 3800);
+        let (answer, after_many) = pages_after(source, "many");
+        assert_eq!(answer, 76000);
+        assert_eq!(after_many, after_some, "the cycles were kept");
+    }
+
+    /// Leak prevention and finalizers: an object is let go of when its last reference goes, and __del__ runs then, where CPython's reference counting runs it; a generator abandoned mid-loop is closed
+    #[test]
+    fn finalizers() {
+        let run = run_main(
+            &dedent(
+                r#"
+            from typing import List
+
+
+            class Res:
+                def __init__(self, name: str):
+                    self.name = name
+
+                def __del__(self):
+                    print("close", self.name)
+
+
+            def scoped() -> None:
+                r = Res("local")
+                print("in scoped")
+
+
+            def held() -> None:
+                xs: List[Res] = [Res("a"), Res("b")]
+                r = Res("first")
+                r = Res("second")
+                print("rebound")
+                del r
+                print("deleted")
+
+
+            def numbers():
+                try:
+                    yield 1
+                    yield 2
+                finally:
+                    print("cleanup")
+
+
+            def first() -> int:
+                for n in numbers():
+                    break
+                print("after loop")
+                return 1
+
+
+            if __name__ == "__main__":
+                scoped()
+                print("after scoped")
+                held()
+                print("after held")
+                print(first())
+                g = Res("global")
+                print("end")
+            "#,
+            ),
+            "",
+            &[],
+        );
+        assert_eq!(
+            run.stdout,
+            "in scoped\nclose local\nafter scoped\n\
+             close first\nrebound\nclose second\ndeleted\nclose b\nclose a\nafter held\n\
+             cleanup\nafter loop\n1\nend\nclose global\n"
+        );
+    }
+
+    /// Memory pools for efficient allocation: a free list per block size
+    #[test]
+    fn memory_pools() {
+        // One object of each of several sizes alive at a time: every round
+        // takes its blocks from the lists the last one's went back to.
+        let source = r#"
+            def sizes(rounds: int) -> int:
+                total = 0
+                for r in range(rounds):
+                    a = [r] * 3
+                    b = [r] * 17
+                    c = "x" * 40 + str(r)
+                    d = (r, r + 1)
+                    total += len(a) + len(b) + len(c) + d[1] - r
+                return total
+
+
+            def few() -> int:
+                return sizes(5)
+
+
+            def some() -> int:
+                return sizes(2000)
+
+
+            def many() -> int:
+                return sizes(40000)
+        "#;
+        assert_eq!(pages_after(source, "few").0, 310);
+        if stressed() {
+            return;
+        }
+        let (answer, after_some) = pages_after(source, "some");
+        assert_eq!(answer, 128890);
+        let (answer, after_many) = pages_after(source, "many");
+        assert_eq!(answer, 2628890);
+        assert_eq!(after_many, after_some, "freed blocks were not reused");
+    }
+
+    /// Bounded memory: a long-running loop that builds and drops collections stays within a fixed number of pages
+    #[test]
+    fn bounded_memory() {
+        let source = r#"
+            from typing import Dict, List
+
+
+            class Point:
+                def __init__(self, x: int, y: int):
+                    self.x = x
+                    self.y = y
+
+                def norm1(self) -> int:
+                    return abs(self.x) + abs(self.y)
+
+
+            def build(n: int) -> List[Point]:
+                out: List[Point] = []
+                for i in range(n):
+                    out.append(Point(i, -i))
+                return out
+
+
+            def churn(rounds: int) -> int:
+                total = 0
+                keep: Dict[int, str] = {}
+                for r in range(rounds):
+                    pts = build(50)
+                    names = [str(p.norm1()) + "-" + str(r) for p in pts]
+                    total += len(names) + len("".join(names))
+                    keep[r % 7] = names[r % 50]
+                    d: Dict[int, List[int]] = {i: [i, i + 1, i + 2] for i in range(20)}
+                    total += sum(len(v) for v in d.values())
+                return total + len(keep)
+
+
+            def few() -> int:
+                return churn(3)
+
+
+            def some() -> int:
+                return churn(300)
+
+
+            def many() -> int:
+                return churn(3000)
+        "#;
+        assert_eq!(pages_after(source, "few").0, 918);
+        if stressed() {
+            return;
+        }
+        let (answer, after_some) = pages_after(source, "some");
+        assert_eq!(answer, 116007);
+        let (answer, after_many) = pages_after(source, "many");
+        assert_eq!(answer, 1309507);
+        assert_eq!(after_many, after_some, "memory grew with the rounds");
+        assert!(after_many <= 32, "{after_many} pages for a small live set");
+    }
 }
 
 mod imports {

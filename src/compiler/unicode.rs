@@ -9,10 +9,11 @@
 //! literal and the same method at run time give one answer.
 
 use crate::compiler::context::{CompilationContext, COLLECTION_HEAP_BASE};
+use crate::compiler::emit::Function;
 use crate::compiler::runtime::{alloc_string, byte, function, w32, Helper};
 use crate::core::unicode::{CaseMap, Class, Predicate};
 use std::sync::OnceLock;
-use wasm_encoder::{BlockType, Function, Instruction as I, ValType};
+use wasm_encoder::{BlockType, Instruction as I, ValType};
 
 macro_rules! emit {
     ($f:expr, $($i:expr),* $(,)?) => {{
@@ -1017,11 +1018,16 @@ pub(crate) fn build_trim_at(ctx: &CompilationContext, with_set: bool, before: bo
 /// Where the code point cache sits: after the formatters' text buffer, below
 /// the heap. Each of its entries is `[string][code points][char][byte]`: a
 /// string's length in code points, and the last code point index looked up
-/// in it with its byte offset. A string never changes and its memory is never
-/// reused, so a pointer names one string for good, and an entry stays true.
+/// in it with its byte offset. A string never changes, and the cache is cleared
+/// whenever memory is freed, so while an entry is there its pointer names the
+/// string it was made for.
 const STR_CACHE: i32 = crate::compiler::runtime::TEXT + crate::compiler::runtime::TEXT_BYTES;
 const STR_CACHE_ENTRIES: i32 = 256;
 const _: () = assert!(STR_CACHE + STR_CACHE_ENTRIES * 16 <= COLLECTION_HEAP_BASE as i32);
+/// Where the cache is and how many bytes it takes. A collection clears it:
+/// an entry is keyed by a string's address, which a new string can take once
+/// the old one is freed.
+pub(crate) const STR_CACHE_REGION: (i32, i32) = (STR_CACHE, STR_CACHE_ENTRIES * 16);
 
 /// Push the address of the cache entry for the string in `s`.
 fn cache_entry(f: &mut Function, s: u32) {
@@ -1288,7 +1294,7 @@ pub(crate) fn build_str_chars(ctx: &CompilationContext) -> Function {
         I::I32Mul,
         I::I32Const(COLLECTION_HEADER as i32),
         I::I32Add,
-        I::Call(ctx.alloc_func_index),
+        I::Call(ctx.alloc_fn()),
         I::LocalTee(list),
         I::LocalGet(count),
         I::I32Store(w32(0)),

@@ -1808,10 +1808,10 @@
   },
   "memory": {
     "title": "MEMORY MANAGEMENT",
-    "status": "progress",
+    "status": "done",
     "features": [
       {
-        "name": "Bump allocator with runtime memory growth",
+        "name": "Allocator with runtime memory growth",
         "status": "done",
         "version": "0.12.0",
         "test": "memory::memory_growth"
@@ -1829,20 +1829,28 @@
         "test": "memory::identity_across_growth"
       },
       {
-        "name": "Garbage collection system",
-        "status": "todo"
+        "name": "Garbage collection: a mark-and-sweep collector frees what is unreachable, reference cycles included",
+        "status": "done",
+        "version": "upcoming",
+        "test": "memory::garbage_collection"
       },
       {
-        "name": "Reference counting & leak prevention",
-        "status": "todo"
+        "name": "Leak prevention and finalizers: an object is let go of when its last reference goes, and __del__ runs then, where CPython's reference counting runs it; a generator abandoned mid-loop is closed",
+        "status": "done",
+        "version": "upcoming",
+        "test": "memory::finalizers"
       },
       {
-        "name": "Memory pools for efficient allocation",
-        "status": "todo"
+        "name": "Memory pools for efficient allocation: a free list per block size",
+        "status": "done",
+        "version": "upcoming",
+        "test": "memory::memory_pools"
       },
       {
         "name": "Bounded memory: a long-running loop that builds and drops collections stays within a fixed number of pages",
-        "status": "todo"
+        "status": "done",
+        "version": "upcoming",
+        "test": "memory::bounded_memory"
       }
     ]
   },

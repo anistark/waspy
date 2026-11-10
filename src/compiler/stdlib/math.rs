@@ -8,13 +8,14 @@
 //! the function can overflow and a domain error where it cannot.
 
 use crate::compiler::context::CompilationContext;
+use crate::compiler::emit::Function;
 use crate::compiler::exceptions::ExcArg;
 use crate::compiler::expression::emit_expr;
 use crate::compiler::function::emit_raise;
 use crate::compiler::libm::{Libm, VEC};
 use crate::compiler::runtime::Helper;
 use crate::ir::{IRExpr, IRType, MemoryLayout};
-use wasm_encoder::{BlockType, Function, Instruction as I, MemArg};
+use wasm_encoder::{BlockType, Instruction as I, MemArg};
 
 macro_rules! emit {
     ($f:expr, $($i:expr),* $(,)?) => {{

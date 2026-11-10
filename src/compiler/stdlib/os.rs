@@ -15,12 +15,13 @@ use crate::compiler::asm::{call, Asm, Ty, Var, E, X};
 use crate::compiler::context::{
     CompilationContext, COLLECTION_CAP, COLLECTION_DATA, COLLECTION_HEADER, DICT_ENTRY,
 };
+use crate::compiler::emit::Function;
 use crate::compiler::expression::{emit_expr, recover_str_pair};
 use crate::compiler::function::emit_post_call_check;
 use crate::compiler::host::{wasi, Wasi};
 use crate::compiler::runtime::Helper;
 use crate::ir::{IRExpr, IRType, MemoryLayout};
-use wasm_encoder::{BlockType, Function, Instruction as I};
+use wasm_encoder::{BlockType, Instruction as I};
 
 macro_rules! emit {
     ($f:expr, $($i:expr),* $(,)?) => {{
@@ -35,6 +36,9 @@ const ENVIRON: i32 = OS;
 const SIZES: i32 = OS + 8;
 const STAT: i32 = OS + 16;
 const _: () = assert!(STAT + 64 <= crate::compiler::context::COLLECTION_HEAP_BASE as i32);
+/// The words holding objects (`os.environ`), which the collector reads as
+/// roots.
+pub(crate) const STATE: (i32, i32) = (OS, OS + 16);
 
 /// The runtime routines. Strings are their offset word.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -97,7 +101,7 @@ fn byte(s: impl Into<E>, i: impl Into<E>) -> E {
 /// lays one out.
 fn new_str(a: &mut Asm, ctx: &CompilationContext, n: impl Into<E>) -> Var {
     let n = a.let_(n);
-    let p = a.let_(call(ctx.alloc_func_index, vec![n + 5], Some(Ty::I32)));
+    let p = a.let_(call(ctx.alloc_fn(), vec![n + 5], Some(Ty::I32)));
     a.store(Ty::I32, p, 0, n);
     a.set(p, p + 4);
     a.store8(p + n, 0, 0);
@@ -142,7 +146,7 @@ fn rfind(a: &mut Asm, s: Var, c: u8) -> Var {
 /// A 2-tuple of strings, laid out as a list.
 fn pair(a: &mut Asm, ctx: &CompilationContext, x: Var, y: Var) -> Var {
     let t = a.let_(call(
-        ctx.alloc_func_index,
+        ctx.alloc_fn(),
         vec![(COLLECTION_HEADER as i32 + 16).into()],
         Some(Ty::I32),
     ));
@@ -461,7 +465,7 @@ fn normpath(a: &mut Asm, ctx: &CompilationContext) {
         |a| a.set(initial, 2),
     );
     // The kept components, as (start, length) pairs.
-    let comps = a.let_(call(ctx.alloc_func_index, vec![n * 8 + 8], Some(Ty::I32)));
+    let comps = a.let_(call(ctx.alloc_fn(), vec![n * 8 + 8], Some(Ty::I32)));
     let count = a.let_(0);
     let start = a.let_(0);
     let i = a.local(Ty::I32);
@@ -546,7 +550,7 @@ fn environ(a: &mut Asm, ctx: &CompilationContext) {
     ));
     let count = a.let_(E::from(SIZES).load(Ty::I32, 0));
     let size = a.let_(E::from(SIZES).load(Ty::I32, 4));
-    let alloc = |n: E| call(ctx.alloc_func_index, vec![n], Some(Ty::I32));
+    let alloc = |n: E| call(ctx.alloc_fn(), vec![n], Some(Ty::I32));
     let ptrs = a.let_(alloc(count * 4 + 8));
     let buf = a.let_(alloc(size + 8));
     a.run(call(

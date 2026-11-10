@@ -269,10 +269,15 @@ fn validate_stmt(stmt: &Stmt, source: &str, function: Option<&str>) -> Result<()
             stmt.range.start().into(),
             function,
         )),
-        Stmt::Delete(stmt) if !stmt.targets.iter().all(|t| matches!(t, Expr::Subscript(_))) => {
+        Stmt::Delete(stmt)
+            if !stmt
+                .targets
+                .iter()
+                .all(|t| matches!(t, Expr::Subscript(_) | Expr::Name(_))) =>
+        {
             Err(unsupported(
-                "'del' of a name or an attribute is not supported. Hint: 'del' works on a \
-                 list index or slice and a dict key",
+                "'del' of an attribute is not supported. Hint: assign None to it; 'del' works \
+                 on a name, a list index or slice, and a dict key",
                 source,
                 stmt.range.start().into(),
                 function,

@@ -43,6 +43,12 @@ examples:
 test:
     cargo test --all-features
 
+# Run the tests with a collection forced at every statement and freed memory
+# overwritten, so a reference the collector cannot see reads garbage instead
+# of surviving by luck. Run it after changing code generation.
+test-gc-stress:
+    WASPY_GC_STRESS=1 cargo test --all-features
+
 # Format the code
 format:
     @echo "Formatting code..."

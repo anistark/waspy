@@ -41,8 +41,9 @@ fn unsupported_statements_are_rejected_with_hints() {
             "nonlocal declaration not allowed at module level",
         ),
         (
-            "def f() -> int:\n    x = 1\n    del x\n    return 0\n",
-            "'del' of a name or an attribute is not supported",
+            "class A:\n    def __init__(self) -> None:\n        self.x = 1\n\n\
+             def f() -> int:\n    a = A()\n    del a.x\n    return 0\n",
+            "'del' of an attribute is not supported",
         ),
         ("from math import *\n\ndef f() -> int:\n    return 1\n", "import *"),
     ];
