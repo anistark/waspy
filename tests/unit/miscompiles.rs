@@ -6464,3 +6464,140 @@ fn a_dict_comprehension_keeps_one_entry_per_key() {
          {3: None, 1: None} []\n"
     );
 }
+
+/// A generator expression was built as a list where it was made, so in a
+/// `for` over one every element was computed before the body ran, and
+/// `any()` / `all()` computed every element (an endless source never ended).
+/// A `for` over one is now the expression's own loop, and `any()` / `all()`
+/// stop at the element that decides them. Every line is CPython's output.
+#[test]
+fn a_generator_expression_runs_as_its_loop_and_any_all_stop_early() {
+    let run = run_main(
+        &dedent(
+            r#"
+            import itertools
+
+
+            def f(y: int) -> int:
+                print("f", y)
+                return y * 10
+
+
+            def loud(y: int) -> bool:
+                print("check", y)
+                return y > 1
+
+
+            def main() -> None:
+                ys = [1, 2, 3]
+                for x in (f(y) for y in ys):
+                    print("body", x)
+                for x2 in (f(y) for y in ys if y != 2):
+                    if x2 > 20:
+                        break
+                    print("body2", x2)
+                else:
+                    print("no break")
+                for x3 in (y * 2 for y in ys):
+                    if x3 == 4:
+                        continue
+                    print("body3", x3)
+                else:
+                    print("ran out")
+                d = {"a": 1, "b": 2}
+                for k, v in ((k, v * 100) for k, v in d.items()):
+                    print(k, v)
+                print(any(loud(y) for y in ys))
+                print(all(loud(y) for y in ys))
+                print(any(n > 3 for n in itertools.count()))
+                print(all(y > 0 for y in ys), any(y > 9 for y in ys), all(y > 9 for y in []))
+                print(sum(y * y for y in ys), sorted(-y for y in ys))
+                print(any([loud(y) for y in ys]))
+                words = ["a", "bb"]
+                print(any(len(w) > 1 for w in words if w != "zz"))
+
+
+            if __name__ == "__main__":
+                main()
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(
+        run.stdout,
+        "f 1\n\
+         body 10\n\
+         f 2\n\
+         body 20\n\
+         f 3\n\
+         body 30\n\
+         f 1\n\
+         body2 10\n\
+         f 3\n\
+         body3 2\n\
+         body3 6\n\
+         ran out\n\
+         a 100\n\
+         b 200\n\
+         check 1\n\
+         check 2\n\
+         True\n\
+         check 1\n\
+         False\n\
+         True\n\
+         True False True\n\
+         14 [-3, -2, -1]\n\
+         check 1\n\
+         check 2\n\
+         check 3\n\
+         True\n\
+         True\n"
+    );
+}
+
+/// `Counter()` of a generator whose element was a method call, or of any
+/// comprehension, was refused before its variables were typed, and
+/// `self.f[k] += v` on a `Counter` field was refused where a local took it.
+/// Every line is CPython's output.
+#[test]
+fn counters_from_generators_and_in_fields() {
+    let run = run_main(
+        &dedent(
+            r#"
+            from collections import Counter
+
+
+            class T:
+                def __init__(self) -> None:
+                    self.f: Counter[str] = Counter()
+                    self.n = 0
+
+
+            def main() -> None:
+                names = ["ann", "bob", "Ann"]
+                c = Counter(n.upper() for n in names)
+                print(c, c["ANN"])
+                lengths = Counter(len(n) for n in names if n != "bob")
+                print(lengths)
+                t = T()
+                t.f["a"] += 2
+                t.f["a"] += 1
+                t.f["b"] -= 1
+                print(t.f, t.f["a"])
+
+
+            if __name__ == "__main__":
+                main()
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(
+        run.stdout,
+        "Counter({'ANN': 2, 'BOB': 1}) 2\n\
+         Counter({3: 2})\n\
+         Counter({'a': 3, 'b': -1}) 3\n"
+    );
+}

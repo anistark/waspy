@@ -150,6 +150,11 @@ fn infer_field_value_type(
         IRExpr::FunctionCall { function_name, .. } if function_name == crate::ir::WALK_NEXT_FN => {
             IRType::Int
         }
+        IRExpr::FunctionCall { function_name, .. }
+            if function_name == crate::ir::ANY_GEN_FN || function_name == crate::ir::ALL_GEN_FN =>
+        {
+            IRType::Bool
+        }
         IRExpr::FunctionCall {
             function_name,
             arguments,

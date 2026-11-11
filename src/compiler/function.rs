@@ -219,7 +219,9 @@ pub fn compile_function(
     // Scan for variable declarations to allocate locals. The for-loop counter
     // is advanced during the scan and replayed during codegen, so reset it here.
     ctx.for_loop_seq = 0;
+    ctx.scanning.set(true);
     scan_and_allocate_locals(&ir_func.body, ctx);
+    ctx.scanning.set(false);
 
     // Reserve scratch locals after all params and named locals so temporary
     // calculations never clobber real variables. The i32 scratch run is absent
@@ -1413,6 +1415,12 @@ pub(crate) fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRTy
         IRExpr::FunctionCall { function_name, .. } if function_name == crate::ir::WALK_NEXT_FN => {
             IRType::Int
         }
+        // `any()` / `all()` of a generator expression.
+        IRExpr::FunctionCall { function_name, .. }
+            if function_name == crate::ir::ANY_GEN_FN || function_name == crate::ir::ALL_GEN_FN =>
+        {
+            IRType::Bool
+        }
         IRExpr::FunctionCall {
             function_name,
             arguments,
@@ -1801,7 +1809,9 @@ pub(crate) fn resolve_return_type(
         *ctx.cell_types.borrow_mut() = cells.clone();
     }
     ctx.for_loop_seq = 0;
+    ctx.scanning.set(true);
     scan_and_allocate_locals(&ir_func.body, &mut ctx);
+    ctx.scanning.set(false);
 
     let mut inferred = IRType::Unknown;
     collect_return_type(&ir_func.body, &ctx, &mut inferred);

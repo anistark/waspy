@@ -17,7 +17,7 @@ These answer differently from CPython without an error. Each is known, and anyth
 - A number that happens to equal an object's address keeps the object alive while it is held, since the collector reads memory without knowing what each word is, so that object's `__del__` can run later than CPython's
 - An exception `__del__` raises is discarded, without the `Exception ignored in` report CPython writes to standard error
 - A traceback is not kept: a `__main__` block's uncaught exception writes only the last line of CPython's report, `logger.exception()` and `exc_info=` log that same line (`ValueError: bad`) in place of the traceback, and a logging error on standard error leaves its traceback out
-- A generator expression is built as a list before anything reads it, so in `for x in (f(y) for y in g()):` every side effect of `f` and `g` comes before the loop's body, where CPython interleaves them
+- A generator expression is built as a list where it is made, unless it is what a `for` statement walks (with one `for` clause of its own) or the argument of `any()` or `all()`, which pull it only as far as CPython does. So one stored in a variable, or passed to a function, computes every element before anything reads it, where CPython computes each as it is read. `next()` of a generator expression is refused
 
 ## Types
 

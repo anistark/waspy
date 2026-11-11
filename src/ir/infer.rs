@@ -93,6 +93,7 @@ impl Types {
                     return IRType::Class(function_name.clone());
                 }
                 match function_name.as_str() {
+                    crate::ir::ANY_GEN_FN | crate::ir::ALL_GEN_FN => IRType::Bool,
                     "str" | "repr" | "chr" | "input" => IRType::String,
                     "bytes" => IRType::Bytes,
                     "int" | "len" | "ord" => IRType::Int,

@@ -582,6 +582,10 @@ pub struct CompilationContext {
     /// the scan can tell (the variable itself is typed when it is bound): an
     /// empty collection the loop appends it to takes that element type.
     pub loop_elements: std::collections::HashMap<String, IRType>,
+    /// Whether the local scan is running, when a variable bound later in the
+    /// statement (a comprehension's) may not be typed yet: a check that
+    /// needs every type waits for code generation then.
+    pub scanning: std::cell::Cell<bool>,
     /// Errors found during code generation.
     ///
     /// Codegen runs behind a shared `&CompilationContext` and its emit
@@ -674,6 +678,7 @@ impl CompilationContext {
             can_raise: std::collections::HashSet::new(),
             current_raises: false,
             loop_elements: std::collections::HashMap::new(),
+            scanning: std::cell::Cell::new(false),
             errors: RefCell::new(Vec::new()),
             current_return_type: IRType::Unknown,
         }

@@ -122,6 +122,21 @@ fn has(ctx: &CompilationContext, class: &str, method: &str) -> bool {
         .is_some_and(|ci| ci.methods.contains_key(method))
 }
 
+/// A field read off a local or parameter, which is not a property: reading it
+/// runs nothing of the program's.
+fn plain_field(expr: &IRExpr, ctx: &CompilationContext) -> bool {
+    let IRExpr::Attribute { object, attribute } = expr else {
+        return false;
+    };
+    if !matches!(object.as_ref(), IRExpr::Variable(_) | IRExpr::Param(_)) {
+        return false;
+    }
+    match class_of(object, ctx) {
+        Some(class) => !has(ctx, &class, attribute),
+        None => false,
+    }
+}
+
 /// A constant or a local: evaluating something else first cannot change it,
 /// so the two operands may be evaluated in either order.
 fn order_free(expr: &IRExpr) -> bool {
@@ -449,6 +464,11 @@ fn rewrite_variant(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
             if has(ctx, &class, method_name) {
                 return None;
             }
+            // In the scan, a comprehension's variables may not be typed yet,
+            // which leaves its elements unknown: code generation decides.
+            if ctx.scanning.get() && has_unknown(&ty) {
+                return None;
+            }
             let shown = match method_name.as_str() {
                 m if m == crate::ir::FROM_METHOD => format!("{class}()"),
                 m => format!("{class}.{m}()"),
@@ -461,6 +481,19 @@ fn rewrite_variant(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
         }
     }
     None
+}
+
+/// Whether a type has a part not known yet.
+fn has_unknown(ty: &IRType) -> bool {
+    match ty {
+        IRType::Unknown => true,
+        IRType::List(e) | IRType::Set(e) | IRType::VarTuple(e) | IRType::Optional(e) => {
+            has_unknown(e)
+        }
+        IRType::Dict(k, v) => has_unknown(k) || has_unknown(v),
+        IRType::Tuple(members) => members.iter().any(has_unknown),
+        _ => false,
+    }
 }
 
 /// What an argument is, the literals of ints and bools included, which
@@ -1874,7 +1907,10 @@ pub(crate) fn rewrite_statement(
                 return None;
             }
             // CPython evaluates the value first, then the container and key.
-            if !(order_free(value) || (order_free(container) && order_free(index))) {
+            // A field of a local (`self.counts[k] += 1`) reads the same
+            // whichever comes first, unless it is a property.
+            let container_free = order_free(container) || plain_field(container, ctx);
+            if !(order_free(value) || (container_free && order_free(index))) {
                 return None;
             }
             Some(IRStatement::Expression(call(

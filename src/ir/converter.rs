@@ -25,6 +25,12 @@ pub const DICT_VAL_AT_FN: &str = "__dict_val_at";
 /// errors. `__walk_at(c, i)` is the element at a position: a list's or str's
 /// item, a dict's key, a set's member (`i` is then a bucket).
 pub const WALK_NEXT_FN: &str = "__walk_next";
+/// `any()` and `all()` of a generator expression, which stop at the first
+/// element that decides them, as CPython's do (the expression is otherwise
+/// built as a list, which `any([...])` of a list comprehension still is).
+/// Recognized by name in expression codegen.
+pub const ANY_GEN_FN: &str = "__waspy_any";
+pub const ALL_GEN_FN: &str = "__waspy_all";
 pub const WALK_AT_FN: &str = "__walk_at";
 /// Prefix of the locals holding zip()'s arguments after the first, which the
 /// loop reads by length and index.
@@ -3874,6 +3880,75 @@ fn lower_for_loop(
         }
     }
 
+    // `for x in (f(y) for y in src if p(y))`: the generator expression's own
+    // loop, its element bound to the targets, so its elements and the body
+    // interleave as CPython's do. It was built as a list first, so every
+    // `f(y)` ran before the body did, and an endless source never ended.
+    if let Expr::GeneratorExp(comp) = &*for_stmt.iter {
+        if comp.generators.len() == 1 {
+            let lowered = lower_comprehension(
+                IRComprehensionKind::List,
+                &comp.elt,
+                None,
+                &comp.generators,
+                memory_layout,
+            )?;
+            let IRExpr::Comprehension {
+                element,
+                generators,
+                ..
+            } = lowered
+            else {
+                return Err(anyhow!("a generator expression lowers to a comprehension"));
+            };
+            let generator = generators
+                .into_iter()
+                .next()
+                .ok_or_else(|| anyhow!("a generator expression has a for clause"))?;
+            let mut guarded = Vec::new();
+            if targets.len() > 1 || starred.is_some() {
+                let element_var = format!("__ft_{uniq}");
+                guarded.push(assign(&element_var, *element));
+                guarded.push(IRStatement::TupleUnpack {
+                    targets,
+                    value: variable(&element_var),
+                    starred,
+                });
+            } else {
+                guarded.push(assign(&targets[0], *element));
+            }
+            guarded.extend(body.statements);
+            for condition in generator.conditions.into_iter().rev() {
+                guarded = vec![IRStatement::If {
+                    condition,
+                    then_body: Box::new(IRBody {
+                        statements: guarded,
+                    }),
+                    else_body: None,
+                }];
+            }
+            let (loop_target, mut statements) = match generator.targets.as_slice() {
+                [one] => (one.clone(), Vec::new()),
+                many => {
+                    let hidden = format!("__fg_{uniq}");
+                    let unpack = IRStatement::TupleUnpack {
+                        targets: many.to_vec(),
+                        value: variable(&hidden),
+                        starred: None,
+                    };
+                    (hidden, vec![unpack])
+                }
+            };
+            statements.extend(guarded);
+            return Ok(vec![IRStatement::For {
+                target: loop_target,
+                iterable: generator.iterable,
+                body: Box::new(IRBody { statements }),
+                else_body,
+            }]);
+        }
+    }
+
     let iterable = lower_expr(&for_stmt.iter, memory_layout)?;
 
     // for a, b in pairs: bind the element to a hidden loop variable and
@@ -4395,6 +4470,28 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
         }
         Expr::Name(name) => Ok(IRExpr::Variable(name.id.to_string())),
         Expr::Call(call) => {
+            // `any(f(x) for x in xs)`: decided by the first element that can.
+            if let (Expr::Name(name), [Expr::GeneratorExp(comp)], true) =
+                (&*call.func, call.args.as_slice(), call.keywords.is_empty())
+            {
+                let decide = match name.id.as_str() {
+                    "any" => Some(ANY_GEN_FN),
+                    "all" => Some(ALL_GEN_FN),
+                    _ => None,
+                };
+                if let Some(decide) = decide {
+                    return Ok(IRExpr::FunctionCall {
+                        function_name: decide.to_string(),
+                        arguments: vec![lower_comprehension(
+                            IRComprehensionKind::List,
+                            &comp.elt,
+                            None,
+                            &comp.generators,
+                            memory_layout,
+                        )?],
+                    });
+                }
+            }
             // Check for dynamic imports
             match &*call.func {
                 Expr::Name(name) if name.id.to_string() == "__import__" => {

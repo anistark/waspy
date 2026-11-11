@@ -7268,6 +7268,117 @@ fn emit_comp_room(func: &mut Function, ctx: &CompilationContext, res: u32, widx:
     emit_collection_reserve(func, ctx, Reserve::Count(1), stride);
 }
 
+/// `any()` (`any` true) or `all()` of a generator expression: its loops run
+/// until an element decides the answer, as CPython's pull the generator only
+/// that far, so the elements after it are never computed and an endless
+/// source ends. A source that is an iterator is pulled one value at a time.
+fn emit_decided_comprehension(
+    any: bool,
+    element: &IRExpr,
+    generators: &[IRGenerator],
+    func: &mut Function,
+    ctx: &CompilationContext,
+    memory_layout: &MemoryLayout,
+) -> IRType {
+    let lazy = lazy_source(IRComprehensionKind::List, generators, ctx);
+    let depth = ctx.comp_depth.get();
+    ctx.comp_depth.set(depth + 1);
+    let res = comp_local(ctx, comp_local_name("res", depth));
+    // The answer when nothing decides it: False for any(), True for all().
+    func.instruction(&Instruction::I32Const(i32::from(!any)));
+    func.instruction(&Instruction::LocalSet(res));
+    // The element decides when it is true for any(), false for all().
+    let decide = |func: &mut Function, outer: u32| {
+        emit_expr(element, func, ctx, memory_layout, Some(&IRType::Bool));
+        if !any {
+            func.instruction(&Instruction::I32Eqz);
+        }
+        func.instruction(&Instruction::If(BlockType::Empty));
+        func.instruction(&Instruction::I32Const(i32::from(any)));
+        func.instruction(&Instruction::LocalSet(res));
+        // Out of every loop, to the block around them all.
+        func.instruction(&Instruction::Br(ctx.expr_block_depth.get() - outer + 1));
+        func.instruction(&Instruction::End);
+    };
+    match lazy {
+        None => {
+            let ptr0 = comp_local(ctx, comp_gen_local_name("ptr", depth, 0));
+            let gen0_ty = emit_expr(&generators[0].iterable, func, ctx, memory_layout, None);
+            let gen0_ty = comp_walk_source(func, ctx, gen0_ty);
+            narrow_element_to_word(func, &gen0_ty);
+            func.instruction(&Instruction::LocalSet(ptr0));
+            func.instruction(&Instruction::Block(BlockType::Empty));
+            ctx.enter_expr_blocks(1);
+            let outer = ctx.expr_block_depth.get();
+            emit_comp_loops(
+                func,
+                ctx,
+                memory_layout,
+                generators,
+                0,
+                depth,
+                &gen0_ty,
+                true,
+                &mut |func| decide(func, outer),
+            );
+            ctx.exit_expr_blocks(1);
+            func.instruction(&Instruction::End);
+        }
+        Some((it, next_index, next_type)) => {
+            let iter = comp_local(ctx, comp_local_name("cap", depth));
+            let one = comp_local(ctx, comp_gen_local_name("ptr", depth, 0));
+            emit_expr(it, func, ctx, memory_layout, None);
+            func.instruction(&Instruction::LocalSet(iter));
+            // The one-element list each value passes through.
+            func.instruction(&Instruction::I32Const(
+                (COLLECTION_HEADER + COLLECTION_SLOT) as i32,
+            ));
+            func.instruction(&Instruction::Call(ctx.alloc_fn()));
+            func.instruction(&Instruction::LocalTee(one));
+            func.instruction(&Instruction::I32Const(1));
+            func.instruction(&Instruction::I32Store(slot_arg()));
+            store_runtime_data_ptr(func, one);
+            func.instruction(&Instruction::Block(BlockType::Empty));
+            func.instruction(&Instruction::Loop(BlockType::Empty));
+            ctx.enter_expr_blocks(2);
+            let outer = ctx.expr_block_depth.get() - 1;
+            // one[0] = next(it), unless it is exhausted.
+            func.instruction(&Instruction::I32Const(0));
+            func.instruction(&Instruction::GlobalSet(1));
+            func.instruction(&Instruction::LocalGet(one));
+            emit_data_base(func);
+            func.instruction(&Instruction::LocalGet(iter));
+            emit_user_call(func, ctx, next_index);
+            store_collection_word(func, &next_type);
+            func.instruction(&Instruction::GlobalGet(1));
+            func.instruction(&Instruction::If(BlockType::Empty));
+            func.instruction(&Instruction::I32Const(0));
+            func.instruction(&Instruction::GlobalSet(1));
+            func.instruction(&Instruction::Br(2));
+            func.instruction(&Instruction::End);
+            let gen0_ty = IRType::List(Box::new(next_type.clone()));
+            emit_comp_loops(
+                func,
+                ctx,
+                memory_layout,
+                generators,
+                0,
+                depth,
+                &gen0_ty,
+                true,
+                &mut |func| decide(func, outer),
+            );
+            func.instruction(&Instruction::Br(0));
+            ctx.exit_expr_blocks(2);
+            func.instruction(&Instruction::End);
+            func.instruction(&Instruction::End);
+        }
+    }
+    func.instruction(&Instruction::LocalGet(res));
+    ctx.comp_depth.set(depth);
+    IRType::Bool
+}
+
 /// A comprehension's variables are its own, and gone when it is done: let go
 /// of what they held. Only a program with finalizers can tell.
 fn release_comp_targets(func: &mut Function, ctx: &CompilationContext, generators: &[IRGenerator]) {
@@ -10359,6 +10470,29 @@ fn emit_function_call_expr(
         ctx.release_held();
         ctx.release_held();
         return IRType::Int;
+    }
+
+    // `any()` / `all()` of a generator expression: stop at the first element
+    // that decides it (see `ir::ANY_GEN_FN`).
+    if function_name == crate::ir::ANY_GEN_FN || function_name == crate::ir::ALL_GEN_FN {
+        if let [IRExpr::Comprehension {
+            element,
+            generators,
+            ..
+        }] = arguments.as_slice()
+        {
+            return emit_decided_comprehension(
+                function_name == crate::ir::ANY_GEN_FN,
+                element,
+                generators,
+                func,
+                ctx,
+                memory_layout,
+            );
+        }
+        ctx.report(format!("{function_name} takes a generator expression"));
+        func.instruction(&Instruction::I32Const(0));
+        return IRType::Bool;
     }
 
     // The member in a set's bucket, for a walk (see `WALK_NEXT_FN` above).
