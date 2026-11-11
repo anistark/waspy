@@ -11,8 +11,10 @@
 //! variable, parameter, or return it is assigned to), so the document is
 //! read by a parser for that type: CPython's scanner, whose errors are its
 //! `JSONDecodeError` with the same message and position. A document the
-//! declared type cannot hold (a string where an int is declared) raises a
-//! `TypeError` naming both, where CPython would hand back the other value.
+//! declared type cannot hold (a string where an int is declared, or an
+//! integer where a float is, which a float place would print as `1.0`)
+//! raises a `TypeError` naming both, where CPython would hand back the other
+//! value.
 //!
 //! The writer reads its options from a block made at run time (`OPT_*`), so
 //! `dumps()`'s constants and a `json.JSONEncoder`'s fields drive the same
@@ -1008,7 +1010,14 @@ fn build_mismatch(a: &mut Asm, ctx: &CompilationContext, ty: &IRType) {
         | (c.ge(b'0' as i32) & c.le(b'9' as i32))
         | c.eq(b'N' as i32)
         | c.eq(b'I' as i32);
-    a.if_(numeric, |a| put_text(a, ctx, b, " is a number"));
+    // A number is a mismatch for an int only when it is CPython's float, and
+    // for a float only when it is CPython's int, so those name the kind.
+    let number = match ty {
+        IRType::Int => " is a float",
+        IRType::Float => " is an int",
+        _ => " is a number",
+    };
+    a.if_(numeric, |a| put_text(a, ctx, b, number));
     put_text(
         a,
         ctx,
@@ -1078,7 +1087,8 @@ fn fits(ctx: &CompilationContext, gives: &IRType, want: &IRType) -> Option<Fit> 
     match (gives, want) {
         (g, w) if g == w => Some(Fit::Same),
         (IRType::Class(g), IRType::Class(w)) if ctx.is_class_or_subclass(g, w) => Some(Fit::Same),
-        (IRType::Bool, IRType::Int) => Some(Fit::Same),
+        // No bool where an int is declared: the place would print `1` where
+        // CPython prints `True` (as `check_widening` refuses it elsewhere).
         (g, IRType::Optional(inner)) => {
             fits(ctx, g, inner)?;
             Some(
@@ -1571,6 +1581,10 @@ fn build_load(a: &mut Asm, ctx: &CompilationContext, ty: &IRType, hook: Option<&
                 },
             );
             if floaty {
+                // An integer is CPython's int, which a float place would
+                // hold and print as a float: a value of another kind, as
+                // `check_widening` refuses `f(5)` for a float parameter.
+                a.if_(is_float.eqz(), |a| mismatch(a));
                 // The digits as a str, parsed as `float()` parses them.
                 let len = a.let_(i - pos);
                 let blob = a.let_(call(ctx.alloc_fn(), vec![len + 5], Some(I32)));

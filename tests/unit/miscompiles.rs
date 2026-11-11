@@ -5815,3 +5815,73 @@ fn a_tuple_sort_key_through_a_captured_object_compares_its_members() {
     );
     assert_eq!(run.stdout, "['Ada', 'Bob', 'Cy', 'Dee']\n");
 }
+
+/// `json.loads` of an integer where a float is declared gave the float
+/// (`1.0`, where CPython keeps the int `1`), and an `object_hook` answering
+/// a bool where an int is declared gave `1` (CPython keeps `True`). Each is
+/// now the `TypeError` any value of another kind than declared raises, as
+/// `check_widening` refuses `f(5)` for a float parameter. Every other line is
+/// CPython's answer for the same source.
+#[test]
+fn json_loads_refuses_an_int_where_a_float_is_declared() {
+    let run = run_main(
+        &dedent(
+            r#"
+            import json
+            from typing import Optional
+
+
+            def as_flag(d: dict[str, int]) -> bool:
+                return d["v"] == 1
+
+
+            def main() -> None:
+                for doc in ["1", "-0", "1.0", "1e2", "-2.5E-1", "NaN"]:
+                    try:
+                        x: float = json.loads(doc)
+                        print(x)
+                    except TypeError as e:
+                        print("TypeError:", e)
+                try:
+                    prices: dict[str, float] = json.loads('{"apple": 1.25, "pear": 2}')
+                    print(prices)
+                except TypeError as e:
+                    print("TypeError:", e)
+                try:
+                    maybe: list[Optional[float]] = json.loads("[null, 0.5, 3]")
+                    print(maybe)
+                except TypeError as e:
+                    print("TypeError:", e)
+                try:
+                    n: int = json.loads("2.0")
+                    print(n)
+                except TypeError as e:
+                    print("TypeError:", e)
+                try:
+                    f: int = json.loads('{"v": 1}', object_hook=as_flag)
+                    print(f)
+                except TypeError as e:
+                    print("TypeError:", e)
+
+
+            if __name__ == "__main__":
+                main()
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(
+        run.stdout,
+        "TypeError: json.loads(): the value at char 0 is an int, where float is declared\n\
+         TypeError: json.loads(): the value at char 0 is an int, where float is declared\n\
+         1.0\n\
+         100.0\n\
+         -0.25\n\
+         nan\n\
+         TypeError: json.loads(): the value at char 24 is an int, where float is declared\n\
+         TypeError: json.loads(): the value at char 12 is an int, where float is declared\n\
+         TypeError: json.loads(): the value at char 0 is a float, where int is declared\n\
+         TypeError: json.loads(): the object_hook's result for the object at char 0 is a bool, where int is declared\n"
+    );
+}
