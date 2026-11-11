@@ -578,6 +578,10 @@ pub struct CompilationContext {
     /// some functions can reach raising (a loop's check that its collection
     /// changed) traps in one that is not, rather than strand the exception.
     pub current_raises: bool,
+    /// What each loop variable of the function being scanned binds, where
+    /// the scan can tell (the variable itself is typed when it is bound): an
+    /// empty collection the loop appends it to takes that element type.
+    pub loop_elements: std::collections::HashMap<String, IRType>,
     /// Errors found during code generation.
     ///
     /// Codegen runs behind a shared `&CompilationContext` and its emit
@@ -669,6 +673,7 @@ impl CompilationContext {
             try_stack: Vec::new(),
             can_raise: std::collections::HashSet::new(),
             current_raises: false,
+            loop_elements: std::collections::HashMap::new(),
             errors: RefCell::new(Vec::new()),
             current_return_type: IRType::Unknown,
         }

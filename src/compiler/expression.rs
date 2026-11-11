@@ -3290,6 +3290,23 @@ pub(crate) fn emit_collection_element(
     if let Some(slot @ IRType::Any) = element_type {
         ctx.check_untyped_store(&actual, slot, what);
     }
+    // A collection whose element type was never learned (an empty literal
+    // nothing typed) reads every element back as an int word, so a value
+    // that is not one would be read back as its address.
+    if matches!(element_type, Some(IRType::Unknown))
+        && !matches!(
+            actual,
+            IRType::Int | IRType::Bool | IRType::None | IRType::Unknown | IRType::Any
+        )
+    {
+        let spelled = crate::type_to_string(&actual);
+        ctx.report(format!(
+            "{what} stores a '{}' into a collection whose element type was not learned where it \
+             was made, which would read it back as an int. Hint: annotate the collection where \
+             it is made with the type of what it holds ({spelled})",
+            crate::compiler::operators::python_type_name(&actual)
+        ));
+    }
 
     match (declared, &actual) {
         // An int or bool into a float slot is converted to the width the slot

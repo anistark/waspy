@@ -160,6 +160,7 @@ pub fn compile_function(
     owning_class: Option<&str>,
 ) -> CompiledFunction {
     ctx.locals_map.clear();
+    ctx.loop_elements.clear();
     ctx.local_count = 0;
     // Errors reported from expression codegen are located by this name.
     ctx.current_function = Some(match owning_class {
@@ -2095,6 +2096,49 @@ fn widen_class_local(target: &str, assigned: &IRType, ctx: &mut CompilationConte
     }
 }
 
+/// A value's type as the scan can tell it: `inferred`, or for a loop
+/// variable the scan left untyped, what its loop binds.
+fn scanned_type(value: &IRExpr, inferred: IRType, ctx: &CompilationContext) -> IRType {
+    match (&inferred, value) {
+        (IRType::Unknown, IRExpr::Variable(name)) => {
+            ctx.loop_elements.get(name).cloned().unwrap_or(inferred)
+        }
+        _ => inferred,
+    }
+}
+
+/// An empty collection takes the types of the first value stored in it, as
+/// a literal takes its elements' (`seen = []`, then `seen.append(k)`; for a
+/// dict, `d = {}`, then `d[k] = v`, whose key is `key`). Its elements had no
+/// type, so a str stored in one was read back as an int word.
+fn adopt_element(
+    target: &str,
+    key: Option<&IRType>,
+    assigned: &IRType,
+    ctx: &mut CompilationContext,
+) {
+    let known = |t: &IRType| !matches!(t, IRType::Unknown | IRType::Any | IRType::None);
+    let Some(info) = ctx.locals_map.get_mut(target) else {
+        return;
+    };
+    match &mut info.var_type {
+        IRType::List(e) | IRType::Set(e) if matches!(**e, IRType::Unknown) && known(assigned) => {
+            **e = assigned.clone();
+        }
+        IRType::Dict(k, v) => {
+            if let Some(key) = key.filter(|key| known(key)) {
+                if matches!(**k, IRType::Unknown) {
+                    **k = key.clone();
+                }
+            }
+            if matches!(**v, IRType::Unknown) && known(assigned) {
+                **v = assigned.clone();
+            }
+        }
+        _ => {}
+    }
+}
+
 /// The element-class counterpart of [`widen_class_local`]: a list, set, or
 /// dict-value local of instances that is given an instance of another class
 /// (`xs.append(Rect(...))` on `[Circle(...)]`) holds either, so its elements
@@ -2226,7 +2270,14 @@ pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
                 if ctx.get_local_index(target).is_none() {
                     // Use the annotation if present; otherwise infer the type
                     // from the value so unannotated float locals become f64.
-                    let inferred = infer_value_type(value, ctx);
+                    // An empty dict is one whose types its stores give it
+                    // (`adopt_element`).
+                    let inferred = match value {
+                        IRExpr::DictLiteral(entries) if entries.is_empty() => {
+                            IRType::Dict(Box::new(IRType::Unknown), Box::new(IRType::Unknown))
+                        }
+                        _ => infer_value_type(value, ctx),
+                    };
                     let var_type = var_type
                         .clone()
                         .map(|annotated| refine_annotation(annotated, &inferred))
@@ -2256,6 +2307,20 @@ pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
                 // float member get an f64 local (it used to bind as its low 32
                 // bits) and a string or tuple member be used as one.
                 let source = infer_unpack_source(value, ctx);
+                // A loop's element unpacked (`for k, v in pairs`): what each
+                // target binds, for an empty collection it is stored in.
+                if let (IRType::Unknown, IRExpr::Variable(element)) = (&source, value) {
+                    if let Some(bound) = ctx.loop_elements.get(element).cloned() {
+                        for (i, target) in targets.iter().enumerate() {
+                            if Some(i) != *starred {
+                                let member = unpack_member_type(&bound, i, targets.len(), *starred);
+                                if !matches!(member, IRType::Unknown | IRType::Any) {
+                                    ctx.loop_elements.insert(target.clone(), member);
+                                }
+                            }
+                        }
+                    }
+                }
                 for (i, target) in targets.iter().enumerate() {
                     if ctx.get_local_index(target).is_none() {
                         // The starred target collects the middle elements as a
@@ -2297,6 +2362,10 @@ pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
                 // f64 the element load pushes. Only literal iterables are typed
                 // confidently at scan time (list vars are still Unknown here), so
                 // `for x in some_float_list` remains an i32 bind for now.
+                let element = infer_iterable_elem_type(iterable, ctx);
+                if !matches!(element, IRType::Unknown | IRType::Any) {
+                    ctx.loop_elements.insert(target.clone(), element);
+                }
                 if ctx.get_local_index(target).is_none() {
                     let target_ty = match infer_iterable_elem_type(iterable, ctx) {
                         IRType::Float => IRType::Float,
@@ -2304,6 +2373,10 @@ pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
                         // class, so `for it in items: it.field` resolves the
                         // field instead of reading 0 off an untyped pointer.
                         class @ IRType::Class(_) => class,
+                        // A str element, so what the body computes from it
+                        // (`line.strip()`) is typed for the scan too; code
+                        // generation would make it a str in any case.
+                        text @ (IRType::String | IRType::Bytes) => text,
                         _ => IRType::Unknown,
                     };
                     let target_ty_for_companion = target_ty.clone();
@@ -2396,15 +2469,23 @@ pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
             }) if matches!(method_name.as_str(), "append" | "insert" | "add") => {
                 if let (IRExpr::Variable(name), Some(value)) = (object.as_ref(), arguments.last()) {
                     let assigned = infer_value_type(value, ctx);
+                    adopt_element(name, None, &scanned_type(value, assigned.clone(), ctx), ctx);
                     widen_class_element(name, &assigned, ctx);
                 }
             }
             IRStatement::IndexAssign {
                 container: IRExpr::Variable(name),
+                index,
                 value,
-                ..
             } => {
                 let assigned = infer_value_type(value, ctx);
+                let key = scanned_type(index, infer_value_type(index, ctx), ctx);
+                adopt_element(
+                    name,
+                    Some(&key),
+                    &scanned_type(value, assigned.clone(), ctx),
+                    ctx,
+                );
                 widen_class_element(name, &assigned, ctx);
             }
             // No `IRStatement::With` arm: `ir::context_managers` rewrites every

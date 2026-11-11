@@ -1485,12 +1485,24 @@ fn an_int_arriving_through_a_variable_is_refused_by_a_float_collection() {
 
 /// A write the compiler cannot make good on is refused rather than stored at
 /// the wrong width: a float into an int collection (CPython keeps the 2.5; an
-/// int slot cannot, and truncating would lose it), a float into a collection
-/// with no element type to read it back at, a value of unknown type into a
-/// float collection, and an `extend` between lists read at different widths.
+/// int slot cannot, and truncating would lose it), a value of unknown type
+/// into a float collection, and an `extend` between lists read at different
+/// widths. A float appended to an empty list types the list instead.
 #[test]
 fn writes_that_cannot_be_made_good_on_are_refused() {
-    let cases: [(&str, &str); 4] = [
+    // An empty list takes the type of what is first appended to it, so a
+    // float appended there is held and read at its width, CPython's answer.
+    assert_eq!(
+        call_f64(
+            "def f() -> float:\n\
+             \x20   xs = []\n\
+             \x20   xs.append(2.5)\n\
+             \x20   return xs[0]\n",
+            "f"
+        ),
+        2.5
+    );
+    let cases: [(&str, &str); 3] = [
         (
             "from typing import List\n\
              \n\
@@ -1499,13 +1511,6 @@ fn writes_that_cannot_be_made_good_on_are_refused() {
              \x20   xs.append(2.5)\n\
              \x20   return xs[1]\n",
             "truncate",
-        ),
-        (
-            "def f() -> float:\n\
-             \x20   xs = []\n\
-             \x20   xs.append(2.5)\n\
-             \x20   return xs[0]\n",
-            "no known element type",
         ),
         (
             "from typing import List\n\
@@ -6263,4 +6268,149 @@ fn ordered_dicts_and_deques_raise_their_own_errors_in_loops() {
          [1, 2]\n\
          [3, 2, 3]\n"
     );
+}
+
+/// An empty list, set, or dict with no annotation read every element back
+/// as an int word, so one filled with strs printed their addresses
+/// (`seen = []; seen.append("z"); print(seen)` was `[45]`). It now takes the
+/// types of the first value stored in it, a loop variable's included, and a
+/// store the compiler cannot type is refused. Every line is CPython's output.
+#[test]
+fn an_empty_collection_takes_the_type_of_what_is_stored_in_it() {
+    let run = run_main(
+        &dedent(
+            r#"
+            from collections import OrderedDict, defaultdict, Counter, deque
+
+
+            def lists() -> None:
+                xs = ["a", "b"]
+                seen = []
+                for k in xs:
+                    seen.append(k)
+                print(seen, len(seen[0]))
+                lit = []
+                for p in ["p", "q"]:
+                    lit.append(p)
+                print(lit)
+                direct = []
+                direct.append("z")
+                direct.insert(0, "y")
+                print(direct, ", ".join(direct))
+                fl = []
+                fl.append(1.5)
+                print(fl, sum(fl))
+                pairs = []
+                pairs.append((1, "one"))
+                print(pairs)
+
+
+            def dicts() -> None:
+                d = {"a": 0, "b": 1}
+                keys = []
+                for k in d:
+                    keys.append(k)
+                print(keys)
+                names = {}
+                names["x"] = "ex"
+                names["y"] = "why"
+                print(names, names["x"])
+                tags = set()
+                tags.add("t")
+                print(tags)
+
+
+            def collections_loops() -> None:
+                c = Counter("ab")
+                ck = []
+                for k in c:
+                    ck.append(k)
+                print(ck)
+                q: deque[str] = deque(["x", "y"])
+                qk = []
+                for k2 in q:
+                    qk.append(k2)
+                print(qk)
+                od: OrderedDict[str, int] = OrderedDict()
+                od["a"] = 0
+                ok = []
+                for k3 in od:
+                    ok.append(k3)
+                print(ok)
+                dd: defaultdict[str, int] = defaultdict(int)
+                dd["a"] = 1
+                dk = []
+                for k4 in dd:
+                    dk.append(k4)
+                print(dk)
+
+
+            if __name__ == "__main__":
+                lists()
+                dicts()
+                collections_loops()
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(
+        run.stdout,
+        "['a', 'b'] 1\n\
+         ['p', 'q']\n\
+         ['y', 'z'] y, z\n\
+         [1.5] 1.5\n\
+         [(1, 'one')]\n\
+         ['a', 'b']\n\
+         {'x': 'ex', 'y': 'why'} ex\n\
+         {'t'}\n\
+         ['a', 'b']\n\
+         ['x', 'y']\n\
+         ['a']\n\
+         ['a']\n"
+    );
+    // A tuple a loop unpacks types its targets for the list they fill.
+    assert_eq!(
+        call_str(
+            "def f() -> str:\n\
+             \x20   pairs = [(\"a\", 1), (\"b\", 2)]\n\
+             \x20   out = []\n\
+             \x20   for k, v in pairs:\n\
+             \x20       out.append(k)\n\
+             \x20   return out[1]\n",
+            "f"
+        ),
+        "b"
+    );
+    // A loop over a method's result, or over standard input, whose element
+    // the body works on before storing it.
+    let run = run_main(
+        &dedent(
+            r#"
+            import sys
+
+
+            def main() -> None:
+                words = []
+                for w in "a b".split():
+                    words.append(w)
+                print(words)
+                got = []
+                for line in sys.stdin:
+                    got.append(line.strip())
+                print(got)
+                seen = {}
+                for w2 in words:
+                    seen[w2] = len(w2)
+                print(seen)
+
+
+            if __name__ == "__main__":
+                main()
+            "#,
+        ),
+        "x\ny\n",
+        &[],
+    );
+    assert_eq!(run.stdout, "['a', 'b']\n['x', 'y']\n{'a': 1, 'b': 1}\n");
 }
