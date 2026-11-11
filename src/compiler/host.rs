@@ -41,6 +41,7 @@ pub enum Wasi {
     PathRename,
     PathUnlinkFile,
     ClockTimeGet,
+    FdReaddir,
 }
 
 impl Wasi {
@@ -64,6 +65,7 @@ impl Wasi {
             Wasi::PathRename => "path_rename",
             Wasi::PathUnlinkFile => "path_unlink_file",
             Wasi::ClockTimeGet => "clock_time_get",
+            Wasi::FdReaddir => "fd_readdir",
         }
     }
 
@@ -101,6 +103,8 @@ impl Wasi {
             Wasi::PathUnlinkFile => (vec![I32; 3], vec![I32]),
             // (clock id, precision, time_out) -> errno
             Wasi::ClockTimeGet => (vec![I32, ValType::I64, I32], vec![I32]),
+            // (fd, buf, buf_len, cookie, bufused_out) -> errno
+            Wasi::FdReaddir => (vec![I32, I32, I32, ValType::I64, I32], vec![I32]),
         }
     }
 }
@@ -121,7 +125,7 @@ const ARGV: i32 = HOST + 28;
 /// A preopened directory's `prestat` (`[tag u8][pad][name_len u32]`), and
 /// the descriptor `path_open` answers.
 const PRESTAT: i32 = HOST + 32;
-const FD_OUT: i32 = HOST + 40;
+pub(crate) const FD_OUT: i32 = HOST + 40;
 /// `sys.path`, once built.
 const SYS_PATH: i32 = HOST + 44;
 /// A resolved path: what is left of it past its preopen, `[rest][len]`.
@@ -179,7 +183,7 @@ pub(crate) fn wasi_needed(module: &IRModule, main_can_raise: bool) -> Vec<Wasi> 
             // unless the program seeded it.
             ("random", _) | ("os", "urandom") => &[Wasi::RandomGet],
             ("os", "environ" | "getenv") => &[Wasi::EnvironSizesGet, Wasi::EnvironGet],
-            ("os.path", "exists" | "isfile" | "isdir" | "getsize") => &[
+            ("os.path", "exists" | "isfile" | "isdir" | "getsize" | "getmtime") => &[
                 Wasi::PathFilestatGet,
                 Wasi::FdPrestatGet,
                 Wasi::FdPrestatDirName,
@@ -192,6 +196,13 @@ pub(crate) fn wasi_needed(module: &IRModule, main_can_raise: bool) -> Vec<Wasi> 
             ("os", "rename" | "replace") => {
                 &[Wasi::PathRename, Wasi::FdPrestatGet, Wasi::FdPrestatDirName]
             }
+            ("os", "listdir") => &[
+                Wasi::PathOpen,
+                Wasi::FdReaddir,
+                Wasi::FdClose,
+                Wasi::FdPrestatGet,
+                Wasi::FdPrestatDirName,
+            ],
             _ => &[],
         }
     };

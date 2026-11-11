@@ -508,8 +508,8 @@ fn logging_refuses_what_it_cannot_do() {
             "logging.handlers.SocketHandler needs a socket",
         ),
         (
-            "from logging.handlers import TimedRotatingFileHandler\ndef f() -> None:\n    TimedRotatingFileHandler(\"a\")\n",
-            "logging.handlers.TimedRotatingFileHandler is not supported yet",
+            "from logging.handlers import TimedRotatingFileHandler\nimport datetime\ndef f() -> None:\n    TimedRotatingFileHandler(\"a\", atTime=datetime.time(1, 0))\n",
+            "TimedRotatingFileHandler()'s atTime= is not supported",
         ),
         (
             "import logging.config\ndef f() -> None:\n    logging.config.fileConfig(\"x.ini\")\n",

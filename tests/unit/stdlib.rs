@@ -4566,3 +4566,123 @@ False
 "#,
     );
 }
+
+/// `logging.handlers.TimedRotatingFileHandler` rolls a file over on the
+/// clock: the first rollover counted from the file's modification time, the
+/// file renamed for the start of its interval, and the oldest backups past
+/// `backupCount` (matched by their date and time, nothing else) removed.
+/// Each expected line, and the files left, are CPython 3.13's on the same
+/// files and clock (`time.time` fixed at 1700100000, local time UTC).
+#[test]
+fn logging_timed_rotating_file_handler() {
+    let source = dedent(
+        r#"
+        import logging
+        import logging.handlers
+
+
+        def main() -> None:
+            log = logging.getLogger("app")
+            log.setLevel(logging.INFO)
+            h = logging.handlers.TimedRotatingFileHandler("app.log", when="D", backupCount=2)
+            h.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+            log.addHandler(h)
+            print(h.rolloverAt)
+            log.info("first")
+            print(h.rolloverAt)
+            log.info("second")
+            s = logging.handlers.TimedRotatingFileHandler("tick.log", when="S", interval=10, backupCount=1)
+            s.setFormatter(logging.Formatter("%(message)s"))
+            t = logging.getLogger("tick")
+            t.addHandler(s)
+            t.warning("tock")
+            print(s.rolloverAt)
+
+
+        if __name__ == "__main__":
+            main()
+    "#,
+    );
+    let mut host = Host::with_input("", &[]);
+    host.clock_ns = Some(1_700_100_000 * 1_000_000_000);
+    for (name, text, mtime) in [
+        ("app.log", "old line\n", 1_700_000_000u64),
+        ("app.log.2023-11-10", "a\n", 0),
+        ("app.log.2023-11-11", "b\n", 0),
+        ("app.log.2023-11-12", "c\n", 0),
+        ("app.log.junk", "j\n", 0),
+        ("other.log", "o\n", 0),
+        ("tick.log", "t0\n", 1_700_099_990),
+        ("tick.log.2023-11-16_01-59-40", "t1\n", 0),
+    ] {
+        host.files
+            .insert(name.to_string(), text.as_bytes().to_vec());
+        host.mtimes.insert(name.to_string(), mtime * 1_000_000_000);
+    }
+    let (run, host) = run_main_on(&source, host);
+    assert_eq!(run.stdout, "1700086400\n1700186400\n1700100010\n");
+    let mut left: Vec<(String, String)> = host
+        .files
+        .iter()
+        .map(|(n, b)| (n.clone(), String::from_utf8_lossy(b).to_string()))
+        .collect();
+    left.sort();
+    let want = [
+        ("app.log", "INFO first\nINFO second\n"),
+        ("app.log.2023-11-12", "c\n"),
+        ("app.log.2023-11-14", "old line\n"),
+        ("app.log.junk", "j\n"),
+        ("other.log", "o\n"),
+        ("tick.log", "tock\n"),
+        ("tick.log.2023-11-16_01-59-50", "t0\n"),
+    ];
+    assert_eq!(
+        left,
+        want.iter()
+            .map(|(n, t)| (n.to_string(), t.to_string()))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// `os.listdir()` and `os.path.getmtime()` through WASI's `fd_readdir` and
+/// `path_filestat_get`: the names but `.` and `..`, the current directory by
+/// default, and CPython's errors for a path that names nothing or a file.
+#[test]
+fn os_listdir_and_getmtime_errors() {
+    let mut host = Host::with_input("", &[]);
+    host.files.insert("x.txt".to_string(), b"x".to_vec());
+    host.mtimes.insert("x.txt".to_string(), 1_999_999_999);
+    let (run, _) = run_main_on(
+        &dedent(
+            r#"
+            import os
+            from os import listdir
+
+
+            def main() -> None:
+                print(listdir(), os.path.getmtime("x.txt"))
+                for bad in ["nope", "x.txt"]:
+                    try:
+                        os.listdir(bad)
+                    except OSError as e:
+                        print(type(e).__name__, e)
+                try:
+                    os.path.getmtime("nope")
+                except FileNotFoundError as e:
+                    print(e)
+
+
+            if __name__ == "__main__":
+                main()
+        "#,
+        ),
+        host,
+    );
+    assert_eq!(
+        run.stdout,
+        "['x.txt'] 1.999999999\n\
+         FileNotFoundError [Errno 2] No such file or directory: 'nope'\n\
+         NotADirectoryError [Errno 20] Not a directory: 'x.txt'\n\
+         [Errno 2] No such file or directory: 'nope'\n"
+    );
+}

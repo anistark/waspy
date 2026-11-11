@@ -337,12 +337,49 @@ pub struct Host {
     pub args: Vec<String>,
     /// The environment, as `KEY=value` strings.
     pub env: Vec<String>,
+    /// The time `clock_time_get` answers, in nanoseconds since the epoch, or
+    /// the real time when None.
+    pub clock_ns: Option<u64>,
+    /// Each file's modification time, in nanoseconds: a file written to (or
+    /// created) is stamped with the clock's time, and a rename keeps it.
+    pub mtimes: HashMap<String, u64>,
 }
 
 /// The name file I/O tests know the host by.
 pub type HostFs = Host;
 
 impl Host {
+    /// The clock's time, in nanoseconds since the epoch.
+    pub fn now(&self) -> u64 {
+        self.clock_ns.unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos() as u64)
+        })
+    }
+
+    /// The entries of the directory `dir` (`.` for the preopen): `.` and
+    /// `..`, then each name in it, sorted, a directory being a prefix of a
+    /// file's name. A directory is `3`, a file `4`, as WASI's filetypes are.
+    fn entries(&self, dir: &str) -> Vec<(String, u8)> {
+        let prefix = match dir.trim_start_matches("./").trim_end_matches('/') {
+            "" | "." => String::new(),
+            d => format!("{d}/"),
+        };
+        let mut names = std::collections::BTreeMap::new();
+        for file in self.files.keys() {
+            if let Some(rest) = file.trim_start_matches("./").strip_prefix(&prefix) {
+                match rest.split_once('/') {
+                    Some((sub, _)) => names.insert(sub.to_string(), 3u8),
+                    None => names.insert(rest.to_string(), 4u8),
+                };
+            }
+        }
+        let mut out = vec![(".".to_string(), 3), ("..".to_string(), 3)];
+        out.extend(names);
+        out
+    }
+
     /// A host whose standard input is `stdin` and whose arguments, after the
     /// program name, are `args`.
     pub fn with_input(stdin: &str, args: &[&str]) -> Host {
@@ -402,9 +439,11 @@ pub fn link_host(linker: &mut Linker<Host>) {
                         };
                         let name = name.clone();
                         host.files
-                            .entry(name)
+                            .entry(name.clone())
                             .or_default()
                             .extend_from_slice(&bytes);
+                        let now = host.now();
+                        host.mtimes.insert(name, now);
                     }
                     _ => return 8, // EBADF
                 }
@@ -480,9 +519,11 @@ pub fn link_host(linker: &mut Linker<Host>) {
                 } else {
                     return 44; // ENOENT
                 };
+                let mtime = host.mtimes.get(&name).copied().unwrap_or(0);
                 data[out as usize..out as usize + 64].fill(0);
                 data[out as usize + 16] = filetype;
                 data[out as usize + 32..out as usize + 40].copy_from_slice(&size.to_le_bytes());
+                data[out as usize + 48..out as usize + 56].copy_from_slice(&mtime.to_le_bytes());
                 0
             },
         )
@@ -500,6 +541,7 @@ pub fn link_host(linker: &mut Linker<Host>) {
                 let name = String::from_utf8_lossy(&data[path as usize..(path + len) as usize])
                     .trim_start_matches("./")
                     .to_string();
+                host.mtimes.remove(&name);
                 match host.files.remove(&name) {
                     Some(_) => 0,
                     None => 44, // ENOENT
@@ -532,6 +574,9 @@ pub fn link_host(linker: &mut Linker<Host>) {
                 let (from, to) = (text(old, old_len), text(new, new_len));
                 match host.files.remove(&from) {
                     Some(bytes) => {
+                        if let Some(mtime) = host.mtimes.remove(&from) {
+                            host.mtimes.insert(to.clone(), mtime);
+                        }
                         host.files.insert(to, bytes);
                         0
                     }
@@ -545,9 +590,7 @@ pub fn link_host(linker: &mut Linker<Host>) {
             wasi,
             "clock_time_get",
             |mut caller: Caller<'_, Host>, _clock: i32, _precision: i64, out: i32| -> i32 {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_nanos() as u64);
+                let now = caller.data().now();
                 let memory = memory_of(&mut caller);
                 let data = memory.data_mut(&mut caller);
                 data[out as usize..out as usize + 8].copy_from_slice(&now.to_le_bytes());
@@ -708,11 +751,29 @@ pub fn link_host(linker: &mut Linker<Host>) {
                 let (data, host) = memory.data_and_store_mut(&mut caller);
                 let start = path as usize;
                 let name = String::from_utf8_lossy(&data[start..start + len as usize]).to_string();
+                // A directory, for `fd_readdir`: neither readable nor writable.
+                if oflags & 2 != 0 {
+                    if host.files.contains_key(&name) {
+                        return 54; // ENOTDIR
+                    }
+                    if host.entries(&name).len() == 2 && !matches!(name.as_str(), "." | "") {
+                        return 44; // ENOENT
+                    }
+                    host.handles.push(Some((name, 0, false, false)));
+                    let fd = FIRST_FILE_FD + host.handles.len() as i32 - 1;
+                    put_word(data, fd_out as usize, fd as u32);
+                    return 0;
+                }
                 let (create, truncate, append) =
                     (oflags & 1 != 0, oflags & 8 != 0, fdflags & 1 != 0);
+                let now = host.now();
                 if truncate {
                     host.files.insert(name.clone(), Vec::new());
+                    host.mtimes.insert(name.clone(), now);
                 } else if create {
+                    if !host.files.contains_key(&name) {
+                        host.mtimes.insert(name.clone(), now);
+                    }
                     host.files.entry(name.clone()).or_default();
                 } else if !host.files.contains_key(&name) {
                     return 44; // ENOENT
@@ -744,6 +805,41 @@ pub fn link_host(linker: &mut Linker<Host>) {
             },
         )
         .expect("link fd_close");
+    linker
+        .func_wrap(
+            wasi,
+            "fd_readdir",
+            |mut caller: Caller<'_, Host>,
+             fd: i32,
+             buf: i32,
+             buf_len: i32,
+             cookie: i64,
+             used: i32|
+             -> i32 {
+                let memory = memory_of(&mut caller);
+                let (data, host) = memory.data_and_store_mut(&mut caller);
+                let Some(Some((dir, _, false, false))) =
+                    host.handles.get((fd - FIRST_FILE_FD).max(0) as usize)
+                else {
+                    return 8; // EBADF
+                };
+                let mut out = Vec::new();
+                for (i, (name, kind)) in host.entries(dir).iter().enumerate().skip(cookie as usize)
+                {
+                    out.extend_from_slice(&(i as u64 + 1).to_le_bytes());
+                    out.extend_from_slice(&0u64.to_le_bytes());
+                    out.extend_from_slice(&(name.len() as u32).to_le_bytes());
+                    out.extend_from_slice(&[*kind, 0, 0, 0]);
+                    out.extend_from_slice(name.as_bytes());
+                }
+                // As much as fits: the last entry may be cut short.
+                let n = out.len().min(buf_len as usize);
+                data[buf as usize..buf as usize + n].copy_from_slice(&out[..n]);
+                put_word(data, used as usize, n as u32);
+                0
+            },
+        )
+        .expect("link fd_readdir");
     linker
         .func_wrap(
             wasi,
@@ -782,6 +878,30 @@ pub fn run_main(source: &str, stdin: &str, args: &[&str]) -> Run {
         stderr: String::from_utf8(host.stderr.clone()).expect("utf-8 stderr"),
         exit,
     }
+}
+
+/// Compile a program and run its `__main__` block on `host` (its files, the
+/// clock, the environment), answering what it printed and the host as the
+/// program left it.
+pub fn run_main_on(source: &str, host: Host) -> (Run, Host) {
+    let wasm = compile(source);
+    let (instance, mut store) = instantiate_wasm_with(&wasm, host);
+    let start = instance
+        .get_typed_func::<(), ()>(&store, "_start")
+        .expect("an exported _start");
+    let exit = match start.call(&mut store, ()) {
+        Ok(()) => 0,
+        Err(trap) => trap
+            .i32_exit_status()
+            .unwrap_or_else(|| panic!("_start trapped: {trap}")),
+    };
+    let host = store.into_data();
+    let run = Run {
+        stdout: String::from_utf8(host.stdout.clone()).expect("utf-8 stdout"),
+        stderr: String::from_utf8(host.stderr.clone()).expect("utf-8 stderr"),
+        exit,
+    };
+    (run, host)
 }
 
 /// Call an exported zero-argument `i32` function and return its answer with

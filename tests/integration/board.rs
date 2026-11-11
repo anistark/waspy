@@ -3725,6 +3725,64 @@ mod stdlib {
         );
     }
 
+    /// os functions on directories and times, through WASI: listdir() and os.path.getmtime()
+    #[test]
+    fn os_listdir_and_getmtime() {
+        let mut host = Host::with_input("", &[]);
+        for (name, text) in [("a.txt", "abc"), ("d/b.txt", "b")] {
+            host.files
+                .insert(name.to_string(), text.as_bytes().to_vec());
+        }
+        host.mtimes
+            .insert("a.txt".to_string(), 1_700_000_000_500_000_000);
+        let (run, _) = run_main_on(
+            &dedent(
+                r#"
+                import os
+                if __name__ == "__main__":
+                    print(sorted(os.listdir(".")), os.listdir("d"), os.path.getmtime("a.txt"))
+                    try:
+                        os.listdir("missing")
+                    except FileNotFoundError as e:
+                        print(e)
+                "#,
+            ),
+            host,
+        );
+        assert_eq!(
+            run.stdout,
+            "['a.txt', 'd'] ['b.txt'] 1700000000.5\n[Errno 2] No such file or directory: 'missing'\n"
+        );
+    }
+
+    /// logging module: logging.handlers.TimedRotatingFileHandler, every when and interval, backupCount, delay (local time is UTC; atTime, namer, and rotator are refused)
+    #[test]
+    fn logging_timed_rotating_file_handler() {
+        let run = run_main(
+            &dedent(
+                r#"
+                import logging
+                import logging.handlers
+                import os
+                if __name__ == "__main__":
+                    h = logging.handlers.TimedRotatingFileHandler("app.log", when="d", interval=2, backupCount=3)
+                    print(h.when, h.interval, h.suffix, h.backupCount)
+                    print(h.rolloverAt - int(os.path.getmtime("app.log")))
+                    try:
+                        logging.handlers.TimedRotatingFileHandler("app.log", when="W9")
+                    except ValueError as e:
+                        print(e)
+                "#,
+            ),
+            "",
+            &[],
+        );
+        assert_eq!(
+            run.stdout,
+            "D 172800 %Y-%m-%d 3\n172800\nInvalid day specified for weekly rollover: W9\n"
+        );
+    }
+
     /// collections module: UserDict, UserList, UserString, ordinary classes whose subclasses reach their overrides, with the methods that make an instance answering the subclass
     #[test]
     fn collections_user_classes() {

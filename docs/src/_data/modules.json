@@ -1269,7 +1269,19 @@
         "test": "stdlib::os_file_functions"
       },
       {
-        "name": "logging module: TimedRotatingFileHandler and logging.config.fileConfig (refused today)",
+        "name": "os functions on directories and times, through WASI: listdir() and os.path.getmtime()",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::os_listdir_and_getmtime"
+      },
+      {
+        "name": "logging module: logging.handlers.TimedRotatingFileHandler, every when and interval, backupCount, delay (local time is UTC; atTime, namer, and rotator are refused)",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::logging_timed_rotating_file_handler"
+      },
+      {
+        "name": "logging module: logging.config.fileConfig (refused today)",
         "status": "todo"
       }
     ]
