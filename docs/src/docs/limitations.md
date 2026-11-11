@@ -61,7 +61,6 @@ These answer differently from CPython without an error. Each is known, and anyth
 
 ## Generators
 
-- A generator is not finalized when it is no longer reachable (there is no collector), so a generator abandoned mid-iteration does not run its `finally` blocks until `close()` is called
 - A generator method that another class of its hierarchy also defines is refused, since which generator a call makes would depend on the instance, and so is iterating a generator whose class is not known where it is iterated (one returned through an unannotated function, say)
 - A comprehension can iterate a generator or iterator only in its first `for` clause: an inner clause is evaluated twice (once to size the result, once to fill it), so an iterator there is refused rather than drained twice. `len()` of a generator is refused, as CPython raises `TypeError`
 
