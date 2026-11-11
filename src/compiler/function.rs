@@ -644,6 +644,370 @@ pub(crate) fn emit_raise(
     crate::compiler::exceptions::emit_raise_builtin(func, ctx, name, arg, extra_depth);
 }
 
+/// What a walk over a collection of `ty` binds: an element, a dict's key,
+/// a str's characters.
+pub(crate) fn walked_element(ty: &IRType) -> IRType {
+    match ty {
+        IRType::List(e) | IRType::VarTuple(e) | IRType::Set(e) => (**e).clone(),
+        IRType::Dict(k, _) => (**k).clone(),
+        IRType::String => IRType::String,
+        IRType::Bytes | IRType::Range => IRType::Int,
+        IRType::Tuple(members) => match members.first() {
+            Some(first) if members.iter().all(|m| m == first) => first.clone(),
+            _ => IRType::Unknown,
+        },
+        _ => IRType::Unknown,
+    }
+}
+
+/// How a loop walks a collection, one step at a time as CPython's iterator
+/// for it does.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum Walk {
+    /// A list or tuple, to wherever its end is at each step.
+    Sequence,
+    /// A deque's elements, held to the size it started at: CPython's
+    /// iterator raises for any change to the deque.
+    Deque,
+    /// A dict's keys, held to the size it started at and to its keys. An
+    /// `OrderedDict`'s (`ordered`) raise their own message, and only while
+    /// a key is left: its iterator, having handed out the last, is done.
+    Dict { float_key: bool, ordered: bool },
+    /// A set's buckets, held to the size it started at.
+    Set,
+}
+
+impl Walk {
+    /// The walk over a value of `ty`, read from an instance of the
+    /// `collections` class `kind` when there is one.
+    pub(crate) fn of(ty: &IRType, kind: Option<crate::ir::collections::spec::Kind>) -> Walk {
+        use crate::ir::collections::spec::Kind;
+        match ty {
+            IRType::Dict(key, _) => Walk::Dict {
+                float_key: matches!(**key, IRType::Float),
+                ordered: kind == Some(Kind::OrderedDict),
+            },
+            IRType::Set(_) => Walk::Set,
+            IRType::List(_) if kind == Some(Kind::Deque) => Walk::Deque,
+            _ => Walk::Sequence,
+        }
+    }
+
+    /// The bytes between two of the walk's positions.
+    pub(crate) fn stride(self) -> i32 {
+        match self {
+            Walk::Dict { .. } => DICT_ENTRY as i32,
+            Walk::Set => crate::compiler::sets::SET_BUCKET as i32,
+            Walk::Sequence | Walk::Deque => COLLECTION_SLOT as i32,
+        }
+    }
+}
+
+/// The `collections` class a walked value is an instance of, whose iterator
+/// has rules of its own (`OrderedDict`, `deque`).
+pub(crate) fn walk_kind(
+    iterable: &IRExpr,
+    ctx: &CompilationContext,
+) -> Option<crate::ir::collections::spec::Kind> {
+    // An instance walked through the data it reads as (`d.<data>()`).
+    if let IRExpr::MethodCall {
+        object,
+        method_name,
+        arguments,
+    } = iterable
+    {
+        if method_name == crate::ir::DATA_METHOD && arguments.is_empty() {
+            return walk_kind(object, ctx);
+        }
+    }
+    match infer_value_type(iterable, ctx) {
+        IRType::Class(class) => crate::ir::collections::spec::kind_of_class(&class),
+        _ => None,
+    }
+}
+
+/// The locals a `for` statement's walk keeps from one step to the next.
+#[derive(Clone, Copy)]
+pub(crate) struct WalkState {
+    /// The collection.
+    pub(crate) ptr: u32,
+    /// The next position: an index, or a set's next bucket.
+    pub(crate) at: u32,
+    /// The size when the walk began.
+    pub(crate) len: u32,
+    /// The word of the key a dict walk bound last, and a float key's high
+    /// word.
+    pub(crate) key: u32,
+    pub(crate) key_hi: u32,
+}
+
+/// Where the position a walk bound last is.
+#[derive(Clone, Copy)]
+pub(crate) enum LastAt {
+    /// One before the next position this local holds (a `for` statement's
+    /// counter), so -1 before the first step.
+    BeforeNext(u32),
+    /// In this local (a `__walk_next` call's argument).
+    Is(u32),
+}
+
+/// How the key a dict walk bound last is held.
+#[derive(Clone, Copy)]
+pub(crate) enum KeyHeld {
+    /// One word.
+    Word(u32),
+    /// A float key's two words.
+    Halves(u32, u32),
+    /// A float key, in an f64 local.
+    Float(u32),
+}
+
+fn push_last(func: &mut Function, last: LastAt) {
+    match last {
+        LastAt::BeforeNext(next) => {
+            func.instruction(&Instruction::LocalGet(next));
+            func.instruction(&Instruction::I32Const(1));
+            func.instruction(&Instruction::I32Sub);
+        }
+        LastAt::Is(local) => {
+            func.instruction(&Instruction::LocalGet(local));
+        }
+    }
+}
+
+/// Raise the `RuntimeError` a walk over a changed collection raises. In a
+/// function no caller looks for an exception from (the analysis saw nothing
+/// in it that changes a collection: one was changed through a call), it
+/// traps instead, which nothing could have caught either.
+fn emit_walk_raise(func: &mut Function, ctx: &CompilationContext, message: &'static str) {
+    if ctx.current_raises || !ctx.try_stack.is_empty() {
+        emit_raise(
+            func,
+            ctx,
+            "RuntimeError",
+            crate::compiler::exceptions::ExcArg::Text(message),
+            2,
+        );
+    } else {
+        func.instruction(&Instruction::Unreachable);
+    }
+}
+
+/// The check CPython's dict and set iterators make on every step after the
+/// first: the collection is still the size the walk began at, and a dict's
+/// key bound last is still at its position. A dict's keys can change without
+/// its size changing (a key renamed with `d[new] = d.pop(old)`), and where
+/// CPython walks on, finishes, or raises then depends on how its table is
+/// laid out, so that raises its error at once.
+pub(crate) fn emit_walk_check(
+    func: &mut Function,
+    ctx: &CompilationContext,
+    walk: Walk,
+    ptr: u32,
+    len: u32,
+    last: LastAt,
+    key: KeyHeld,
+) {
+    const ORDERED: &str = "OrderedDict mutated during iteration";
+    let (size_message, keys_message) = match walk {
+        Walk::Sequence => return,
+        Walk::Deque => ("deque mutated during iteration", None),
+        Walk::Dict { ordered: true, .. } => (ORDERED, Some(ORDERED)),
+        Walk::Dict { .. } => (
+            "dictionary changed size during iteration",
+            Some("dictionary keys changed during iteration"),
+        ),
+        Walk::Set => ("Set changed size during iteration", None),
+    };
+    let word = |offset: u32| MemArg {
+        offset: offset as u64,
+        align: 2,
+        memory_index: 0,
+    };
+    push_last(func, last);
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::I32GeS);
+    if let Walk::Dict { ordered: true, .. } = walk {
+        // Not after the last key: the walk is over then, whatever changed.
+        push_last(func, last);
+        func.instruction(&Instruction::LocalGet(len));
+        func.instruction(&Instruction::I32Const(1));
+        func.instruction(&Instruction::I32Sub);
+        func.instruction(&Instruction::I32Ne);
+        func.instruction(&Instruction::I32And);
+    }
+    func.instruction(&Instruction::If(BlockType::Empty));
+    func.instruction(&Instruction::LocalGet(ptr));
+    func.instruction(&Instruction::I32Load(word(0)));
+    func.instruction(&Instruction::LocalGet(len));
+    func.instruction(&Instruction::I32Ne);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    emit_walk_raise(func, ctx, size_message);
+    func.instruction(&Instruction::End);
+    if let Some(keys_message) = keys_message {
+        // The slot of the key bound last: the size is unchanged, so the
+        // position is still inside the dict.
+        let slot = ctx.temp_local;
+        func.instruction(&Instruction::LocalGet(ptr));
+        func.instruction(&Instruction::I32Load(word(COLLECTION_DATA)));
+        push_last(func, last);
+        func.instruction(&Instruction::I32Const(DICT_ENTRY as i32));
+        func.instruction(&Instruction::I32Mul);
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalSet(slot));
+        match key {
+            KeyHeld::Word(k) => {
+                func.instruction(&Instruction::LocalGet(slot));
+                func.instruction(&Instruction::I32Load(word(0)));
+                func.instruction(&Instruction::LocalGet(k));
+                func.instruction(&Instruction::I32Ne);
+            }
+            KeyHeld::Halves(lo, hi) => {
+                func.instruction(&Instruction::LocalGet(slot));
+                func.instruction(&Instruction::I32Load(word(0)));
+                func.instruction(&Instruction::LocalGet(lo));
+                func.instruction(&Instruction::I32Ne);
+                func.instruction(&Instruction::LocalGet(slot));
+                func.instruction(&Instruction::I32Load(word(4)));
+                func.instruction(&Instruction::LocalGet(hi));
+                func.instruction(&Instruction::I32Ne);
+                func.instruction(&Instruction::I32Or);
+            }
+            KeyHeld::Float(f) => {
+                func.instruction(&Instruction::LocalGet(slot));
+                func.instruction(&Instruction::I64Load(MemArg {
+                    offset: 0,
+                    align: 3,
+                    memory_index: 0,
+                }));
+                func.instruction(&Instruction::LocalGet(f));
+                func.instruction(&Instruction::I64ReinterpretF64);
+                func.instruction(&Instruction::I64Ne);
+            }
+        }
+        func.instruction(&Instruction::If(BlockType::Empty));
+        emit_walk_raise(func, ctx, keys_message);
+        func.instruction(&Instruction::End);
+    }
+    func.instruction(&Instruction::End);
+}
+
+/// Move a set walk's position (`at`, a bucket) on to the next live bucket
+/// at or after it, through the set's current table, which a resize
+/// replaces. It is left at the table's size past the last.
+pub(crate) fn emit_set_seek_live(func: &mut Function, set: u32, at: u32) {
+    use crate::compiler::sets::{SET_BUCKET, SET_CAP, SET_DATA, SET_LIVE};
+    let word = |offset: u32| MemArg {
+        offset: offset as u64,
+        align: 2,
+        memory_index: 0,
+    };
+    func.instruction(&Instruction::Block(BlockType::Empty));
+    func.instruction(&Instruction::Loop(BlockType::Empty));
+    func.instruction(&Instruction::LocalGet(at));
+    func.instruction(&Instruction::LocalGet(set));
+    func.instruction(&Instruction::I32Load(word(SET_CAP)));
+    func.instruction(&Instruction::I32GeS);
+    func.instruction(&Instruction::BrIf(1));
+    func.instruction(&Instruction::LocalGet(set));
+    func.instruction(&Instruction::I32Load(word(SET_DATA)));
+    func.instruction(&Instruction::LocalGet(at));
+    func.instruction(&Instruction::I32Const(SET_BUCKET as i32));
+    func.instruction(&Instruction::I32Mul);
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::I32Load(word(0)));
+    func.instruction(&Instruction::I32Const(SET_LIVE));
+    func.instruction(&Instruction::I32Eq);
+    func.instruction(&Instruction::BrIf(1));
+    func.instruction(&Instruction::LocalGet(at));
+    func.instruction(&Instruction::I32Const(1));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::LocalSet(at));
+    func.instruction(&Instruction::Br(0));
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::End);
+}
+
+/// Push whether a `for` statement's walk is past its end (a set's position
+/// first moved on to its next live bucket).
+pub(crate) fn emit_walk_past_end(func: &mut Function, walk: Walk, s: WalkState) {
+    let word = |offset: u32| MemArg {
+        offset: offset as u64,
+        align: 2,
+        memory_index: 0,
+    };
+    func.instruction(&Instruction::LocalGet(s.at));
+    match walk {
+        Walk::Sequence => {
+            func.instruction(&Instruction::LocalGet(s.ptr));
+            func.instruction(&Instruction::I32Load(word(0)));
+        }
+        Walk::Dict { .. } | Walk::Deque => {
+            func.instruction(&Instruction::LocalGet(s.len));
+        }
+        Walk::Set => {
+            func.instruction(&Instruction::Drop);
+            emit_set_seek_live(func, s.ptr, s.at);
+            func.instruction(&Instruction::LocalGet(s.at));
+            func.instruction(&Instruction::LocalGet(s.ptr));
+            func.instruction(&Instruction::I32Load(word(crate::compiler::sets::SET_CAP)));
+        }
+    }
+    func.instruction(&Instruction::I32GeS);
+}
+
+/// Push the address of the element at a `for` statement's position: a
+/// list's slot, a dict's key slot, a set's bucket value.
+pub(crate) fn emit_walk_slot(func: &mut Function, walk: Walk, s: WalkState, stride: i32) {
+    let (data, value) = match walk {
+        Walk::Set => (
+            crate::compiler::sets::SET_DATA,
+            crate::compiler::sets::SET_BUCKET_VALUE,
+        ),
+        _ => (COLLECTION_DATA, 0),
+    };
+    func.instruction(&Instruction::LocalGet(s.ptr));
+    func.instruction(&Instruction::I32Load(MemArg {
+        offset: data as u64,
+        align: 2,
+        memory_index: 0,
+    }));
+    func.instruction(&Instruction::LocalGet(s.at));
+    func.instruction(&Instruction::I32Const(stride));
+    func.instruction(&Instruction::I32Mul);
+    func.instruction(&Instruction::I32Add);
+    if value > 0 {
+        func.instruction(&Instruction::I32Const(value as i32));
+        func.instruction(&Instruction::I32Add);
+    }
+}
+
+/// With a dict key's slot address on the stack, keep the key it holds for
+/// the next step's check, and leave the address.
+pub(crate) fn emit_walk_keep_key(
+    func: &mut Function,
+    ctx: &CompilationContext,
+    s: WalkState,
+    float_key: bool,
+) {
+    let slot = ctx.temp_local;
+    let word = |offset: u64| MemArg {
+        offset,
+        align: 2,
+        memory_index: 0,
+    };
+    func.instruction(&Instruction::LocalSet(slot));
+    func.instruction(&Instruction::LocalGet(slot));
+    func.instruction(&Instruction::I32Load(word(0)));
+    func.instruction(&Instruction::LocalSet(s.key));
+    if float_key {
+        func.instruction(&Instruction::LocalGet(slot));
+        func.instruction(&Instruction::I32Load(word(4)));
+        func.instruction(&Instruction::LocalSet(s.key_hi));
+    }
+    func.instruction(&Instruction::LocalGet(slot));
+}
+
 /// The check emitted after a call that can raise: if the callee left an
 /// exception pending, keep unwinding instead of using its result.
 pub(crate) fn emit_post_call_check(func: &mut Function, ctx: &CompilationContext) {
@@ -1044,6 +1408,17 @@ pub(crate) fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRTy
                 IRType::List(Box::new(elem))
             }
         }
+        // A walk's next position, and the element at one.
+        IRExpr::FunctionCall { function_name, .. } if function_name == crate::ir::WALK_NEXT_FN => {
+            IRType::Int
+        }
+        IRExpr::FunctionCall {
+            function_name,
+            arguments,
+        } if function_name == crate::ir::WALK_AT_FN => arguments
+            .first()
+            .map(|c| walked_element(&infer_value_type(c, ctx)))
+            .unwrap_or(IRType::Unknown),
         // A dict loop's key or value (see `ir::dict_views`).
         IRExpr::FunctionCall {
             function_name,
@@ -1496,6 +1871,10 @@ fn scan_expr_locals(expr: &IRExpr, ctx: &mut CompilationContext, depth: u32) {
                 ensure_local(ctx, &comp_gen_local_name("idx", depth, g), IRType::Int);
                 ensure_local(ctx, &comp_gen_local_name("len", depth, g), IRType::Int);
                 ensure_local(ctx, &comp_gen_local_name("mark", depth, g), IRType::Int);
+                // The key a dict walk bound last (a root, as it may be a str)
+                // and a float key's high word.
+                ensure_local(ctx, &comp_gen_local_name("key", depth, g), IRType::Unknown);
+                ensure_local(ctx, &comp_gen_local_name("khi", depth, g), IRType::Int);
                 // The iterable first: a comprehension inside it types its own
                 // target, which the element type here may be read through.
                 scan_expr_locals(&generator.iterable, ctx, depth + 1);
@@ -1948,6 +2327,11 @@ pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
                 ctx.add_local(&format!("__iter_ptr_{seq}"), IRType::Unknown);
                 ctx.add_local(&format!("__iter_idx_{seq}"), IRType::Int);
                 ctx.add_local(&format!("__iter_len_{seq}"), IRType::Int);
+                // The key a dict walk last bound, to tell when the dict's keys
+                // changed under the loop: its word (a root, since it may be a
+                // str), and a float key's high word.
+                ctx.add_local(&format!("__iter_key_{seq}"), IRType::Unknown);
+                ctx.add_local(&format!("__iter_khi_{seq}"), IRType::Int);
                 scan_and_allocate_locals(body, ctx);
                 if let Some(else_body) = else_body {
                     scan_and_allocate_locals(else_body, ctx);
@@ -3343,6 +3727,12 @@ fn compile_statement(
                 let list_length_idx = ctx
                     .get_local_index(&format!("__iter_len_{seq}"))
                     .expect("iterator len local not reserved");
+                let key_idx = ctx
+                    .get_local_index(&format!("__iter_key_{seq}"))
+                    .expect("iterator key local not reserved");
+                let key_hi_idx = ctx
+                    .get_local_index(&format!("__iter_khi_{seq}"))
+                    .expect("iterator key high-word local not reserved");
                 let target_idx = ctx
                     .get_local_index(target)
                     .expect("Target variable not found");
@@ -3408,11 +3798,13 @@ fn compile_statement(
                 }
 
                 // Evaluate the iterable (should return a pointer to list or value).
-                // A set is walked as the list of its members in table order.
+                let walk_class = walk_kind(iterable, ctx);
                 let iterable_type = emit_expr(iterable, func, ctx, memory_layout, None);
                 let iterable_type = match iterable_type {
-                    // A string and a dict are walked in place, below.
-                    t @ (IRType::String | IRType::Dict(..)) => t,
+                    // A string, a dict, and a set are walked in place, below,
+                    // so the loop sees what the body does to them as CPython's
+                    // iterators do.
+                    t @ (IRType::String | IRType::Dict(..) | IRType::Set(_)) => t,
                     other => crate::compiler::expression::emit_as_sequence(func, ctx, other),
                 };
 
@@ -3424,7 +3816,9 @@ fn compile_statement(
                 // Iterating a dict binds its *keys*, so the loop variable
                 // takes the key type, exactly as a list's binds the element.
                 let bound_elem = match &iterable_type {
-                    IRType::List(elem) | IRType::VarTuple(elem) => Some((**elem).clone()),
+                    IRType::List(elem) | IRType::VarTuple(elem) | IRType::Set(elem) => {
+                        Some((**elem).clone())
+                    }
                     IRType::Dict(key, _) => Some((**key).clone()),
                     _ => None,
                 };
@@ -3547,25 +3941,25 @@ fn compile_statement(
                         ctx.block_depth -= 1;
                         func.instruction(&Instruction::End);
                     }
-                    ref iter_ty @ (IRType::List(_) | IRType::VarTuple(_) | IRType::Dict(_, _)) => {
-                        // Lists store one COLLECTION_SLOT (8 bytes) per element;
-                        // strings keep their legacy 4-byte-per-codepoint stride.
+                    ref iter_ty @ (IRType::List(_)
+                    | IRType::VarTuple(_)
+                    | IRType::Dict(_, _)
+                    | IRType::Set(_)) => {
+                        // Lists store one COLLECTION_SLOT (8 bytes) per element.
                         // A dict entry is a key slot followed by a value slot,
                         // and `for k in d` walks the keys, so it strides two
                         // slots at a time. Iterating a dict used to fall through
                         // to the branch below and read whatever the stride
                         // happened to land on, so `for k in d` over three keys
-                        // counted 131072.
-                        let elem_stride = match iter_ty {
-                            IRType::Dict(_, _) => DICT_ENTRY as i32,
-                            IRType::List(_) | IRType::VarTuple(_) => COLLECTION_SLOT as i32,
-                            _ => 4,
-                        };
+                        // counted 131072. A set is walked bucket by bucket
+                        // through its table, as CPython's iterator walks it.
+                        let walk = Walk::of(iter_ty, walk_class);
+                        let elem_stride = walk.stride();
                         // A float list binds each element as f64 (the loop var was
                         // typed Float by the scan); everything else loads an i32.
                         let target_is_float =
                             matches!(get_local_type_by_index(ctx, target_idx), IRType::Float);
-                        // Store the pointer to the list/string
+                        // Store the pointer to the collection
                         func.instruction(&Instruction::LocalSet(iterator_ptr_idx));
                         // The iterable is in its own local now: what working
                         // it out left on the root stack goes once, here, and
@@ -3573,7 +3967,10 @@ fn compile_statement(
                         end_statement(func, ctx, calls, false);
                         let calls = func.runtime_calls();
 
-                        // Get list length: load from memory at ptr+0
+                        // The size when the loop starts, which a dict's or a
+                        // set's iterator holds it to. A list's iterator walks
+                        // to wherever its end is by then, so the list's
+                        // length is read again each time round instead.
                         func.instruction(&Instruction::LocalGet(iterator_ptr_idx));
                         func.instruction(&Instruction::I32Load(MemArg {
                             offset: 0,
@@ -3593,11 +3990,30 @@ fn compile_statement(
                         func.instruction(&Instruction::Loop(BlockType::Empty));
                         ctx.block_depth += 1;
 
-                        // Check if counter >= length
-                        func.instruction(&Instruction::LocalGet(loop_counter_idx));
-                        func.instruction(&Instruction::LocalGet(list_length_idx));
-                        func.instruction(&Instruction::I32GeS);
-                        func.instruction(&Instruction::BrIf(1)); // Break if true
+                        let state = WalkState {
+                            ptr: iterator_ptr_idx,
+                            at: loop_counter_idx,
+                            len: list_length_idx,
+                            key: key_idx,
+                            key_hi: key_hi_idx,
+                        };
+                        let key_held = match walk {
+                            Walk::Dict {
+                                float_key: true, ..
+                            } => KeyHeld::Halves(key_idx, key_hi_idx),
+                            _ => KeyHeld::Word(key_idx),
+                        };
+                        emit_walk_check(
+                            func,
+                            ctx,
+                            walk,
+                            iterator_ptr_idx,
+                            list_length_idx,
+                            LastAt::BeforeNext(loop_counter_idx),
+                            key_held,
+                        );
+                        emit_walk_past_end(func, walk, state);
+                        func.instruction(&Instruction::BrIf(1)); // Break if past the end
 
                         // Load element from list[counter]. The elements live in
                         // the block the region's data pointer names, so the
@@ -3605,16 +4021,10 @@ fn compile_statement(
                         // list mid-iteration moves the block, and reading it
                         // through the header each time is what keeps the loop
                         // looking at the live elements.
-                        func.instruction(&Instruction::LocalGet(iterator_ptr_idx));
-                        func.instruction(&Instruction::I32Load(MemArg {
-                            offset: COLLECTION_DATA as u64,
-                            align: 2,
-                            memory_index: 0,
-                        }));
-                        func.instruction(&Instruction::LocalGet(loop_counter_idx));
-                        func.instruction(&Instruction::I32Const(elem_stride));
-                        func.instruction(&Instruction::I32Mul);
-                        func.instruction(&Instruction::I32Add);
+                        emit_walk_slot(func, walk, state, elem_stride);
+                        if let Walk::Dict { float_key, .. } = walk {
+                            emit_walk_keep_key(func, ctx, state, float_key);
+                        }
                         let elem_arg = MemArg {
                             offset: 0,
                             align: 2,

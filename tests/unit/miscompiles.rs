@@ -5885,3 +5885,382 @@ fn json_loads_refuses_an_int_where_a_float_is_declared() {
          TypeError: json.loads(): the object_hook's result for the object at char 0 is a bool, where int is declared\n"
     );
 }
+
+/// A loop over a list, dict, or set changed while the loop runs walked a copy
+/// or a length read once: appending to a list stopped at its old end,
+/// removing from one read slots past the new end, and a dict or set changed
+/// by the loop never raised CPython's `RuntimeError`. Each walk now steps as
+/// CPython's iterator does, in a `for` statement, a dict view's loop, a
+/// generator's loop (whose collection the code resuming it can change), and
+/// a comprehension (whose result grows past the size counted when its
+/// source does). Every line is CPython's output for the same source.
+#[test]
+fn loops_see_what_is_done_to_the_collection_they_walk() {
+    let run = run_main(
+        &dedent(
+            r#"
+            from typing import Iterator
+
+
+            def lists() -> None:
+                xs = [1, 2, 3]
+                for x in xs:
+                    if x < 5:
+                        xs.append(x + 3)
+                print(xs)
+                ys = [1, 2, 3, 4]
+                seen: list[int] = []
+                for y in ys:
+                    seen.append(y)
+                    ys.remove(y)
+                print(seen, ys)
+
+
+            def dicts() -> None:
+                d = {1: 1, 2: 2}
+                n = 0
+                try:
+                    for k in d:
+                        n += 1
+                        if n < 5:
+                            d[k + 10] = 0
+                except RuntimeError as e:
+                    print("RuntimeError:", e)
+                print(n, d)
+                gone = {1: 1, 2: 2, 3: 3}
+                seen: list[int] = []
+                try:
+                    for k in gone:
+                        seen.append(k)
+                        del gone[k]
+                except RuntimeError as e:
+                    print("RuntimeError:", e)
+                print(seen)
+                later = {1: 1, 2: 2, 3: 3}
+                got: list[int] = []
+                for k in later:
+                    got.append(k)
+                    if k == 1:
+                        del later[3]
+                        later[4] = 4
+                print(got)
+                same = {1: 1, 2: 2}
+                for k in same:
+                    same[k] = same[k] * 10
+                print(same)
+                floats = {1.5: 1, 2.5: 2}
+                fl: list[float] = []
+                try:
+                    for kf in floats:
+                        fl.append(kf)
+                        floats[kf + 10.0] = 0
+                except RuntimeError as e:
+                    print("RuntimeError:", e)
+                print(fl)
+
+
+            def sets() -> None:
+                s = {1, 2}
+                n = 0
+                try:
+                    for v in s:
+                        n += 1
+                        if n < 5:
+                            s.add(v + 10)
+                except RuntimeError as e:
+                    print("RuntimeError:", e)
+                print(n, sorted(s))
+                t = {1, 2, 3}
+                seen: list[int] = []
+                for x in t:
+                    seen.append(x)
+                    if x == 1:
+                        t.remove(3)
+                        t.add(4)
+                print(seen)
+
+
+            def views() -> None:
+                d = {1: 1}
+                seen: list[int] = []
+                try:
+                    for k, v in d.items():
+                        seen.append(k)
+                        d[k + 1] = v
+                except RuntimeError as e:
+                    print("RuntimeError:", e)
+                print(seen)
+                w = {1: 10, 2: 20}
+                vals: list[int] = []
+                try:
+                    for v in w.values():
+                        vals.append(v)
+                        w.pop(2, 0)
+                except RuntimeError as e:
+                    print("RuntimeError:", e)
+                print(vals)
+
+
+            def walk(d: dict[int, int]) -> Iterator[int]:
+                for k in d:
+                    yield k
+
+
+            def walk_set(s: set[int]) -> Iterator[int]:
+                for x in s:
+                    yield x
+
+
+            def walk_list(xs: list[int]) -> Iterator[int]:
+                for x in xs:
+                    yield x
+
+
+            def generators() -> None:
+                d = {1: 1}
+                seen: list[int] = []
+                try:
+                    for k in walk(d):
+                        seen.append(k)
+                        d[k + 1] = 0
+                except RuntimeError as e:
+                    print("RuntimeError:", e)
+                print(seen)
+                s = {1, 2, 3}
+                got: list[int] = []
+                for x in walk_set(s):
+                    got.append(x)
+                    if x == 1:
+                        s.remove(3)
+                        s.add(4)
+                print(got)
+                xs = [1, 2]
+                out: list[int] = []
+                for y in walk_list(xs):
+                    out.append(y)
+                    if y < 3:
+                        xs.append(y + 2)
+                print(out)
+
+
+            def comprehensions() -> None:
+                xs = [1, 2, 3]
+                print([xs.pop() for x in xs])
+                ys = [1, 2]
+                print([y for y in ys if y > 5 or (len(ys) < 4 and ys.append(y + 10) is None) or True])
+                e = {1: 1, 2: 2}
+                try:
+                    print([e.pop(k) for k in e])
+                except RuntimeError as err:
+                    print("RuntimeError:", err)
+                s = {1, 2, 3}
+                try:
+                    print([s.pop() for v in s])
+                except RuntimeError as err:
+                    print("RuntimeError:", err)
+                qd = {"q": 1, "r": 2}
+                qs = {7, 8}
+                print([w for w in qd], [n for n in qs], [k for row in [{1: 1}, {2: 2, 3: 3}] for k in row])
+
+
+            if __name__ == "__main__":
+                lists()
+                dicts()
+                sets()
+                views()
+                generators()
+                comprehensions()
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(
+        run.stdout,
+        "[1, 2, 3, 4, 5, 6, 7]\n\
+         [1, 3] [2, 4]\n\
+         RuntimeError: dictionary changed size during iteration\n\
+         1 {1: 1, 2: 2, 11: 0}\n\
+         RuntimeError: dictionary changed size during iteration\n\
+         [1]\n\
+         [1, 2, 4]\n\
+         {1: 10, 2: 20}\n\
+         RuntimeError: dictionary changed size during iteration\n\
+         [1.5]\n\
+         RuntimeError: Set changed size during iteration\n\
+         1 [1, 2, 11]\n\
+         [1, 2, 4]\n\
+         RuntimeError: dictionary changed size during iteration\n\
+         [1]\n\
+         RuntimeError: dictionary changed size during iteration\n\
+         [10]\n\
+         RuntimeError: dictionary changed size during iteration\n\
+         [1]\n\
+         [1, 2, 4]\n\
+         [1, 2, 3, 4]\n\
+         [3, 2]\n\
+         [1, 2, 11, 12]\n\
+         RuntimeError: dictionary changed size during iteration\n\
+         RuntimeError: Set changed size during iteration\n\
+         ['q', 'r'] [8, 7] [1, 2, 3]\n"
+    );
+}
+
+/// A dict whose keys change during a loop over it without its size changing
+/// raises at once: CPython's answer there depends on how its table is laid
+/// out (for these two keys it walks on, then raises the same error). A set
+/// changed by a function the loop calls, in a function nothing else makes
+/// raise, traps where CPython raises, since no caller would look for the
+/// exception.
+#[test]
+fn a_dict_renamed_in_a_loop_raises_at_once_and_a_change_through_a_call_traps() {
+    let run = run_main(
+        &dedent(
+            r#"
+            def renamed() -> list[str]:
+                r = {"a": 1, "b": 2}
+                names: list[str] = []
+                try:
+                    for k in r:
+                        names.append(k)
+                        r[k.upper()] = r.pop(k)
+                except RuntimeError as e:
+                    names.append(str(e))
+                return names
+
+
+            if __name__ == "__main__":
+                print(renamed())
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(
+        run.stdout,
+        "['a', 'dictionary keys changed during iteration']\n"
+    );
+    assert!(call_i32_traps(
+        &dedent(
+            r#"
+            def touch(s: set[int]) -> None:
+                s |= {99}
+
+
+            def walk() -> int:
+                s = {1, 2}
+                n = 0
+                for x in s:
+                    touch(s)
+                    n += 1
+                return n
+            "#,
+        ),
+        "walk",
+    ));
+}
+
+/// An `OrderedDict`'s and a `deque`'s iterators raise their own errors: an
+/// `OrderedDict` changed while a key is left raises `OrderedDict mutated
+/// during iteration` (and one changed after its last key is handed out
+/// does not), and a `deque` that changes size raises `deque mutated during
+/// iteration`, even after its last element. Every line is CPython's output.
+#[test]
+fn ordered_dicts_and_deques_raise_their_own_errors_in_loops() {
+    let run = run_main(
+        &dedent(
+            r#"
+            from collections import OrderedDict, deque
+
+
+            def ordered() -> None:
+                d: OrderedDict[str, int] = OrderedDict()
+                d["a"] = 0
+                d["b"] = 1
+                seen: list[str] = []
+                try:
+                    for k in d:
+                        seen.append(k)
+                        d["z"] = 0
+                except RuntimeError as e:
+                    print("RuntimeError:", e)
+                print(seen)
+                last: OrderedDict[str, int] = OrderedDict()
+                last["a"] = 0
+                last["b"] = 1
+                got: list[str] = []
+                for k2 in last:
+                    got.append(k2)
+                    if k2 == "b":
+                        last["c"] = 2
+                print(got, list(last))
+                same: OrderedDict[str, int] = OrderedDict()
+                same["a"] = 1
+                same["b"] = 2
+                for k3 in same:
+                    same[k3] = same[k3] * 10
+                print(list(same.items()))
+                gone: OrderedDict[str, int] = OrderedDict()
+                gone["a"] = 1
+                gone["b"] = 2
+                gone["c"] = 3
+                order: list[str] = []
+                try:
+                    for k4, v4 in gone.items():
+                        order.append(k4)
+                        if k4 == "a":
+                            gone.pop("c")
+                except RuntimeError as e:
+                    print("RuntimeError:", e)
+                print(order)
+
+
+            def queue() -> None:
+                q: deque[int] = deque([1, 2])
+                seen: list[int] = []
+                try:
+                    for x in q:
+                        seen.append(x)
+                        q.append(9)
+                except RuntimeError as e:
+                    print("RuntimeError:", e)
+                print(seen)
+                r: deque[int] = deque([1, 2])
+                got: list[int] = []
+                try:
+                    for y in r:
+                        got.append(y)
+                        if y == 2:
+                            r.popleft()
+                except RuntimeError as e:
+                    print("RuntimeError:", e)
+                print(got)
+                s: deque[int] = deque([1, 2, 3])
+                for z in s:
+                    s[0] = z
+                print(list(s))
+
+
+            if __name__ == "__main__":
+                ordered()
+                queue()
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(
+        run.stdout,
+        "RuntimeError: OrderedDict mutated during iteration\n\
+         ['a']\n\
+         ['a', 'b'] ['a', 'b', 'c']\n\
+         [('a', 10), ('b', 20)]\n\
+         RuntimeError: OrderedDict mutated during iteration\n\
+         ['a']\n\
+         RuntimeError: deque mutated during iteration\n\
+         [1]\n\
+         RuntimeError: deque mutated during iteration\n\
+         [1, 2]\n\
+         [3, 2, 3]\n"
+    );
+}

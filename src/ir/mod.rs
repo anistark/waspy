@@ -30,7 +30,7 @@ pub use decorate::{
 };
 pub(crate) use decorate::{rename_body, walk_targets};
 pub use decorators::*;
-pub use dict_views::{lower_dict_views, DICT_VIEW_PREFIX};
+pub use dict_views::{lower_dict_views, may_change_collection, DICT_VIEW_PREFIX};
 pub use entry_points::*;
 pub use finalize::cell_local;
 pub(crate) use finalize::visit_body;

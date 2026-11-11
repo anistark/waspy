@@ -12,6 +12,20 @@ use std::collections::HashSet;
 /// codegen.
 pub const DICT_KEY_AT_FN: &str = "__dict_key_at";
 pub const DICT_VAL_AT_FN: &str = "__dict_val_at";
+/// Codegen intrinsics a loop walks a collection with, step by step as
+/// CPython's iterator does (see `ir::dict_views` and the suspending loops in
+/// `ir::generators`). `__walk_next(c, last, n, key, may_change)` is the next
+/// position after `last` (-1 before the first), or -1 past the end, raising
+/// CPython's `RuntimeError` when a dict or set is not the size `n` it started
+/// at or a dict's key `key`, bound at `last`, has moved. A list is walked to
+/// wherever its end is by then. `may_change` (a constant) says whether the
+/// loop's own body can change a dict or set, which is when the walk can
+/// raise. An optional sixth constant says the collection is an
+/// `OrderedDict`'s data (1) or a deque's (2), whose iterators raise their own
+/// errors. `__walk_at(c, i)` is the element at a position: a list's or str's
+/// item, a dict's key, a set's member (`i` is then a bucket).
+pub const WALK_NEXT_FN: &str = "__walk_next";
+pub const WALK_AT_FN: &str = "__walk_at";
 /// Prefix of the locals holding zip()'s arguments after the first, which the
 /// loop reads by length and index.
 pub const ZIP_SEQ_PREFIX: &str = "__zip_";

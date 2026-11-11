@@ -20,7 +20,9 @@ use crate::compiler::expression::emit_user_call;
 use crate::compiler::function::{
     emit_call_depth_step, emit_post_call_check, emit_raise, infer_value_type,
 };
-use crate::ir::{IRCompareOp, IRExpr, IROp, IRStatement, IRType, IRUnaryOp, MethodKind};
+use crate::ir::{
+    IRCompareOp, IRConstant, IRExpr, IROp, IRStatement, IRType, IRUnaryOp, MethodKind,
+};
 use wasm_encoder::{BlockType, Instruction as I, MemArg};
 
 /// Every special method an operator, a truth test, or a builtin calls.
@@ -1071,7 +1073,10 @@ pub(crate) fn rewrite(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr>
     if let Some(compared) = rewrite_optional_text_compare(expr, ctx) {
         return Some(compared);
     }
-    if let Some(built) = rewrite_dict_call(expr, ctx).or_else(|| rewrite_iter_seq(expr, ctx)) {
+    if let Some(built) = rewrite_dict_call(expr, ctx)
+        .or_else(|| rewrite_iter_seq(expr, ctx))
+        .or_else(|| rewrite_walk(expr, ctx))
+    {
         return Some(built);
     }
     if let Some(unwrapped) = rewrite_optional_receiver(expr, ctx) {
@@ -1634,25 +1639,8 @@ fn rewrite_iter_seq(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
         return None;
     };
     Some(match infer_value_type(x, ctx) {
-        IRType::Dict(..) => call(x, "keys", Vec::new()),
-        IRType::Set(e) => {
-            // Named for the element type, so the scan that reserves it and
-            // the code that uses it agree.
-            let each = format!(
-                "__iter_seq_{}",
-                crate::ir::collections::spec::encode(&e).unwrap_or_default()
-            );
-            IRExpr::Comprehension {
-                kind: crate::ir::IRComprehensionKind::List,
-                element: Box::new(IRExpr::Variable(each.clone())),
-                value: None,
-                generators: vec![crate::ir::IRGenerator {
-                    targets: vec![each],
-                    iterable: x.clone(),
-                    conditions: Vec::new(),
-                }],
-            }
-        }
+        // A dict and a set are walked in place (`__walk_next`), so the loop
+        // sees what is done to them while it is suspended, as CPython's does.
         IRType::Class(_) => match view_of(x, ctx) {
             Some(view) => IRExpr::FunctionCall {
                 function_name: function_name.clone(),
@@ -1662,6 +1650,64 @@ fn rewrite_iter_seq(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
         },
         _ => x.clone(),
     })
+}
+
+/// `__walk_next` / `__walk_at` over a list, tuple, str, bytes, or range, as
+/// the indexing they mean (a list is walked to wherever its end is by then),
+/// and `__walk_at` over a dict as its key. A dict's and a set's steps, which
+/// check what the loop did to them, are code generation's.
+fn rewrite_walk(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
+    let IRExpr::FunctionCall {
+        function_name,
+        arguments,
+    } = expr
+    else {
+        return None;
+    };
+    let next = function_name == crate::ir::WALK_NEXT_FN;
+    if !next && function_name != crate::ir::WALK_AT_FN {
+        return None;
+    }
+    let collection = arguments.first()?;
+    // A deque's data walked by a step that checks it (see `WALK_NEXT_FN`).
+    if next && matches!(arguments.get(5), Some(IRExpr::Const(IRConstant::Int(2)))) {
+        return None;
+    }
+    let ty = infer_value_type(collection, ctx);
+    match (&ty, next) {
+        // A dict's and a set's steps, and a set's members, are code
+        // generation's.
+        (IRType::Dict(..) | IRType::Set(_), true) | (IRType::Set(_), false) => None,
+        (IRType::Dict(..), false) => Some(IRExpr::FunctionCall {
+            function_name: crate::ir::DICT_KEY_AT_FN.to_string(),
+            arguments: arguments.clone(),
+        }),
+        // Anything else is walked by `len()` and indexing, as it was before
+        // the walk was a step: a list, tuple, str, bytes, or range.
+        (_, true) => {
+            let after = IRExpr::BinaryOp {
+                left: Box::new(arguments.get(1)?.clone()),
+                right: Box::new(IRExpr::Const(IRConstant::Int(1))),
+                op: IROp::Add,
+            };
+            Some(IRExpr::Conditional {
+                condition: Box::new(IRExpr::CompareOp {
+                    left: Box::new(after.clone()),
+                    right: Box::new(IRExpr::FunctionCall {
+                        function_name: "len".to_string(),
+                        arguments: vec![collection.clone()],
+                    }),
+                    op: IRCompareOp::Lt,
+                }),
+                body: Box::new(after),
+                orelse: Box::new(IRExpr::Const(IRConstant::Int(-1))),
+            })
+        }
+        (_, false) => Some(IRExpr::Indexing {
+            container: Box::new(collection.clone()),
+            index: Box::new(arguments.get(1)?.clone()),
+        }),
+    }
 }
 
 /// `dict(x)`: a copy of a dict (or of the dict a `collections` class reads

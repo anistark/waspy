@@ -18,8 +18,8 @@ use super::build::{assign, call, cmp, for_, idx, int, mcall, v};
 use super::collections::spec::{self, Kind};
 use super::infer::{bind, Types};
 use crate::ir::{
-    IRBody, IRCompareOp, IRExpr, IRModule, IROp, IRStatement, IRType, DATA_METHOD, DICT_KEY_AT_FN,
-    DICT_VAL_AT_FN, VIEW_METHOD,
+    IRBody, IRCompareOp, IRConstant, IRExpr, IRModule, IROp, IRStatement, IRType, DATA_METHOD,
+    DEL_ITEM_METHOD, DEL_SLICE_METHOD, DICT_KEY_AT_FN, DICT_VAL_AT_FN, VIEW_METHOD, WALK_NEXT_FN,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -28,6 +28,73 @@ const VIEWS: [&str; 3] = ["items", "keys", "values"];
 /// The prefix of the local a dict-view loop parks the dict it walks in. It
 /// starts `__dict_`, which `len()` reads as a compiler-made collection.
 pub const DICT_VIEW_PREFIX: &str = "__dict_view_";
+
+/// The methods that change a dict or a set in place.
+const CHANGING_METHODS: [&str; 14] = [
+    "pop",
+    "popitem",
+    "clear",
+    "update",
+    "setdefault",
+    "add",
+    "discard",
+    "remove",
+    "difference_update",
+    "intersection_update",
+    "symmetric_difference_update",
+    "move_to_end",
+    DEL_ITEM_METHOD,
+    DEL_SLICE_METHOD,
+];
+
+/// Whether a loop's body changes a dict or a set itself, so that a walk over
+/// one can find it changed and raise CPython's `RuntimeError`: an item
+/// assignment, a `del` of an item, a method that changes one in place, or an
+/// in-place set operator. The analysis of what can raise asks this of every
+/// loop. A collection changed through a call to a function is not seen here,
+/// and a walk that finds that traps instead.
+pub fn may_change_collection(statements: &[IRStatement]) -> bool {
+    let mut found = false;
+    let mut probe = IRBody {
+        statements: statements.to_vec(),
+    };
+    let _ = super::finalize::visit_body(&mut probe, &mut |e| {
+        if let IRExpr::MethodCall { method_name, .. } = e {
+            found |= CHANGING_METHODS.contains(&method_name.as_str());
+        }
+        Ok(())
+    });
+    found || statements.iter().any(statement_changes)
+}
+
+fn statement_changes(stmt: &IRStatement) -> bool {
+    let any = |body: &IRBody| body.statements.iter().any(statement_changes);
+    match stmt {
+        IRStatement::IndexAssign { .. } => true,
+        IRStatement::AugAssign { op, .. } | IRStatement::AttributeAugAssign { op, .. } => {
+            matches!(op, IROp::BitOr | IROp::BitAnd | IROp::Sub | IROp::BitXor)
+        }
+        IRStatement::If {
+            then_body,
+            else_body,
+            ..
+        } => any(then_body) || else_body.as_deref().is_some_and(any),
+        IRStatement::While { body, .. } | IRStatement::With { body, .. } => any(body),
+        IRStatement::For {
+            body, else_body, ..
+        } => any(body) || else_body.as_deref().is_some_and(any),
+        IRStatement::TryExcept {
+            try_body,
+            except_handlers,
+            finally_body,
+        } => {
+            any(try_body)
+                || except_handlers.iter().any(|h| any(&h.body))
+                || finally_body.as_deref().is_some_and(any)
+        }
+        _ => false,
+    }
+}
 
 /// Rewrite every dict-view loop of the module's functions and methods.
 pub fn lower_dict_views(module: &mut IRModule) {
@@ -290,7 +357,10 @@ impl Pass<'_> {
             return vec![keep(object, method_name, arguments, body)];
         }
         let mut object = object;
+        // An `OrderedDict`'s iterator has its own rules (see `WALK_NEXT_FN`).
+        let mut ordered = false;
         if let IRType::Class(class) = self.receiver(&object, env) {
+            ordered = spec::kind_of_class(&class) == Some(Kind::OrderedDict);
             if self.classes.reads_through_getitem(&class, &method_name) {
                 return self.walk_mapping(*object, &method_name, target, *body);
             }
@@ -338,27 +408,48 @@ impl Pass<'_> {
         self.next += 1;
         let dict = format!("{DICT_VIEW_PREFIX}{n}");
         let counter = format!("__dview_at_{n}");
+        let size = format!("__dview_len_{n}");
+        let key = format!("__dview_key_{n}");
+        // Each step checks the dict is the size it started at and its key
+        // bound last has not moved, as CPython's iterator does.
+        let may_change = may_change_collection(&statements);
         let mut inner = vec![
-            IRStatement::AugAssign {
-                target: counter.clone(),
-                value: int(1),
-                op: IROp::Add,
-            },
+            assign(
+                &counter,
+                call(
+                    WALK_NEXT_FN,
+                    vec![
+                        v(&dict),
+                        v(&counter),
+                        v(&size),
+                        v(&key),
+                        IRExpr::Const(IRConstant::Bool(may_change)),
+                        int(i32::from(ordered)),
+                    ],
+                ),
+            ),
             IRStatement::If {
-                condition: cmp(v(&counter), IRCompareOp::GtE, call("len", vec![v(&dict)])),
+                condition: cmp(v(&counter), IRCompareOp::Lt, int(0)),
                 then_body: Box::new(IRBody {
                     statements: vec![IRStatement::Break],
                 }),
                 else_body: None,
             },
+            assign(&key, call(DICT_KEY_AT_FN, vec![v(&dict), v(&counter)])),
         ];
         for (name, intrinsic) in bindings {
-            inner.push(assign(&name, call(intrinsic, vec![v(&dict), v(&counter)])));
+            let value = if intrinsic == DICT_KEY_AT_FN {
+                v(&key)
+            } else {
+                call(intrinsic, vec![v(&dict), v(&counter)])
+            };
+            inner.push(assign(&name, value));
         }
         inner.extend(statements);
         vec![
             assign(&dict, *object),
             assign(&counter, int(-1)),
+            assign(&size, call("len", vec![v(&dict)])),
             IRStatement::While {
                 condition: IRExpr::Const(crate::ir::IRConstant::Bool(true)),
                 body: Box::new(IRBody { statements: inner }),

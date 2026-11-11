@@ -573,6 +573,11 @@ pub struct CompilationContext {
     /// something they call. Calls to anything else need no exception check, so
     /// a program that never raises compiles to exactly what it did before.
     pub can_raise: std::collections::HashSet<u32>,
+    /// Whether the function being compiled is one of `can_raise`, so an
+    /// exception it raises reaches callers that look for it. Code that only
+    /// some functions can reach raising (a loop's check that its collection
+    /// changed) traps in one that is not, rather than strand the exception.
+    pub current_raises: bool,
     /// Errors found during code generation.
     ///
     /// Codegen runs behind a shared `&CompilationContext` and its emit
@@ -663,6 +668,7 @@ impl CompilationContext {
             current_function: None,
             try_stack: Vec::new(),
             can_raise: std::collections::HashSet::new(),
+            current_raises: false,
             errors: RefCell::new(Vec::new()),
             current_return_type: IRType::Unknown,
         }

@@ -5648,6 +5648,16 @@ fn unify_compared(a: &IRType, b: &IRType) -> Option<IRType> {
 }
 
 /// Resolve a comprehension helper local reserved by the scan pass.
+/// What a comprehension walks for a value of `ty`: a dict or a set in place,
+/// so the walk sees what the element and filters do to it, and anything else
+/// as a sequence.
+fn comp_walk_source(func: &mut Function, ctx: &CompilationContext, ty: IRType) -> IRType {
+    match ty {
+        IRType::Dict(..) | IRType::Set(_) => ty,
+        other => emit_as_sequence(func, ctx, other),
+    }
+}
+
 fn comp_local(ctx: &CompilationContext, name: String) -> u32 {
     ctx.get_local_index(&name)
         .unwrap_or_else(|| panic!("comprehension helper local {name} not reserved"))
@@ -5785,7 +5795,7 @@ fn emit_comp_loops(
         gen0_ty.clone()
     } else {
         let t = emit_expr(&generator.iterable, func, ctx, memory_layout, None);
-        let t = emit_as_sequence(func, ctx, t);
+        let t = comp_walk_source(func, ctx, t);
         narrow_element_to_word(func, &t);
         func.instruction(&Instruction::LocalSet(ptr));
         t
@@ -5875,7 +5885,26 @@ fn emit_comp_loops(
         func.instruction(&Instruction::End);
         func.instruction(&Instruction::End);
     } else {
-        // List-like layout: [len:i32][slot0][slot1]... (lists and tuples).
+        // A list or tuple, a dict's keys, or a set's buckets, each walked as
+        // CPython's iterator walks it (see `function::Walk`): a list to
+        // wherever its end is by then, a dict or set held to the size it
+        // started at, which the element or a filter may change.
+        use crate::compiler::function::{
+            emit_walk_check, emit_walk_keep_key, emit_walk_past_end, emit_walk_slot, KeyHeld,
+            LastAt, Walk, WalkState,
+        };
+        let walk = Walk::of(
+            &ty,
+            crate::compiler::function::walk_kind(&generator.iterable, ctx),
+        );
+        let stride = walk.stride();
+        let state = WalkState {
+            ptr,
+            at: idx,
+            len,
+            key: comp_local(ctx, comp_gen_local_name("key", depth, g)),
+            key_hi: comp_local(ctx, comp_gen_local_name("khi", depth, g)),
+        };
         func.instruction(&Instruction::LocalGet(ptr));
         func.instruction(&Instruction::I32Load(slot_arg()));
         func.instruction(&Instruction::LocalSet(len));
@@ -5887,10 +5916,23 @@ fn emit_comp_loops(
         func.instruction(&Instruction::Loop(BlockType::Empty));
         ctx.enter_expr_blocks(2);
 
-        func.instruction(&Instruction::LocalGet(idx));
-        func.instruction(&Instruction::LocalGet(len));
-        func.instruction(&Instruction::I32GeS);
+        let key_held = match walk {
+            Walk::Dict {
+                float_key: true, ..
+            } => KeyHeld::Halves(state.key, state.key_hi),
+            _ => KeyHeld::Word(state.key),
+        };
+        emit_walk_check(func, ctx, walk, ptr, len, LastAt::BeforeNext(idx), key_held);
+        emit_walk_past_end(func, walk, state);
         func.instruction(&Instruction::BrIf(1));
+        // The element's slot, kept in `elem_slot` (a dict's key kept for the
+        // next step's check).
+        let elem_slot = ctx.temp_local + 2;
+        emit_walk_slot(func, walk, state, stride);
+        if let Walk::Dict { float_key, .. } = walk {
+            emit_walk_keep_key(func, ctx, state, float_key);
+        }
+        func.instruction(&Instruction::LocalSet(elem_slot));
 
         // Bind the target(s) from slot `idx`.
         if let [target] = generator.targets.as_slice() {
@@ -5902,10 +5944,7 @@ fn emit_comp_loops(
             // An element's declared type decides how wide the slot is read and,
             // for a string, whether the companion length local has to be filled
             // in as well.
-            let elem_ty = match &ty {
-                IRType::List(inner) | IRType::VarTuple(inner) => (**inner).clone(),
-                _ => IRType::Unknown,
-            };
+            let elem_ty = crate::compiler::function::walked_element(&ty);
             // A variable the pre-pass could not type is read as an int, so
             // one binding a str would render its address.
             let open = |t: &IRType| matches!(t, IRType::Unknown | IRType::Any);
@@ -5951,12 +5990,7 @@ fn emit_comp_loops(
                     crate::type_to_string(&elem_ty)
                 ));
             }
-            func.instruction(&Instruction::LocalGet(ptr));
-            emit_data_base(func);
-            func.instruction(&Instruction::LocalGet(idx));
-            func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
-            func.instruction(&Instruction::I32Mul);
-            func.instruction(&Instruction::I32Add);
+            func.instruction(&Instruction::LocalGet(elem_slot));
             if target_is_float {
                 func.instruction(&Instruction::F64Load(mem_off(0)));
             } else {
@@ -5982,12 +6016,7 @@ fn emit_comp_loops(
             // slots positionally (i32 words — float members keep the existing
             // tuple-unpack limitation).
             let elem = comp_local(ctx, comp_local_name("elem", depth));
-            func.instruction(&Instruction::LocalGet(ptr));
-            emit_data_base(func);
-            func.instruction(&Instruction::LocalGet(idx));
-            func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
-            func.instruction(&Instruction::I32Mul);
-            func.instruction(&Instruction::I32Add);
+            func.instruction(&Instruction::LocalGet(elem_slot));
             func.instruction(&Instruction::I32Load(mem_off(0)));
             func.instruction(&Instruction::LocalSet(elem));
             for (j, target) in generator.targets.iter().enumerate() {
@@ -6998,7 +7027,7 @@ fn emit_comprehension(
     // --- Capacity phase -----------------------------------------------------
     // Evaluate the first iterable once and stash it; the fill phase reuses it.
     let gen0_ty = emit_expr(&generators[0].iterable, func, ctx, memory_layout, None);
-    let gen0_ty = emit_as_sequence(func, ctx, gen0_ty);
+    let gen0_ty = comp_walk_source(func, ctx, gen0_ty);
     narrow_element_to_word(func, &gen0_ty);
     func.instruction(&Instruction::LocalSet(ptr0));
 
@@ -7024,7 +7053,7 @@ fn emit_comprehension(
             false,
             &mut |func| {
                 let t = emit_expr(last_iterable, func, ctx, memory_layout, None);
-                let t = emit_as_sequence(func, ctx, t);
+                let t = comp_walk_source(func, ctx, t);
                 narrow_element_to_word(func, &t);
                 func.instruction(&Instruction::LocalSet(ptr_last));
                 emit_comp_iterable_len(func, ctx, matches!(t, IRType::Range), ptr_last);
@@ -7099,6 +7128,7 @@ fn emit_comprehension(
             true,
             &mut |func| match kind {
                 IRComprehensionKind::List => {
+                    emit_comp_room(func, ctx, res, widx, COLLECTION_SLOT);
                     // slot address = res + HEADER + widx*SLOT
                     func.instruction(&Instruction::LocalGet(res));
                     emit_data_base(func);
@@ -7117,6 +7147,7 @@ fn emit_comprehension(
                     func.instruction(&Instruction::LocalSet(widx));
                 }
                 IRComprehensionKind::Dict => {
+                    emit_comp_room(func, ctx, res, widx, DICT_ENTRY);
                     // key slot at res + HEADER + widx*ENTRY, value slot right after
                     func.instruction(&Instruction::LocalGet(res));
                     emit_data_base(func);
@@ -7196,6 +7227,19 @@ fn emit_comprehension(
         IRComprehensionKind::Set => IRType::Set(Box::new(elem_ty)),
         IRComprehensionKind::Dict => IRType::Dict(Box::new(elem_ty), Box::new(val_ty)),
     }
+}
+
+/// Make room in a list or dict comprehension's result for the element about
+/// to be written at `widx`. The result is sized for the source's length when
+/// the comprehension began, which a source the element or a filter changes
+/// can run past (a list walks to wherever its end is by then).
+fn emit_comp_room(func: &mut Function, ctx: &CompilationContext, res: u32, widx: u32, stride: u32) {
+    func.instruction(&Instruction::LocalGet(res));
+    func.instruction(&Instruction::LocalGet(widx));
+    func.instruction(&Instruction::I32Store(slot_arg()));
+    func.instruction(&Instruction::LocalGet(res));
+    func.instruction(&Instruction::LocalSet(ctx.temp_local));
+    emit_collection_reserve(func, ctx, Reserve::Count(1), stride);
 }
 
 /// A comprehension's variables are its own, and gone when it is done: let go
@@ -10187,6 +10231,140 @@ fn emit_function_call_expr(
         func.instruction(&Instruction::I32Const(0));
         func.instruction(&Instruction::GlobalSet(1));
         return IRType::Bool;
+    }
+
+    // A walk's step over a dict or a set (see `ir::dict_views` and the
+    // suspending loops in `ir::generators`): check what was done to the
+    // collection since the last step, as CPython's iterator does, then
+    // answer the next position, or -1 past the end. A list, tuple, or str
+    // is rewritten as indexing instead (`dunders::rewrite_walk`).
+    if function_name == crate::ir::WALK_NEXT_FN {
+        use crate::compiler::function::{
+            emit_set_seek_live, emit_walk_check, KeyHeld, LastAt, Walk,
+        };
+        let [collection, last, size, key, _may_change, rest @ ..] = arguments.as_slice() else {
+            ctx.report(format!("{function_name} takes five arguments"));
+            func.instruction(&Instruction::I32Const(-1));
+            return IRType::Int;
+        };
+        // What the walked collection is read from: an `OrderedDict`'s data
+        // (1) or a deque's (2), whose iterators have rules of their own.
+        let class = match rest.first() {
+            Some(IRExpr::Const(IRConstant::Int(1))) => {
+                Some(crate::ir::collections::spec::Kind::OrderedDict)
+            }
+            Some(IRExpr::Const(IRConstant::Int(2))) => {
+                Some(crate::ir::collections::spec::Kind::Deque)
+            }
+            _ => None,
+        };
+        let ty = emit_expr(collection, func, ctx, memory_layout, None);
+        let walk = Walk::of(&ty, class);
+        let (walk, key_ty) = match &ty {
+            IRType::Dict(k, _) => (walk, (**k).clone()),
+            IRType::Set(e) => (walk, (**e).clone()),
+            IRType::List(e) if walk == Walk::Deque => (walk, (**e).clone()),
+            other => {
+                ctx.report(format!(
+                    "a loop walks a value of type '{}' it cannot walk",
+                    crate::type_to_string(other)
+                ));
+                emit_drop_value(func, other);
+                func.instruction(&Instruction::I32Const(-1));
+                return IRType::Int;
+            }
+        };
+        let c = crate::compiler::equality::hold(ctx);
+        func.instruction(&Instruction::LocalSet(c));
+        let at = crate::compiler::equality::hold(ctx);
+        emit_expr(last, func, ctx, memory_layout, Some(&IRType::Int));
+        func.instruction(&Instruction::LocalSet(at));
+        let n = crate::compiler::equality::hold(ctx);
+        emit_expr(size, func, ctx, memory_layout, Some(&IRType::Int));
+        func.instruction(&Instruction::LocalSet(n));
+        // The key bound last is read only once a step has bound it: before
+        // that it is a zero, which a str held in a field (a generator's)
+        // would read its length through.
+        let held_key = crate::compiler::sets::Held::of(ctx, &key_ty);
+        func.instruction(&Instruction::LocalGet(at));
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::I32GeS);
+        func.instruction(&Instruction::If(BlockType::Empty));
+        ctx.enter_expr_blocks(1);
+        let key_word_ty = emit_expr(key, func, ctx, memory_layout, Some(&key_ty));
+        narrow_element_to_word(func, &key_word_ty);
+        held_key.set(func);
+        ctx.exit_expr_blocks(1);
+        func.instruction(&Instruction::End);
+        let key_held = match held_key {
+            crate::compiler::sets::Held::Word(slot) => KeyHeld::Word(slot),
+            crate::compiler::sets::Held::F64(slot) => KeyHeld::Float(slot),
+        };
+        emit_walk_check(func, ctx, walk, c, n, LastAt::Is(at), key_held);
+        func.instruction(&Instruction::LocalGet(at));
+        func.instruction(&Instruction::I32Const(1));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalSet(at));
+        let bound = if walk == Walk::Set {
+            emit_set_seek_live(func, c, at);
+            func.instruction(&Instruction::LocalGet(c));
+            func.instruction(&Instruction::I32Load(mem_off(
+                crate::compiler::sets::SET_CAP as u64,
+            )));
+            c
+        } else {
+            n
+        };
+        if bound == n {
+            func.instruction(&Instruction::LocalGet(n));
+        }
+        // Stack: the bound. The next position, or -1 at or past it.
+        func.instruction(&Instruction::LocalGet(at));
+        func.instruction(&Instruction::I32GtS);
+        func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        func.instruction(&Instruction::LocalGet(at));
+        func.instruction(&Instruction::Else);
+        func.instruction(&Instruction::I32Const(-1));
+        func.instruction(&Instruction::End);
+        held_key.release(ctx);
+        ctx.release_held();
+        ctx.release_held();
+        ctx.release_held();
+        return IRType::Int;
+    }
+
+    // The member in a set's bucket, for a walk (see `WALK_NEXT_FN` above).
+    if function_name == crate::ir::WALK_AT_FN {
+        let [collection, index] = arguments.as_slice() else {
+            ctx.report(format!("{function_name} takes a collection and a position"));
+            func.instruction(&Instruction::I32Const(0));
+            return IRType::Unknown;
+        };
+        let ty = emit_expr(collection, func, ctx, memory_layout, None);
+        let IRType::Set(member) = &ty else {
+            ctx.report(format!(
+                "a loop walks a value of type '{}' it cannot walk",
+                crate::type_to_string(&ty)
+            ));
+            emit_drop_value(func, &ty);
+            func.instruction(&Instruction::I32Const(0));
+            return IRType::Unknown;
+        };
+        func.instruction(&Instruction::I32Load(mem_off(
+            crate::compiler::sets::SET_DATA as u64,
+        )));
+        emit_expr(index, func, ctx, memory_layout, Some(&IRType::Int));
+        func.instruction(&Instruction::I32Const(
+            crate::compiler::sets::SET_BUCKET as i32,
+        ));
+        func.instruction(&Instruction::I32Mul);
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::I32Const(
+            crate::compiler::sets::SET_BUCKET_VALUE as i32,
+        ));
+        func.instruction(&Instruction::I32Add);
+        load_collection_word(func, member, ctx.temp_local + 1);
+        return (**member).clone();
     }
 
     // Positional dict-entry access backing `for k, v in d.items()` and
