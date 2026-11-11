@@ -1369,6 +1369,31 @@ mod strings {
         );
     }
 
+    /// More str methods: removeprefix, removesuffix, partition, rpartition, rfind, rindex, rsplit with maxsplit, splitlines, expandtabs, zfill, swapcase, istitle, isascii, and replace with a count
+    #[test]
+    fn more_methods() {
+        check(
+            r#"
+            def f() -> str:
+                s = "Hello, World"
+                a = "aaaa"
+                parts = [s.removeprefix("Hello"), s.removesuffix("World"), str(s.rfind("o")),
+                         str(s.rindex("l")), "|".join(s.partition(", ")), "|".join(s.rpartition("o")),
+                         "42".zfill(5), "-42".zfill(5), "a\tb".expandtabs(4),
+                         "|".join("a\nb\r\nc".splitlines()), "|".join("a b c".rsplit(maxsplit=1)),
+                         a.replace("a", "b", 2), "aaaa".replace("a", "b"), s.swapcase(),
+                         str(s.istitle()), str("é".isascii())]
+                return ",".join(parts)
+        "#,
+            &[(
+                "f",
+                Want::Str(
+                    ", World,Hello, ,8,10,Hello|, |World,Hello, W|o|rld,00042,-0042,a   b,a|b|c,a b|c,bbaa,bbbb,hELLO, wORLD,True,False",
+                ),
+            )],
+        );
+    }
+
     /// % formatting - compile-time for constants: %s %r %d %i %x %X %o %f with flags, width, and precision (rendered as written, or in decimal for %x, before; anything else is refused)
     #[test]
     fn constant_percent_formatting() {

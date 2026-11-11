@@ -506,6 +506,12 @@
         "test": "strings::layout_methods"
       },
       {
+        "name": "More str methods: removeprefix, removesuffix, partition, rpartition, rfind, rindex, rsplit with maxsplit, splitlines, expandtabs, zfill, swapcase, istitle, isascii, and replace with a count",
+        "status": "done",
+        "version": "upcoming",
+        "test": "strings::more_methods"
+      },
+      {
         "name": "% formatting - compile-time for constants: %s %r %d %i %x %X %o %f with flags, width, and precision (rendered as written, or in decimal for %x, before; anything else is refused)",
         "status": "done",
         "version": "0.18.0",

@@ -886,6 +886,14 @@ fn scan_expr_calls(expr: &IRExpr, raises: &mut bool, calls: &mut HashSet<String>
             if matches!(method_name.as_str(), "read" | "readline" | "readlines") {
                 *raises = true;
             }
+            // A `str` method written in IR that raises (`ValueError` for an
+            // absent substring or an empty separator) is a call of its helper.
+            if matches!(
+                method_name.as_str(),
+                "rindex" | "partition" | "rpartition" | "rsplit"
+            ) {
+                calls.insert(crate::ir::str_helper_name(method_name));
+            }
             // `sys.exit()` raises SystemExit, and the standard library's
             // functions raise CPython's errors (`math.sqrt(-1)`).
             if matches!(object.as_ref(), IRExpr::Variable(m) if crate::stdlib::is_stdlib_module(m))
@@ -1591,6 +1599,15 @@ fn is_pure_constant(
 /// instance wherever it was mentioned. Arbitrary module-level statements stay
 /// refused; this covers definitions, which is what Python runs at import.
 pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, WaspyError> {
+    // The `str` methods written in IR that the program calls (`ir::str_methods`).
+    let with_strs;
+    let ir_module = match crate::ir::with_str_helpers(ir_module) {
+        Some(module) => {
+            with_strs = module;
+            &with_strs
+        }
+        None => ir_module,
+    };
     // A module that can raise carries the builtin exception classes, ahead of
     // its own, so every exception is an object of one.
     let with_exceptions;

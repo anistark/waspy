@@ -61,10 +61,10 @@ fn unknown_methods_name_the_method_and_the_receiver() {
 
     let string = "def f() -> int:\n\
                   \x20   w = \"abc\"\n\
-                  \x20   return len(w.swapcase())\n";
+                  \x20   return len(w.frobnicate())\n";
     let err = try_compile(string).expect_err("an unknown string method must be rejected");
     assert!(
-        err.contains("swapcase") && err.contains("str"),
+        err.contains("frobnicate") && err.contains("str"),
         "expected the method and receiver, got: {err}"
     );
     assert!(
@@ -6599,5 +6599,96 @@ fn counters_from_generators_and_in_fields() {
         "Counter({'ANN': 2, 'BOB': 1}) 2\n\
          Counter({3: 2})\n\
          Counter({'a': 3, 'b': -1}) 3\n"
+    );
+}
+
+/// The `str` methods added in IR and in the case tables (`removeprefix`,
+/// `removesuffix`, `rfind`, `rindex`, `partition`, `rpartition`, `zfill`,
+/// `expandtabs`, `splitlines`, `rsplit`, `replace` with a count, `swapcase`,
+/// `istitle`, `isascii`), and `replace` on a literal receiver, which was
+/// folded to replace only the first occurrence (`"aaaa".replace("a", "b")`
+/// was `baaa`). Every line is CPython's output for the same source.
+#[test]
+fn str_methods_answer_as_cpython_does() {
+    let run = run_main(
+        &dedent(
+            r#"
+            def show(s: str) -> None:
+                print(repr(s.swapcase()), s.istitle(), s.isascii())
+
+
+            def main() -> None:
+                for s in ["Hello World", "hELLO wORLD", "ΣΑΣ", "ὈΔΥΣΣΕΎΣ", "ß", "ǅungla", "Ǆ", "", "abc123", "éclair", "Title Case Here", "Not title", "  Leading", "ΣΑΣ ΣΑΣ", "123"]:
+                    show(s)
+                print("ǅ".istitle(), "Ǆ".istitle(), "A".istitle(), "a".istitle(), "Aa Bb".istitle(), "AA".istitle())
+
+
+            def main2() -> None:
+                s = "Hello, World"
+                print(s.removeprefix("Hello"), s.removeprefix("x"), s.removesuffix("World"), s.removesuffix(""), "é-x".removeprefix("é"))
+                print(s.rfind("o"), s.rfind("zz"), s.rfind(""), "ééé".rfind("é"), s.rindex("l"))
+                try:
+                    s.rindex("q")
+                except ValueError as e:
+                    print("ValueError:", e)
+                print(s.partition(", "), s.partition("x"), s.rpartition("o"), s.rpartition("x"))
+                try:
+                    s.partition("")
+                except ValueError as e:
+                    print("ValueError:", e)
+                print("42".zfill(5), "-42".zfill(5), "+7".zfill(4), "abc".zfill(2), "".zfill(3), "é".zfill(3))
+                print(repr("a\tb\tc".expandtabs()), repr("ab\tc".expandtabs(4)), repr("x\ty\nz\tw".expandtabs(3)), repr("a\tb".expandtabs(0)), repr("a\tb".expandtabs(tabsize=2)))
+                text = "one\ntwo\r\nthree\rfour\x0bfive six"
+                print(text.splitlines(), text.splitlines(True), "".splitlines(), "x\n".splitlines(keepends=True), "\n\n".splitlines())
+                print("a b  c ".rsplit(), "a b  c".rsplit(maxsplit=1), " a b c ".rsplit(None, 1), "a,b,,c".rsplit(","), "a,b,,c".rsplit(",", 2), "abc".rsplit("x"), "a--b--c".rsplit("--", 1))
+                try:
+                    "a".rsplit("")
+                except ValueError as e:
+                    print("ValueError:", e)
+                print("aaaa".replace("a", "b", 2), "aaaa".replace("a", "b", 0), "aaaa".replace("a", "b", -1), "abc".replace("", "-", 2), "abc".replace("", "-", 9), "x.y.z".replace(".", "::", 1), "aaa".replace("a", "b", count=1))
+                words = ["ab", "cd"]
+                print([w.zfill(4) for w in words], "-".join(w.removeprefix("a") for w in words))
+
+
+            if __name__ == "__main__":
+                main()
+                main2()
+                print("aaaa".replace("a", "b"), "a.b.c".replace(".", "-"), "aaa".replace("a", "b", 1))
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(
+        run.stdout,
+        "'hELLO wORLD' True True\n\
+         'Hello World' False True\n\
+         'σας' False False\n\
+         'ὀδυσσεύς' False False\n\
+         'SS' False False\n\
+         'ǅUNGLA' True False\n\
+         'ǆ' True False\n\
+         '' False True\n\
+         'ABC123' False True\n\
+         'ÉCLAIR' False False\n\
+         'tITLE cASE hERE' True True\n\
+         'nOT TITLE' False True\n\
+         '  lEADING' True True\n\
+         'σας σας' False False\n\
+         '123' False True\n\
+         True True True False True False\n\
+         , World Hello, World Hello,  Hello, World -x\n\
+         8 -1 12 2 10\n\
+         ValueError: substring not found\n\
+         ('Hello', ', ', 'World') ('Hello, World', '', '') ('Hello, W', 'o', 'rld') ('', '', 'Hello, World')\n\
+         ValueError: empty separator\n\
+         00042 -0042 +007 abc 000 00é\n\
+         'a       b       c' 'ab  c' 'x  y\\nz  w' 'ab' 'a b'\n\
+         ['one', 'two', 'three', 'four', 'five', 'six'] ['one\\n', 'two\\r\\n', 'three\\r', 'four\\x0b', 'five\\u2028', 'six'] [] ['x\\n'] ['', '']\n\
+         ['a', 'b', 'c'] ['a b', 'c'] [' a b', 'c'] ['a', 'b', '', 'c'] ['a,b', '', 'c'] ['abc'] ['a--b', 'c']\n\
+         ValueError: empty separator\n\
+         bbaa aaaa bbbb -a-bc -a-b-c- x::y.z baa\n\
+         ['00ab', '00cd'] b-cd\n\
+         bbbb a-b-c baa\n"
     );
 }

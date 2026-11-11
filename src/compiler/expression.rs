@@ -1417,6 +1417,7 @@ enum CaseMode {
     Lower,
     Capitalize,
     Title,
+    Swap,
 }
 
 /// Which ends a strip-family method trims.
@@ -1441,6 +1442,7 @@ fn emit_string_case(func: &mut Function, ctx: &CompilationContext, mode: CaseMod
         CaseMode::Lower => Case::Lower,
         CaseMode::Capitalize => Case::Capitalize,
         CaseMode::Title => Case::Title,
+        CaseMode::Swap => Case::Swap,
     };
     func.instruction(&Instruction::Drop);
     func.instruction(&Instruction::Call(
@@ -13348,6 +13350,19 @@ fn emit_method_call_expr(
                     IRType::String
                 }
 
+                "swapcase" => {
+                    // swapcase(): each cased character in the other case.
+                    if !arguments.is_empty() {
+                        ctx.report(format!("str.{method_name}() takes no arguments"));
+                        func.instruction(&Instruction::Unreachable);
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::I32Const(0));
+                        return IRType::String;
+                    }
+                    emit_string_case(func, ctx, CaseMode::Swap);
+                    IRType::String
+                }
+
                 "title" => {
                     // title(): uppercase each letter that starts a word.
                     // The receiver's (offset, length) is on the stack;
@@ -13548,7 +13563,7 @@ fn emit_method_call_expr(
                 }
 
                 "isdigit" | "isalpha" | "isalnum" | "isspace" | "isupper" | "islower"
-                | "isdecimal" | "isnumeric" => {
+                | "isdecimal" | "isnumeric" | "istitle" | "isascii" => {
                     // The predicates over every character, as CPython
                     // classifies it (`core::unicode`). Constant
                     // receivers are folded during lowering. These
@@ -13569,6 +13584,8 @@ fn emit_method_call_expr(
                         "isupper" => Predicate::Upper,
                         "islower" => Predicate::Lower,
                         "isdecimal" => Predicate::Decimal,
+                        "istitle" => Predicate::Title,
+                        "isascii" => Predicate::Ascii,
                         _ => Predicate::Numeric,
                     };
                     func.instruction(&Instruction::Drop);
@@ -13696,11 +13713,14 @@ fn emit_method_call_expr(
                     ctx.report(format!(
                         "'{method_name}' is not supported on a str yet. \
                                  Hint: the supported string methods are capitalize, \
-                                 center, count, endswith, find, format, index, \
-                                 isalnum, isalpha, isdigit, islower, isspace, \
-                                 isupper, join, ljust, lower, lstrip, replace, \
-                                 rjust, rstrip, split, startswith, strip, title, \
-                                 and upper"
+                                 center, count, endswith, expandtabs, find, format, \
+                                 index, isalnum, isalpha, isascii, isdecimal, \
+                                 isdigit, islower, isnumeric, isspace, istitle, \
+                                 isupper, join, ljust, lower, lstrip, partition, \
+                                 removeprefix, removesuffix, replace, rfind, rindex, \
+                                 rjust, rpartition, rsplit, rstrip, split, \
+                                 splitlines, startswith, strip, swapcase, title, \
+                                 upper, and zfill"
                     ));
                     func.instruction(&Instruction::Drop); // length
                     func.instruction(&Instruction::Drop); // offset

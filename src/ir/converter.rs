@@ -4992,17 +4992,36 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                                     // Fall through to runtime handling
                                 }
                                 "replace" => {
-                                    // replace(old, new) - replace first occurrence
-                                    if arguments.len() >= 2 {
-                                        if let (
-                                            IRExpr::Const(IRConstant::String(old)),
-                                            IRExpr::Const(IRConstant::String(new)),
-                                        ) = (&arguments[0], &arguments[1])
-                                        {
-                                            let result = s.replacen(old.as_str(), new.as_str(), 1);
-                                            memory_layout.add_string(&result);
-                                            return Ok(IRExpr::Const(IRConstant::String(result)));
+                                    // replace(old, new[, count]): every
+                                    // occurrence, or the first `count` (all of
+                                    // them for a negative one). It replaced only
+                                    // the first, so `"aaaa".replace("a", "b")`
+                                    // was `baaa`. Rust's `replace` and `replacen`
+                                    // place an empty `old` where CPython does.
+                                    let count = match arguments.get(2) {
+                                        None => Some(None),
+                                        Some(IRExpr::Const(IRConstant::Int(n))) => {
+                                            Some(usize::try_from(*n).ok())
                                         }
+                                        Some(_) => None,
+                                    };
+                                    if let (
+                                        Some(IRExpr::Const(IRConstant::String(old))),
+                                        Some(IRExpr::Const(IRConstant::String(new))),
+                                        Some(count),
+                                        true,
+                                    ) = (
+                                        arguments.first(),
+                                        arguments.get(1),
+                                        count,
+                                        arguments.len() <= 3,
+                                    ) {
+                                        let result = match count {
+                                            Some(n) => s.replacen(old.as_str(), new.as_str(), n),
+                                            None => s.replace(old.as_str(), new.as_str()),
+                                        };
+                                        memory_layout.add_string(&result);
+                                        return Ok(IRExpr::Const(IRConstant::String(result)));
                                     }
                                     // Fall through to runtime handling
                                 }

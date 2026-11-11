@@ -203,6 +203,10 @@ pub enum Predicate {
     Space,
     Upper,
     Lower,
+    /// `istitle`.
+    Title,
+    /// `isascii`, true of an empty string too.
+    Ascii,
 }
 
 impl Predicate {
@@ -217,6 +221,28 @@ impl Predicate {
             Predicate::Space => every(&|c| Class::Space.has(c)),
             Predicate::Upper => cased_test(s, Class::Upper, Class::Lower),
             Predicate::Lower => cased_test(s, Class::Lower, Class::Upper),
+            Predicate::Ascii => s.is_ascii(),
+            Predicate::Title => {
+                let (mut cased, mut previous) = (false, false);
+                for c in s.chars() {
+                    if Class::Upper.has(c) || Class::Title.has(c) {
+                        if previous {
+                            return false;
+                        }
+                        previous = true;
+                        cased = true;
+                    } else if Class::Lower.has(c) {
+                        if !previous {
+                            return false;
+                        }
+                        previous = true;
+                        cased = true;
+                    } else {
+                        previous = false;
+                    }
+                }
+                cased
+            }
         }
     }
 }

@@ -1109,6 +1109,7 @@ pub(crate) fn rewrite(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr>
     if let Some(built) = rewrite_dict_call(expr, ctx)
         .or_else(|| rewrite_iter_seq(expr, ctx))
         .or_else(|| rewrite_walk(expr, ctx))
+        .or_else(|| rewrite_str_method(expr, ctx))
     {
         return Some(built);
     }
@@ -1741,6 +1742,76 @@ fn rewrite_walk(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
             index: Box::new(arguments.get(1)?.clone()),
         }),
     }
+}
+
+/// A `str` method written in IR (`ir::str_methods`) on a str receiver, as the
+/// call of its helper with every argument placed: positional, by keyword, or
+/// its default. A call the helper cannot take is left to code generation,
+/// which implements `replace(old, new)` and refuses the rest.
+fn rewrite_str_method(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
+    let IRExpr::MethodCall {
+        object,
+        method_name,
+        arguments,
+    } = expr
+    else {
+        return None;
+    };
+    if !crate::ir::STR_METHODS.contains(&method_name.as_str()) {
+        return None;
+    }
+    let helper = crate::ir::str_helper_name(method_name);
+    ctx.get_function_info(&helper)?;
+    if !matches!(infer_value_type(object, ctx), IRType::String) {
+        return None;
+    }
+    let int = |i: i32| Some(IRExpr::Const(IRConstant::Int(i)));
+    let (names, defaults): (&[&str], Vec<Option<IRExpr>>) = match method_name.as_str() {
+        "removeprefix" => (&["prefix"], vec![None]),
+        "removesuffix" => (&["suffix"], vec![None]),
+        "rfind" | "rindex" => (&["sub"], vec![None]),
+        "partition" | "rpartition" => (&["sep"], vec![None]),
+        "zfill" => (&["width"], vec![None]),
+        "expandtabs" => (&["tabsize"], vec![int(8)]),
+        "splitlines" => (
+            &["keepends"],
+            vec![Some(IRExpr::Const(IRConstant::Bool(false)))],
+        ),
+        "rsplit" => (
+            &["sep", "maxsplit"],
+            vec![Some(IRExpr::Const(IRConstant::None)), int(-1)],
+        ),
+        "replace" => (&["old", "new", "count"], vec![None, None, None]),
+        _ => return None,
+    };
+    let mut slots: Vec<Option<IRExpr>> = vec![None; names.len()];
+    let mut next = 0;
+    for argument in arguments {
+        match argument {
+            IRExpr::Keyword { name, value } => {
+                let at = names.iter().position(|n| n == name)?;
+                if slots[at].is_some() {
+                    return None;
+                }
+                slots[at] = Some((**value).clone());
+            }
+            positional => {
+                if next >= names.len() {
+                    return None;
+                }
+                slots[next] = Some(positional.clone());
+                next += 1;
+            }
+        }
+    }
+    let mut placed = vec![(**object).clone()];
+    for (slot, default) in slots.into_iter().zip(defaults) {
+        placed.push(slot.or(default)?);
+    }
+    Some(IRExpr::FunctionCall {
+        function_name: helper,
+        arguments: placed,
+    })
 }
 
 /// `dict(x)`: a copy of a dict (or of the dict a `collections` class reads
