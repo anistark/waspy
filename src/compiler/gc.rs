@@ -138,7 +138,12 @@ const FINALIZED: i32 = 1 << 30;
 /// instances, dicts, and sets do. One without the flag goes last to first,
 /// as its lists and tuples do. Only the order of finalizers depends on it.
 pub const FORWARD: i32 = 1 << 29;
-const AUX_FLAGS: i32 = FINALIZABLE | FINALIZED | FORWARD;
+/// The block holds no references (a string's or bytes' text), so marking and
+/// the finalizer analysis never read its words as pointers: a collection
+/// spends no time on it, and text that happens to spell an object's address
+/// keeps nothing alive.
+pub const NOSCAN: i32 = 1 << 28;
+const AUX_FLAGS: i32 = FINALIZABLE | FINALIZED | FORWARD | NOSCAN;
 
 /// Bytes allocated before the first collection, and the least between two.
 /// A program that allocates less than this in all never collects.
@@ -590,11 +595,13 @@ fn build_drain(ctx: &CompilationContext) -> Function {
     a.while_(g(GC_STACK_GLOBAL).gt_u(base), |a, _| {
         a.set_global(GC_STACK_GLOBAL, g(GC_STACK_GLOBAL) - 4);
         a.set(block, word(g(GC_STACK_GLOBAL), 0));
-        a.run(call(
-            scan,
-            vec![block + HDR, block + size_of(word(block, 0))],
-            None,
-        ));
+        a.if_((word(block, 4) & NOSCAN).eqz(), |a| {
+            a.run(call(
+                scan,
+                vec![block + HDR, block + size_of(word(block, 0))],
+                None,
+            ));
+        });
     });
     a.finish()
 }
@@ -626,11 +633,15 @@ fn build_peel(ctx: &CompilationContext) -> Function {
             a.set_global(GC_QUEUE_GLOBAL, g(GC_QUEUE_GLOBAL) + 4);
         });
         a.store(Ty::I32, top, 0, block);
+        // A block of text starts past its end, so nothing in it is read.
         a.store(
             Ty::I32,
             top,
             4,
-            (word(block, 4) & FORWARD).pick(block + HDR, block + size_of(word(block, 0)) - 4),
+            (word(block, 4) & NOSCAN).pick(
+                block + size_of(word(block, 0)),
+                (word(block, 4) & FORWARD).pick(block + HDR, block + size_of(word(block, 0)) - 4),
+            ),
         );
         a.set(top, top + 8);
     };
@@ -821,6 +832,8 @@ fn build_collect(ctx: &CompilationContext) -> Function {
                     each_dead(a, &mut |a| {
                         a.set(at, block + HDR);
                         a.set(size, block + size_of(header));
+                        // Text refers to nothing.
+                        a.if_(word(block, 4) & NOSCAN, |a| a.set(at, size));
                         a.while_(at.lt_u(size), |a, _| {
                             a.set(target, call(find_dead, vec![word(at, 0)], Some(Ty::I32)));
                             a.if_(

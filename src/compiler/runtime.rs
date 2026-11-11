@@ -730,6 +730,17 @@ fn build_big_quorem(ctx: &CompilationContext) -> Function {
     f
 }
 
+/// Mark the block just allocated, whose payload address is in `block`, as one
+/// holding no references (`gc::NOSCAN`): a fresh block's second header word
+/// is zero, so the flag is all it holds.
+pub(crate) fn mark_no_scan(f: &mut Function, block: u32) {
+    f.instruction(&Instruction::LocalGet(block));
+    f.instruction(&Instruction::I32Const(4));
+    f.instruction(&Instruction::I32Sub);
+    f.instruction(&Instruction::I32Const(crate::compiler::gc::NOSCAN));
+    f.instruction(&Instruction::I32Store(w32(0)));
+}
+
 /// Allocate a string blob for `len` bytes (a local), leaving the address of
 /// its first byte in `out` and storing the length prefix and terminator.
 pub(crate) fn alloc_string(f: &mut Function, ctx: &CompilationContext, len: u32, out: u32) {
@@ -737,7 +748,9 @@ pub(crate) fn alloc_string(f: &mut Function, ctx: &CompilationContext, len: u32,
     f.instruction(&Instruction::I32Const(5));
     f.instruction(&Instruction::I32Add);
     f.instruction(&Instruction::Call(ctx.alloc_fn()));
-    f.instruction(&Instruction::LocalTee(out));
+    f.instruction(&Instruction::LocalSet(out));
+    mark_no_scan(f, out);
+    f.instruction(&Instruction::LocalGet(out));
     f.instruction(&Instruction::LocalGet(len));
     f.instruction(&Instruction::I32Store(w32(0)));
     f.instruction(&Instruction::LocalGet(out));

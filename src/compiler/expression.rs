@@ -4327,6 +4327,12 @@ fn emit_alloc_string(
     func.instruction(&Instruction::I32Add);
     func.instruction(&Instruction::Call(ctx.alloc_fn()));
     func.instruction(&Instruction::LocalSet(blk_local));
+    // Text holds no references (`gc::NOSCAN`).
+    func.instruction(&Instruction::LocalGet(blk_local));
+    func.instruction(&Instruction::I32Const(4));
+    func.instruction(&Instruction::I32Sub);
+    func.instruction(&Instruction::I32Const(crate::compiler::gc::NOSCAN));
+    func.instruction(&Instruction::I32Store(slot_arg()));
     func.instruction(&Instruction::LocalGet(blk_local));
     func.instruction(&Instruction::LocalGet(len_local));
     func.instruction(&Instruction::I32Store(slot_arg()));
