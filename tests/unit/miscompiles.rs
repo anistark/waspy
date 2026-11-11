@@ -6414,3 +6414,53 @@ fn an_empty_collection_takes_the_type_of_what_is_stored_in_it() {
     );
     assert_eq!(run.stdout, "['a', 'b']\n['x', 'y']\n{'a': 1, 'b': 1}\n");
 }
+
+/// A dict comprehension appended every entry, so a repeated key was held
+/// twice (`{x % 2: x for x in range(4)}` was `{0: 0, 1: 1, 0: 2, 1: 3}`); it
+/// now inserts as `d[k] = v` does, the first position kept and the last
+/// value. A comprehension element that is a call answering None built an
+/// invalid module. Every line is CPython's output for the same source.
+#[test]
+fn a_dict_comprehension_keeps_one_entry_per_key() {
+    let run = run_main(
+        &dedent(
+            r#"
+            def main() -> None:
+                parity = {x % 2: x for x in range(4)}
+                print(parity, len(parity))
+                words = ["apple", "avocado", "banana"]
+                first = {w[0]: w for w in words}
+                print(first, len(first), first["a"])
+                halves = {x // 1.0: x for x in [1.5, 1.75, 2.5]}
+                print(halves)
+                ages = {"ann": 30, "bob": 25, "cy": 30}
+                by_age = {v: k for k, v in ages.items()}
+                print(by_age)
+                grid = {(r, c % 2): r * c for r in range(2) for c in range(3)}
+                print(grid)
+                big = {i % 50: i for i in range(200)}
+                print(len(big), big[0], big[49])
+                log: list[int] = []
+                print([log.append(v) for v in [3, 1]], log)
+                print({v: log.clear() for v in [3, 1]}, log)
+
+
+            if __name__ == "__main__":
+                main()
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(
+        run.stdout,
+        "{0: 2, 1: 3} 2\n\
+         {'a': 'avocado', 'b': 'banana'} 2 avocado\n\
+         {1.0: 1.75, 2.0: 2.5}\n\
+         {30: 'cy', 25: 'bob'}\n\
+         {(0, 0): 0, (0, 1): 0, (1, 0): 2, (1, 1): 1}\n\
+         50 150 199\n\
+         [None, None] [3, 1]\n\
+         {3: None, 1: None} []\n"
+    );
+}

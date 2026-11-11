@@ -1700,6 +1700,8 @@ fn infer_iterable_elem_type(iterable: &IRExpr, ctx: &CompilationContext) -> IRTy
         _ => IRType::Unknown,
     };
     match iterable {
+        // A range's elements are ints.
+        IRExpr::RangeCall { .. } => IRType::Int,
         IRExpr::ListLiteral(elems) | IRExpr::SetLiteral(elems) | IRExpr::TupleLiteral(elems) => {
             literal_elem_type(elems, ctx)
         }
@@ -1888,7 +1890,13 @@ fn scan_expr_locals(expr: &IRExpr, ctx: &mut CompilationContext, depth: u32) {
                     // companion length rather than treating the offset as a
                     // collection pointer.
                     let target_ty = match infer_iterable_elem_type(&generator.iterable, ctx) {
-                        ty @ (IRType::Float | IRType::String | IRType::Bytes) => ty,
+                        // A number, so a tuple or key built from it compares
+                        // by its members' types.
+                        ty @ (IRType::Float
+                        | IRType::String
+                        | IRType::Bytes
+                        | IRType::Int
+                        | IRType::Bool) => ty,
                         class @ IRType::Class(_) => class,
                         // A tuple or collection element is a pointer whose
                         // type the reads of the target need: an untyped one

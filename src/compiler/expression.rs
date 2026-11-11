@@ -7153,7 +7153,9 @@ fn emit_comprehension(
                     func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
                     func.instruction(&Instruction::I32Mul);
                     func.instruction(&Instruction::I32Add);
-                    let t = emit_expr(element, func, ctx, memory_layout, None);
+                    // A call answering None is the word 0, as any None value
+                    // is: it pushed nothing, and the store took no value.
+                    let t = emit_value(element, func, ctx, memory_layout, None);
                     narrow_element_to_word(func, &t);
                     store_collection_word(func, &t);
                     *elem_ty = t;
@@ -7164,29 +7166,17 @@ fn emit_comprehension(
                     func.instruction(&Instruction::LocalSet(widx));
                 }
                 IRComprehensionKind::Dict => {
-                    emit_comp_room(func, ctx, res, widx, DICT_ENTRY);
-                    // key slot at res + HEADER + widx*ENTRY, value slot right after
-                    func.instruction(&Instruction::LocalGet(res));
-                    emit_data_base(func);
-                    func.instruction(&Instruction::LocalGet(widx));
-                    func.instruction(&Instruction::I32Const(DICT_ENTRY as i32));
-                    func.instruction(&Instruction::I32Mul);
-                    func.instruction(&Instruction::I32Add);
-                    let kt = emit_expr(element, func, ctx, memory_layout, None);
+                    // Through the insert `d[k] = v` uses, so a key already in
+                    // the result takes the new value where its entry is, as
+                    // CPython's dict comprehension does (every entry used to
+                    // be appended, so `{x % 2: x for x in range(4)}` held four),
+                    // and the result grows as it fills.
+                    use crate::compiler::sets::Held;
+                    let kt = emit_value(element, func, ctx, memory_layout, None);
                     narrow_element_to_word(func, &kt);
-                    store_collection_word(func, &kt);
-                    *elem_ty = kt;
-
-                    func.instruction(&Instruction::LocalGet(res));
-                    func.instruction(&Instruction::I32Const(
-                        (COLLECTION_HEADER + COLLECTION_SLOT) as i32,
-                    ));
-                    func.instruction(&Instruction::I32Add);
-                    func.instruction(&Instruction::LocalGet(widx));
-                    func.instruction(&Instruction::I32Const(DICT_ENTRY as i32));
-                    func.instruction(&Instruction::I32Mul);
-                    func.instruction(&Instruction::I32Add);
-                    let vt = emit_expr(
+                    let key = Held::of(ctx, &kt);
+                    key.set(func);
+                    let vt = emit_value(
                         value.expect("dict comprehension has a value"),
                         func,
                         ctx,
@@ -7194,13 +7184,32 @@ fn emit_comprehension(
                         None,
                     );
                     narrow_element_to_word(func, &vt);
-                    store_collection_word(func, &vt);
+                    let val = Held::of(ctx, &vt);
+                    val.set(func);
+                    if let Some(why) = crate::compiler::equality::hash_unsupported(ctx, &kt) {
+                        ctx.report(format!("{why} cannot be a dict key"));
+                    }
+                    func.instruction(&Instruction::LocalGet(res));
+                    func.instruction(&Instruction::LocalSet(ctx.temp_local));
+                    key.get(func);
+                    func.instruction(&Instruction::LocalSet(match key {
+                        Held::F64(_) => ctx.temp_local_f64_2,
+                        Held::Word(_) => ctx.temp_local + 1,
+                    }));
+                    val.get(func);
+                    func.instruction(&Instruction::LocalSet(match val {
+                        Held::F64(_) => ctx.temp_local_f64,
+                        Held::Word(_) => ctx.temp_local + 2,
+                    }));
+                    let search_key = match &kt {
+                        IRType::Bytes => IRType::String,
+                        other => other.clone(),
+                    };
+                    emit_dict_set(func, ctx, &search_key, matches!(vt, IRType::Float));
+                    val.release(ctx);
+                    key.release(ctx);
+                    *elem_ty = kt;
                     *val_ty = vt;
-
-                    func.instruction(&Instruction::LocalGet(widx));
-                    func.instruction(&Instruction::I32Const(1));
-                    func.instruction(&Instruction::I32Add);
-                    func.instruction(&Instruction::LocalSet(widx));
                 }
                 IRComprehensionKind::Set => {
                     let member = set_member.as_ref().expect("a set comprehension");
@@ -7228,9 +7237,9 @@ fn emit_comprehension(
     }
 
     // --- Finalize -------------------------------------------------------------
-    // Lists and dicts record how many elements the filters let through; the
-    // set's count was maintained by the dedup insert.
-    if !matches!(kind, IRComprehensionKind::Set) {
+    // A list records how many elements the filters let through; a dict's and
+    // a set's counts were kept by their inserts.
+    if matches!(kind, IRComprehensionKind::List) {
         func.instruction(&Instruction::LocalGet(res));
         func.instruction(&Instruction::LocalGet(widx));
         func.instruction(&Instruction::I32Store(slot_arg()));
@@ -7428,7 +7437,9 @@ fn emit_lazy_comprehension(
                     func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
                     func.instruction(&Instruction::I32Mul);
                     func.instruction(&Instruction::I32Add);
-                    let t = emit_expr(element, func, ctx, memory_layout, None);
+                    // A call answering None is the word 0, as any None value
+                    // is: it pushed nothing, and the store took no value.
+                    let t = emit_value(element, func, ctx, memory_layout, None);
                     narrow_element_to_word(func, &t);
                     store_collection_word(func, &t);
                     *elem_ty = t;
