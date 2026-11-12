@@ -361,13 +361,6 @@ fn compile_merged_sources(
         }
     }
 
-    // For the check below: what each file runs at its top level, the modules
-    // imported at some file's top level, and those imported only in a
-    // function or a main block (module, place, importing file).
-    let mut top_level_code: Vec<(String, Option<String>)> = Vec::new();
-    let mut imported_at_top = std::collections::HashSet::new();
-    let mut deferred_imports: Vec<(String, String, String)> = Vec::new();
-
     // Which file each class came from, and the one run as `__main__` (the
     // entry point's, else the first), so a class's repr names its module.
     let mut class_files: Vec<(String, String)> = Vec::new();
@@ -429,28 +422,6 @@ fn compile_merged_sources(
         let ir_module = ir::lower_ast_to_ir_named(&ast, &module_name)
             .with_context(|| format!("failed to compile {filename}"))?;
 
-        // What each file runs at its top level, and the modules it imports
-        // there or only in a function or its main block.
-        top_level_code.push((filename.to_string(), ir::top_level_code(&ir_module)));
-        let deferred_here: Vec<(String, String)> = ir_module
-            .metadata
-            .iter()
-            .filter_map(|(key, place)| {
-                let module = key.strip_prefix(ir::DEFERRED_IMPORT_KEY)?;
-                Some((module.to_string(), place.clone()))
-            })
-            .collect();
-        for imp in &ir_module.imports {
-            if !deferred_here.iter().any(|(m, _)| *m == imp.module) {
-                imported_at_top.insert(imp.module.clone());
-            }
-        }
-        deferred_imports.extend(
-            deferred_here
-                .into_iter()
-                .map(|(module, place)| (module, place, filename.to_string())),
-        );
-
         // Skip files that contribute nothing (a constants-only module still
         // carries variables worth merging).
         if ir_module.functions.is_empty()
@@ -505,6 +476,9 @@ fn compile_merged_sources(
             first_file = Some(filename.to_string());
         }
         combined_module.classes.extend(ir_module.classes);
+        // Each file's top level in order, for the order the program runs
+        // them in.
+        combined_module.sources.extend(ir_module.sources);
         combined_module
             .dispatch_tables
             .extend(ir_module.dispatch_tables);
@@ -524,8 +498,6 @@ fn compile_merged_sources(
             combined_module.metadata.insert(key, value);
         }
     }
-
-    check_deferred_imports(&top_level_code, &imported_at_top, &deferred_imports)?;
 
     if combined_module.functions.is_empty() {
         return Err(anyhow!(
@@ -1057,43 +1029,6 @@ pub fn get_python_project_metadata<P: AsRef<Path>>(
 
 /// The module a merged file is, by its path (`shapes/circle.py` is
 /// `shapes.circle`).
-/// Refuse a user module imported only in a function or a main block whose
-/// top level runs code. Every module is linked and started with the program,
-/// so that code would run before the program's first statement, where CPython
-/// runs it at the import. A module of constants, functions, and classes starts
-/// the same either way.
-fn check_deferred_imports(
-    top_level_code: &[(String, Option<String>)],
-    imported_at_top: &std::collections::HashSet<String>,
-    deferred: &[(String, String, String)],
-) -> Result<()> {
-    for (module, place, importer) in deferred {
-        if imported_at_top.contains(module) {
-            continue;
-        }
-        let path = module.replace('.', "/");
-        let defines = |file: &str| {
-            let file = file.replace('\\', "/");
-            [format!("{path}.py"), format!("{path}/__init__.py")]
-                .iter()
-                .any(|end| file == *end || file.ends_with(&format!("/{end}")))
-        };
-        let code = top_level_code
-            .iter()
-            .find(|(file, _)| defines(file))
-            .and_then(|(_, code)| code.as_ref());
-        if let Some(code) = code {
-            return Err(anyhow!(
-                "{importer}: module '{module}' is imported in {place}, and its top level \
-                 runs code ({code}), which would run when the program starts, where CPython \
-                 runs it at that import. Hint: compute it in a function of '{module}' \
-                 instead of at its top level"
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn module_name_of(file: &str) -> String {
     file.trim_end_matches(".py")
         .trim_end_matches("/__init__")

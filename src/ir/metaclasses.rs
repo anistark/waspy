@@ -228,9 +228,21 @@ pub fn apply_metaclasses(module: &mut IRModule) -> Result<()> {
     }
 
     let mut inserts: Vec<(usize, IRVariable)> = Vec::new();
+    let mut placed: Vec<(String, Vec<String>)> = Vec::new();
     for (class, meta) in &effective {
+        let before = inserts.len();
         create_class(module, class, meta, &mut inserts)?;
+        let names = inserts[before..]
+            .iter()
+            .map(|(_, v)| v.name.clone())
+            .collect();
+        placed.push((class.clone(), names));
         specialize_call(module, class, meta)?;
+    }
+    // In the top-level order, the class is made at its class statement,
+    // after its body (its class variables) has run.
+    for (class, names) in placed {
+        module.place_after(&crate::ir::IRInitItem::Class(class), names);
     }
     inserts.sort_by_key(|(position, _)| *position);
     for (offset, (position, var)) in inserts.into_iter().enumerate() {

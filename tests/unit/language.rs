@@ -1520,19 +1520,154 @@ fn dynamic_imports_of_user_modules() {
     assert_eq!(run.stdout, "19 10 8 4\n");
 }
 
-/// A user module imported only in a function starts with the program here,
-/// where CPython runs its top level at that import; a module whose top level
-/// runs code would print, or raise, at the wrong time, so it is refused.
+/// Every file's top level runs where CPython runs it: in source order (a
+/// class's variables at its class statement, a decorator at its `def`, a
+/// metaclass after the class body), and an imported module at its first
+/// import, however many files import it. A module first imported in a
+/// function starts when that import runs, once, and an exception its top
+/// level raises reaches the function's `try`. The entry's whole top level
+/// used to run first, every class variable before every module variable, and
+/// each imported module after it.
 #[test]
-fn a_late_import_of_a_module_that_runs_code_is_refused() {
-    let lazy = dedent(
+fn top_levels_run_in_cpythons_order() {
+    let run = run_files(&[
+        (
+            "main.py",
+            r#"
+            from log import mark
+
+            M1 = mark("main start")
+            import a
+            import c
+            M2 = mark("main end")
+
+
+            def deco(f):
+                mark("decorating " + f.__name__)
+                return f
+
+
+            @deco
+            def g() -> int:
+                return 1
+
+
+            class Meta(type):
+                def __init__(cls, name: str, bases: tuple, ns: dict) -> None:
+                    mark("meta for " + name)
+
+
+            class Q(metaclass=Meta):
+                q = mark("Q body")
+
+
+            M3 = mark("after Q")
+
+
+            def lazy() -> int:
+                import late1
+                import late1 as again
+                return late1.L1 + again.L1
+
+
+            def risky() -> str:
+                try:
+                    import boom
+                    return "imported"
+                except ValueError as e:
+                    return "caught " + str(e)
+
+
+            if __name__ == "__main__":
+                print("main block")
+                print(lazy())
+                print(lazy())
+                print(risky())
+            "#,
+        ),
+        (
+            "log.py",
+            r#"
+            def mark(s: str) -> int:
+                print(s)
+                return 1
+            "#,
+        ),
+        (
+            "a.py",
+            r#"
+            from log import mark
+            A1 = mark("a start")
+            import b
+            A2 = mark("a end")
+            "#,
+        ),
+        (
+            "b.py",
+            r#"
+            from log import mark
+            B1 = mark("b")
+            "#,
+        ),
+        (
+            "c.py",
+            r#"
+            from log import mark
+            import b
+            C1 = mark("c, after b")
+
+            class K:
+                k = mark("c class K")
+
+            C2 = mark("c end")
+            "#,
+        ),
+        (
+            "late1.py",
+            r#"
+            from log import mark
+            import late2
+            L1 = mark("late1")
+            "#,
+        ),
+        (
+            "late2.py",
+            r#"
+            from log import mark
+            L2 = mark("late2")
+            "#,
+        ),
+        (
+            "boom.py",
+            r#"
+            def explode() -> int:
+                raise ValueError("boom at import")
+
+            X = explode()
+            "#,
+        ),
+    ]);
+    assert_eq!(
+        run.stdout,
+        "main start\na start\nb\na end\nc, after b\nc class K\nc end\nmain end\n\
+         decorating g\nQ body\nmeta for Q\nafter Q\nmain block\nlate2\nlate1\n2\n2\n\
+         caught boom at import\n"
+    );
+}
+
+/// A module that starts late cannot start at a dynamic import used in place,
+/// which leaves no statement to start it from, so that is refused with a
+/// hint to name the import.
+#[test]
+fn a_late_import_used_in_place_is_refused() {
+    let main = dedent(
         r#"
+        import importlib
+
         def f() -> int:
-            import noisy
-            return noisy.VALUE
+            return importlib.import_module("noisy").VALUE
 
         if __name__ == "__main__":
-            print("before")
             print(f())
         "#,
     );
@@ -1545,9 +1680,10 @@ fn a_late_import_of_a_module_that_runs_code_is_refused() {
         VALUE = make()
         "#,
     );
-    let err = try_compile_multi(&[("main.py", &lazy), ("noisy.py", &noisy)]).expect_err("refused");
+    let err = try_compile_multi(&[("main.py", &main), ("noisy.py", &noisy)]).expect_err("refused");
     assert!(
-        err.contains("module 'noisy' is imported in function 'f'") && err.contains("VALUE = ..."),
+        err.contains("the module 'noisy' is imported in place in function 'f'")
+            && err.contains("assign the import to a name first"),
         "{err}"
     );
 }

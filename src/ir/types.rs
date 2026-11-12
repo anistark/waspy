@@ -15,7 +15,41 @@ pub struct IRModule {
     /// Module functions decorated by a function of this module, recorded by
     /// the converter and applied by `ir::decorate` before the other passes.
     pub user_decorations: Vec<IRUserDecoration>,
+    /// Each source file's top level in source order, one per file merged
+    /// into the module: the order its definitions run in, and where it
+    /// imports the others (`compile_ir_module` builds the module's start
+    /// from it).
+    pub sources: Vec<IRSource>,
 }
+
+/// One source file's top level, in source order.
+#[derive(Debug, Clone)]
+pub struct IRSource {
+    /// The module it is (`__main__` for the entry; an imported file's
+    /// dotted name, as `__name__` reads in it).
+    pub module: String,
+    pub items: Vec<IRInitItem>,
+}
+
+/// A top-level statement whose place in the order matters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IRInitItem {
+    /// A module definition, named as in `IRModule::variables`.
+    Variable(String),
+    /// A class statement, where its class variables are evaluated.
+    Class(String),
+    /// A decorated function's `def`, where its decorators run.
+    Def(String),
+    /// An `import` of the module of this dotted name, which runs that
+    /// module's top level here the first time.
+    Import(String),
+}
+
+/// A call standing where an `import` of a user module was written in a
+/// function or the main block (`ir::imports`), with the module's dotted name
+/// as its argument: `compile_ir_module` makes it a call of that module's
+/// start when the module runs code there, and drops it otherwise.
+pub const IMPORT_MARKER_FN: &str = "__waspy_import";
 
 /// One function decorated by functions this module defines: its decorators
 /// outermost first, each a function name with the arguments a factory was
@@ -672,6 +706,31 @@ impl IRModule {
             comments: Vec::new(),
             dispatch_tables: Vec::new(),
             user_decorations: Vec::new(),
+            sources: Vec::new(),
+        }
+    }
+
+    /// Place the definitions `names`, in order, right after `anchor` in the
+    /// top-level order of the source holding it, as a pass that adds
+    /// definitions where a statement runs does (a decorator's, a metaclass's),
+    /// once per anchor. With no such source they go at the end of the last one.
+    pub fn place_after(&mut self, anchor: &IRInitItem, names: Vec<String>) {
+        let items = names.into_iter().map(IRInitItem::Variable);
+        let found = self.sources.iter_mut().find_map(|source| {
+            let at = source.items.iter().position(|item| item == anchor)?;
+            Some((source, at))
+        });
+        match found {
+            Some((source, at)) => {
+                let tail = source.items.split_off(at + 1);
+                source.items.extend(items);
+                source.items.extend(tail);
+            }
+            None => {
+                if let Some(source) = self.sources.last_mut() {
+                    source.items.extend(items);
+                }
+            }
         }
     }
 }

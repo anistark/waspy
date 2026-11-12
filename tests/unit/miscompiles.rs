@@ -4033,6 +4033,35 @@ fn print_writes_to_stdout_through_wasi() {
     );
 }
 
+/// A module's top level runs in source order: every class variable used to
+/// be evaluated before every module variable, so `A = mark("first")` ahead of
+/// `class C: y = mark("second")` printed second, then first.
+#[test]
+fn class_variables_run_at_their_class_statement() {
+    let run = run_main(
+        &dedent(
+            r#"
+            def mark(s: str) -> int:
+                print(s)
+                return 1
+
+            A = mark("first")
+
+            class C:
+                y = mark("second")
+
+            B = mark("third")
+
+            if __name__ == "__main__":
+                print(A + C.y + B)
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(run.stdout, "first\nsecond\nthird\n3\n");
+}
+
 /// A standard-library module's name read where no import binds it compiled
 /// as if imported: `math.floor(2.5)` with no `import math` answered 2, and so
 /// did a function reading a module another function imported. CPython raises

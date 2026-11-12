@@ -1230,7 +1230,7 @@ fn collect_self_fields(
 /// The class variables some function assigns through its class's name
 /// (`Counter.count += 1`), as `Owner.var` keys. Each lives in a global even
 /// when it starts as a constant, which every read would otherwise inline.
-fn written_class_vars(module: &IRModule) -> HashSet<String> {
+pub(crate) fn written_class_vars(module: &IRModule) -> HashSet<String> {
     let owner_of = |class: &str, var: &str| -> Option<String> {
         let mut pending = vec![class.to_string()];
         let mut seen = HashSet::new();
@@ -1559,7 +1559,7 @@ pub(crate) fn module_uses_file_io(ir_module: &IRModule) -> bool {
 /// be mutated: a number, bool, string, bytes, or `None` constant, or
 /// arithmetic over those and over other such module definitions? Those are
 /// inlined at each read, as before. Anything else is evaluated once.
-fn is_pure_constant(
+pub(crate) fn is_pure_constant(
     expr: &IRExpr,
     vars: &std::collections::HashMap<&str, &IRExpr>,
     depth: u32,
@@ -1591,14 +1591,21 @@ fn is_pure_constant(
 /// Compile an IR module into WebAssembly binary format.
 ///
 /// A module-level definition that is not a plain constant (a collection, an
-/// instance, a call, a comprehension) is evaluated once, in source order, by a
-/// synthesized `__module_init` that the module's start function runs, and read
-/// through a WASM global. Every definition used to be inlined at each read,
-/// which made each read a new object: `G.append(2); len(G)` answered 1,
-/// `G[0] = 9; G[0]` answered G's first element, and `C = Counter()` was a fresh
-/// instance wherever it was mentioned. Arbitrary module-level statements stay
-/// refused; this covers definitions, which is what Python runs at import.
+/// instance, a call, a comprehension) is evaluated once by a synthesized
+/// `__module_init` that the module's start function runs, and read through a
+/// WASM global. Every definition used to be inlined at each read, which made
+/// each read a new object: `G.append(2); len(G)` answered 1, `G[0] = 9; G[0]`
+/// answered G's first element, and `C = Counter()` was a fresh instance
+/// wherever it was mentioned. Arbitrary module-level statements stay refused;
+/// this covers definitions, which is what Python runs at import. They run in
+/// CPython's order (`compiler::start`): each file's top level in source order,
+/// an imported module at its first import, and a module first imported in a
+/// function when that import runs.
 pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, WaspyError> {
+    // Each top level placed where CPython runs it, a module first imported in
+    // a function given a start of its own.
+    let staged = crate::compiler::start::stage(ir_module)?;
+    let ir_module = &staged.module;
     // The `str` methods written in IR that the program calls (`ir::str_methods`).
     let with_strs;
     let ir_module = match crate::ir::with_str_helpers(ir_module) {
@@ -1620,70 +1627,64 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, WaspyError> {
     } else {
         ir_module
     };
-    // A definition some function declares `global` is a global even when it
-    // is a plain constant, since that function rebinds it; so is anything
-    // computed from one, which reads its import-time value.
-    let declared: std::collections::HashSet<String> = ir_module
-        .functions
-        .iter()
-        .chain(ir_module.classes.iter().flat_map(|c| c.methods.iter()))
-        .flat_map(|f| crate::compiler::function::global_declarations(&f.body))
-        // A metaclass's class attributes are written through the class.
-        .chain(ir_module.classes.iter().flat_map(|c| {
-            c.deferred_vars
-                .iter()
-                .map(move |v| format!("{}.{v}", c.name))
-        }))
-        .collect();
-    let vars: std::collections::HashMap<&str, &IRExpr> = ir_module
-        .variables
-        .iter()
-        .filter(|v| !declared.contains(&v.name))
-        .map(|v| (v.name.as_str(), &v.value))
-        .collect();
-    // Class variables the same way, under `Class.var`: `class C: items = []`
-    // then `C.items.append(1)` read back an empty list, since every mention of
-    // `C.items` rebuilt it. They come first, because a module definition such
-    // as `C = Counter()` runs class code that may read them.
-    let written = written_class_vars(ir_module);
-    let mut globals: Vec<crate::ir::IRVariable> = Vec::new();
+
+    // What no file states goes first: the class variables of the classes the
+    // standard-library passes make (whose code relies on them) and of the
+    // builtin exceptions, and any definition a pass added.
+    let evaluated = crate::compiler::start::Evaluated::of(ir_module);
+    let mut first: Vec<crate::ir::IRVariable> = Vec::new();
     for cls in &ir_module.classes {
-        for var in &cls.class_vars {
-            let key = format!("{}.{}", cls.name, var.name);
-            if written.contains(&key) || !is_pure_constant(&var.value, &vars, 0) {
-                globals.push(crate::ir::IRVariable {
-                    name: format!("{}.{}", cls.name, var.name),
-                    value: var.value.clone(),
-                    var_type: var.var_type.clone(),
-                });
-            }
+        if staged.placed_classes.contains(&cls.name) {
+            continue;
         }
+        first.extend(
+            cls.class_vars
+                .iter()
+                .filter_map(|var| evaluated.class_var(&cls.name, var)),
+        );
     }
-    globals.extend(
+    first.extend(
         ir_module
             .variables
             .iter()
-            .filter(|v| declared.contains(&v.name) || !is_pure_constant(&v.value, &vars, 0))
-            .cloned(),
+            .enumerate()
+            .filter(|(i, v)| !staged.placed_vars.contains(i) && evaluated.var(v))
+            .map(|(_, v)| v.clone()),
     );
-    if globals.is_empty() {
+    if first.is_empty() && staged.start.is_empty() && staged.flags.is_empty() {
         return compile_module(ir_module, &[]);
     }
-    let names: Vec<String> = globals.iter().map(|v| v.name.clone()).collect();
+    let mut statements: Vec<IRStatement> = staged
+        .flags
+        .iter()
+        .map(|flag| IRStatement::Assign {
+            target: flag.clone(),
+            value: IRExpr::Const(IRConstant::Int(0)),
+            var_type: Some(IRType::Int),
+        })
+        .collect();
+    statements.extend(first.iter().map(|v| IRStatement::Assign {
+        target: v.name.clone(),
+        value: v.value.clone(),
+        var_type: v.var_type.clone(),
+    }));
+    statements.extend(staged.start.iter().cloned());
+    let mut names: Vec<String> = Vec::new();
+    for name in staged
+        .flags
+        .iter()
+        .chain(first.iter().map(|v| &v.name))
+        .chain(staged.globals.iter())
+    {
+        if !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
     let mut with_init = ir_module.clone();
     with_init.functions.push(crate::ir::IRFunction {
         name: MODULE_INIT_FN.to_string(),
         params: Vec::new(),
-        body: crate::ir::IRBody {
-            statements: globals
-                .iter()
-                .map(|v| IRStatement::Assign {
-                    target: v.name.clone(),
-                    value: v.value.clone(),
-                    var_type: v.var_type.clone(),
-                })
-                .collect(),
-        },
+        body: crate::ir::IRBody { statements },
         return_type: IRType::None,
         decorators: Vec::new(),
     });
@@ -2011,7 +2012,7 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
         // reachable through the funcref table.
         if !func.name.starts_with("__lambda_")
             && !crate::ir::is_internal_function(&func.name)
-            && func.name != MODULE_INIT_FN
+            && !func.name.starts_with(MODULE_INIT_FN)
         {
             exports.export(&func.name, wasm_encoder::ExportKind::Func, func_idx);
         }
@@ -2732,29 +2733,39 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
     // `__module_init` is compiled first, whatever its position: it is where
     // each module global's type is learned, and every other function reads
     // those globals.
-    let compiled_init = ir_module
+    // So is each late start (`compiler::start`), right after it, in the
+    // order they come in: a late start after the late starts it calls.
+    let mut compiled_functions: Vec<Option<crate::compiler::function::CompiledFunction>> =
+        (0..ir_module.functions.len()).map(|_| None).collect();
+    let starts = ir_module
         .functions
         .iter()
-        .find(|f| f.name == MODULE_INIT_FN)
-        .map(|init| {
-            ctx.in_module_init = true;
-            ctx.current_raises = raisers.contains(&init.name);
-            let return_type = module_return(init);
-            let compiled = compile_function(init, &mut ctx, &memory_layout, &return_type, None);
-            ctx.in_module_init = false;
-            compiled
-        });
+        .enumerate()
+        .filter(|(_, f)| f.name == MODULE_INIT_FN)
+        .chain(ir_module.functions.iter().enumerate().filter(|(_, f)| {
+            f.name
+                .starts_with(crate::compiler::start::LATE_START_PREFIX)
+        }));
+    for (i, init) in starts.collect::<Vec<_>>() {
+        ctx.in_module_init = true;
+        ctx.current_raises = raisers.contains(&init.name);
+        let return_type = module_return(init);
+        compiled_functions[i] = Some(compile_function(
+            init,
+            &mut ctx,
+            &memory_layout,
+            &return_type,
+            None,
+        ));
+        ctx.in_module_init = false;
+    }
 
     // A lifted closure reads its captured cells at the types the function
     // creating it stored, so it is compiled after that function: every other
     // function and method first, then the closures, outermost first. The code
     // section is still written in index order.
-    let mut compiled_functions: Vec<Option<crate::compiler::function::CompiledFunction>> =
-        (0..ir_module.functions.len()).map(|_| None).collect();
-    let mut compiled_init = compiled_init;
     for (i, func_ir) in ir_module.functions.iter().enumerate() {
-        if func_ir.name == MODULE_INIT_FN {
-            compiled_functions[i] = compiled_init.take();
+        if compiled_functions[i].is_some() {
             continue;
         }
         if func_ir.name.starts_with("__lambda_") {

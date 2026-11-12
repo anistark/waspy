@@ -16,13 +16,15 @@
 //!   `__import__("a.b")` answers the package `a`, as CPython's does. A name
 //!   computed at run time is refused: there is no loader at run time, and every
 //!   module is linked into the program when it is compiled.
-//! - An import in a function binds the name in that function only. Modules are
-//!   linked when the program starts, so the import moves to module level under
-//!   the same name, and reading that name where CPython has not bound it is
-//!   refused, as is a read before the import or an import that only runs on
-//!   some paths (inside an `if` or a loop). The imports in the
-//!   `if __name__ == "__main__":` block move to module level the same way,
-//!   since that block is compiled as a function.
+//! - An import in a function binds the name in that function only. Every
+//!   module is linked into the program, so the import moves to module level
+//!   under the same name, and reading that name where CPython has not bound it
+//!   is refused, as is a read before the import or an import that only runs on
+//!   some paths (inside an `if` or a loop). Where the import was written, a
+//!   call of `IMPORT_MARKER_FN` names a user module it imports, which
+//!   `compile_ir_module` makes the start of that module when it runs code
+//!   there. The imports in the `if __name__ == "__main__":` block move the same
+//!   way, since that block is compiled as a function.
 //! - A standard-library module's name read where no import binds it is refused,
 //!   where CPython raises `NameError`. It used to compile as if imported.
 
@@ -525,9 +527,6 @@ struct Prescan {
     classes: HashMap<u32, Scope>,
     hoists: Vec<Hoist>,
     constants: HashMap<String, String>,
-    /// The modules imported at the top of the module (not in a function or
-    /// the main block).
-    top_level: HashSet<String>,
 }
 
 impl Prescan {
@@ -668,9 +667,6 @@ impl Prescan {
         // Imports that move to module level: a function's, and the main
         // block's.
         for f in found {
-            if kind == Kind::Module && !f.in_main {
-                self.top_level.insert(stmt_module(&f.hoist));
-            }
             let moves = kind != Kind::Module || f.in_main;
             if !moves || !scope.bindings.contains_key(&f.binding) {
                 continue;
@@ -854,25 +850,15 @@ struct Resolver {
     added_keys: HashMap<String, Target>,
     /// Inside the module's main block.
     in_main: usize,
-    /// User modules first imported in a function or the main block, and
-    /// where.
-    deferred: Vec<(String, String)>,
-    top_level: HashSet<String>,
+    /// User modules a dynamic import in a function or the main block uses
+    /// in place, and where (`Resolved::import_values`).
+    import_values: Vec<(String, String)>,
+    /// Imports of user modules a dynamic import at module level uses in
+    /// place, which go just before the statement holding it, where they run.
+    before: Vec<Stmt>,
 }
 
 impl Resolver {
-    /// Record that `module` is first imported at `place`, unless it is a
-    /// standard-library module or the module imports it at the top.
-    fn defer(&mut self, module: String, place: String) {
-        if is_stdlib_module_path(&module)
-            || self.top_level.contains(&module)
-            || self.deferred.iter().any(|(m, _)| *m == module)
-        {
-            return;
-        }
-        self.deferred.push((module, place));
-    }
-
     fn function_name(&self) -> Option<&str> {
         self.stack
             .iter()
@@ -946,8 +932,20 @@ impl Resolver {
         Ok(expr)
     }
 
-    /// Add `stmt`, which binds `key` to `target`, at module level.
+    /// Add `stmt`, which binds `key` to `target`, at the top of the module.
     fn add(&mut self, key: String, target: Target, stmt: Stmt, range: TextRange) -> Result<()> {
+        self.claim(&key, target, range)?;
+        let shape = stmt_shape(&stmt);
+        if !self.added.iter().any(|s| stmt_shape(s) == shape) {
+            self.added.push(stmt);
+        }
+        Ok(())
+    }
+
+    /// Bind `key` to `target` at module level, unless the module binds it to
+    /// something else.
+    fn claim(&mut self, key: &str, target: Target, range: TextRange) -> Result<()> {
+        let key = key.to_string();
         let module = &self.stack[0];
         let clash = module.locals.contains(&key)
             || module
@@ -968,10 +966,6 @@ impl Resolver {
             ));
         }
         self.added_keys.entry(key).or_insert(target);
-        let shape = stmt_shape(&stmt);
-        if !self.added.iter().any(|s| stmt_shape(s) == shape) {
-            self.added.push(stmt);
-        }
         Ok(())
     }
 
@@ -1048,12 +1042,15 @@ impl Resolver {
                     .to_string(),
             ));
         }
-        if self.kind() != Kind::Module || self.in_main > 0 {
+        let late = self.kind() != Kind::Module || self.in_main > 0;
+        if late && !is_stdlib_module_path(&dynamic.loaded) {
             let place = match self.function_name() {
                 Some(f) => format!("function '{f}'"),
                 None => MAIN_BLOCK_PLACE.to_string(),
             };
-            self.defer(dynamic.loaded.clone(), place);
+            if !self.import_values.iter().any(|(m, _)| *m == dynamic.loaded) {
+                self.import_values.push((dynamic.loaded.clone(), place));
+            }
         }
         if is_stdlib_module_path(&dynamic.loaded) {
             let key = dynamic
@@ -1085,12 +1082,19 @@ impl Resolver {
                 ))
             }
         }
-        self.add(
-            dynamic.bound.clone(),
-            Target::Module(dynamic.bound.clone()),
-            import_stmt(&dynamic.bound, None, range),
-            range,
-        )?;
+        let stmt = import_stmt(&dynamic.bound, None, range);
+        if late {
+            self.add(
+                dynamic.bound.clone(),
+                Target::Module(dynamic.bound.clone()),
+                stmt,
+                range,
+            )?;
+        } else {
+            // At module level the module starts where the import is.
+            self.claim(&dynamic.bound, Target::Module(dynamic.bound.clone()), range)?;
+            self.before.push(stmt);
+        }
         Ok(Expr::Name(ast::ExprName {
             range,
             id: Identifier::new(dynamic.bound),
@@ -1109,7 +1113,8 @@ impl Resolver {
                 };
                 scope.bound.insert(binding);
             }
-            return Ok(Stmt::Pass(ast::StmtPass { range }));
+            let modules = i.names.iter().map(|a| a.name.to_string()).collect();
+            return Ok(marker(modules, range));
         }
         // A standard-library module's alias reads through the module's own
         // name, so the statement binds that.
@@ -1144,7 +1149,8 @@ impl Resolver {
                     .bound
                     .insert(a.asname.as_ref().unwrap_or(&a.name).to_string());
             }
-            return Ok(Stmt::Pass(ast::StmtPass { range }));
+            let modules = i.module.iter().map(|m| m.to_string()).collect();
+            return Ok(marker(modules, range));
         }
         Ok(Stmt::ImportFrom(i))
     }
@@ -1173,7 +1179,7 @@ impl Resolver {
                 .expect("scope")
                 .bound
                 .insert(name.to_string());
-            return Some(Ok(Stmt::Pass(ast::StmtPass { range })));
+            return Some(Ok(marker(vec![dynamic.loaded], range)));
         }
         Some(Ok(dynamic_stmt(&dynamic, name, range)))
     }
@@ -1321,7 +1327,12 @@ impl Fold<TextRange> for Resolver {
                 if let Expr::Call(call) = &*e.value {
                     self.check_callee(&call.func)?;
                 }
-                Ok(Stmt::Pass(ast::StmtPass { range: e.range }))
+                // Nothing is bound, but the module starts here.
+                let loaded = match dynamic_import(&self.stack, &self.constants, &e.value) {
+                    Some(Ok(d)) => vec![d.loaded],
+                    _ => Vec::new(),
+                };
+                Ok(marker(loaded, e.range))
             }
             Stmt::If(s) if self.kind() == Kind::Module && self.in_main == 0 => {
                 self.in_main += 1;
@@ -1453,7 +1464,6 @@ pub(crate) fn resolve_module_bindings(ast: &Suite) -> Result<Resolved> {
         classes: HashMap::new(),
         hoists: Vec::new(),
         constants,
-        top_level: HashSet::new(),
     };
     let module = prescan.build(Kind::Module, None, Vec::new(), ast)?;
     prescan.stack.push(module);
@@ -1505,8 +1515,8 @@ pub(crate) fn resolve_module_bindings(ast: &Suite) -> Result<Resolved> {
         added: Vec::new(),
         added_keys: HashMap::new(),
         in_main: 0,
-        deferred: Vec::new(),
-        top_level: std::mem::take(&mut prescan.top_level),
+        import_values: Vec::new(),
+        before: Vec::new(),
     };
     // A standard-library alias at module level binds the module's own name.
     let canonical: Vec<(String, Target)> = resolver.stack[0]
@@ -1517,13 +1527,6 @@ pub(crate) fn resolve_module_bindings(ast: &Suite) -> Result<Resolved> {
         .collect();
     for (key, target) in canonical {
         resolver.added_keys.entry(key).or_insert(target);
-    }
-    for h in &hoists {
-        let place = match &h.function {
-            Some(f) => format!("function '{f}'"),
-            None => MAIN_BLOCK_PLACE.to_string(),
-        };
-        resolver.defer(stmt_module(&h.stmt), place);
     }
     for h in hoists {
         let function = h.function.clone();
@@ -1539,23 +1542,67 @@ pub(crate) fn resolve_module_bindings(ast: &Suite) -> Result<Resolved> {
     }
     let mut body = Vec::with_capacity(ast.len());
     for stmt in ast.iter().cloned() {
-        body.push(resolver.fold_stmt(stmt)?);
+        let folded = resolver.fold_stmt(stmt)?;
+        body.append(&mut resolver.before);
+        body.push(folded);
     }
     let mut out = std::mem::take(&mut resolver.added);
+    let hoisted = out.len();
     out.extend(body);
     Ok(Resolved {
         ast: out,
-        deferred: resolver.deferred,
+        hoisted,
+        import_values: resolver.import_values,
     })
 }
 
 /// A module with its bindings resolved.
 pub(crate) struct Resolved {
     pub(crate) ast: Suite,
-    /// The user modules it imports only in a function or in its main block,
-    /// each with the place: CPython runs such a module's top level when that
-    /// code first runs, where here it runs when the program starts.
-    pub(crate) deferred: Vec<(String, String)>,
+    /// How many statements at its top are imports moved there from functions
+    /// and the main block. They bind names for code generation, but a module
+    /// they name starts where the marker left in their place runs, not there.
+    pub(crate) hoisted: usize,
+    /// The user modules a dynamic import in a function or the main block uses
+    /// in place (`importlib.import_module("m").f()`), each with the place: no
+    /// marker stands for that import (`converter::IMPORT_VALUE_KEY`).
+    pub(crate) import_values: Vec<(String, String)>,
+}
+
+/// The statement standing where imports of `modules` were written in a
+/// function or the main block: a marker naming the user modules among them,
+/// or `pass` when there are none.
+fn marker(modules: Vec<String>, range: TextRange) -> Stmt {
+    let modules: Vec<String> = modules
+        .into_iter()
+        .filter(|m| !is_stdlib_module_path(m))
+        .collect();
+    if modules.is_empty() {
+        return Stmt::Pass(ast::StmtPass { range });
+    }
+    let args = modules
+        .into_iter()
+        .map(|m| {
+            Expr::Constant(ast::ExprConstant {
+                range,
+                value: Constant::Str(m),
+                kind: None,
+            })
+        })
+        .collect();
+    Stmt::Expr(ast::StmtExpr {
+        range,
+        value: Box::new(Expr::Call(ast::ExprCall {
+            range,
+            func: Box::new(Expr::Name(ast::ExprName {
+                range,
+                id: Identifier::new(crate::ir::IMPORT_MARKER_FN),
+                ctx: ExprContext::Load,
+            })),
+            args,
+            keywords: Vec::new(),
+        })),
+    })
 }
 
 /// A definition the scan did not reach: a statement holding a body that
@@ -1563,19 +1610,6 @@ pub(crate) struct Resolved {
 const UNSCANNED: &str = "internal error: a definition here was not scanned for its imports";
 
 const MAIN_BLOCK_PLACE: &str = "the 'if __name__ == \"__main__\":' block";
-
-/// The module an import statement loads.
-fn stmt_module(stmt: &Stmt) -> String {
-    match stmt {
-        Stmt::Import(i) => i
-            .names
-            .first()
-            .map(|a| a.name.to_string())
-            .unwrap_or_default(),
-        Stmt::ImportFrom(i) => i.module.as_ref().map(|m| m.to_string()).unwrap_or_default(),
-        _ => String::new(),
-    }
-}
 
 fn is_stdlib_module_path_target(target: &Target) -> bool {
     matches!(target, Target::Module(path) if is_stdlib_module_path(path))
@@ -1656,49 +1690,4 @@ pub(crate) fn module_dependencies(ast: &Suite) -> Vec<String> {
         let _ = collect.fold_stmt(stmt);
     }
     collect.found
-}
-
-/// The first definition at the top of `module` that runs code when the
-/// module starts (a call, a comprehension, a subscript, a decorator, or a
-/// metaclass), if any: when it runs is observable, and CPython runs it at the
-/// first import. The standard-library passes' own definitions are not counted.
-pub(crate) fn top_level_code(module: &crate::ir::IRModule) -> Option<String> {
-    use crate::ir::{IRBody, IRExpr, IRStatement};
-    fn runs_code(expr: &IRExpr) -> bool {
-        let mut body = IRBody {
-            statements: vec![IRStatement::Expression(expr.clone())],
-        };
-        let mut found = false;
-        let _ = crate::ir::visit_body(&mut body, &mut |e: &mut IRExpr| {
-            found |= matches!(
-                e,
-                IRExpr::FunctionCall { .. }
-                    | IRExpr::MethodCall { .. }
-                    | IRExpr::Comprehension { .. }
-                    | IRExpr::Indexing { .. }
-                    | IRExpr::Slicing { .. }
-            );
-            Ok(())
-        });
-        found
-    }
-    for var in &module.variables {
-        if !var.name.starts_with("__") && runs_code(&var.value) {
-            return Some(format!("{} = ...", var.name));
-        }
-    }
-    for class in module.classes.iter().filter(|c| !c.name.contains('.')) {
-        if class.metaclass.is_some() {
-            return Some(format!("class {}", class.name));
-        }
-        for var in &class.class_vars {
-            if runs_code(&var.value) {
-                return Some(format!("{}.{} = ...", class.name, var.name));
-            }
-        }
-    }
-    module
-        .user_decorations
-        .first()
-        .map(|d| format!("the decorators of {}", d.function))
 }

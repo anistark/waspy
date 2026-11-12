@@ -179,24 +179,27 @@ pub fn lower_ast_to_ir_named(ast: &Suite, module_name: &str) -> Result<IRModule>
             logging: logging_imports(ast),
         })
     });
-    let lowered = lower_module(ast);
+    let lowered = lower_module(ast, resolved.hoisted);
     LOWERING.with(|l| l.replace(previous));
     let mut lowered = lowered?;
-    for (module, place) in resolved.deferred {
+    for (module, place) in resolved.import_values {
         lowered
             .metadata
-            .insert(format!("{DEFERRED_IMPORT_KEY}{module}"), place);
+            .insert(format!("{IMPORT_VALUE_KEY}{module}"), place);
     }
     Ok(lowered)
 }
 
-/// Metadata key prefix: a user module this module imports only in a function
-/// or in its main block (`ir::imports`), and the place it does. The multi-file
-/// merge refuses one whose top level runs code, which CPython would run when
-/// that place first runs.
-pub(crate) const DEFERRED_IMPORT_KEY: &str = "deferred_import:";
+/// Metadata key prefix: a user module a dynamic import in a function or the
+/// main block uses in place (`importlib.import_module("m").f()`), and where.
+/// No statement stands for that import, so `compile_ir_module` refuses one
+/// whose module would have to start there.
+pub(crate) const IMPORT_VALUE_KEY: &str = "import_value:";
 
-fn lower_module(ast: &Suite) -> Result<IRModule> {
+/// `hoisted`: how many statements at the top of `ast` are imports
+/// `ir::imports` moved there from functions and the main block, which do not
+/// run the module where they now stand.
+fn lower_module(ast: &Suite, hoisted: usize) -> Result<IRModule> {
     let mut module = IRModule::new();
     let mut memory_layout = MemoryLayout::new();
     // `format(x)` with no spec formats with the empty one.
@@ -209,8 +212,13 @@ fn lower_module(ast: &Suite) -> Result<IRModule> {
     // The names defined after that block, which CPython has not defined yet
     // when the block runs.
     let mut defined_after: Vec<String> = Vec::new();
+    // The top level in source order, for the order it runs in.
+    let mut items: Vec<IRInitItem> = Vec::new();
+    let import_items = |imports: &[IRImport], items: &mut Vec<IRInitItem>| {
+        items.extend(imports.iter().map(|i| IRInitItem::Import(i.module.clone())));
+    };
 
-    for stmt in ast {
+    for (index, stmt) in ast.iter().enumerate() {
         if main_block.is_some() {
             module_statement_bindings(stmt, &mut defined_after);
         }
@@ -333,6 +341,7 @@ fn lower_module(ast: &Suite) -> Result<IRModule> {
                     .into());
                 }
                 if !user_decorators.is_empty() {
+                    items.push(IRInitItem::Def(name.clone()));
                     module.user_decorations.push(IRUserDecoration {
                         function: name.clone(),
                         decorators: user_decorators,
@@ -354,34 +363,44 @@ fn lower_module(ast: &Suite) -> Result<IRModule> {
                 // Process class definition
                 let mut class = process_class_definition(stmt, &mut memory_layout)?;
                 class.position = module.variables.len();
+                items.push(IRInitItem::Class(class.name.clone()));
                 module.classes.push(class);
             }
             Stmt::Assign(assign) if namedtuple_call(&assign.value).is_some() => {
                 // `P = namedtuple("P", "x y")` defines a class.
                 let mut class = namedtuple_definition(assign, &mut memory_layout)?;
                 class.position = module.variables.len();
+                items.push(IRInitItem::Class(class.name.clone()));
                 module.classes.push(class);
             }
             Stmt::Assign(_) => {
                 // Process module-level assignment
                 if let Some(var) = process_module_level_assign(stmt, &mut memory_layout)? {
+                    items.push(IRInitItem::Variable(var.name.clone()));
                     module.variables.push(var);
                 }
             }
             Stmt::AnnAssign(_) => {
                 // Process module-level typed assignment
                 if let Some(var) = process_module_level_ann_assign(stmt, &mut memory_layout)? {
+                    items.push(IRInitItem::Variable(var.name.clone()));
                     module.variables.push(var);
                 }
             }
             Stmt::Import(_) => {
                 // Process direct import
                 let imports = process_import(stmt, in_try_block, &conditional_fallbacks)?;
+                if index >= hoisted {
+                    import_items(&imports, &mut items);
+                }
                 module.imports.extend(imports);
             }
             Stmt::ImportFrom(_) => {
                 // Process from import
                 let imports = process_import_from(stmt, in_try_block, &conditional_fallbacks)?;
+                if index >= hoisted {
+                    import_items(&imports, &mut items);
+                }
                 module.imports.extend(imports);
             }
             Stmt::Expr(expr) => {
@@ -424,6 +443,7 @@ fn lower_module(ast: &Suite) -> Result<IRModule> {
                 let (imports, fallbacks) = process_try_except_imports(stmt)?;
 
                 // Add imports from the try block
+                import_items(&imports, &mut items);
                 module.imports.extend(imports);
 
                 // Store fallbacks for except blocks
@@ -472,6 +492,10 @@ fn lower_module(ast: &Suite) -> Result<IRModule> {
         check_main_block_order(&entry, &module, &defined_after)?;
         module.functions.push(entry);
     }
+    module.sources.push(IRSource {
+        module: LOWERING.with(|l| l.borrow().module_name.clone()),
+        items,
+    });
 
     // Process circular imports
     process_circular_imports(&mut module);
