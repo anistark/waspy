@@ -138,18 +138,32 @@ fn infer_field_value_type(
                 _ => IRType::Unknown,
             }
         }
-        // A suspending loop's sequence: a dict's keys, a set's members.
+        // A suspending loop's collection, walked in place.
         IRExpr::FunctionCall {
             function_name,
             arguments,
-        } if function_name == crate::ir::ITER_SEQ_FN => {
+        } if function_name == crate::ir::ITER_SEQ_FN => arguments
+            .first()
+            .map(|x| infer_field_value_type(x, params, classes))
+            .unwrap_or(IRType::Unknown),
+        // A walk's next position, and the element at one.
+        IRExpr::FunctionCall { function_name, .. } if function_name == crate::ir::WALK_NEXT_FN => {
+            IRType::Int
+        }
+        IRExpr::FunctionCall { function_name, .. }
+            if function_name == crate::ir::ANY_GEN_FN || function_name == crate::ir::ALL_GEN_FN =>
+        {
+            IRType::Bool
+        }
+        IRExpr::FunctionCall {
+            function_name,
+            arguments,
+        } if function_name == crate::ir::WALK_AT_FN => {
             match arguments
                 .first()
                 .map(|x| infer_field_value_type(x, params, classes))
             {
-                Some(IRType::Dict(k, _)) => IRType::List(k),
-                Some(IRType::Set(e)) => IRType::List(e),
-                Some(other) => other,
+                Some(t) => crate::compiler::function::walked_element(&t),
                 None => IRType::Unknown,
             }
         }
@@ -528,6 +542,15 @@ fn scan_raise_and_calls(body: &IRBody, raises: &mut bool, calls: &mut HashSet<St
                 *raises = true;
             }
         }
+        // A loop over a dict or set whose body changes one raises CPython's
+        // `RuntimeError` when it is the one walked.
+        if let IRStatement::For { iterable, body, .. } = stmt {
+            if !matches!(iterable, IRExpr::RangeCall { .. })
+                && crate::ir::may_change_collection(&body.statements)
+            {
+                *raises = true;
+            }
+        }
         if matches!(stmt, IRStatement::IndexAssign { .. }) {
             // An assignment through an index bounds-checks and can raise
             // IndexError, exactly as a read does.
@@ -814,6 +837,16 @@ fn scan_expr_calls(expr: &IRExpr, raises: &mut bool, calls: &mut HashSet<String>
             {
                 *raises = true;
             }
+            // A walk's step raises when the collection changed, which the
+            // pass that made it says can happen.
+            if function_name == crate::ir::WALK_NEXT_FN
+                && matches!(
+                    arguments.get(4),
+                    Some(IRExpr::Const(IRConstant::Bool(true)))
+                )
+            {
+                *raises = true;
+            }
             if function_name == "int" || function_name == "float" {
                 let plainly_numeric = matches!(
                     arguments.first(),
@@ -852,6 +885,14 @@ fn scan_expr_calls(expr: &IRExpr, raises: &mut bool, calls: &mut HashSet<String>
             // are not UTF-8.
             if matches!(method_name.as_str(), "read" | "readline" | "readlines") {
                 *raises = true;
+            }
+            // A `str` method written in IR that raises (`ValueError` for an
+            // absent substring or an empty separator) is a call of its helper.
+            if matches!(
+                method_name.as_str(),
+                "rindex" | "partition" | "rpartition" | "rsplit"
+            ) {
+                calls.insert(crate::ir::str_helper_name(method_name));
             }
             // `sys.exit()` raises SystemExit, and the standard library's
             // functions raise CPython's errors (`math.sqrt(-1)`).
@@ -961,6 +1002,16 @@ fn scan_expr_calls(expr: &IRExpr, raises: &mut bool, calls: &mut HashSet<String>
                 for condition in &generator.conditions {
                     scan_expr_calls(condition, raises, calls);
                 }
+            }
+            // An element or filter that changes a dict or set raises when it
+            // is the one walked, as a loop's body does.
+            let parts: Vec<IRStatement> = std::iter::once(element.as_ref())
+                .chain(value.as_deref())
+                .chain(generators.iter().flat_map(|g| g.conditions.iter()))
+                .map(|e| IRStatement::Expression(e.clone()))
+                .collect();
+            if crate::ir::may_change_collection(&parts) {
+                *raises = true;
             }
         }
         IRExpr::RangeCall { start, stop, step } => {
@@ -1548,6 +1599,15 @@ fn is_pure_constant(
 /// instance wherever it was mentioned. Arbitrary module-level statements stay
 /// refused; this covers definitions, which is what Python runs at import.
 pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, WaspyError> {
+    // The `str` methods written in IR that the program calls (`ir::str_methods`).
+    let with_strs;
+    let ir_module = match crate::ir::with_str_helpers(ir_module) {
+        Some(module) => {
+            with_strs = module;
+            &with_strs
+        }
+        None => ir_module,
+    };
     // A module that can raise carries the builtin exception classes, ahead of
     // its own, so every exception is an object of one.
     let with_exceptions;
@@ -2678,6 +2738,7 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
         .find(|f| f.name == MODULE_INIT_FN)
         .map(|init| {
             ctx.in_module_init = true;
+            ctx.current_raises = raisers.contains(&init.name);
             let return_type = module_return(init);
             let compiled = compile_function(init, &mut ctx, &memory_layout, &return_type, None);
             ctx.in_module_init = false;
@@ -2699,6 +2760,7 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
         if func_ir.name.starts_with("__lambda_") {
             continue;
         }
+        ctx.current_raises = raisers.contains(&func_ir.name);
         let return_type = module_return(func_ir);
         compiled_functions[i] = Some(compile_function(
             func_ir,
@@ -2712,6 +2774,7 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
     let mut compiled_methods = Vec::new();
     for cls in &ir_module.classes {
         for method in &cls.methods {
+            ctx.current_raises = raisers.contains(&method_registry_key(&cls.name, method));
             let return_type = method_return(&cls.name, method);
             compiled_methods.push(compile_function(
                 method,
@@ -2725,6 +2788,7 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
 
     for i in closures_outermost_first(ir_module) {
         let func_ir = &ir_module.functions[i];
+        ctx.current_raises = raisers.contains(&func_ir.name);
         let return_type = module_return(func_ir);
         compiled_functions[i] = Some(compile_function(
             func_ir,

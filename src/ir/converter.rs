@@ -12,6 +12,26 @@ use std::collections::HashSet;
 /// codegen.
 pub const DICT_KEY_AT_FN: &str = "__dict_key_at";
 pub const DICT_VAL_AT_FN: &str = "__dict_val_at";
+/// Codegen intrinsics a loop walks a collection with, step by step as
+/// CPython's iterator does (see `ir::dict_views` and the suspending loops in
+/// `ir::generators`). `__walk_next(c, last, n, key, may_change)` is the next
+/// position after `last` (-1 before the first), or -1 past the end, raising
+/// CPython's `RuntimeError` when a dict or set is not the size `n` it started
+/// at or a dict's key `key`, bound at `last`, has moved. A list is walked to
+/// wherever its end is by then. `may_change` (a constant) says whether the
+/// loop's own body can change a dict or set, which is when the walk can
+/// raise. An optional sixth constant says the collection is an
+/// `OrderedDict`'s data (1) or a deque's (2), whose iterators raise their own
+/// errors. `__walk_at(c, i)` is the element at a position: a list's or str's
+/// item, a dict's key, a set's member (`i` is then a bucket).
+pub const WALK_NEXT_FN: &str = "__walk_next";
+/// `any()` and `all()` of a generator expression, which stop at the first
+/// element that decides them, as CPython's do (the expression is otherwise
+/// built as a list, which `any([...])` of a list comprehension still is).
+/// Recognized by name in expression codegen.
+pub const ANY_GEN_FN: &str = "__waspy_any";
+pub const ALL_GEN_FN: &str = "__waspy_all";
+pub const WALK_AT_FN: &str = "__walk_at";
 /// Prefix of the locals holding zip()'s arguments after the first, which the
 /// loop reads by length and index.
 pub const ZIP_SEQ_PREFIX: &str = "__zip_";
@@ -3860,6 +3880,75 @@ fn lower_for_loop(
         }
     }
 
+    // `for x in (f(y) for y in src if p(y))`: the generator expression's own
+    // loop, its element bound to the targets, so its elements and the body
+    // interleave as CPython's do. It was built as a list first, so every
+    // `f(y)` ran before the body did, and an endless source never ended.
+    if let Expr::GeneratorExp(comp) = &*for_stmt.iter {
+        if comp.generators.len() == 1 {
+            let lowered = lower_comprehension(
+                IRComprehensionKind::List,
+                &comp.elt,
+                None,
+                &comp.generators,
+                memory_layout,
+            )?;
+            let IRExpr::Comprehension {
+                element,
+                generators,
+                ..
+            } = lowered
+            else {
+                return Err(anyhow!("a generator expression lowers to a comprehension"));
+            };
+            let generator = generators
+                .into_iter()
+                .next()
+                .ok_or_else(|| anyhow!("a generator expression has a for clause"))?;
+            let mut guarded = Vec::new();
+            if targets.len() > 1 || starred.is_some() {
+                let element_var = format!("__ft_{uniq}");
+                guarded.push(assign(&element_var, *element));
+                guarded.push(IRStatement::TupleUnpack {
+                    targets,
+                    value: variable(&element_var),
+                    starred,
+                });
+            } else {
+                guarded.push(assign(&targets[0], *element));
+            }
+            guarded.extend(body.statements);
+            for condition in generator.conditions.into_iter().rev() {
+                guarded = vec![IRStatement::If {
+                    condition,
+                    then_body: Box::new(IRBody {
+                        statements: guarded,
+                    }),
+                    else_body: None,
+                }];
+            }
+            let (loop_target, mut statements) = match generator.targets.as_slice() {
+                [one] => (one.clone(), Vec::new()),
+                many => {
+                    let hidden = format!("__fg_{uniq}");
+                    let unpack = IRStatement::TupleUnpack {
+                        targets: many.to_vec(),
+                        value: variable(&hidden),
+                        starred: None,
+                    };
+                    (hidden, vec![unpack])
+                }
+            };
+            statements.extend(guarded);
+            return Ok(vec![IRStatement::For {
+                target: loop_target,
+                iterable: generator.iterable,
+                body: Box::new(IRBody { statements }),
+                else_body,
+            }]);
+        }
+    }
+
     let iterable = lower_expr(&for_stmt.iter, memory_layout)?;
 
     // for a, b in pairs: bind the element to a hidden loop variable and
@@ -4381,6 +4470,28 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
         }
         Expr::Name(name) => Ok(IRExpr::Variable(name.id.to_string())),
         Expr::Call(call) => {
+            // `any(f(x) for x in xs)`: decided by the first element that can.
+            if let (Expr::Name(name), [Expr::GeneratorExp(comp)], true) =
+                (&*call.func, call.args.as_slice(), call.keywords.is_empty())
+            {
+                let decide = match name.id.as_str() {
+                    "any" => Some(ANY_GEN_FN),
+                    "all" => Some(ALL_GEN_FN),
+                    _ => None,
+                };
+                if let Some(decide) = decide {
+                    return Ok(IRExpr::FunctionCall {
+                        function_name: decide.to_string(),
+                        arguments: vec![lower_comprehension(
+                            IRComprehensionKind::List,
+                            &comp.elt,
+                            None,
+                            &comp.generators,
+                            memory_layout,
+                        )?],
+                    });
+                }
+            }
             // Check for dynamic imports
             match &*call.func {
                 Expr::Name(name) if name.id.to_string() == "__import__" => {
@@ -4881,17 +4992,36 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                                     // Fall through to runtime handling
                                 }
                                 "replace" => {
-                                    // replace(old, new) - replace first occurrence
-                                    if arguments.len() >= 2 {
-                                        if let (
-                                            IRExpr::Const(IRConstant::String(old)),
-                                            IRExpr::Const(IRConstant::String(new)),
-                                        ) = (&arguments[0], &arguments[1])
-                                        {
-                                            let result = s.replacen(old.as_str(), new.as_str(), 1);
-                                            memory_layout.add_string(&result);
-                                            return Ok(IRExpr::Const(IRConstant::String(result)));
+                                    // replace(old, new[, count]): every
+                                    // occurrence, or the first `count` (all of
+                                    // them for a negative one). It replaced only
+                                    // the first, so `"aaaa".replace("a", "b")`
+                                    // was `baaa`. Rust's `replace` and `replacen`
+                                    // place an empty `old` where CPython does.
+                                    let count = match arguments.get(2) {
+                                        None => Some(None),
+                                        Some(IRExpr::Const(IRConstant::Int(n))) => {
+                                            Some(usize::try_from(*n).ok())
                                         }
+                                        Some(_) => None,
+                                    };
+                                    if let (
+                                        Some(IRExpr::Const(IRConstant::String(old))),
+                                        Some(IRExpr::Const(IRConstant::String(new))),
+                                        Some(count),
+                                        true,
+                                    ) = (
+                                        arguments.first(),
+                                        arguments.get(1),
+                                        count,
+                                        arguments.len() <= 3,
+                                    ) {
+                                        let result = match count {
+                                            Some(n) => s.replacen(old.as_str(), new.as_str(), n),
+                                            None => s.replace(old.as_str(), new.as_str()),
+                                        };
+                                        memory_layout.add_string(&result);
+                                        return Ok(IRExpr::Const(IRConstant::String(result)));
                                     }
                                     // Fall through to runtime handling
                                 }

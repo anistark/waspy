@@ -60,6 +60,7 @@ const CLASSES: &[&str] = &[
 /// The classes of `logging.handlers` that are implemented, by their names.
 const HANDLER_CLASSES: &[&str] = &[
     "RotatingFileHandler",
+    "TimedRotatingFileHandler",
     "WatchedFileHandler",
     "BufferingHandler",
     "MemoryHandler",
@@ -75,10 +76,6 @@ const REFUSED_HANDLERS: &[(&str, &str)] = &[
     ("NTEventLogHandler", "needs Windows' event log"),
     ("QueueHandler", "needs the queue module"),
     ("QueueListener", "needs the queue module and threads"),
-    (
-        "TimedRotatingFileHandler",
-        "is not supported yet, as it needs the directory listing and the time module",
-    ),
 ];
 
 const LEVELS: &[(&str, i32)] = &[
@@ -614,6 +611,29 @@ fn module_call(name: &str, arguments: Vec<IRExpr>, formats: &mut Formats) -> Res
         "Formatter" => {
             formatter_call(&arguments, formats)?;
             call(&class_name("Formatter"), arguments)
+        }
+        "TimedRotatingFileHandler" => {
+            check_encoding(
+                argument(&arguments, 4, "encoding").as_ref(),
+                "TimedRotatingFileHandler",
+            )?;
+            // A time of day to roll over at is a `datetime.time`, which the
+            // handler here does not read, so one given would be ignored.
+            if argument(&arguments, 7, "atTime")
+                .is_some_and(|a| !matches!(a, IRExpr::Const(IRConstant::None)))
+            {
+                return Err(refused(
+                    "TimedRotatingFileHandler()'s atTime= is not supported. Hint: leave it out \
+                     to roll over at midnight"
+                        .to_string(),
+                ));
+            }
+            if argument(&arguments, 8, "errors").is_some() {
+                return Err(refused(
+                    "TimedRotatingFileHandler()'s errors= is not supported".to_string(),
+                ));
+            }
+            call(&handler_class("TimedRotatingFileHandler"), arguments)
         }
         n if HANDLER_CLASSES.contains(&n) => {
             check_encoding(argument(&arguments, 4, "encoding").as_ref(), n)?;

@@ -61,10 +61,10 @@ fn unknown_methods_name_the_method_and_the_receiver() {
 
     let string = "def f() -> int:\n\
                   \x20   w = \"abc\"\n\
-                  \x20   return len(w.swapcase())\n";
+                  \x20   return len(w.frobnicate())\n";
     let err = try_compile(string).expect_err("an unknown string method must be rejected");
     assert!(
-        err.contains("swapcase") && err.contains("str"),
+        err.contains("frobnicate") && err.contains("str"),
         "expected the method and receiver, got: {err}"
     );
     assert!(
@@ -1485,12 +1485,24 @@ fn an_int_arriving_through_a_variable_is_refused_by_a_float_collection() {
 
 /// A write the compiler cannot make good on is refused rather than stored at
 /// the wrong width: a float into an int collection (CPython keeps the 2.5; an
-/// int slot cannot, and truncating would lose it), a float into a collection
-/// with no element type to read it back at, a value of unknown type into a
-/// float collection, and an `extend` between lists read at different widths.
+/// int slot cannot, and truncating would lose it), a value of unknown type
+/// into a float collection, and an `extend` between lists read at different
+/// widths. A float appended to an empty list types the list instead.
 #[test]
 fn writes_that_cannot_be_made_good_on_are_refused() {
-    let cases: [(&str, &str); 4] = [
+    // An empty list takes the type of what is first appended to it, so a
+    // float appended there is held and read at its width, CPython's answer.
+    assert_eq!(
+        call_f64(
+            "def f() -> float:\n\
+             \x20   xs = []\n\
+             \x20   xs.append(2.5)\n\
+             \x20   return xs[0]\n",
+            "f"
+        ),
+        2.5
+    );
+    let cases: [(&str, &str); 3] = [
         (
             "from typing import List\n\
              \n\
@@ -1499,13 +1511,6 @@ fn writes_that_cannot_be_made_good_on_are_refused() {
              \x20   xs.append(2.5)\n\
              \x20   return xs[1]\n",
             "truncate",
-        ),
-        (
-            "def f() -> float:\n\
-             \x20   xs = []\n\
-             \x20   xs.append(2.5)\n\
-             \x20   return xs[0]\n",
-            "no known element type",
         ),
         (
             "from typing import List\n\
@@ -5814,4 +5819,876 @@ fn a_tuple_sort_key_through_a_captured_object_compares_its_members() {
         &[],
     );
     assert_eq!(run.stdout, "['Ada', 'Bob', 'Cy', 'Dee']\n");
+}
+
+/// `json.loads` of an integer where a float is declared gave the float
+/// (`1.0`, where CPython keeps the int `1`), and an `object_hook` answering
+/// a bool where an int is declared gave `1` (CPython keeps `True`). Each is
+/// now the `TypeError` any value of another kind than declared raises, as
+/// `check_widening` refuses `f(5)` for a float parameter. Every other line is
+/// CPython's answer for the same source.
+#[test]
+fn json_loads_refuses_an_int_where_a_float_is_declared() {
+    let run = run_main(
+        &dedent(
+            r#"
+            import json
+            from typing import Optional
+
+
+            def as_flag(d: dict[str, int]) -> bool:
+                return d["v"] == 1
+
+
+            def main() -> None:
+                for doc in ["1", "-0", "1.0", "1e2", "-2.5E-1", "NaN"]:
+                    try:
+                        x: float = json.loads(doc)
+                        print(x)
+                    except TypeError as e:
+                        print("TypeError:", e)
+                try:
+                    prices: dict[str, float] = json.loads('{"apple": 1.25, "pear": 2}')
+                    print(prices)
+                except TypeError as e:
+                    print("TypeError:", e)
+                try:
+                    maybe: list[Optional[float]] = json.loads("[null, 0.5, 3]")
+                    print(maybe)
+                except TypeError as e:
+                    print("TypeError:", e)
+                try:
+                    n: int = json.loads("2.0")
+                    print(n)
+                except TypeError as e:
+                    print("TypeError:", e)
+                try:
+                    f: int = json.loads('{"v": 1}', object_hook=as_flag)
+                    print(f)
+                except TypeError as e:
+                    print("TypeError:", e)
+
+
+            if __name__ == "__main__":
+                main()
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(
+        run.stdout,
+        "TypeError: json.loads(): the value at char 0 is an int, where float is declared\n\
+         TypeError: json.loads(): the value at char 0 is an int, where float is declared\n\
+         1.0\n\
+         100.0\n\
+         -0.25\n\
+         nan\n\
+         TypeError: json.loads(): the value at char 24 is an int, where float is declared\n\
+         TypeError: json.loads(): the value at char 12 is an int, where float is declared\n\
+         TypeError: json.loads(): the value at char 0 is a float, where int is declared\n\
+         TypeError: json.loads(): the object_hook's result for the object at char 0 is a bool, where int is declared\n"
+    );
+}
+
+/// A loop over a list, dict, or set changed while the loop runs walked a copy
+/// or a length read once: appending to a list stopped at its old end,
+/// removing from one read slots past the new end, and a dict or set changed
+/// by the loop never raised CPython's `RuntimeError`. Each walk now steps as
+/// CPython's iterator does, in a `for` statement, a dict view's loop, a
+/// generator's loop (whose collection the code resuming it can change), and
+/// a comprehension (whose result grows past the size counted when its
+/// source does). Every line is CPython's output for the same source.
+#[test]
+fn loops_see_what_is_done_to_the_collection_they_walk() {
+    let run = run_main(
+        &dedent(
+            r#"
+            from typing import Iterator
+
+
+            def lists() -> None:
+                xs = [1, 2, 3]
+                for x in xs:
+                    if x < 5:
+                        xs.append(x + 3)
+                print(xs)
+                ys = [1, 2, 3, 4]
+                seen: list[int] = []
+                for y in ys:
+                    seen.append(y)
+                    ys.remove(y)
+                print(seen, ys)
+
+
+            def dicts() -> None:
+                d = {1: 1, 2: 2}
+                n = 0
+                try:
+                    for k in d:
+                        n += 1
+                        if n < 5:
+                            d[k + 10] = 0
+                except RuntimeError as e:
+                    print("RuntimeError:", e)
+                print(n, d)
+                gone = {1: 1, 2: 2, 3: 3}
+                seen: list[int] = []
+                try:
+                    for k in gone:
+                        seen.append(k)
+                        del gone[k]
+                except RuntimeError as e:
+                    print("RuntimeError:", e)
+                print(seen)
+                later = {1: 1, 2: 2, 3: 3}
+                got: list[int] = []
+                for k in later:
+                    got.append(k)
+                    if k == 1:
+                        del later[3]
+                        later[4] = 4
+                print(got)
+                same = {1: 1, 2: 2}
+                for k in same:
+                    same[k] = same[k] * 10
+                print(same)
+                floats = {1.5: 1, 2.5: 2}
+                fl: list[float] = []
+                try:
+                    for kf in floats:
+                        fl.append(kf)
+                        floats[kf + 10.0] = 0
+                except RuntimeError as e:
+                    print("RuntimeError:", e)
+                print(fl)
+
+
+            def sets() -> None:
+                s = {1, 2}
+                n = 0
+                try:
+                    for v in s:
+                        n += 1
+                        if n < 5:
+                            s.add(v + 10)
+                except RuntimeError as e:
+                    print("RuntimeError:", e)
+                print(n, sorted(s))
+                t = {1, 2, 3}
+                seen: list[int] = []
+                for x in t:
+                    seen.append(x)
+                    if x == 1:
+                        t.remove(3)
+                        t.add(4)
+                print(seen)
+
+
+            def views() -> None:
+                d = {1: 1}
+                seen: list[int] = []
+                try:
+                    for k, v in d.items():
+                        seen.append(k)
+                        d[k + 1] = v
+                except RuntimeError as e:
+                    print("RuntimeError:", e)
+                print(seen)
+                w = {1: 10, 2: 20}
+                vals: list[int] = []
+                try:
+                    for v in w.values():
+                        vals.append(v)
+                        w.pop(2, 0)
+                except RuntimeError as e:
+                    print("RuntimeError:", e)
+                print(vals)
+
+
+            def walk(d: dict[int, int]) -> Iterator[int]:
+                for k in d:
+                    yield k
+
+
+            def walk_set(s: set[int]) -> Iterator[int]:
+                for x in s:
+                    yield x
+
+
+            def walk_list(xs: list[int]) -> Iterator[int]:
+                for x in xs:
+                    yield x
+
+
+            def generators() -> None:
+                d = {1: 1}
+                seen: list[int] = []
+                try:
+                    for k in walk(d):
+                        seen.append(k)
+                        d[k + 1] = 0
+                except RuntimeError as e:
+                    print("RuntimeError:", e)
+                print(seen)
+                s = {1, 2, 3}
+                got: list[int] = []
+                for x in walk_set(s):
+                    got.append(x)
+                    if x == 1:
+                        s.remove(3)
+                        s.add(4)
+                print(got)
+                xs = [1, 2]
+                out: list[int] = []
+                for y in walk_list(xs):
+                    out.append(y)
+                    if y < 3:
+                        xs.append(y + 2)
+                print(out)
+
+
+            def comprehensions() -> None:
+                xs = [1, 2, 3]
+                print([xs.pop() for x in xs])
+                ys = [1, 2]
+                print([y for y in ys if y > 5 or (len(ys) < 4 and ys.append(y + 10) is None) or True])
+                e = {1: 1, 2: 2}
+                try:
+                    print([e.pop(k) for k in e])
+                except RuntimeError as err:
+                    print("RuntimeError:", err)
+                s = {1, 2, 3}
+                try:
+                    print([s.pop() for v in s])
+                except RuntimeError as err:
+                    print("RuntimeError:", err)
+                qd = {"q": 1, "r": 2}
+                qs = {7, 8}
+                print([w for w in qd], [n for n in qs], [k for row in [{1: 1}, {2: 2, 3: 3}] for k in row])
+
+
+            if __name__ == "__main__":
+                lists()
+                dicts()
+                sets()
+                views()
+                generators()
+                comprehensions()
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(
+        run.stdout,
+        "[1, 2, 3, 4, 5, 6, 7]\n\
+         [1, 3] [2, 4]\n\
+         RuntimeError: dictionary changed size during iteration\n\
+         1 {1: 1, 2: 2, 11: 0}\n\
+         RuntimeError: dictionary changed size during iteration\n\
+         [1]\n\
+         [1, 2, 4]\n\
+         {1: 10, 2: 20}\n\
+         RuntimeError: dictionary changed size during iteration\n\
+         [1.5]\n\
+         RuntimeError: Set changed size during iteration\n\
+         1 [1, 2, 11]\n\
+         [1, 2, 4]\n\
+         RuntimeError: dictionary changed size during iteration\n\
+         [1]\n\
+         RuntimeError: dictionary changed size during iteration\n\
+         [10]\n\
+         RuntimeError: dictionary changed size during iteration\n\
+         [1]\n\
+         [1, 2, 4]\n\
+         [1, 2, 3, 4]\n\
+         [3, 2]\n\
+         [1, 2, 11, 12]\n\
+         RuntimeError: dictionary changed size during iteration\n\
+         RuntimeError: Set changed size during iteration\n\
+         ['q', 'r'] [8, 7] [1, 2, 3]\n"
+    );
+}
+
+/// A dict whose keys change during a loop over it without its size changing
+/// raises at once: CPython's answer there depends on how its table is laid
+/// out (for these two keys it walks on, then raises the same error). A set
+/// changed by a function the loop calls, in a function nothing else makes
+/// raise, traps where CPython raises, since no caller would look for the
+/// exception.
+#[test]
+fn a_dict_renamed_in_a_loop_raises_at_once_and_a_change_through_a_call_traps() {
+    let run = run_main(
+        &dedent(
+            r#"
+            def renamed() -> list[str]:
+                r = {"a": 1, "b": 2}
+                names: list[str] = []
+                try:
+                    for k in r:
+                        names.append(k)
+                        r[k.upper()] = r.pop(k)
+                except RuntimeError as e:
+                    names.append(str(e))
+                return names
+
+
+            if __name__ == "__main__":
+                print(renamed())
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(
+        run.stdout,
+        "['a', 'dictionary keys changed during iteration']\n"
+    );
+    assert!(call_i32_traps(
+        &dedent(
+            r#"
+            def touch(s: set[int]) -> None:
+                s |= {99}
+
+
+            def walk() -> int:
+                s = {1, 2}
+                n = 0
+                for x in s:
+                    touch(s)
+                    n += 1
+                return n
+            "#,
+        ),
+        "walk",
+    ));
+}
+
+/// An `OrderedDict`'s and a `deque`'s iterators raise their own errors: an
+/// `OrderedDict` changed while a key is left raises `OrderedDict mutated
+/// during iteration` (and one changed after its last key is handed out
+/// does not), and a `deque` that changes size raises `deque mutated during
+/// iteration`, even after its last element. Every line is CPython's output.
+#[test]
+fn ordered_dicts_and_deques_raise_their_own_errors_in_loops() {
+    let run = run_main(
+        &dedent(
+            r#"
+            from collections import OrderedDict, deque
+
+
+            def ordered() -> None:
+                d: OrderedDict[str, int] = OrderedDict()
+                d["a"] = 0
+                d["b"] = 1
+                seen: list[str] = []
+                try:
+                    for k in d:
+                        seen.append(k)
+                        d["z"] = 0
+                except RuntimeError as e:
+                    print("RuntimeError:", e)
+                print(seen)
+                last: OrderedDict[str, int] = OrderedDict()
+                last["a"] = 0
+                last["b"] = 1
+                got: list[str] = []
+                for k2 in last:
+                    got.append(k2)
+                    if k2 == "b":
+                        last["c"] = 2
+                print(got, list(last))
+                same: OrderedDict[str, int] = OrderedDict()
+                same["a"] = 1
+                same["b"] = 2
+                for k3 in same:
+                    same[k3] = same[k3] * 10
+                print(list(same.items()))
+                gone: OrderedDict[str, int] = OrderedDict()
+                gone["a"] = 1
+                gone["b"] = 2
+                gone["c"] = 3
+                order: list[str] = []
+                try:
+                    for k4, v4 in gone.items():
+                        order.append(k4)
+                        if k4 == "a":
+                            gone.pop("c")
+                except RuntimeError as e:
+                    print("RuntimeError:", e)
+                print(order)
+
+
+            def queue() -> None:
+                q: deque[int] = deque([1, 2])
+                seen: list[int] = []
+                try:
+                    for x in q:
+                        seen.append(x)
+                        q.append(9)
+                except RuntimeError as e:
+                    print("RuntimeError:", e)
+                print(seen)
+                r: deque[int] = deque([1, 2])
+                got: list[int] = []
+                try:
+                    for y in r:
+                        got.append(y)
+                        if y == 2:
+                            r.popleft()
+                except RuntimeError as e:
+                    print("RuntimeError:", e)
+                print(got)
+                s: deque[int] = deque([1, 2, 3])
+                for z in s:
+                    s[0] = z
+                print(list(s))
+
+
+            if __name__ == "__main__":
+                ordered()
+                queue()
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(
+        run.stdout,
+        "RuntimeError: OrderedDict mutated during iteration\n\
+         ['a']\n\
+         ['a', 'b'] ['a', 'b', 'c']\n\
+         [('a', 10), ('b', 20)]\n\
+         RuntimeError: OrderedDict mutated during iteration\n\
+         ['a']\n\
+         RuntimeError: deque mutated during iteration\n\
+         [1]\n\
+         RuntimeError: deque mutated during iteration\n\
+         [1, 2]\n\
+         [3, 2, 3]\n"
+    );
+}
+
+/// An empty list, set, or dict with no annotation read every element back
+/// as an int word, so one filled with strs printed their addresses
+/// (`seen = []; seen.append("z"); print(seen)` was `[45]`). It now takes the
+/// types of the first value stored in it, a loop variable's included, and a
+/// store the compiler cannot type is refused. Every line is CPython's output.
+#[test]
+fn an_empty_collection_takes_the_type_of_what_is_stored_in_it() {
+    let run = run_main(
+        &dedent(
+            r#"
+            from collections import OrderedDict, defaultdict, Counter, deque
+
+
+            def lists() -> None:
+                xs = ["a", "b"]
+                seen = []
+                for k in xs:
+                    seen.append(k)
+                print(seen, len(seen[0]))
+                lit = []
+                for p in ["p", "q"]:
+                    lit.append(p)
+                print(lit)
+                direct = []
+                direct.append("z")
+                direct.insert(0, "y")
+                print(direct, ", ".join(direct))
+                fl = []
+                fl.append(1.5)
+                print(fl, sum(fl))
+                pairs = []
+                pairs.append((1, "one"))
+                print(pairs)
+
+
+            def dicts() -> None:
+                d = {"a": 0, "b": 1}
+                keys = []
+                for k in d:
+                    keys.append(k)
+                print(keys)
+                names = {}
+                names["x"] = "ex"
+                names["y"] = "why"
+                print(names, names["x"])
+                tags = set()
+                tags.add("t")
+                print(tags)
+
+
+            def collections_loops() -> None:
+                c = Counter("ab")
+                ck = []
+                for k in c:
+                    ck.append(k)
+                print(ck)
+                q: deque[str] = deque(["x", "y"])
+                qk = []
+                for k2 in q:
+                    qk.append(k2)
+                print(qk)
+                od: OrderedDict[str, int] = OrderedDict()
+                od["a"] = 0
+                ok = []
+                for k3 in od:
+                    ok.append(k3)
+                print(ok)
+                dd: defaultdict[str, int] = defaultdict(int)
+                dd["a"] = 1
+                dk = []
+                for k4 in dd:
+                    dk.append(k4)
+                print(dk)
+
+
+            if __name__ == "__main__":
+                lists()
+                dicts()
+                collections_loops()
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(
+        run.stdout,
+        "['a', 'b'] 1\n\
+         ['p', 'q']\n\
+         ['y', 'z'] y, z\n\
+         [1.5] 1.5\n\
+         [(1, 'one')]\n\
+         ['a', 'b']\n\
+         {'x': 'ex', 'y': 'why'} ex\n\
+         {'t'}\n\
+         ['a', 'b']\n\
+         ['x', 'y']\n\
+         ['a']\n\
+         ['a']\n"
+    );
+    // A tuple a loop unpacks types its targets for the list they fill.
+    assert_eq!(
+        call_str(
+            "def f() -> str:\n\
+             \x20   pairs = [(\"a\", 1), (\"b\", 2)]\n\
+             \x20   out = []\n\
+             \x20   for k, v in pairs:\n\
+             \x20       out.append(k)\n\
+             \x20   return out[1]\n",
+            "f"
+        ),
+        "b"
+    );
+    // A loop over a method's result, or over standard input, whose element
+    // the body works on before storing it.
+    let run = run_main(
+        &dedent(
+            r#"
+            import sys
+
+
+            def main() -> None:
+                words = []
+                for w in "a b".split():
+                    words.append(w)
+                print(words)
+                got = []
+                for line in sys.stdin:
+                    got.append(line.strip())
+                print(got)
+                seen = {}
+                for w2 in words:
+                    seen[w2] = len(w2)
+                print(seen)
+
+
+            if __name__ == "__main__":
+                main()
+            "#,
+        ),
+        "x\ny\n",
+        &[],
+    );
+    assert_eq!(run.stdout, "['a', 'b']\n['x', 'y']\n{'a': 1, 'b': 1}\n");
+}
+
+/// A dict comprehension appended every entry, so a repeated key was held
+/// twice (`{x % 2: x for x in range(4)}` was `{0: 0, 1: 1, 0: 2, 1: 3}`); it
+/// now inserts as `d[k] = v` does, the first position kept and the last
+/// value. A comprehension element that is a call answering None built an
+/// invalid module. Every line is CPython's output for the same source.
+#[test]
+fn a_dict_comprehension_keeps_one_entry_per_key() {
+    let run = run_main(
+        &dedent(
+            r#"
+            def main() -> None:
+                parity = {x % 2: x for x in range(4)}
+                print(parity, len(parity))
+                words = ["apple", "avocado", "banana"]
+                first = {w[0]: w for w in words}
+                print(first, len(first), first["a"])
+                halves = {x // 1.0: x for x in [1.5, 1.75, 2.5]}
+                print(halves)
+                ages = {"ann": 30, "bob": 25, "cy": 30}
+                by_age = {v: k for k, v in ages.items()}
+                print(by_age)
+                grid = {(r, c % 2): r * c for r in range(2) for c in range(3)}
+                print(grid)
+                big = {i % 50: i for i in range(200)}
+                print(len(big), big[0], big[49])
+                log: list[int] = []
+                print([log.append(v) for v in [3, 1]], log)
+                print({v: log.clear() for v in [3, 1]}, log)
+
+
+            if __name__ == "__main__":
+                main()
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(
+        run.stdout,
+        "{0: 2, 1: 3} 2\n\
+         {'a': 'avocado', 'b': 'banana'} 2 avocado\n\
+         {1.0: 1.75, 2.0: 2.5}\n\
+         {30: 'cy', 25: 'bob'}\n\
+         {(0, 0): 0, (0, 1): 0, (1, 0): 2, (1, 1): 1}\n\
+         50 150 199\n\
+         [None, None] [3, 1]\n\
+         {3: None, 1: None} []\n"
+    );
+}
+
+/// A generator expression was built as a list where it was made, so in a
+/// `for` over one every element was computed before the body ran, and
+/// `any()` / `all()` computed every element (an endless source never ended).
+/// A `for` over one is now the expression's own loop, and `any()` / `all()`
+/// stop at the element that decides them. Every line is CPython's output.
+#[test]
+fn a_generator_expression_runs_as_its_loop_and_any_all_stop_early() {
+    let run = run_main(
+        &dedent(
+            r#"
+            import itertools
+
+
+            def f(y: int) -> int:
+                print("f", y)
+                return y * 10
+
+
+            def loud(y: int) -> bool:
+                print("check", y)
+                return y > 1
+
+
+            def main() -> None:
+                ys = [1, 2, 3]
+                for x in (f(y) for y in ys):
+                    print("body", x)
+                for x2 in (f(y) for y in ys if y != 2):
+                    if x2 > 20:
+                        break
+                    print("body2", x2)
+                else:
+                    print("no break")
+                for x3 in (y * 2 for y in ys):
+                    if x3 == 4:
+                        continue
+                    print("body3", x3)
+                else:
+                    print("ran out")
+                d = {"a": 1, "b": 2}
+                for k, v in ((k, v * 100) for k, v in d.items()):
+                    print(k, v)
+                print(any(loud(y) for y in ys))
+                print(all(loud(y) for y in ys))
+                print(any(n > 3 for n in itertools.count()))
+                print(all(y > 0 for y in ys), any(y > 9 for y in ys), all(y > 9 for y in []))
+                print(sum(y * y for y in ys), sorted(-y for y in ys))
+                print(any([loud(y) for y in ys]))
+                words = ["a", "bb"]
+                print(any(len(w) > 1 for w in words if w != "zz"))
+
+
+            if __name__ == "__main__":
+                main()
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(
+        run.stdout,
+        "f 1\n\
+         body 10\n\
+         f 2\n\
+         body 20\n\
+         f 3\n\
+         body 30\n\
+         f 1\n\
+         body2 10\n\
+         f 3\n\
+         body3 2\n\
+         body3 6\n\
+         ran out\n\
+         a 100\n\
+         b 200\n\
+         check 1\n\
+         check 2\n\
+         True\n\
+         check 1\n\
+         False\n\
+         True\n\
+         True False True\n\
+         14 [-3, -2, -1]\n\
+         check 1\n\
+         check 2\n\
+         check 3\n\
+         True\n\
+         True\n"
+    );
+}
+
+/// `Counter()` of a generator whose element was a method call, or of any
+/// comprehension, was refused before its variables were typed, and
+/// `self.f[k] += v` on a `Counter` field was refused where a local took it.
+/// Every line is CPython's output.
+#[test]
+fn counters_from_generators_and_in_fields() {
+    let run = run_main(
+        &dedent(
+            r#"
+            from collections import Counter
+
+
+            class T:
+                def __init__(self) -> None:
+                    self.f: Counter[str] = Counter()
+                    self.n = 0
+
+
+            def main() -> None:
+                names = ["ann", "bob", "Ann"]
+                c = Counter(n.upper() for n in names)
+                print(c, c["ANN"])
+                lengths = Counter(len(n) for n in names if n != "bob")
+                print(lengths)
+                t = T()
+                t.f["a"] += 2
+                t.f["a"] += 1
+                t.f["b"] -= 1
+                print(t.f, t.f["a"])
+
+
+            if __name__ == "__main__":
+                main()
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(
+        run.stdout,
+        "Counter({'ANN': 2, 'BOB': 1}) 2\n\
+         Counter({3: 2})\n\
+         Counter({'a': 3, 'b': -1}) 3\n"
+    );
+}
+
+/// The `str` methods added in IR and in the case tables (`removeprefix`,
+/// `removesuffix`, `rfind`, `rindex`, `partition`, `rpartition`, `zfill`,
+/// `expandtabs`, `splitlines`, `rsplit`, `replace` with a count, `swapcase`,
+/// `istitle`, `isascii`), and `replace` on a literal receiver, which was
+/// folded to replace only the first occurrence (`"aaaa".replace("a", "b")`
+/// was `baaa`). Every line is CPython's output for the same source.
+#[test]
+fn str_methods_answer_as_cpython_does() {
+    let run = run_main(
+        &dedent(
+            r#"
+            def show(s: str) -> None:
+                print(repr(s.swapcase()), s.istitle(), s.isascii())
+
+
+            def main() -> None:
+                for s in ["Hello World", "hELLO wORLD", "ΣΑΣ", "ὈΔΥΣΣΕΎΣ", "ß", "ǅungla", "Ǆ", "", "abc123", "éclair", "Title Case Here", "Not title", "  Leading", "ΣΑΣ ΣΑΣ", "123"]:
+                    show(s)
+                print("ǅ".istitle(), "Ǆ".istitle(), "A".istitle(), "a".istitle(), "Aa Bb".istitle(), "AA".istitle())
+
+
+            def main2() -> None:
+                s = "Hello, World"
+                print(s.removeprefix("Hello"), s.removeprefix("x"), s.removesuffix("World"), s.removesuffix(""), "é-x".removeprefix("é"))
+                print(s.rfind("o"), s.rfind("zz"), s.rfind(""), "ééé".rfind("é"), s.rindex("l"))
+                try:
+                    s.rindex("q")
+                except ValueError as e:
+                    print("ValueError:", e)
+                print(s.partition(", "), s.partition("x"), s.rpartition("o"), s.rpartition("x"))
+                try:
+                    s.partition("")
+                except ValueError as e:
+                    print("ValueError:", e)
+                print("42".zfill(5), "-42".zfill(5), "+7".zfill(4), "abc".zfill(2), "".zfill(3), "é".zfill(3))
+                print(repr("a\tb\tc".expandtabs()), repr("ab\tc".expandtabs(4)), repr("x\ty\nz\tw".expandtabs(3)), repr("a\tb".expandtabs(0)), repr("a\tb".expandtabs(tabsize=2)))
+                text = "one\ntwo\r\nthree\rfour\x0bfive six"
+                print(text.splitlines(), text.splitlines(True), "".splitlines(), "x\n".splitlines(keepends=True), "\n\n".splitlines())
+                print("a b  c ".rsplit(), "a b  c".rsplit(maxsplit=1), " a b c ".rsplit(None, 1), "a,b,,c".rsplit(","), "a,b,,c".rsplit(",", 2), "abc".rsplit("x"), "a--b--c".rsplit("--", 1))
+                try:
+                    "a".rsplit("")
+                except ValueError as e:
+                    print("ValueError:", e)
+                print("aaaa".replace("a", "b", 2), "aaaa".replace("a", "b", 0), "aaaa".replace("a", "b", -1), "abc".replace("", "-", 2), "abc".replace("", "-", 9), "x.y.z".replace(".", "::", 1), "aaa".replace("a", "b", count=1))
+                words = ["ab", "cd"]
+                print([w.zfill(4) for w in words], "-".join(w.removeprefix("a") for w in words))
+
+
+            if __name__ == "__main__":
+                main()
+                main2()
+                print("aaaa".replace("a", "b"), "a.b.c".replace(".", "-"), "aaa".replace("a", "b", 1))
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(
+        run.stdout,
+        "'hELLO wORLD' True True\n\
+         'Hello World' False True\n\
+         'σας' False False\n\
+         'ὀδυσσεύς' False False\n\
+         'SS' False False\n\
+         'ǅUNGLA' True False\n\
+         'ǆ' True False\n\
+         '' False True\n\
+         'ABC123' False True\n\
+         'ÉCLAIR' False False\n\
+         'tITLE cASE hERE' True True\n\
+         'nOT TITLE' False True\n\
+         '  lEADING' True True\n\
+         'σας σας' False False\n\
+         '123' False True\n\
+         True True True False True False\n\
+         , World Hello, World Hello,  Hello, World -x\n\
+         8 -1 12 2 10\n\
+         ValueError: substring not found\n\
+         ('Hello', ', ', 'World') ('Hello, World', '', '') ('Hello, W', 'o', 'rld') ('', '', 'Hello, World')\n\
+         ValueError: empty separator\n\
+         00042 -0042 +007 abc 000 00é\n\
+         'a       b       c' 'ab  c' 'x  y\\nz  w' 'ab' 'a b'\n\
+         ['one', 'two', 'three', 'four', 'five', 'six'] ['one\\n', 'two\\r\\n', 'three\\r', 'four\\x0b', 'five\\u2028', 'six'] [] ['x\\n'] ['', '']\n\
+         ['a', 'b', 'c'] ['a b', 'c'] [' a b', 'c'] ['a', 'b', '', 'c'] ['a,b', '', 'c'] ['abc'] ['a--b', 'c']\n\
+         ValueError: empty separator\n\
+         bbaa aaaa bbbb -a-bc -a-b-c- x::y.z baa\n\
+         ['00ab', '00cd'] b-cd\n\
+         bbbb a-b-c baa\n"
+    );
 }

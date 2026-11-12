@@ -68,6 +68,11 @@ pub enum OsFn {
     Remove,
     /// `(a, b)`: `os.rename`.
     Rename,
+    /// `(p) -> float`: `os.path.getmtime`, the seconds since the epoch.
+    Mtime,
+    /// `(p) -> list`: `os.listdir`, the names in a directory but `.` and
+    /// `..`, in the order the host gives them.
+    Listdir,
 }
 
 impl OsFn {
@@ -78,6 +83,7 @@ impl OsFn {
             OsFn::Join => (vec![I32, I32], Some(I32)),
             OsFn::Remove => (vec![I32], None),
             OsFn::Rename => (vec![I32, I32], None),
+            OsFn::Mtime => (vec![I32], Some(Ty::F64)),
             _ => (vec![I32], Some(I32)),
         }
     }
@@ -335,6 +341,39 @@ pub(crate) fn build(ctx: &CompilationContext, routine: OsFn) -> Function {
             });
             a.ret(E::from(STAT).load(Ty::I32, 32));
         }
+        OsFn::Mtime => {
+            let p = a.param(0);
+            let dir = resolve(&mut a, ctx, p);
+            let resolved = crate::compiler::host::RESOLVED;
+            let errno = a.let_(no_directory());
+            a.if_(dir.ge(0), |a| {
+                a.set(
+                    errno,
+                    call(
+                        wasi(ctx, Wasi::PathFilestatGet),
+                        vec![
+                            dir.e(),
+                            1.into(), // follow symlinks
+                            E::from(resolved).load(Ty::I32, 0),
+                            E::from(resolved).load(Ty::I32, 4),
+                            STAT.into(),
+                        ],
+                        Some(Ty::I32),
+                    ),
+                );
+            });
+            a.if_(errno.ne(0), |a| {
+                a.run(os_error(ctx, repr(ctx, p), errno));
+                a.ret(0.0);
+            });
+            // `st_mtime` as CPython makes it: the seconds, and the
+            // nanoseconds scaled, added as floats.
+            let ns = a.let_(E::from(STAT).load(Ty::I64, 48));
+            let seconds = (ns / 1_000_000_000i64).to_f64();
+            let nanos = (ns % 1_000_000_000i64).to_f64();
+            a.ret(seconds + nanos * 1e-9);
+        }
+        OsFn::Listdir => listdir(&mut a, ctx),
         OsFn::Remove => {
             let p = a.param(0);
             let dir = resolve(&mut a, ctx, p);
@@ -396,6 +435,125 @@ pub(crate) fn build(ctx: &CompilationContext, routine: OsFn) -> Function {
         }
     }
     a.finish()
+}
+
+/// `os.listdir(p)`: open the directory, read its entries with `fd_readdir`
+/// twice (to count the names, then to copy them into a list of exactly that
+/// many), and close it. An entry is `[d_next u64][d_ino u64][d_namlen u32]
+/// [d_type u8][pad 3]` and its name; one the buffer cut short is read again
+/// from its cookie on the next call.
+fn listdir(a: &mut Asm, ctx: &CompilationContext) {
+    const BUF: i32 = 4096;
+    const ENTRY: i32 = 24;
+    let p = a.param(0);
+    let dir = resolve(a, ctx, p);
+    let resolved = crate::compiler::host::RESOLVED;
+    let fd_out = crate::compiler::host::FD_OUT;
+    let errno = a.let_(no_directory());
+    a.if_(dir.ge(0), |a| {
+        a.set(
+            errno,
+            call(
+                wasi(ctx, Wasi::PathOpen),
+                vec![
+                    dir.e(),
+                    1.into(), // follow symlinks
+                    E::from(resolved).load(Ty::I32, 0),
+                    E::from(resolved).load(Ty::I32, 4),
+                    2.into(),        // O_DIRECTORY
+                    E::I64(1 << 14), // fd_readdir
+                    E::I64(0),
+                    0.into(),
+                    fd_out.into(),
+                ],
+                Some(Ty::I32),
+            ),
+        );
+    });
+    a.if_(errno.ne(0), |a| {
+        a.run(os_error(ctx, repr(ctx, p), errno));
+        a.ret(0);
+    });
+    let fd = a.let_(E::from(fd_out).load(Ty::I32, 0));
+    let buf = a.let_(call(ctx.alloc_fn(), vec![E::I32(BUF + 8)], Some(Ty::I32)));
+    let used_at = a.let_(buf + BUF);
+    let count = a.let_(0);
+    let list = a.let_(0);
+    let cookie = a.local(Ty::I64);
+    let at = a.local(Ty::I32);
+    let used = a.local(Ty::I32);
+    let n = a.local(Ty::I32);
+    let name = a.local(Ty::I32);
+    // Pass 0 counts the names; pass 1 copies them into the list.
+    for pass in 0..2 {
+        a.set(cookie, E::I64(0));
+        let k = a.let_(0);
+        a.loop_(|a, more| {
+            a.set(
+                errno,
+                call(
+                    wasi(ctx, Wasi::FdReaddir),
+                    vec![fd.e(), buf.e(), E::I32(BUF), cookie.e(), used_at.e()],
+                    Some(Ty::I32),
+                ),
+            );
+            a.if_(errno.ne(0), |a| {
+                a.run(call(wasi(ctx, Wasi::FdClose), vec![fd.e()], Some(Ty::I32)));
+                a.run(os_error(ctx, repr(ctx, p), errno));
+                a.ret(0);
+            });
+            a.set(used, used_at.load(Ty::I32, 0));
+            a.set(at, 0);
+            a.loop_(|a, entries| {
+                a.brk_if(entries, (at + ENTRY).gt_u(used));
+                a.set(n, (buf + at).load(Ty::I32, 16));
+                // Cut short by the end of the buffer: read again from here.
+                a.brk_if(entries, ((at + ENTRY) + n).gt_u(used));
+                a.set(name, (buf + at) + ENTRY);
+                let dot = n.eq(1) & byte(name, 0).eq(b'.' as i32);
+                let dotdot =
+                    n.eq(2) & byte(name, 0).eq(b'.' as i32) & byte(name, 1).eq(b'.' as i32);
+                a.if_((dot | dotdot).eqz(), |a| {
+                    if pass == 1 {
+                        let piece = new_str(a, ctx, n);
+                        copy(a, piece, name, n);
+                        a.store(
+                            Ty::I32,
+                            list.load(Ty::I32, COLLECTION_DATA as u64) + (k * 8),
+                            0,
+                            piece,
+                        );
+                    }
+                    a.set(k, k + 1);
+                });
+                a.set(cookie, (buf + at).load(Ty::I64, 0));
+                a.set(at, (at + ENTRY) + n);
+                a.cont(entries);
+            });
+            a.cont_if(more, used.eq(BUF));
+        });
+        if pass == 0 {
+            a.set(count, k);
+            a.set(
+                list,
+                call(
+                    ctx.alloc_fn(),
+                    vec![E::I32(COLLECTION_HEADER as i32) + count * 8],
+                    Some(Ty::I32),
+                ),
+            );
+            a.store(Ty::I32, list, 0, count);
+            a.store(Ty::I32, list, COLLECTION_CAP as u64, count);
+            a.store(
+                Ty::I32,
+                list,
+                COLLECTION_DATA as u64,
+                list + COLLECTION_HEADER as i32,
+            );
+        }
+    }
+    a.run(call(wasi(ctx, Wasi::FdClose), vec![fd.e()], Some(Ty::I32)));
+    a.ret(list);
 }
 
 /// The preopen `p` resolves against, with the rest of it at `RESOLVED`.
@@ -840,6 +998,40 @@ pub(crate) fn emit_call(
             emit_post_call_check(func, ctx);
             Some(IRType::Int)
         }
+        "os.path.getmtime" => {
+            if one_str(func) {
+                emit!(func, helper(OsFn::Mtime));
+                emit_post_call_check(func, ctx);
+            } else {
+                emit!(func, I::F64Const(0.0f64.into()));
+            }
+            Some(IRType::Float)
+        }
+        "os.listdir" => {
+            if arguments.len() > 1
+                || arguments
+                    .iter()
+                    .any(|a| matches!(a, IRExpr::Keyword { .. }))
+            {
+                ctx.report("os.listdir() takes a path, by position");
+                emit!(func, I::I32Const(0));
+                return Some(IRType::List(Box::new(IRType::String)));
+            }
+            let ok = match arguments.first() {
+                Some(path) => emit_str_word(qualified, path, func, ctx, memory_layout),
+                None => {
+                    emit!(func, I::Call(ctx.helper(Helper::ExcText(".".to_string()))));
+                    true
+                }
+            };
+            if ok {
+                emit!(func, helper(OsFn::Listdir));
+                emit_post_call_check(func, ctx);
+            } else {
+                emit!(func, I::I32Const(0));
+            }
+            Some(IRType::List(Box::new(IRType::String)))
+        }
         "os.remove" | "os.unlink" => {
             if one_str(func) {
                 emit!(func, helper(OsFn::Remove));
@@ -896,6 +1088,8 @@ pub(crate) fn result_type(qualified: &str, arguments: &[IRExpr]) -> Option<IRTyp
         "os.getcwd" | "os.path.join" | "os.path.basename" | "os.path.dirname"
         | "os.path.normpath" | "os.path.abspath" => IRType::String,
         "os.getpid" | "os.path.getsize" => IRType::Int,
+        "os.path.getmtime" => IRType::Float,
+        "os.listdir" => IRType::List(Box::new(IRType::String)),
         "os.remove" | "os.unlink" | "os.rename" | "os.replace" => IRType::None,
         "os.urandom" => IRType::Bytes,
         "os.getenv" => IRType::Optional(Box::new(IRType::String)),

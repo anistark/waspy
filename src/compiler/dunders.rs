@@ -20,7 +20,9 @@ use crate::compiler::expression::emit_user_call;
 use crate::compiler::function::{
     emit_call_depth_step, emit_post_call_check, emit_raise, infer_value_type,
 };
-use crate::ir::{IRCompareOp, IRExpr, IROp, IRStatement, IRType, IRUnaryOp, MethodKind};
+use crate::ir::{
+    IRCompareOp, IRConstant, IRExpr, IROp, IRStatement, IRType, IRUnaryOp, MethodKind,
+};
 use wasm_encoder::{BlockType, Instruction as I, MemArg};
 
 /// Every special method an operator, a truth test, or a builtin calls.
@@ -118,6 +120,21 @@ fn class_of(expr: &IRExpr, ctx: &CompilationContext) -> Option<String> {
 fn has(ctx: &CompilationContext, class: &str, method: &str) -> bool {
     ctx.get_class_info(class)
         .is_some_and(|ci| ci.methods.contains_key(method))
+}
+
+/// A field read off a local or parameter, which is not a property: reading it
+/// runs nothing of the program's.
+fn plain_field(expr: &IRExpr, ctx: &CompilationContext) -> bool {
+    let IRExpr::Attribute { object, attribute } = expr else {
+        return false;
+    };
+    if !matches!(object.as_ref(), IRExpr::Variable(_) | IRExpr::Param(_)) {
+        return false;
+    }
+    match class_of(object, ctx) {
+        Some(class) => !has(ctx, &class, attribute),
+        None => false,
+    }
 }
 
 /// A constant or a local: evaluating something else first cannot change it,
@@ -447,6 +464,11 @@ fn rewrite_variant(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
             if has(ctx, &class, method_name) {
                 return None;
             }
+            // In the scan, a comprehension's variables may not be typed yet,
+            // which leaves its elements unknown: code generation decides.
+            if ctx.scanning.get() && has_unknown(&ty) {
+                return None;
+            }
             let shown = match method_name.as_str() {
                 m if m == crate::ir::FROM_METHOD => format!("{class}()"),
                 m => format!("{class}.{m}()"),
@@ -459,6 +481,19 @@ fn rewrite_variant(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
         }
     }
     None
+}
+
+/// Whether a type has a part not known yet.
+fn has_unknown(ty: &IRType) -> bool {
+    match ty {
+        IRType::Unknown => true,
+        IRType::List(e) | IRType::Set(e) | IRType::VarTuple(e) | IRType::Optional(e) => {
+            has_unknown(e)
+        }
+        IRType::Dict(k, v) => has_unknown(k) || has_unknown(v),
+        IRType::Tuple(members) => members.iter().any(has_unknown),
+        _ => false,
+    }
 }
 
 /// What an argument is, the literals of ints and bools included, which
@@ -1071,7 +1106,11 @@ pub(crate) fn rewrite(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr>
     if let Some(compared) = rewrite_optional_text_compare(expr, ctx) {
         return Some(compared);
     }
-    if let Some(built) = rewrite_dict_call(expr, ctx).or_else(|| rewrite_iter_seq(expr, ctx)) {
+    if let Some(built) = rewrite_dict_call(expr, ctx)
+        .or_else(|| rewrite_iter_seq(expr, ctx))
+        .or_else(|| rewrite_walk(expr, ctx))
+        .or_else(|| rewrite_str_method(expr, ctx))
+    {
         return Some(built);
     }
     if let Some(unwrapped) = rewrite_optional_receiver(expr, ctx) {
@@ -1634,25 +1673,8 @@ fn rewrite_iter_seq(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
         return None;
     };
     Some(match infer_value_type(x, ctx) {
-        IRType::Dict(..) => call(x, "keys", Vec::new()),
-        IRType::Set(e) => {
-            // Named for the element type, so the scan that reserves it and
-            // the code that uses it agree.
-            let each = format!(
-                "__iter_seq_{}",
-                crate::ir::collections::spec::encode(&e).unwrap_or_default()
-            );
-            IRExpr::Comprehension {
-                kind: crate::ir::IRComprehensionKind::List,
-                element: Box::new(IRExpr::Variable(each.clone())),
-                value: None,
-                generators: vec![crate::ir::IRGenerator {
-                    targets: vec![each],
-                    iterable: x.clone(),
-                    conditions: Vec::new(),
-                }],
-            }
-        }
+        // A dict and a set are walked in place (`__walk_next`), so the loop
+        // sees what is done to them while it is suspended, as CPython's does.
         IRType::Class(_) => match view_of(x, ctx) {
             Some(view) => IRExpr::FunctionCall {
                 function_name: function_name.clone(),
@@ -1661,6 +1683,134 @@ fn rewrite_iter_seq(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
             None => x.clone(),
         },
         _ => x.clone(),
+    })
+}
+
+/// `__walk_next` / `__walk_at` over a list, tuple, str, bytes, or range, as
+/// the indexing they mean (a list is walked to wherever its end is by then),
+/// and `__walk_at` over a dict as its key. A dict's and a set's steps, which
+/// check what the loop did to them, are code generation's.
+fn rewrite_walk(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
+    let IRExpr::FunctionCall {
+        function_name,
+        arguments,
+    } = expr
+    else {
+        return None;
+    };
+    let next = function_name == crate::ir::WALK_NEXT_FN;
+    if !next && function_name != crate::ir::WALK_AT_FN {
+        return None;
+    }
+    let collection = arguments.first()?;
+    // A deque's data walked by a step that checks it (see `WALK_NEXT_FN`).
+    if next && matches!(arguments.get(5), Some(IRExpr::Const(IRConstant::Int(2)))) {
+        return None;
+    }
+    let ty = infer_value_type(collection, ctx);
+    match (&ty, next) {
+        // A dict's and a set's steps, and a set's members, are code
+        // generation's.
+        (IRType::Dict(..) | IRType::Set(_), true) | (IRType::Set(_), false) => None,
+        (IRType::Dict(..), false) => Some(IRExpr::FunctionCall {
+            function_name: crate::ir::DICT_KEY_AT_FN.to_string(),
+            arguments: arguments.clone(),
+        }),
+        // Anything else is walked by `len()` and indexing, as it was before
+        // the walk was a step: a list, tuple, str, bytes, or range.
+        (_, true) => {
+            let after = IRExpr::BinaryOp {
+                left: Box::new(arguments.get(1)?.clone()),
+                right: Box::new(IRExpr::Const(IRConstant::Int(1))),
+                op: IROp::Add,
+            };
+            Some(IRExpr::Conditional {
+                condition: Box::new(IRExpr::CompareOp {
+                    left: Box::new(after.clone()),
+                    right: Box::new(IRExpr::FunctionCall {
+                        function_name: "len".to_string(),
+                        arguments: vec![collection.clone()],
+                    }),
+                    op: IRCompareOp::Lt,
+                }),
+                body: Box::new(after),
+                orelse: Box::new(IRExpr::Const(IRConstant::Int(-1))),
+            })
+        }
+        (_, false) => Some(IRExpr::Indexing {
+            container: Box::new(collection.clone()),
+            index: Box::new(arguments.get(1)?.clone()),
+        }),
+    }
+}
+
+/// A `str` method written in IR (`ir::str_methods`) on a str receiver, as the
+/// call of its helper with every argument placed: positional, by keyword, or
+/// its default. A call the helper cannot take is left to code generation,
+/// which implements `replace(old, new)` and refuses the rest.
+fn rewrite_str_method(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
+    let IRExpr::MethodCall {
+        object,
+        method_name,
+        arguments,
+    } = expr
+    else {
+        return None;
+    };
+    if !crate::ir::STR_METHODS.contains(&method_name.as_str()) {
+        return None;
+    }
+    let helper = crate::ir::str_helper_name(method_name);
+    ctx.get_function_info(&helper)?;
+    if !matches!(infer_value_type(object, ctx), IRType::String) {
+        return None;
+    }
+    let int = |i: i32| Some(IRExpr::Const(IRConstant::Int(i)));
+    let (names, defaults): (&[&str], Vec<Option<IRExpr>>) = match method_name.as_str() {
+        "removeprefix" => (&["prefix"], vec![None]),
+        "removesuffix" => (&["suffix"], vec![None]),
+        "rfind" | "rindex" => (&["sub"], vec![None]),
+        "partition" | "rpartition" => (&["sep"], vec![None]),
+        "zfill" => (&["width"], vec![None]),
+        "expandtabs" => (&["tabsize"], vec![int(8)]),
+        "splitlines" => (
+            &["keepends"],
+            vec![Some(IRExpr::Const(IRConstant::Bool(false)))],
+        ),
+        "rsplit" => (
+            &["sep", "maxsplit"],
+            vec![Some(IRExpr::Const(IRConstant::None)), int(-1)],
+        ),
+        "replace" => (&["old", "new", "count"], vec![None, None, None]),
+        _ => return None,
+    };
+    let mut slots: Vec<Option<IRExpr>> = vec![None; names.len()];
+    let mut next = 0;
+    for argument in arguments {
+        match argument {
+            IRExpr::Keyword { name, value } => {
+                let at = names.iter().position(|n| n == name)?;
+                if slots[at].is_some() {
+                    return None;
+                }
+                slots[at] = Some((**value).clone());
+            }
+            positional => {
+                if next >= names.len() {
+                    return None;
+                }
+                slots[next] = Some(positional.clone());
+                next += 1;
+            }
+        }
+    }
+    let mut placed = vec![(**object).clone()];
+    for (slot, default) in slots.into_iter().zip(defaults) {
+        placed.push(slot.or(default)?);
+    }
+    Some(IRExpr::FunctionCall {
+        function_name: helper,
+        arguments: placed,
     })
 }
 
@@ -1828,7 +1978,10 @@ pub(crate) fn rewrite_statement(
                 return None;
             }
             // CPython evaluates the value first, then the container and key.
-            if !(order_free(value) || (order_free(container) && order_free(index))) {
+            // A field of a local (`self.counts[k] += 1`) reads the same
+            // whichever comes first, unless it is a property.
+            let container_free = order_free(container) || plain_field(container, ctx);
+            if !(order_free(value) || (container_free && order_free(index))) {
                 return None;
             }
             Some(IRStatement::Expression(call(

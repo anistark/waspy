@@ -506,6 +506,12 @@
         "test": "strings::layout_methods"
       },
       {
+        "name": "More str methods: removeprefix, removesuffix, partition, rpartition, rfind, rindex, rsplit with maxsplit, splitlines, expandtabs, zfill, swapcase, istitle, isascii, and replace with a count",
+        "status": "done",
+        "version": "upcoming",
+        "test": "strings::more_methods"
+      },
+      {
         "name": "% formatting - compile-time for constants: %s %r %d %i %x %X %o %f with flags, width, and precision (rendered as written, or in decimal for %x, before; anything else is refused)",
         "status": "done",
         "version": "0.18.0",
@@ -1263,7 +1269,19 @@
         "test": "stdlib::os_file_functions"
       },
       {
-        "name": "logging module: TimedRotatingFileHandler and logging.config.fileConfig (refused today)",
+        "name": "os functions on directories and times, through WASI: listdir() and os.path.getmtime()",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::os_listdir_and_getmtime"
+      },
+      {
+        "name": "logging module: logging.handlers.TimedRotatingFileHandler, every when and interval, backupCount, delay (local time is UTC; atTime, namer, and rotator are refused)",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::logging_timed_rotating_file_handler"
+      },
+      {
+        "name": "logging module: logging.config.fileConfig (refused today)",
         "status": "todo"
       }
     ]

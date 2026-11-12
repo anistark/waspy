@@ -231,10 +231,486 @@ fn extra_methods(extras: &[(String, IRType)]) -> Vec<IRFunction> {
 pub(super) fn handlers() -> Vec<IRClass> {
     vec![
         rotating_handler(),
+        timed_rotating_handler(),
         watched_handler(),
         buffering_handler(),
         memory_handler(),
     ]
+}
+
+/// `TimedRotatingFileHandler`, as CPython 3.13 writes it. Local time is UTC,
+/// as it is for `datetime`, so `utc` changes nothing and no daylight saving
+/// time is accounted for; `atTime` is refused (it is typed None) and so are
+/// `namer` and `rotator`, which no handler here has. The file is named
+/// relative to where it was given, as every `FileHandler` here is.
+fn timed_rotating_handler() -> IRClass {
+    const NAME: &str = "handlers.TimedRotatingFileHandler";
+    const DAY: i32 = 86_400;
+    let me_t = || me(NAME);
+    let path_call = |name: &str, args: Vec<IRExpr>| mcall(attr(v("os"), "path"), name, args);
+    let os_call = |name: &str, args: Vec<IRExpr>| mcall(v("os"), name, args);
+    let now = || {
+        call(
+            "int",
+            vec![bin(
+                call(crate::ir::DATETIME_CLOCK_FN, Vec::new()),
+                IROp::FloorDiv,
+                float(1e6),
+            )],
+        )
+    };
+    let eq = |l: IRExpr, r: IRExpr| cmp(l, IRCompareOp::Eq, r);
+    let when_is = |w: &str| eq(my("when"), text(w));
+    let weekly = || mcall(my("when"), "startswith", vec![text("W")]);
+    let unit = |interval: i32, suffix: &str, shape: &str| {
+        vec![
+            set_attr(v("self"), "interval", int(interval)),
+            set_attr(v("self"), "suffix", text(suffix)),
+            set_attr(v("self"), "_shape", text(shape)),
+        ]
+    };
+    let two = |n: IRExpr| call("format", vec![n, text("02d")]);
+    let incr = |name: &str, by: IRExpr| assign(name, bin(v(name), IROp::Add, by));
+    class(
+        NAME,
+        Some("FileHandler"),
+        vec![
+            method(
+                "__init__",
+                vec![
+                    me_t(),
+                    param("filename", &s()),
+                    param_default("when", &s(), text("h")),
+                    param_default("interval", &i(), int(1)),
+                    param_default("backupCount", &i(), int(0)),
+                    param_default("encoding", &os(), none()),
+                    param_default("delay", &b(), boolean(false)),
+                    param_default("utc", &b(), boolean(false)),
+                    param_default("atTime", &IRType::None, none()),
+                    param_default("errors", &os(), none()),
+                ],
+                IRType::None,
+                vec![
+                    super_init(vec![v("filename"), text("a"), v("encoding"), v("delay")]),
+                    set_my_typed("delay", v("delay"), &b()),
+                    set_my_typed("when", mcall(v("when"), "upper", Vec::new()), &s()),
+                    set_my_typed("backupCount", v("backupCount"), &i()),
+                    set_my_typed("utc", v("utc"), &b()),
+                    set_my_typed("interval", int(0), &i()),
+                    set_my_typed("suffix", text(""), &s()),
+                    set_my_typed("_shape", text(""), &s()),
+                    set_my_typed("dayOfWeek", int(0), &i()),
+                    if_else(
+                        when_is("S"),
+                        unit(1, "%Y-%m-%d_%H-%M-%S", "dddd-dd-dd_dd-dd-dd"),
+                        vec![if_else(
+                            when_is("M"),
+                            unit(60, "%Y-%m-%d_%H-%M", "dddd-dd-dd_dd-dd"),
+                            vec![if_else(
+                                when_is("H"),
+                                unit(3600, "%Y-%m-%d_%H", "dddd-dd-dd_dd"),
+                                vec![if_else(
+                                    or(when_is("D"), when_is("MIDNIGHT")),
+                                    unit(DAY, "%Y-%m-%d", "dddd-dd-dd"),
+                                    vec![if_else(
+                                        weekly(),
+                                        {
+                                            let day = || idx(my("when"), int(1));
+                                            let mut body = vec![
+                                                if_(
+                                                    cmp(len(my("when")), IRCompareOp::NotEq, int(2)),
+                                                    vec![raise_expr(
+                                                        "ValueError",
+                                                        concat(vec![
+                                                            text("You must specify a day for weekly rollover from 0 to 6 (0 is Monday): "),
+                                                            my("when"),
+                                                        ]),
+                                                    )],
+                                                ),
+                                                if_(
+                                                    or(
+                                                        cmp(day(), IRCompareOp::Lt, text("0")),
+                                                        cmp(day(), IRCompareOp::Gt, text("6")),
+                                                    ),
+                                                    vec![raise_expr(
+                                                        "ValueError",
+                                                        concat(vec![
+                                                            text("Invalid day specified for weekly rollover: "),
+                                                            my("when"),
+                                                        ]),
+                                                    )],
+                                                ),
+                                                set_attr(v("self"), "dayOfWeek", call("int", vec![day()])),
+                                            ];
+                                            body.extend(unit(7 * DAY, "%Y-%m-%d", "dddd-dd-dd"));
+                                            body
+                                        },
+                                        vec![raise_expr(
+                                            "ValueError",
+                                            concat(vec![
+                                                text("Invalid rollover interval specified: "),
+                                                my("when"),
+                                            ]),
+                                        )],
+                                    )],
+                                )],
+                            )],
+                        )],
+                    ),
+                    set_attr(v("self"), "interval", bin(my("interval"), IROp::Mul, v("interval"))),
+                    assign_typed("t", int(0), &i()),
+                    if_else(
+                        path_call("exists", vec![my("_path")]),
+                        vec![assign("t", call("int", vec![path_call("getmtime", vec![my("_path")])]))],
+                        vec![assign("t", now())],
+                    ),
+                    set_my_typed(
+                        "rolloverAt",
+                        mcall(v("self"), "computeRollover", vec![v("t")]),
+                        &i(),
+                    ),
+                ],
+            ),
+            // The next rollover after `currentTime`: an interval on, or for
+            // midnight and weekly rollover the next midnight (and the day).
+            method(
+                "computeRollover",
+                vec![me_t(), param("currentTime", &i())],
+                i(),
+                vec![
+                    assign_typed("result", bin(v("currentTime"), IROp::Add, my("interval")), &i()),
+                    if_(
+                        or(when_is("MIDNIGHT"), weekly()),
+                        vec![
+                            assign_typed(
+                                "r",
+                                bin(int(DAY), IROp::Sub, bin(v("currentTime"), IROp::Mod, int(DAY))),
+                                &i(),
+                            ),
+                            // 1970-01-01 was a Thursday, day 3 with Monday 0.
+                            assign_typed(
+                                "currentDay",
+                                bin(
+                                    bin(bin(v("currentTime"), IROp::FloorDiv, int(DAY)), IROp::Add, int(3)),
+                                    IROp::Mod,
+                                    int(7),
+                                ),
+                                &i(),
+                            ),
+                            if_(
+                                cmp(v("r"), IRCompareOp::LtE, int(0)),
+                                vec![
+                                    incr("r", int(DAY)),
+                                    assign("currentDay", bin(bin(v("currentDay"), IROp::Add, int(1)), IROp::Mod, int(7))),
+                                ],
+                            ),
+                            assign("result", bin(v("currentTime"), IROp::Add, v("r"))),
+                            if_else(
+                                weekly(),
+                                vec![
+                                    if_(
+                                        cmp(v("currentDay"), IRCompareOp::NotEq, my("dayOfWeek")),
+                                        vec![if_else(
+                                            cmp(v("currentDay"), IRCompareOp::Lt, my("dayOfWeek")),
+                                            vec![incr(
+                                                "result",
+                                                bin(bin(my("dayOfWeek"), IROp::Sub, v("currentDay")), IROp::Mul, int(DAY)),
+                                            )],
+                                            vec![incr(
+                                                "result",
+                                                bin(
+                                                    bin(bin(bin(int(6), IROp::Sub, v("currentDay")), IROp::Add, my("dayOfWeek")), IROp::Add, int(1)),
+                                                    IROp::Mul,
+                                                    int(DAY),
+                                                ),
+                                            )],
+                                        )],
+                                    ),
+                                    incr("result", bin(my("interval"), IROp::Sub, int(7 * DAY))),
+                                ],
+                                vec![incr("result", bin(my("interval"), IROp::Sub, int(DAY)))],
+                            ),
+                        ],
+                    ),
+                    ret_val(v("result")),
+                ],
+            ),
+            method(
+                "shouldRollover",
+                vec![me_t(), param("record", &ty("LogRecord"))],
+                b(),
+                vec![
+                    assign_typed("t", now(), &i()),
+                    if_(
+                        cmp(v("t"), IRCompareOp::GtE, my("rolloverAt")),
+                        vec![
+                            // Only a regular file is rolled over.
+                            if_(
+                                and(
+                                    path_call("exists", vec![my("_path")]),
+                                    not(path_call("isfile", vec![my("_path")])),
+                                ),
+                                vec![
+                                    set_attr(v("self"), "rolloverAt", mcall(v("self"), "computeRollover", vec![v("t")])),
+                                    ret_val(boolean(false)),
+                                ],
+                            ),
+                            ret_val(boolean(true)),
+                        ],
+                    ),
+                    ret_val(boolean(false)),
+                ],
+            ),
+            // `extMatch.fullmatch(suffix)`: the suffix has the digits and
+            // separators of the date and time it names.
+            method(
+                "_matches",
+                vec![me_t(), param("suffix", &s())],
+                b(),
+                vec![
+                    if_(
+                        cmp(len(v("suffix")), IRCompareOp::NotEq, len(my("_shape"))),
+                        vec![ret_val(boolean(false))],
+                    ),
+                    assign_typed("k", int(0), &i()),
+                    while_(
+                        cmp(v("k"), IRCompareOp::Lt, len(v("suffix"))),
+                        vec![
+                            assign_typed("c", idx(v("suffix"), v("k")), &s()),
+                            if_else(
+                                eq(idx(my("_shape"), v("k")), text("d")),
+                                vec![if_(
+                                    or(cmp(v("c"), IRCompareOp::Lt, text("0")), cmp(v("c"), IRCompareOp::Gt, text("9"))),
+                                    vec![ret_val(boolean(false))],
+                                )],
+                                vec![if_(
+                                    cmp(v("c"), IRCompareOp::NotEq, idx(my("_shape"), v("k"))),
+                                    vec![ret_val(boolean(false))],
+                                )],
+                            ),
+                            incr("k", int(1)),
+                        ],
+                    ),
+                    ret_val(boolean(true)),
+                ],
+            ),
+            // `time.strftime(self.suffix, time.gmtime(t))` for the numeric
+            // fields a suffix is written with.
+            method(
+                "_stamp",
+                vec![me_t(), param("t", &i())],
+                s(),
+                vec![
+                    assign_typed("days", bin(v("t"), IROp::FloorDiv, int(DAY)), &i()),
+                    assign_typed("secs", bin(v("t"), IROp::Mod, int(DAY)), &i()),
+                    // The civil date of a day count (Howard Hinnant's days_from_civil, reversed).
+                    assign_typed("z", bin(v("days"), IROp::Add, int(719_468)), &i()),
+                    assign_typed("era", bin(v("z"), IROp::FloorDiv, int(146_097)), &i()),
+                    assign_typed("doe", bin(v("z"), IROp::Sub, bin(v("era"), IROp::Mul, int(146_097))), &i()),
+                    assign_typed(
+                        "yoe",
+                        bin(
+                            bin(
+                                bin(
+                                    bin(v("doe"), IROp::Sub, bin(v("doe"), IROp::FloorDiv, int(1460))),
+                                    IROp::Add,
+                                    bin(v("doe"), IROp::FloorDiv, int(36_524)),
+                                ),
+                                IROp::Sub,
+                                bin(v("doe"), IROp::FloorDiv, int(146_096)),
+                            ),
+                            IROp::FloorDiv,
+                            int(365),
+                        ),
+                        &i(),
+                    ),
+                    assign_typed(
+                        "doy",
+                        bin(
+                            v("doe"),
+                            IROp::Sub,
+                            bin(
+                                bin(bin(int(365), IROp::Mul, v("yoe")), IROp::Add, bin(v("yoe"), IROp::FloorDiv, int(4))),
+                                IROp::Sub,
+                                bin(v("yoe"), IROp::FloorDiv, int(100)),
+                            ),
+                        ),
+                        &i(),
+                    ),
+                    assign_typed(
+                        "mp",
+                        bin(bin(bin(int(5), IROp::Mul, v("doy")), IROp::Add, int(2)), IROp::FloorDiv, int(153)),
+                        &i(),
+                    ),
+                    assign_typed(
+                        "day",
+                        bin(
+                            bin(v("doy"), IROp::Sub, bin(bin(bin(int(153), IROp::Mul, v("mp")), IROp::Add, int(2)), IROp::FloorDiv, int(5))),
+                            IROp::Add,
+                            int(1),
+                        ),
+                        &i(),
+                    ),
+                    assign_typed("month", bin(v("mp"), IROp::Add, int(3)), &i()),
+                    if_(cmp(v("month"), IRCompareOp::Gt, int(12)), vec![incr("month", int(-12))]),
+                    assign_typed("year", bin(v("yoe"), IROp::Add, bin(v("era"), IROp::Mul, int(400))), &i()),
+                    if_(cmp(v("month"), IRCompareOp::LtE, int(2)), vec![incr("year", int(1))]),
+                    assign_typed(
+                        "parts",
+                        IRExpr::ListLiteral(Vec::new()),
+                        &IRType::List(Box::new(s())),
+                    ),
+                    assign_typed("k", int(0), &i()),
+                    assign_typed("n", len(my("suffix")), &i()),
+                    while_(
+                        cmp(v("k"), IRCompareOp::Lt, v("n")),
+                        vec![
+                            assign_typed("c", idx(my("suffix"), v("k")), &s()),
+                            if_else(
+                                and(eq(v("c"), text("%")), cmp(bin(v("k"), IROp::Add, int(1)), IRCompareOp::Lt, v("n"))),
+                                vec![
+                                    assign_typed("code", idx(my("suffix"), bin(v("k"), IROp::Add, int(1))), &s()),
+                                    if_else(
+                                        eq(v("code"), text("Y")),
+                                        vec![expr_stmt(mcall(v("parts"), "append", vec![call("format", vec![v("year"), text("04d")])]))],
+                                        vec![if_else(
+                                            eq(v("code"), text("m")),
+                                            vec![expr_stmt(mcall(v("parts"), "append", vec![two(v("month"))]))],
+                                            vec![if_else(
+                                                eq(v("code"), text("d")),
+                                                vec![expr_stmt(mcall(v("parts"), "append", vec![two(v("day"))]))],
+                                                vec![if_else(
+                                                    eq(v("code"), text("H")),
+                                                    vec![expr_stmt(mcall(v("parts"), "append", vec![two(bin(v("secs"), IROp::FloorDiv, int(3600)))]))],
+                                                    vec![if_else(
+                                                        eq(v("code"), text("M")),
+                                                        vec![expr_stmt(mcall(v("parts"), "append", vec![two(bin(bin(v("secs"), IROp::Mod, int(3600)), IROp::FloorDiv, int(60)))]))],
+                                                        vec![if_else(
+                                                            eq(v("code"), text("S")),
+                                                            vec![expr_stmt(mcall(v("parts"), "append", vec![two(bin(v("secs"), IROp::Mod, int(60)))]))],
+                                                            vec![if_else(
+                                                                eq(v("code"), text("%")),
+                                                                vec![expr_stmt(mcall(v("parts"), "append", vec![text("%")]))],
+                                                                vec![raise_expr(
+                                                                    "NotImplementedError",
+                                                                    concat(vec![
+                                                                        text("a TimedRotatingFileHandler suffix with %"),
+                                                                        v("code"),
+                                                                        text(": only %Y, %m, %d, %H, %M, %S, and %% are supported"),
+                                                                    ]),
+                                                                )],
+                                                            )],
+                                                        )],
+                                                    )],
+                                                )],
+                                            )],
+                                        )],
+                                    ),
+                                    incr("k", int(2)),
+                                ],
+                                vec![
+                                    expr_stmt(mcall(v("parts"), "append", vec![v("c")])),
+                                    incr("k", int(1)),
+                                ],
+                            ),
+                        ],
+                    ),
+                    ret_val(mcall(text(""), "join", vec![v("parts")])),
+                ],
+            ),
+            method(
+                "getFilesToDelete",
+                vec![me_t()],
+                IRType::List(Box::new(s())),
+                vec![
+                    assign_typed("dirName", path_call("dirname", vec![my("_path")]), &s()),
+                    assign_typed("baseName", path_call("basename", vec![my("_path")]), &s()),
+                    assign_typed("listing", v("dirName"), &s()),
+                    if_(eq(v("listing"), text("")), vec![assign("listing", text("."))]),
+                    assign_typed("result", IRExpr::ListLiteral(Vec::new()), &IRType::List(Box::new(s()))),
+                    assign_typed("prefix", bin(v("baseName"), IROp::Add, text(".")), &s()),
+                    assign_typed("plen", len(v("prefix")), &i()),
+                    for_(
+                        "fileName",
+                        os_call("listdir", vec![v("listing")]),
+                        vec![if_(
+                            eq(slice(v("fileName"), None, Some(v("plen"))), v("prefix")),
+                            vec![if_(
+                                mcall(v("self"), "_matches", vec![slice(v("fileName"), Some(v("plen")), None)]),
+                                vec![expr_stmt(mcall(
+                                    v("result"),
+                                    "append",
+                                    vec![path_call("join", vec![v("dirName"), v("fileName")])],
+                                ))],
+                            )],
+                        )],
+                    ),
+                    if_else(
+                        cmp(len(v("result")), IRCompareOp::Lt, my("backupCount")),
+                        vec![assign("result", IRExpr::ListLiteral(Vec::new()))],
+                        vec![
+                            assign("result", call("sorted", vec![v("result")])),
+                            assign(
+                                "result",
+                                slice(v("result"), None, Some(bin(len(v("result")), IROp::Sub, my("backupCount")))),
+                            ),
+                        ],
+                    ),
+                    ret_val(v("result")),
+                ],
+            ),
+            method(
+                "doRollover",
+                vec![me_t()],
+                IRType::None,
+                vec![
+                    assign_typed("currentTime", now(), &i()),
+                    assign_typed(
+                        "dfn",
+                        concat(vec![
+                            my("_path"),
+                            text("."),
+                            mcall(v("self"), "_stamp", vec![bin(my("rolloverAt"), IROp::Sub, my("interval"))]),
+                        ]),
+                        &s(),
+                    ),
+                    if_(path_call("exists", vec![v("dfn")]), vec![ret()]),
+                    set_attr(v("self"), "_opened", boolean(false)),
+                    if_(
+                        path_call("exists", vec![my("_path")]),
+                        vec![expr_stmt(os_call("rename", vec![my("_path"), v("dfn")]))],
+                    ),
+                    if_(
+                        cmp(my("backupCount"), IRCompareOp::Gt, int(0)),
+                        vec![for_(
+                            "old",
+                            mcall(v("self"), "getFilesToDelete", Vec::new()),
+                            vec![expr_stmt(os_call("remove", vec![v("old")]))],
+                        )],
+                    ),
+                    if_(
+                        not(my("delay")),
+                        vec![expr_stmt(mcall(v("self"), "_open", Vec::new()))],
+                    ),
+                    set_attr(v("self"), "rolloverAt", mcall(v("self"), "computeRollover", vec![v("currentTime")])),
+                ],
+            ),
+            method("emit", vec![me_t(), param("record", &ty("LogRecord"))], IRType::None, {
+                let mut body = format_or_report();
+                body.push(if_(
+                    mcall(v("self"), "shouldRollover", vec![v("record")]),
+                    vec![expr_stmt(mcall(v("self"), "doRollover", Vec::new()))],
+                ));
+                body.push(expr_stmt(mcall(
+                    call("super", Vec::new()),
+                    "emit",
+                    vec![v("record")],
+                )));
+                body
+            }),
+        ],
+        Vec::new(),
+    )
 }
 
 fn rotating_handler() -> IRClass {

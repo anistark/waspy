@@ -1988,8 +1988,12 @@ fn desugar_suspending_fors(body: &mut IRBody, counter: &mut u32) {
                         out.push(while_true(loop_body));
                     }
                     other => {
-                        // A dict's keys or a set's members, as a sequence to
-                        // index (a list or string as itself).
+                        // The collection walked in place, as CPython's
+                        // iterator walks it: a list to wherever its end is
+                        // by then, and a dict or set held to the size it
+                        // started at (and a dict to its keys), checked on
+                        // each step since the code that resumes this
+                        // generator may have changed it.
                         out.push(assign(
                             "__gsq",
                             IRExpr::FunctionCall {
@@ -1998,26 +2002,38 @@ fn desugar_suspending_fors(body: &mut IRBody, counter: &mut u32) {
                             },
                         ));
                         out.push(assign("__gix", int_const(-1)));
-                        let mut loop_body = vec![
-                            IRStatement::AugAssign {
-                                target: format!("__gix_{n}"),
-                                value: int_const(1),
-                                op: IROp::Add,
+                        out.push(assign(
+                            "__gln",
+                            IRExpr::FunctionCall {
+                                function_name: "len".to_string(),
+                                arguments: vec![var("__gsq")],
                             },
-                            break_unless(cmp(
-                                var("__gix"),
-                                IRCompareOp::Lt,
+                        ));
+                        let mut loop_body = vec![
+                            assign(
+                                "__gix",
                                 IRExpr::FunctionCall {
-                                    function_name: "len".to_string(),
-                                    arguments: vec![var("__gsq")],
+                                    function_name: crate::ir::WALK_NEXT_FN.to_string(),
+                                    arguments: vec![
+                                        var("__gsq"),
+                                        var("__gix"),
+                                        var("__gln"),
+                                        var("__gky"),
+                                        IRExpr::Const(IRConstant::Bool(true)),
+                                    ],
                                 },
-                            )),
+                            ),
+                            break_unless(cmp(var("__gix"), IRCompareOp::GtE, int_const(0))),
+                            assign(
+                                "__gky",
+                                IRExpr::FunctionCall {
+                                    function_name: crate::ir::WALK_AT_FN.to_string(),
+                                    arguments: vec![var("__gsq"), var("__gix")],
+                                },
+                            ),
                             IRStatement::Assign {
                                 target: target.clone(),
-                                value: IRExpr::Indexing {
-                                    container: Box::new(var("__gsq")),
-                                    index: Box::new(var("__gix")),
-                                },
+                                value: var("__gky"),
                                 var_type: None,
                             },
                         ];
@@ -2505,11 +2521,18 @@ pub(crate) fn yielded_type(body: &IRBody, params: &[IRParam]) -> IRType {
             IRExpr::FunctionCall {
                 function_name,
                 arguments,
-            } if function_name == crate::ir::ITER_SEQ_FN => {
+            } if function_name == crate::ir::ITER_SEQ_FN => kind_of(arguments.first()?, kinds),
+            // `x = __walk_at(__gsq, __gix)`: the walked collection's element.
+            IRExpr::FunctionCall {
+                function_name,
+                arguments,
+            } if function_name == crate::ir::WALK_AT_FN => {
                 match kind_of(arguments.first()?, kinds)? {
-                    IRType::Dict(k, _) => Some(IRType::List(k)),
-                    IRType::Set(e) => Some(IRType::List(e)),
-                    other => Some(other),
+                    IRType::List(e) | IRType::VarTuple(e) | IRType::Set(e) => Some(*e),
+                    IRType::Dict(k, _) => Some(*k),
+                    IRType::String => Some(IRType::String),
+                    IRType::Bytes | IRType::Range => Some(IRType::Int),
+                    _ => None,
                 }
             }
             IRExpr::Indexing { container, .. } => match kind_of(container, kinds)? {

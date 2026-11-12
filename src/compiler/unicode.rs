@@ -142,6 +142,9 @@ pub enum Case {
     Lower,
     Capitalize,
     Title,
+    /// `swapcase()`: an uppercase character lowered (a capital sigma by its
+    /// context), a lowercase one uppered, anything else as it is.
+    Swap,
 }
 
 fn incr(f: &mut Function, local: u32, by: i32) {
@@ -753,6 +756,44 @@ pub(crate) fn build_case_run(ctx: &CompilationContext, case: Case) -> Function {
             );
             emit!(f, I::LocalGet(cp), I::Call(cased), I::LocalSet(prev_cased));
         }
+        Case::Swap => {
+            let (upper, lower) = (
+                ctx.helper(Helper::UniHas(Class::Upper)),
+                ctx.helper(Helper::UniHas(Class::Lower)),
+            );
+            emit!(
+                f,
+                I::LocalGet(cp),
+                I::Call(upper),
+                I::If(BlockType::Result(ValType::I32))
+            );
+            lower_here(&mut f);
+            emit!(
+                f,
+                I::Else,
+                I::LocalGet(cp),
+                I::Call(lower),
+                I::If(BlockType::Result(ValType::I32)),
+                I::LocalGet(cp),
+                I::LocalGet(dst),
+                I::Call(map(CaseMap::Upper)),
+                I::Else,
+                // As it is: its bytes, when there is somewhere to write them.
+                I::LocalGet(dst),
+                I::If(BlockType::Empty),
+                I::LocalGet(dst),
+                I::LocalGet(addr),
+                I::LocalGet(w),
+                I::MemoryCopy {
+                    src_mem: 0,
+                    dst_mem: 0
+                },
+                I::End,
+                I::LocalGet(w),
+                I::End,
+                I::End
+            );
+        }
     }
     emit!(f, I::LocalGet(total), I::I32Add, I::LocalSet(total));
     emit!(f, I::LocalGet(i), I::LocalGet(w), I::I32Add, I::LocalSet(i));
@@ -796,9 +837,51 @@ pub(crate) fn build_case(ctx: &CompilationContext, case: Case) -> Function {
 /// `(s) -> bool`: a string predicate, as CPython evaluates it.
 pub(crate) fn build_str_is(ctx: &CompilationContext, predicate: Predicate) -> Function {
     let has = |class| ctx.helper(Helper::UniHas(class));
-    let mut f = function(&[ValType::I32; 6]);
+    let mut f = function(&[ValType::I32; 7]);
     let s = 0;
-    let (n, i, cp, w, cased, addr) = (1, 2, 3, 4, 5, 6);
+    let (n, i, cp, w, cased, addr, prev) = (1, 2, 3, 4, 5, 6, 7);
+    if predicate == Predicate::Ascii {
+        // Every byte below 0x80, so every character is ASCII; an empty
+        // string is ASCII too.
+        emit!(
+            f,
+            I::LocalGet(s),
+            I::I32Const(4),
+            I::I32Sub,
+            I::I32Load(w32(0)),
+            I::LocalSet(n),
+            I::Block(BlockType::Empty),
+            I::Loop(BlockType::Empty),
+            I::LocalGet(i),
+            I::LocalGet(n),
+            I::I32GeU,
+            I::BrIf(1),
+            I::LocalGet(s),
+            I::LocalGet(i),
+            I::I32Add,
+            I::I32Load8U(wasm_encoder::MemArg {
+                offset: 0,
+                align: 0,
+                memory_index: 0
+            }),
+            I::I32Const(0x80),
+            I::I32GeU,
+            I::If(BlockType::Empty),
+            I::I32Const(0),
+            I::Return,
+            I::End,
+            I::LocalGet(i),
+            I::I32Const(1),
+            I::I32Add,
+            I::LocalSet(i),
+            I::Br(0),
+            I::End,
+            I::End,
+            I::I32Const(1),
+            I::End
+        );
+        return f;
+    }
     emit!(
         f,
         I::LocalGet(s),
@@ -830,6 +913,54 @@ pub(crate) fn build_str_is(ctx: &CompilationContext, predicate: Predicate) -> Fu
         emit!(f, I::LocalGet(i), I::LocalGet(w), I::I32Add, I::LocalSet(i));
         emit!(f, I::Br(0), I::End, I::End);
     };
+    if predicate == Predicate::Title {
+        // CPython's `istitle`: an uppercase or titlecase character only after
+        // an uncased one, a lowercase one only after a cased one, and at
+        // least one cased character.
+        let (upper, title, lower) = (has(Class::Upper), has(Class::Title), has(Class::Lower));
+        open_loop(&mut f);
+        step(&mut f);
+        emit!(
+            f,
+            I::LocalGet(cp),
+            I::Call(upper),
+            I::LocalGet(cp),
+            I::Call(title),
+            I::I32Or,
+            I::If(BlockType::Empty),
+            I::LocalGet(prev),
+            I::If(BlockType::Empty),
+            I::I32Const(0),
+            I::Return,
+            I::End,
+            I::I32Const(1),
+            I::LocalSet(prev),
+            I::I32Const(1),
+            I::LocalSet(cased),
+            I::Else,
+            I::LocalGet(cp),
+            I::Call(lower),
+            I::If(BlockType::Empty),
+            I::LocalGet(prev),
+            I::I32Eqz,
+            I::If(BlockType::Empty),
+            I::I32Const(0),
+            I::Return,
+            I::End,
+            I::I32Const(1),
+            I::LocalSet(prev),
+            I::I32Const(1),
+            I::LocalSet(cased),
+            I::Else,
+            I::I32Const(0),
+            I::LocalSet(prev),
+            I::End,
+            I::End
+        );
+        close_loop(&mut f);
+        emit!(f, I::LocalGet(cased), I::End);
+        return f;
+    }
     if let Predicate::Upper | Predicate::Lower = predicate {
         let (this, other) = if predicate == Predicate::Upper {
             (has(Class::Upper), has(Class::Lower))
