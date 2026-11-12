@@ -3060,7 +3060,11 @@ mod runtime_features {
         );
     }
 
-    /// Dynamic Module Loading - runtime module loading and execution
+    /// Dynamic Module Loading - a module named at run time, loaded through the host
+    ///
+    /// A constant name is linked at compile time (`imports::dynamic_imports`);
+    /// a name computed at run time needs the host loader, which is built on the
+    /// JavaScript bridge's proxy type. This asserts CPython's answer for one.
     #[test]
     #[ignore = "open on the board"]
     fn dynamic_module_loading() {
@@ -3068,11 +3072,14 @@ mod runtime_features {
             r#"
             import importlib
 
+            def load(name: str) -> int:
+                m = importlib.import_module(name)
+                return m.floor(2.5)
+
             def f() -> int:
-                m = importlib.import_module("math")
-                return 1
+                return load("ma" + "th")
         "#,
-            &[("f", Want::Int(1))],
+            &[("f", Want::Int(2))],
         );
     }
 
@@ -6049,17 +6056,24 @@ mod imports {
         );
     }
 
-    /// Dynamic imports (__import__, importlib) (refused at compile time today)
+    /// Dynamic imports (__import__, importlib) with a constant name, in a function or at module level
     #[test]
-    #[ignore = "open on the board"]
     fn dynamic_imports() {
         check(
             r#"
+            import importlib
+
+            j = importlib.import_module("json")
+
             def f() -> int:
                 m = __import__("math")
-                return 1
+                return m.floor(m.pi * 100) + len(j.dumps([1, 2]))
+
+            def g() -> int:
+                import math as mm
+                return importlib.import_module("math").gcd(12, 18) + mm.floor(2.5)
         "#,
-            &[("f", Want::Int(1))],
+            &[("f", Want::Int(320)), ("g", Want::Int(8))],
         );
     }
 

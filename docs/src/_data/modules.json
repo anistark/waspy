@@ -1045,7 +1045,7 @@
         "test": "runtime_features::generator_state"
       },
       {
-        "name": "Dynamic Module Loading - runtime module loading and execution",
+        "name": "Dynamic Module Loading - a module named at run time, loaded through the host",
         "status": "todo",
         "test": "runtime_features::dynamic_module_loading"
       },
@@ -1474,7 +1474,7 @@
   },
   "imports": {
     "title": "IMPORT SYSTEM",
-    "status": "progress",
+    "status": "done",
     "version": "0.8.0",
     "features": [
       {
@@ -1502,8 +1502,9 @@
         "test": "imports::conditional_imports"
       },
       {
-        "name": "Dynamic imports (__import__, importlib) (refused at compile time today)",
-        "status": "todo",
+        "name": "Dynamic imports (__import__, importlib) with a constant name, in a function or at module level",
+        "status": "done",
+        "version": "upcoming",
         "test": "imports::dynamic_imports"
       },
       {

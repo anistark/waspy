@@ -109,3 +109,42 @@ jobs:
       # A release does not go out on a red run here.
       - name: Whole programs under Node and wasmtime (required gate)
         run: just verify-examples
+
+  browser:
+    name: Whole programs in a browser, against Pyodide
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tests/browser/package-lock.json
+
+      - uses: extractions/setup-just@v2
+
+      # Playwright and Pyodide are pinned exactly in tests/browser/package.json
+      # and its lock file; Chromium is the build that Playwright release pins.
+      - name: Install the gate's dependencies
+        working-directory: tests/browser
+        run: npm ci --no-audit --no-fund
+
+      - name: Install Chromium
+        working-directory: tests/browser
+        run: npx playwright install --with-deps chromium
+
+      # The end-to-end programs in headless Chromium through the playground's
+      # WASI shim, each answer checked against Pyodide running the same Python
+      # in the same page: the browser a web program runs in, and the reference
+      # the web cards on the board are held to.
+      - name: Whole programs in Chromium, against Pyodide (required gate)
+        run: just browser-verify

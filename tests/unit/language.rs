@@ -1,6 +1,6 @@
 //! Runtime coverage for the core-syntax constructs: nested functions and
-//! `nonlocal`, star parameters, class objects, and the cases around them that
-//! have to be refused rather than answered wrong.
+//! `nonlocal`, star parameters, class objects, imports, and the cases around
+//! them that have to be refused rather than answered wrong.
 //!
 //! Every expected value is what CPython answers for the same source.
 
@@ -9,7 +9,7 @@ mod harness;
 
 use harness::{
     call_f64, call_i32, call_i32_traps, call_instance_i32, call_str, dedent, instantiate_wasm,
-    read_str, run_main, try_compile, try_compile_multi,
+    read_str, run_main, try_compile, try_compile_multi, Run,
 };
 
 fn refused(source: &str, needle: &str) {
@@ -1280,5 +1280,382 @@ fn sorted_cells_and_dict_annotated_collections_are_typed() {
     assert_eq!(
         run.stdout,
         "['x', 'y'] [3, 2] 2\n['C', 'A', 'B']\n['n1!', 'n2!'] n1\na=2, b=2, c=1\n"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Imports: aliases, imports in a function, and importlib
+// ---------------------------------------------------------------------------
+
+/// Run the `__main__` block of a program merged from several files.
+fn run_files(files: &[(&str, &str)]) -> Run {
+    let sources: Vec<(String, String)> = files
+        .iter()
+        .map(|(name, text)| (name.to_string(), dedent(text)))
+        .collect();
+    let refs: Vec<(&str, &str)> = sources
+        .iter()
+        .map(|(n, t)| (n.as_str(), t.as_str()))
+        .collect();
+    let wasm = try_compile_multi(&refs).expect("compiles");
+    let (instance, mut store) = instantiate_wasm(&wasm);
+    instance
+        .get_typed_func::<(), ()>(&store, "_start")
+        .expect("an exported _start")
+        .call(&mut store, ())
+        .expect("runs");
+    let host = store.data();
+    Run {
+        stdout: String::from_utf8(host.stdout.clone()).expect("utf-8"),
+        stderr: String::from_utf8(host.stderr.clone()).expect("utf-8"),
+        exit: 0,
+    }
+}
+
+/// A standard-library module imported under another name is read through
+/// it: `import math as m` answered "name 'm' is not defined", and a
+/// submodule's alias (`osp.sep`) and a base class through one
+/// (`lh.BufferingHandler`) the same.
+#[test]
+fn module_aliases_read_through_the_module() {
+    let run = run_main(
+        &dedent(
+            r#"
+            import math as m
+            import os.path as osp
+            import collections as co
+            import re as regex
+            import logging
+            import logging.handlers as lh
+            from typing import List
+
+
+            class Keep(lh.BufferingHandler):
+                pass
+
+
+            def words(text: str) -> List[str]:
+                return regex.findall(r"[a-z]+", text)
+
+
+            if __name__ == "__main__":
+                print(m.floor(m.pi * 100), m.sqrt(2.0))
+                print(osp.join("a", "b"), osp.sep, osp.basename("x/y.txt"))
+                c = co.Counter(words("the cat and the hat"))
+                print(c["the"], c.most_common(1))
+                print(Keep(3).capacity, isinstance(Keep(1), logging.Handler))
+        "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(
+        run.stdout,
+        "314 1.4142135623730951\na/b / y.txt\n2 [('the', 2)]\n3 True\n"
+    );
+}
+
+/// An import in a function, aliased or not, `from` or not, binds there and in
+/// the functions nested in it; so does one in the main block. Each was refused
+/// as a dynamic import.
+#[test]
+fn imports_in_a_function_bind_there() {
+    let run = run_main(
+        &dedent(
+            r#"
+            def area() -> float:
+                import math
+                return math.pi * 2.0 ** 2
+
+
+            def tally(text: str) -> int:
+                from collections import Counter as C
+                import json as j
+                counts = C(text.split())
+                return len(j.dumps(counts)) + counts["a"]
+
+
+            def nested() -> int:
+                import math as mm
+
+                def inner(x: float) -> int:
+                    return mm.floor(x)
+
+                return inner(7.9)
+
+
+            if __name__ == "__main__":
+                import sys
+                from itertools import accumulate as acc
+                print(round(area(), 4), tally("a b a"), nested())
+                print(list(acc([1, 2, 3])), len(sys.argv))
+        "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(run.stdout, "12.5664 18 7\n[1, 3, 6] 1\n");
+}
+
+/// `importlib.import_module` and `__import__` with a constant name, or a
+/// module-level constant holding one, are the import they name, however
+/// `importlib` was imported. `__import__("os.path")` answers the package
+/// `os`, and `import_module("os.path")` the submodule, as in CPython.
+#[test]
+fn importlib_with_a_constant_name() {
+    let run = run_main(
+        &dedent(
+            r#"
+            import importlib
+            import importlib as il
+            from importlib import import_module
+
+            NAME = "json"
+
+
+            def first() -> int:
+                m = importlib.import_module("math")
+                return m.floor(m.e * 1000)
+
+
+            def second() -> str:
+                j = import_module(NAME)
+                return j.dumps({"k": [1, 2]})
+
+
+            def third() -> str:
+                o = __import__("os.path")
+                p = il.import_module("os.path")
+                return o.path.join("a", "b") + p.sep + str(o.sep == p.sep)
+
+
+            def fourth() -> float:
+                return importlib.import_module("math").sqrt(81.0) + __import__("math").tau
+
+
+            r = importlib.import_module("random")
+
+
+            def fifth() -> int:
+                r.seed(11)
+                return r.randrange(1000)
+
+
+            if __name__ == "__main__":
+                print(first(), second(), third())
+                print(fourth(), fifth())
+        "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(
+        run.stdout,
+        "2718 {\"k\": [1, 2]} a/b/True\n15.283185307179586 463\n"
+    );
+}
+
+/// A user module imported through importlib, `__import__`, or in a function
+/// is linked like any other: at module level and in a function, by name and
+/// as a value.
+#[test]
+fn dynamic_imports_of_user_modules() {
+    let run = run_files(&[
+        (
+            "main.py",
+            r#"
+            import importlib
+
+            g = importlib.import_module("geometry")
+
+
+            def f() -> int:
+                return g.area(3, 5) + g.SIDES
+
+
+            def h() -> int:
+                s = importlib.import_module("shapes")
+                return s.perimeter(2, 3)
+
+
+            def k() -> int:
+                from geometry import Box
+                return Box(2).volume()
+
+
+            def m() -> int:
+                return __import__("shapes").perimeter(1, 1)
+
+
+            if __name__ == "__main__":
+                print(f(), h(), k(), m())
+            "#,
+        ),
+        (
+            "geometry.py",
+            r#"
+            SIDES = 4
+
+
+            def area(w: int, h: int) -> int:
+                return w * h
+
+
+            class Box:
+                def __init__(self, w: int) -> None:
+                    self.w = w
+
+                def volume(self) -> int:
+                    return self.w ** 3
+            "#,
+        ),
+        (
+            "shapes.py",
+            r#"
+            def perimeter(w: int, h: int) -> int:
+                return 2 * (w + h)
+            "#,
+        ),
+    ]);
+    assert_eq!(run.stdout, "19 10 8 4\n");
+}
+
+/// A user module imported only in a function starts with the program here,
+/// where CPython runs its top level at that import; a module whose top level
+/// runs code would print, or raise, at the wrong time, so it is refused.
+#[test]
+fn a_late_import_of_a_module_that_runs_code_is_refused() {
+    let lazy = dedent(
+        r#"
+        def f() -> int:
+            import noisy
+            return noisy.VALUE
+
+        if __name__ == "__main__":
+            print("before")
+            print(f())
+        "#,
+    );
+    let noisy = dedent(
+        r#"
+        def make() -> int:
+            print("noisy init")
+            return 5
+
+        VALUE = make()
+        "#,
+    );
+    let err = try_compile_multi(&[("main.py", &lazy), ("noisy.py", &noisy)]).expect_err("refused");
+    assert!(
+        err.contains("module 'noisy' is imported in function 'f'") && err.contains("VALUE = ..."),
+        "{err}"
+    );
+}
+
+/// What a dynamic import or an import in a function cannot be compiled as is
+/// refused: a name computed at run time, the forms that take more than a name,
+/// a read before the import, an import that only runs on some paths, a name
+/// both imported and assigned, a name another function imported, and a module
+/// reached through an alias where its own name is a local.
+#[test]
+fn imports_that_cannot_be_compiled_are_refused() {
+    refused(
+        r#"
+        import importlib
+        def f(name: str) -> int:
+            m = importlib.import_module(name)
+            return 1
+        "#,
+        "of a name computed at run time is not supported",
+    );
+    refused(
+        r#"
+        def f() -> int:
+            return __import__("ma" + "th").floor(2.5)
+        "#,
+        "of a name computed at run time is not supported",
+    );
+    refused(
+        r#"
+        import importlib
+        def f() -> int:
+            m = importlib.import_module("math", "pkg")
+            return 1
+        "#,
+        "with the module's name as its only argument",
+    );
+    refused(
+        r#"
+        import importlib
+        def f() -> int:
+            m = importlib.import_module(".math")
+            return 1
+        "#,
+        "of the relative name '.math'",
+    );
+    refused(
+        r#"
+        def f() -> int:
+            x = math.floor(2.5)
+            import math
+            return x
+        "#,
+        "read before the import that binds it",
+    );
+    refused(
+        r#"
+        def f(c: bool) -> int:
+            if c:
+                import math
+            return math.floor(2.5)
+        "#,
+        "an import inside a block that may not run",
+    );
+    refused(
+        r#"
+        def f() -> int:
+            import math as m
+            m = 3
+            return m
+        "#,
+        "'m' is bound by an import and also assigned",
+    );
+    refused(
+        r#"
+        def f() -> int:
+            from math import floor
+            return floor(2.5)
+
+        def g() -> int:
+            return floor(3.5)
+        "#,
+        "it is imported in function 'f', which binds it there only",
+    );
+    refused(
+        r#"
+        def f() -> int:
+            return floor(3.5)
+
+        if __name__ == "__main__":
+            from math import floor
+            print(f())
+        "#,
+        "name 'floor' is imported only in the 'if __name__ == \"__main__\":' block",
+    );
+    refused(
+        r#"
+        import math as m
+        def f() -> int:
+            math = 3
+            return m.floor(2.5) + math
+        "#,
+        "but 'math' is bound to something else in this scope",
+    );
+    refused(
+        r#"
+        class C:
+            import math
+        "#,
+        "an import in a class body is not supported",
     );
 }

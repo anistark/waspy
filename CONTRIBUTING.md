@@ -33,7 +33,7 @@ Thank you for your interest in contributing to Waspy! This document provides gui
    - [Just](https://github.com/casey/just#installation)
    - [Git](https://git-scm.com/downloads)
    - [Python](https://www.python.org/downloads/)
-   - [Node.js](https://nodejs.org/) and [wasmtime](https://wasmtime.dev/), for `just board-check`, `just verify-runtime`, and the website
+   - [Node.js](https://nodejs.org/) and [wasmtime](https://wasmtime.dev/), for `just board-check`, `just verify-runtime`, `just browser-verify`, and the website
 
 2. **Clone the Repository**
    ```sh
@@ -138,7 +138,16 @@ just run-typed-demo
 
 ```sh
 just verify-examples   # compile every bundled example through the real drivers
+just browser-verify    # run the end-to-end programs in headless Chromium, checked against Pyodide
 just benchmark         # time compilation (release build)
+```
+
+### The Browser Gate
+
+`just browser-verify` runs the end-to-end programs in headless Chromium, through the playground's WASI shim, and checks each answer against [Pyodide](https://pyodide.org/) running the same Python in the same page. Pyodide is the reference for what CPython cannot run, which is what the web cards on the board (the JavaScript bridge, the DOM, events, `fetch`, canvas) will be checked against, so their programs join this gate. Its dependencies, Playwright and Pyodide, are pinned in `tests/browser/package.json`; the recipe installs them on first use, and Chromium once with:
+
+```sh
+cd tests/browser && npx playwright install chromium
 ```
 
 ### The Playground
@@ -239,6 +248,7 @@ Waspy uses a `justfile` to manage common development tasks:
 - `just docs-rs` - Generate and open the API documentation
 - `just docs-check` - Check documentation
 - `just board-check` - Check that every done feature on the board has a passing test
+- `just browser-verify` - Run the end-to-end programs in headless Chromium, checked against Pyodide
 - `just ci` - Run all CI checks locally
 - `just dev` - Run the full development workflow
 - `just compile <file>` - Compile a Python file to WebAssembly

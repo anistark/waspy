@@ -4033,9 +4033,26 @@ fn print_writes_to_stdout_through_wasi() {
     );
 }
 
+/// A standard-library module's name read where no import binds it compiled
+/// as if imported: `math.floor(2.5)` with no `import math` answered 2, and so
+/// did a function reading a module another function imported. CPython raises
+/// NameError for both.
+#[test]
+fn an_unimported_module_name_is_refused() {
+    refused(
+        "def f() -> int:\n    return math.floor(2.5)\n",
+        "name 'math' is not defined here: CPython raises NameError",
+    );
+    refused(
+        "def f() -> int:\n    import math\n    return 1\n\ndef g() -> int:\n    return math.floor(2.5)\n",
+        "name 'math' is not defined here: CPython raises NameError",
+    );
+}
+
 /// Placeholders the audit found in calls the board did not list: `super()`
 /// with no base method answered 0, `namedtuple()` a null pointer, and the
-/// statement form of a dynamic import stored the module's name.
+/// statement form of a dynamic import stored the module's name. A constant
+/// name is now the import it names; a computed one is still refused.
 #[test]
 fn remaining_placeholders_are_refused() {
     refused(
@@ -4047,8 +4064,8 @@ fn remaining_placeholders_are_refused() {
         "namedtuple() is supported as a module-level assignment",
     );
     refused(
-        "def f() -> int:\n    __import__(\"os\")\n    return 1\n",
-        "dynamic import",
+        "def f(name: str) -> int:\n    __import__(name)\n    return 1\n",
+        "computed at run time",
     );
 }
 

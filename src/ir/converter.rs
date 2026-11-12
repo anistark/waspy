@@ -170,6 +170,9 @@ pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
 /// Lower a Python AST into our IR as the module named `module_name`, which
 /// is what `__name__` reads in it.
 pub fn lower_ast_to_ir_named(ast: &Suite, module_name: &str) -> Result<IRModule> {
+    // Every way of binding a module, read as the module's own name.
+    let resolved = crate::ir::resolve_module_bindings(ast)?;
+    let ast = &resolved.ast;
     let previous = LOWERING.with(|l| {
         l.replace(Lowering {
             module_name: module_name.to_string(),
@@ -178,8 +181,20 @@ pub fn lower_ast_to_ir_named(ast: &Suite, module_name: &str) -> Result<IRModule>
     });
     let lowered = lower_module(ast);
     LOWERING.with(|l| l.replace(previous));
-    lowered
+    let mut lowered = lowered?;
+    for (module, place) in resolved.deferred {
+        lowered
+            .metadata
+            .insert(format!("{DEFERRED_IMPORT_KEY}{module}"), place);
+    }
+    Ok(lowered)
 }
+
+/// Metadata key prefix: a user module this module imports only in a function
+/// or in its main block (`ir::imports`), and the place it does. The multi-file
+/// merge refuses one whose top level runs code, which CPython would run when
+/// that place first runs.
+pub(crate) const DEFERRED_IMPORT_KEY: &str = "deferred_import:";
 
 fn lower_module(ast: &Suite) -> Result<IRModule> {
     let mut module = IRModule::new();
@@ -925,16 +940,21 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
         let name = classdef.name.to_string();
 
         // Extract base classes: bare names (`Shape`) and attribute paths
-        // (`abc.ABC`), which only appear for module-qualified marker bases.
+        // (`abc.ABC`, `logging.handlers.MemoryHandler`), which only appear
+        // for module-qualified bases.
+        fn dotted(expr: &Expr) -> Option<String> {
+            match expr {
+                Expr::Name(name) => Some(name.id.to_string()),
+                Expr::Attribute(attr) => Some(format!("{}.{}", dotted(&attr.value)?, attr.attr)),
+                _ => None,
+            }
+        }
         let bases: Vec<String> = classdef
             .bases
             .iter()
             .filter_map(|base| match base {
                 Expr::Name(name) => Some(name.id.to_string()),
-                Expr::Attribute(attr) => match &*attr.value {
-                    Expr::Name(module) => Some(format!("{}.{}", module.id, attr.attr)),
-                    _ => None,
-                },
+                Expr::Attribute(_) => dotted(base),
                 // `UserDict[str, int]` is a class of its own, made for those
                 // types. Other subscripted bases (`Generic[T]`) say nothing
                 // of what the class does.

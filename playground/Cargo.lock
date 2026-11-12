@@ -927,6 +927,7 @@ dependencies = [
  "rustpython-parser",
  "serde_json",
  "thiserror",
+ "unicode_names2",
  "wasm-encoder",
  "wasmparser",
 ]
