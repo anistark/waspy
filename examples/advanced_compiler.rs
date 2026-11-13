@@ -94,6 +94,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     );
 
+    // The JavaScript loader, for a module that uses the bridge.
+    if options.js_exports
+        || source.contains("import js")
+        || source.contains("from js ")
+        || source.contains("pyodide")
+    {
+        let loader = output_file.with_file_name("waspy-loader.js");
+        fs::write(&loader, waspy::js_loader())?;
+        println!("JavaScript loader written to {}", loader.display());
+    }
+
     // Generate HTML test harness if requested
     if driver.generate_html {
         let html_file = output_file.with_extension("html");
@@ -145,6 +156,9 @@ fn print_usage(program_name: &str) {
     eprintln!("                  before compiling");
     eprintln!("  --html          Also write an HTML page next to the .wasm that loads");
     eprintln!("                  it and calls exported functions from the browser");
+    eprintln!("  --js            Wrap every export for the JavaScript loader, and write");
+    eprintln!("                  the loader next to the .wasm (waspy-loader.js); a program");
+    eprintln!("                  importing js or pyodide gets the loader without it");
     eprintln!("  --verbose       Verbose compiler logging (per-stage progress)");
     eprintln!("  --debug         Debug logging (most detailed, includes IR dumps)");
     eprintln!();
@@ -167,6 +181,7 @@ fn parse_options(args: &[String]) -> (CompilerOptions, DriverFlags) {
             "--no-optimize" => options.optimize = false,
             "--metadata" => driver.show_metadata = true,
             "--html" => driver.generate_html = true,
+            "--js" => options.js_exports = true,
             "--verbose" => verbose = true,
             "--debug" => debug = true,
             other => {

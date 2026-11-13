@@ -34,6 +34,9 @@ A compiled program's side effects go through [WASI preview 1](https://github.com
 | `random`, `os.urandom()` | `random_get` |
 | `os.environ`, `os.getenv()` | `environ_sizes_get`, `environ_get` |
 | reading the clock (`datetime`'s `now()` and `today()`, a log record's time) | `clock_time_get` |
+| `asyncio`'s event loop | `clock_time_get` (the monotonic clock), `poll_oneoff` (to wait for a timer) |
+
+A program that imports `js` or `pyodide` (or loads a module by a name computed at run time, or is compiled with `js_exports`) also imports the JavaScript bridge's functions, all of them, from `waspy_js`, which the loader `waspy::js_loader()` provides; instantiate such a module through the loader ([JavaScript and async](/docs/javascript/#the-loader)).
 
 ## Running a program
 

@@ -42,6 +42,7 @@ pub enum Wasi {
     PathUnlinkFile,
     ClockTimeGet,
     FdReaddir,
+    PollOneoff,
 }
 
 impl Wasi {
@@ -66,6 +67,7 @@ impl Wasi {
             Wasi::PathUnlinkFile => "path_unlink_file",
             Wasi::ClockTimeGet => "clock_time_get",
             Wasi::FdReaddir => "fd_readdir",
+            Wasi::PollOneoff => "poll_oneoff",
         }
     }
 
@@ -105,6 +107,8 @@ impl Wasi {
             Wasi::ClockTimeGet => (vec![I32, ValType::I64, I32], vec![I32]),
             // (fd, buf, buf_len, cookie, bufused_out) -> errno
             Wasi::FdReaddir => (vec![I32, I32, I32, ValType::I64, I32], vec![I32]),
+            // (subscriptions, events, nsubscriptions, nevents_out) -> errno
+            Wasi::PollOneoff => (vec![I32; 4], vec![I32]),
         }
     }
 }
@@ -134,6 +138,12 @@ pub(crate) const RESOLVED: i32 = HOST + 48;
 pub(crate) const CLOCK_OUT: i32 = HOST + 56;
 const STDIN_CHUNK: i32 = 4096;
 const _: () = assert!(HOST + 64 <= crate::compiler::context::COLLECTION_HEAP_BASE as i32);
+/// `asyncio`'s wait: one clock `subscription` (48 bytes), the `event`
+/// `poll_oneoff` answers (32), and how many it answered.
+pub(crate) const POLL: i32 = HOST + 64;
+const POLL_EVENT: i32 = POLL + 48;
+const POLL_COUNT: i32 = POLL + 80;
+const _: () = assert!(POLL_COUNT + 4 <= crate::compiler::libm::LIBM);
 /// The words above, which the collector reads as roots: standard input's
 /// buffer, `sys.argv`, and `sys.path` are objects.
 pub(crate) const STATE: (i32, i32) = (HOST, HOST + 64);
@@ -250,9 +260,13 @@ pub(crate) fn wasi_needed(module: &IRModule, main_can_raise: bool) -> Vec<Wasi> 
                     "print" => {
                         needed.insert(Wasi::FdWrite);
                     }
-                    // `datetime`'s reading of the clock.
-                    crate::ir::DATETIME_CLOCK_FN => {
+                    // `datetime`'s reading of the clock, and `asyncio`'s.
+                    crate::ir::DATETIME_CLOCK_FN | crate::ir::asyncio::CLOCK_FN => {
                         needed.insert(Wasi::ClockTimeGet);
+                    }
+                    // `asyncio`'s waits.
+                    crate::ir::asyncio::WAIT_FN | crate::ir::asyncio::IDLE_FN => {
+                        needed.insert(Wasi::PollOneoff);
                     }
                     "input" => {
                         needed.insert(Wasi::FdWrite);
@@ -1769,3 +1783,36 @@ pub(crate) fn build_sys_path(ctx: &CompilationContext) -> Function {
     );
     f
 }
+
+/// Block for the timeout stored at `POLL + 24` (nanoseconds, an u64): one
+/// relative timeout on the monotonic clock through `poll_oneoff`.
+pub(crate) fn emit_poll(f: &mut Function, ctx: &CompilationContext) {
+    let poll = wasi(ctx, Wasi::PollOneoff);
+    let mem = |offset: u64| wasm_encoder::MemArg {
+        offset,
+        align: 3,
+        memory_index: 0,
+    };
+    // userdata, the clock tag, the monotonic clock, no precision, and a
+    // relative timeout.
+    for (offset, value) in [(0, 0), (8, 0), (16, 1), (32, 0), (40, 0)] {
+        emit!(
+            f,
+            I::I32Const(POLL),
+            I::I64Const(value),
+            I::I64Store(mem(offset))
+        );
+    }
+    emit!(
+        f,
+        I::I32Const(POLL),
+        I::I32Const(POLL_EVENT),
+        I::I32Const(1),
+        I::I32Const(POLL_COUNT),
+        I::Call(poll),
+        I::Drop,
+    );
+}
+
+/// Where `emit_poll` reads its timeout.
+pub(crate) const POLL_TIMEOUT: i32 = POLL + 24;

@@ -83,6 +83,16 @@ pub struct CompilerOptions {
     /// How much diagnostic output the compiler emits while running
     /// (defaults to [`Verbosity::Normal`]).
     pub verbosity: Verbosity,
+
+    /// Give every export a JavaScript-facing wrapper, so the loader
+    /// ([`crate::js_loader`]) calls it with JavaScript values, even when the
+    /// program does not import `js` or `pyodide` (defaults to `false`). A
+    /// program that does gets the wrappers anyway. Set it for a module
+    /// another loads by a name computed at run time
+    /// (`importlib.import_module(name)`), or one a page calls with strings,
+    /// lists, or dicts. The module then imports the bridge's functions
+    /// (`waspy_js`), so it is instantiated through the loader.
+    pub js_exports: bool,
 }
 
 impl Default for CompilerOptions {
@@ -90,6 +100,7 @@ impl Default for CompilerOptions {
         Self {
             optimize: true,
             verbosity: Verbosity::default(),
+            js_exports: false,
         }
     }
 }

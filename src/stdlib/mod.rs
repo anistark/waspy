@@ -24,6 +24,11 @@ pub fn is_stdlib_module(name: &str) -> bool {
             | "itertools"
             | "functools"
             | "logging"
+            | "asyncio"
+            // The JavaScript bridge (`compiler::js`): `js` names JavaScript's
+            // globals, and `pyodide.ffi` holds Pyodide's conversions.
+            | "js"
+            | "pyodide"
             // Compile-time-only modules: `abc.ABC`/`abstractmethod` and
             // `dataclasses.dataclass` are resolved during IR conversion, and
             // `importlib.import_module` with a constant name is the import it
@@ -62,7 +67,7 @@ pub fn is_stdlib_module_path(name: &str) -> bool {
 pub fn is_stdlib_submodule(module: &str, submodule: &str) -> bool {
     matches!(
         (module, submodule),
-        ("os", "path") | ("logging", "handlers") | ("logging", "config")
+        ("os", "path") | ("logging", "handlers") | ("logging", "config") | ("pyodide", "ffi")
     )
 }
 

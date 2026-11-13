@@ -143,7 +143,24 @@ pub const FORWARD: i32 = 1 << 29;
 /// spends no time on it, and text that happens to spell an object's address
 /// keeps nothing alive.
 pub const NOSCAN: i32 = 1 << 28;
-const AUX_FLAGS: i32 = FINALIZABLE | FINALIZED | FORWARD | NOSCAN;
+/// The block is a JavaScript value's proxy (`compiler::js`): its one word
+/// is a handle in the JavaScript side's table, given back when the block is
+/// freed.
+pub const JSREF: i32 = 1 << 27;
+const AUX_FLAGS: i32 = FINALIZABLE | FINALIZED | FORWARD | NOSCAN | JSREF;
+
+/// What one JavaScript value a proxy holds counts for, towards the next
+/// collection: memory on the JavaScript side, which only a collection here
+/// gives back, so a program making many proxies collects often enough.
+pub const JS_VALUE_CHARGE: i32 = 1024;
+
+/// Count `bytes` more towards the next collection, as if allocated.
+pub(crate) fn charge(a: &mut Asm, bytes: impl Into<E>) {
+    a.set_global(GC_ALLOCATED_GLOBAL, g(GC_ALLOCATED_GLOBAL) + bytes.into());
+    a.if_(g(GC_ALLOCATED_GLOBAL).ge_u(g(GC_THRESHOLD_GLOBAL)), |a| {
+        a.set_global(GC_PENDING_GLOBAL, 1)
+    });
+}
 
 /// Bytes allocated before the first collection, and the least between two.
 /// A program that allocates less than this in all never collects.
@@ -930,6 +947,13 @@ fn build_collect(ctx: &CompilationContext) -> Function {
                     a.if_(run, |a| release(a, at.e()));
                 },
                 |a| {
+                    // A JavaScript value's proxy gives its handle back.
+                    if let Some(release) = ctx.js.get(&crate::compiler::js::JsImport::Release) {
+                        a.if_(
+                            (header & ALLOCATED).ne(0) & (word(at, 4) & JSREF).ne(0),
+                            |a| a.run(call(*release, vec![word(at, HDR as u64)], None)),
+                        );
+                    }
                     if stress() {
                         a.if_(header & ALLOCATED, |a| {
                             a.fill(at + HDR, 0xDD, size_of(header) - HDR);

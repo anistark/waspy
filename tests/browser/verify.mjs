@@ -61,6 +61,16 @@ const origin = `http://127.0.0.1:${server.address().port}`;
 
 const failures = [];
 let passed = 0;
+
+// Where two outputs part: the first line that differs, ours then Pyodide's.
+function firstDifference(ours, theirs) {
+    const a = ours.split("\n");
+    const b = theirs.split("\n");
+    for (let i = 0; i < Math.max(a.length, b.length); i++) {
+        if (a[i] !== b[i]) return `line ${i + 1}: ${JSON.stringify(a[i])} vs ${JSON.stringify(b[i])}`;
+    }
+    return "the same lines";
+}
 const browser = await chromium.launch();
 try {
     const page = await browser.newPage();
@@ -143,7 +153,36 @@ try {
         }
         const reference = references.get(key);
         if (got.error) failures.push(`${label}: ${got.error}`);
-        else if (got.stdout !== reference.stdout) failures.push(`${label}: stdout differs from Pyodide's`);
+        else if (got.stdout !== reference.stdout) failures.push(`${label}: stdout differs from Pyodide's: ${firstDifference(got.stdout, reference.stdout)}`);
+        else if (got.stderr !== reference.stderr) failures.push(`${label}: stderr differs from Pyodide's`);
+        else if (got.exit !== reference.exit) failures.push(`${label}: exited ${got.exit}, Pyodide ${reference.exit}`);
+        else passed += 1;
+        console.log(`  ${label}: output compared`);
+    }
+    // Programs using the JavaScript bridge: their output against Pyodide's,
+    // each in the page's JavaScript.
+    for (const cmd of manifest.web ?? []) {
+        const label = `${cmd.program} (${cmd.optimized ? "optimized" : "unoptimized"}, web)`;
+        const key = `web:${cmd.program}`;
+        let got;
+        try {
+            got = await page.evaluate(([wasm]) => window.gate.waspyCommand(wasm, "", []), [cmd.wasm]);
+            if (!references.has(key)) {
+                references.set(
+                    key,
+                    await page.evaluate(
+                        ([source]) => window.gate.pyodideCommand(source, "", []),
+                        [cmd.source],
+                    ),
+                );
+            }
+        } catch (error) {
+            failures.push(`${label}: ${error.message}`);
+            continue;
+        }
+        const reference = references.get(key);
+        if (got.error) failures.push(`${label}: ${got.error}`);
+        else if (got.stdout !== reference.stdout) failures.push(`${label}: stdout differs from Pyodide's: ${firstDifference(got.stdout, reference.stdout)}`);
         else if (got.stderr !== reference.stderr) failures.push(`${label}: stderr differs from Pyodide's`);
         else if (got.exit !== reference.exit) failures.push(`${label}: exited ${got.exit}, Pyodide ${reference.exit}`);
         else passed += 1;

@@ -178,6 +178,8 @@ pub enum Helper {
     Os(crate::compiler::stdlib::OsFn),
     /// A routine of `json`.
     Json(crate::compiler::stdlib::json::JsonFn),
+    /// A routine of the JavaScript bridge (`compiler::js`).
+    Js(crate::compiler::js::JsFn),
 }
 
 /// The parameter and result types of `helper`.
@@ -276,6 +278,7 @@ pub fn signature(helper: &Helper) -> (Vec<ValType>, Vec<ValType>) {
                 result.iter().map(|t| t.val()).collect(),
             )
         }
+        Helper::Js(routine) => routine.signature(),
         Helper::Libm(routine) => {
             let (params, result) = routine.signature();
             (
@@ -371,6 +374,7 @@ pub fn build(helper: &Helper, ctx: &CompilationContext) -> Function {
         Helper::Random(routine) => crate::compiler::stdlib::build_random(ctx, *routine),
         Helper::Os(routine) => crate::compiler::stdlib::build_os(ctx, *routine),
         Helper::Json(routine) => crate::compiler::stdlib::json::build(ctx, routine),
+        Helper::Js(routine) => crate::compiler::js::build(routine, ctx),
     }
 }
 
@@ -1335,7 +1339,8 @@ fn unsupported_rendering(
         | IRType::Unknown
         | IRType::Any
         | IRType::Range
-        | IRType::ClassRef(_) => None,
+        | IRType::ClassRef(_)
+        | IRType::JsProxy => None,
         IRType::List(e) | IRType::Set(e) | IRType::VarTuple(e) => str_unsupported(ctx, e, true),
         IRType::Dict(k, v) => {
             str_unsupported(ctx, k, true).or_else(|| str_unsupported(ctx, v, true))
@@ -1567,6 +1572,18 @@ fn build_str(ctx: &CompilationContext, ty: &IRType, repr: bool) -> Function {
             f
         }
         IRType::Range => build_range_repr(ctx),
+        // A JavaScript value shows as the value Pyodide hands over.
+        IRType::JsProxy => {
+            let mut f = function(&[]);
+            f.instruction(&Instruction::LocalGet(0));
+            f.instruction(&Instruction::Call(ctx.helper(Helper::Js(if repr {
+                crate::compiler::js::JsFn::Repr
+            } else {
+                crate::compiler::js::JsFn::Str
+            }))));
+            f.instruction(&Instruction::End);
+            f
+        }
         IRType::List(_)
         | IRType::VarTuple(_)
         | IRType::Set(_)

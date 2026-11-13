@@ -20,6 +20,7 @@ export default [
         title: "Running",
         items: [
             { label: "Running compiled modules", href: "/docs/running/" },
+            { label: "JavaScript and async", href: "/docs/javascript/" },
             { label: "What a program looks like", href: "/docs/programs/" },
         ],
     },

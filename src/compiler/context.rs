@@ -542,6 +542,9 @@ pub struct CompilationContext {
     pub helpers: RefCell<Vec<crate::compiler::runtime::Helper>>,
     /// The function index of each WASI import the module makes.
     pub wasi: HashMap<crate::compiler::host::Wasi, u32>,
+    /// The function index of each JavaScript bridge import, when the module
+    /// uses the bridge (`compiler::js`).
+    pub js: HashMap<crate::compiler::js::JsImport, u32>,
     pub helper_base: u32,
     /// True while compiling an `__init__` method. Its `return` paths (explicit
     /// bare `return` and the implicit fall-through) yield `self` (local 0)
@@ -662,6 +665,7 @@ impl CompilationContext {
             closure_max_arity: 0,
             signature_types: HashMap::new(),
             wasi: HashMap::new(),
+            js: HashMap::new(),
             cell_types: RefCell::new(HashMap::new()),
             pending_captures: RefCell::new(Vec::new()),
             capture_types: HashMap::new(),

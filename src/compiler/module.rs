@@ -432,9 +432,13 @@ fn functions_that_can_raise(ir_module: &IRModule) -> HashSet<String> {
         by_name.entry(name.to_string()).or_default();
     }
 
+    // What a JavaScript value does is not known until it is used, and any
+    // attribute, call, or item of one can raise, so in a module using the
+    // bridge every function counts as one that can.
+    let bridge = crate::compiler::js::uses_bridge(ir_module);
     let mut raisers: HashSet<String> = facts
         .iter()
-        .filter(|(_, (raises, _))| *raises)
+        .filter(|(_, (raises, _))| *raises || bridge)
         .map(|(key, _)| key.clone())
         .collect();
     // A call that resolves to nothing is a closure or a builtin. Only closures
@@ -1615,6 +1619,16 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, WaspyError> {
         }
         None => ir_module,
     };
+    // A module using the JavaScript bridge: the names its operations carry,
+    // and a JavaScript-facing wrapper for each export (`compiler::js`).
+    let with_bridge;
+    let ir_module = match crate::compiler::js::with_bridge(ir_module) {
+        Some(module) => {
+            with_bridge = module;
+            &with_bridge
+        }
+        None => ir_module,
+    };
     // A module that can raise carries the builtin exception classes, ahead of
     // its own, so every exception is an object of one.
     let with_exceptions;
@@ -1798,7 +1812,18 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
     for (k, import) in wasi_imports.iter().enumerate() {
         ctx.wasi.insert(*import, k as u32);
     }
-    let import_count: u32 = wasi_imports.len() as u32;
+    // The JavaScript bridge's imports, after WASI's, all of them when the
+    // module uses it.
+    let js_imports: Vec<crate::compiler::js::JsImport> =
+        if crate::compiler::js::uses_bridge(ir_module) {
+            crate::compiler::js::JsImport::ALL.to_vec()
+        } else {
+            Vec::new()
+        };
+    for (k, import) in js_imports.iter().enumerate() {
+        ctx.js.insert(*import, (wasi_imports.len() + k) as u32);
+    }
+    let import_count: u32 = (wasi_imports.len() + js_imports.len()) as u32;
 
     // Resolve each function's (and method's) return type up front, inferring
     // unannotated ones from their bodies, so the type section, the registered
@@ -1956,6 +1981,16 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
         types.ty().function(params, results);
         host_imports.import(
             crate::compiler::host::Wasi::MODULE,
+            import.name(),
+            EntityType::Function(type_index),
+        );
+    }
+    for import in &js_imports {
+        let (params, results) = import.signature();
+        let type_index = types.len();
+        types.ty().function(params, results);
+        host_imports.import(
+            crate::compiler::js::MODULE,
             import.name(),
             EntityType::Function(type_index),
         );
@@ -3097,6 +3132,12 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
     module.section(&data);
 
     // Custom sections carry no code, so this leaves execution untouched.
+    if let Some(exports) = ir_module.metadata.get(crate::compiler::js::EXPORTS_SECTION) {
+        module.section(&CustomSection {
+            name: crate::compiler::js::EXPORTS_SECTION.into(),
+            data: exports.as_bytes().into(),
+        });
+    }
     if !ir_module.comments.is_empty() {
         let payload = crate::core::comments::encode_comment_section(&ir_module.comments);
         module.section(&CustomSection {

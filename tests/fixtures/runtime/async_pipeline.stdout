@@ -1,0 +1,16 @@
+beat 0
+beat 1
+b fetched 4 -> 16
+beat 2
+a fetched 1 -> 1
+b fetched 5 -> 25
+c fetched 6 -> 36
+a fetched 2 -> 4
+a fetched 3 -> 9
+totals [14, 41, 36]
+stalled worker cleaned up
+gave up on the stalled worker
+d fetched 8 -> 64
+d fetched 9 -> 81
+first 49 rest 145
+grand total 285

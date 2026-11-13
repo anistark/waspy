@@ -78,7 +78,27 @@ pub(crate) const BUILTIN_EXCEPTIONS: &[(&str, &str)] = &[
     // `re.PatternError` (`re.error`), which a bad replacement template
     // raises.
     ("PatternError", "Exception"),
+    // `asyncio.CancelledError`, which a cancelled task's coroutine sees, and
+    // `asyncio.InvalidStateError`, which a future's result before it is
+    // done raises.
+    ("CancelledError", "BaseException"),
+    ("InvalidStateError", "Exception"),
+    // `pyodide.ffi.JsException`, which a JavaScript exception surfaces as.
+    ("JsException", "Exception"),
 ];
+
+/// The module a builtin exception class of a standard-library module is
+/// named in, as CPython prints it.
+pub(crate) fn qualified_exception(name: &str) -> Option<&'static str> {
+    match name {
+        "JSONDecodeError" => Some("json.decoder.JSONDecodeError"),
+        "PatternError" => Some("re.PatternError"),
+        "CancelledError" => Some("asyncio.exceptions.CancelledError"),
+        "InvalidStateError" => Some("asyncio.exceptions.InvalidStateError"),
+        "JsException" => Some("pyodide.ffi.JsException"),
+        _ => None,
+    }
+}
 
 pub(crate) fn is_builtin_exception(name: &str) -> bool {
     BUILTIN_EXCEPTIONS.iter().any(|(n, _)| *n == name)
@@ -632,9 +652,23 @@ pub(crate) fn build_class_name(ctx: &CompilationContext, by_id: Option<bool>) ->
             _ if name.starts_with("re._Pattern") => "Pattern".to_string(),
             Some(true) if name.starts_with("re.") => format!("<class '{name}'>"),
             _ if name.starts_with("re.") => name["re.".len()..].to_string(),
-            Some(true) if name == "JSONDecodeError" => {
-                "<class 'json.decoder.JSONDecodeError'>".to_string()
+            Some(true) if qualified_exception(name).is_some() => {
+                format!("<class '{}'>", qualified_exception(name).expect("checked"))
             }
+            // A task, a future, and a coroutine are `_asyncio`'s and
+            // CPython's own.
+            Some(true) if name.starts_with("asyncio.Task[") => {
+                "<class '_asyncio.Task'>".to_string()
+            }
+            _ if name.starts_with("asyncio.Task[") => "Task".to_string(),
+            Some(true) if name.starts_with("asyncio.Future[") || name == "asyncio._Gathering" => {
+                "<class '_asyncio.Future'>".to_string()
+            }
+            _ if name.starts_with("asyncio.Future[") => "Future".to_string(),
+            Some(true) if name.starts_with(crate::ir::CORO_CLASS_PREFIX) => {
+                "<class 'coroutine'>".to_string()
+            }
+            _ if name.starts_with(crate::ir::CORO_CLASS_PREFIX) => "coroutine".to_string(),
             Some(true) if is_builtin_exception(name) => format!("<class '{name}'>"),
             Some(true) => format!(
                 "<class '{}.{name}'>",
@@ -719,15 +753,23 @@ pub(crate) fn emit_report_uncaught(
             I::End
         );
     }
-    if ctx.get_class_info("JSONDecodeError").is_some() {
-        emit_pending_is(f, ctx, "JSONDecodeError");
-        emit!(
-            f,
-            I::If(BlockType::Empty),
-            I::Call(ctx.helper(Helper::ExcText("json.decoder.JSONDecodeError".to_string()))),
-            I::LocalSet(line),
-            I::End
-        );
+    for name in [
+        "JSONDecodeError",
+        "CancelledError",
+        "InvalidStateError",
+        "JsException",
+    ] {
+        if ctx.get_class_info(name).is_some() {
+            emit_pending_is(f, ctx, name);
+            let shown = qualified_exception(name).expect("a qualified exception");
+            emit!(
+                f,
+                I::If(BlockType::Empty),
+                I::Call(ctx.helper(Helper::ExcText(shown.to_string()))),
+                I::LocalSet(line),
+                I::End
+            );
+        }
     }
     emit!(
         f,

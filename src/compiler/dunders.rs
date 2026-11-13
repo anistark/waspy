@@ -1100,6 +1100,10 @@ fn rewrite_binary(
 
 /// `expr` as the special-method call it means, when it is one.
 pub(crate) fn rewrite(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
+    // An operation on a JavaScript value is the bridge's.
+    if let Some(bridged) = crate::compiler::js::rewrite(expr, ctx) {
+        return Some(bridged);
+    }
     if let Some(logged) = rewrite_log_expr(expr, ctx) {
         return Some(logged);
     }

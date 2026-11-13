@@ -397,12 +397,13 @@ pub fn transform_generators(module: &mut IRModule) -> Result<()> {
     }
 
     // Rewrite each generator function into a constructor plus a state class.
+    let types = crate::ir::infer::Types::of_module(module);
     let mut state_classes = Vec::new();
     for func in &mut module.functions {
         let Some(class_name) = gen_classes.get(&func.name) else {
             continue;
         };
-        state_classes.push(build_state_class(func, class_name, &mut counter)?);
+        state_classes.push(build_state_class(func, class_name, &mut counter, &types)?);
 
         let arguments = func
             .params
@@ -1329,10 +1330,11 @@ fn for_each_child(expr: &mut IRExpr, f: &mut impl FnMut(&mut IRExpr)) {
 
 /// Build the state class for one generator function and leave `func`'s body
 /// untouched (the caller replaces it with the constructor call).
-fn build_state_class(
+pub(crate) fn build_state_class(
     func: &mut IRFunction,
     class_name: &str,
     counter: &mut u32,
+    types: &crate::ir::infer::Types,
 ) -> Result<IRClass> {
     let mut body = std::mem::replace(
         &mut func.body,
@@ -1343,6 +1345,12 @@ fn build_state_class(
     desugar_suspending_fors(&mut body, counter);
     split_literal_unpacks(&mut body, counter);
     unique_handler_names(&mut body, counter);
+    let mut env: HashMap<String, IRType> = func
+        .params
+        .iter()
+        .map(|p| (p.name.clone(), p.param_type.clone()))
+        .collect();
+    annotate_locals(&mut body, types, &mut env);
 
     // Resolved before the lift below rewrites parameter references into
     // `self.<name>` attribute reads.
@@ -1363,6 +1371,10 @@ fn build_state_class(
         lift.insert(GEN_SENT_FIELD.to_string());
         collect_assigned_names(&body, &mut lift);
         collect_handler_names(&body, &mut lift);
+        // A name declared `global` is the module's, not a local to keep.
+        for name in declared_globals(&body) {
+            lift.remove(&name);
+        }
         let mut exempt = HashSet::new();
         collect_exempt_names(&body, &mut exempt);
         for name in &exempt {
@@ -1539,6 +1551,38 @@ fn build_state_class(
         position: 0,
         deferred_vars: Vec::new(),
     })
+}
+
+/// Give each local's first assignment the type its value shows, where that is
+/// known all the way down. A local of a generator or coroutine body becomes a
+/// field of its state class, whose type is otherwise read off the value at
+/// layout time, which knows no function's or method's result, so a local
+/// bound to one and read after a suspension was refused as untyped. None is
+/// left alone, since a local started at None is typed by what it holds next.
+pub(crate) fn annotate_locals(
+    body: &mut IRBody,
+    types: &crate::ir::infer::Types,
+    env: &mut HashMap<String, IRType>,
+) {
+    for stmt in &mut body.statements {
+        if let IRStatement::Assign {
+            target,
+            value,
+            var_type: var_type @ None,
+        } = stmt
+        {
+            if !env.contains_key(target.as_str()) {
+                let ty = types.of(value, env);
+                if crate::ir::infer::fully_known(&ty) && ty != IRType::None {
+                    *var_type = Some(ty);
+                }
+            }
+        }
+        crate::ir::infer::bind(stmt, types, env);
+        for nested in sub_bodies_mut(stmt) {
+            annotate_locals(nested, types, env);
+        }
+    }
 }
 
 /// The prefix of the generator functions generator methods are lifted to.
@@ -2094,6 +2138,20 @@ fn collect_assigned_names(body: &IRBody, out: &mut HashSet<String>) {
             collect_assigned_names(sub, out);
         }
     }
+}
+
+/// The names a body declares `global`, at any depth.
+fn declared_globals(body: &IRBody) -> Vec<String> {
+    let mut out = Vec::new();
+    for stmt in &body.statements {
+        if let IRStatement::Global(names) = stmt {
+            out.extend(names.iter().cloned());
+        }
+        for sub in sub_bodies(stmt) {
+            out.extend(declared_globals(sub));
+        }
+    }
+    out
 }
 
 /// `a, b = x, y` in a generator body becomes one assignment per target, so

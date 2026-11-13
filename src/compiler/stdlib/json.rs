@@ -64,6 +64,20 @@ pub(crate) struct DumpOpts {
     allow_nan: bool,
 }
 
+impl DumpOpts {
+    /// `dumps()`'s defaults.
+    pub(crate) fn defaults() -> DumpOpts {
+        DumpOpts {
+            indent: None,
+            item_sep: ", ".to_string(),
+            key_sep: ": ".to_string(),
+            sort_keys: false,
+            ensure_ascii: true,
+            allow_nan: true,
+        }
+    }
+}
+
 /// A function of the program that `dumps` calls for a value it has no form
 /// for, or `loads` for each object, with its static signature.
 #[derive(Clone, Debug, PartialEq)]

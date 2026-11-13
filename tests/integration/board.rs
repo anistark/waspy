@@ -3063,24 +3063,82 @@ mod runtime_features {
     /// Dynamic Module Loading - a module named at run time, loaded through the host
     ///
     /// A constant name is linked at compile time (`imports::dynamic_imports`);
-    /// a name computed at run time needs the host loader, which is built on the
-    /// JavaScript bridge's proxy type. This asserts CPython's answer for one.
+    /// a name computed at run time loads a separately compiled module the
+    /// host holds, through the JavaScript bridge: its exports are a JS
+    /// value's methods, their results converted where they are stored, and a
+    /// name the host has no module for is CPython's `ModuleNotFoundError`.
     #[test]
-    #[ignore = "open on the board"]
     fn dynamic_module_loading() {
-        check(
+        let plugin = waspy::compile_python_to_wasm_with_options(
+            &dedent(
+                r#"
+                def area(r: int) -> int:
+                    return r * r * 3
+
+
+                def shout(s: str) -> str:
+                    return s.upper() + "!"
+                "#,
+            ),
+            &waspy::CompilerOptions {
+                js_exports: true,
+                ..waspy::CompilerOptions::default()
+            },
+        )
+        .expect("the plugin compiles");
+        let main = compile(&dedent(
             r#"
             import importlib
 
-            def load(name: str) -> int:
-                m = importlib.import_module(name)
-                return m.floor(2.5)
 
-            def f() -> int:
-                return load("ma" + "th")
-        "#,
-            &[("f", Want::Int(2))],
-        );
+            def load(name: str) -> str:
+                m = importlib.import_module(name)
+                r: int = m.area(3)
+                s: str = m.shout("hey")
+                return s + " " + str(r)
+
+
+            def missing() -> str:
+                try:
+                    importlib.import_module("no" + "where")
+                    return "loaded"
+                except ModuleNotFoundError as e:
+                    return str(e)
+
+
+            def which() -> str:
+                return load("geo" + "metry")
+            "#,
+        ));
+        let engine = wasmi::Engine::default();
+        let mut store = wasmi::Store::new(&engine, Host::default());
+        let mut linker = wasmi::Linker::<Host>::new(&engine);
+        link_host(&mut linker);
+        let instantiate = |store: &mut wasmi::Store<Host>, wasm: &[u8]| {
+            let module = wasmi::Module::new(&engine, wasm).expect("valid module");
+            linker
+                .instantiate(&mut *store, &module)
+                .expect("instantiate")
+                .start(&mut *store)
+                .expect("start")
+        };
+        let plugin = instantiate(&mut store, &plugin);
+        store
+            .data_mut()
+            .js
+            .modules
+            .insert("geometry".to_string(), plugin);
+        let main = instantiate(&mut store, &main);
+        let call = |store: &mut wasmi::Store<Host>, f: &str| {
+            let offset = main
+                .get_typed_func::<(), i32>(&*store, f)
+                .expect("export")
+                .call(&mut *store, ())
+                .expect("call");
+            read_str(&main, store, offset)
+        };
+        assert_eq!(call(&mut store, "which"), "HEY! 27");
+        assert_eq!(call(&mut store, "missing"), "No module named 'nowhere'");
     }
 
     /// Closure Variable Capture Analysis - detecting and capturing closure variables
@@ -6284,8 +6342,14 @@ mod optimization {
     /// Early validation - unsupported syntax rejected before codegen
     #[test]
     fn early_validation() {
-        let err = try_compile("async def f():\n    return 1\n").expect_err("refused");
-        assert!(err.contains("async functions are not supported"), "{err}");
+        let err = try_compile(
+            "def f(x: int) -> int:\n    match x:\n        case 1:\n            return 1\n    return 0\n",
+        )
+        .expect_err("refused");
+        assert!(
+            err.contains("'match' statements are not supported"),
+            "{err}"
+        );
     }
 
     /// A parse or lowering failure fails the build naming the file, rather than skipping it with a warning
@@ -6473,6 +6537,270 @@ def read_some() -> int:
                 ),
                 ("g", Want::Str("FileNotFoundError")),
             ],
+        );
+    }
+}
+
+mod async_await {
+    use super::*;
+
+    fn prints(source: &str, want: &str) {
+        let run = run_main(&dedent(source), "", &[]);
+        assert_eq!(run.stderr, "", "stderr");
+        assert_eq!(run.stdout, want);
+    }
+
+    /// async/await syntax support
+    ///
+    /// `async def` makes a coroutine, which `await` runs inline (in a value
+    /// in any position CPython evaluates it, in CPython's order), and an
+    /// exception crosses awaits as it crosses calls.
+    #[test]
+    fn async_await_syntax() {
+        prints(
+            r#"
+            import asyncio
+
+
+            async def double(x: int) -> int:
+                await asyncio.sleep(0)
+                return x * 2
+
+
+            async def safe(x: int) -> int:
+                try:
+                    if x < 0:
+                        raise ValueError("negative")
+                    return await double(x)
+                except ValueError as e:
+                    print("caught", e)
+                    return -1
+                finally:
+                    print("finally")
+
+
+            async def main() -> int:
+                total = await double(1) + await double(2)
+                print("total", total)
+                print(await safe(5), await safe(-1))
+                return total
+
+
+            if __name__ == "__main__":
+                print(asyncio.run(main()))
+            "#,
+            "total 6\nfinally\ncaught negative\nfinally\n10 -1\n6\n",
+        );
+    }
+
+    /// Asynchronous function execution
+    ///
+    /// CPython's event loop: tasks start in the order they are made, a
+    /// `sleep(0)` lets every other ready task run once, and timers fall due
+    /// in deadline order.
+    #[test]
+    fn asynchronous_execution() {
+        prints(
+            r#"
+            import asyncio
+
+
+            async def worker(name: str, delay: float) -> str:
+                print("start", name)
+                await asyncio.sleep(delay)
+                print("end", name)
+                return name.upper()
+
+
+            async def chatter(name: str, n: int) -> None:
+                for i in range(n):
+                    print(name, i)
+                    await asyncio.sleep(0)
+
+
+            async def main() -> None:
+                t1 = asyncio.create_task(worker("a", 0.02))
+                t2 = asyncio.create_task(worker("b", 0.01))
+                print(await t1, await t2)
+                c = asyncio.create_task(chatter("c", 2))
+                await chatter("main", 2)
+                await c
+
+
+            if __name__ == "__main__":
+                asyncio.run(main())
+            "#,
+            "start a\nstart b\nend b\nend a\nA B\nmain 0\nc 0\nmain 1\nc 1\n",
+        );
+    }
+
+    /// Concurrent task management
+    ///
+    /// `gather()` in argument order, `wait_for()` cancelling at its deadline
+    /// (with the cancelled coroutine's `finally` run) into TimeoutError, a
+    /// task's `cancel()`, and `asyncio.run()` cancelling what is left.
+    #[test]
+    fn concurrent_tasks() {
+        prints(
+            r#"
+            import asyncio
+
+
+            async def square(x: int) -> int:
+                await asyncio.sleep(0.01 * (4 - x))
+                return x * x
+
+
+            async def slow() -> int:
+                try:
+                    await asyncio.sleep(1)
+                    return 1
+                finally:
+                    print("slow cleanup")
+
+
+            async def forever(name: str) -> None:
+                try:
+                    while True:
+                        await asyncio.sleep(0.01)
+                finally:
+                    print("cleanup", name)
+
+
+            async def main() -> str:
+                print(await asyncio.gather(square(1), square(2), square(3)))
+                try:
+                    await asyncio.wait_for(slow(), timeout=0.05)
+                except TimeoutError:
+                    print("timed out")
+                t = asyncio.create_task(forever("t"))
+                await asyncio.sleep(0.015)
+                print(t.cancel())
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    print("cancelled", t.cancelled())
+                asyncio.create_task(forever("left"))
+                await asyncio.sleep(0)
+                return "main done"
+
+
+            if __name__ == "__main__":
+                print(asyncio.run(main()))
+            "#,
+            "[1, 4, 9]\nslow cleanup\ntimed out\nTrue\ncleanup t\ncancelled True\ncleanup left\nmain done\n",
+        );
+    }
+
+    /// Promise object representation
+    ///
+    /// A JavaScript promise awaited in a coroutine settles as a future does
+    /// (a rejection is `pyodide.ffi.JsException`), and an exported `async
+    /// def` called from JavaScript answers a Promise the loop resolves with
+    /// what the coroutine returns, or rejects with what it raised.
+    #[test]
+    fn promise_representation() {
+        let wasm = compile(&dedent(
+            r#"
+            import asyncio
+            import js
+            from pyodide.ffi import JsException, JsProxy
+
+
+            async def chain(x: int) -> str:
+                a: int = await js.Promise.resolve(x)
+                await asyncio.sleep(0.01)
+                try:
+                    await js.Promise.reject(js.Error.new("nope"))
+                except JsException as e:
+                    return str(e) + " after " + str(a * 2)
+                return "unreachable"
+
+
+            async def boom() -> int:
+                await asyncio.sleep(0)
+                raise ValueError("bad")
+            "#,
+        ));
+        let engine = wasmi::Engine::default();
+        let module = wasmi::Module::new(&engine, &wasm[..]).expect("valid module");
+        let mut store = wasmi::Store::new(&engine, Host::default());
+        let mut linker = wasmi::Linker::<Host>::new(&engine);
+        link_host(&mut linker);
+        let instance = linker
+            .instantiate(&mut store, &module)
+            .expect("instantiate")
+            .start(&mut store)
+            .expect("start");
+        let start = |store: &mut wasmi::Store<Host>, name: &str, args: Vec<Js>| -> i32 {
+            let handles: Vec<wasmi::Value> = args
+                .into_iter()
+                .map(|a| wasmi::Value::I32(store.data_mut().js.add(a)))
+                .collect();
+            let f = instance
+                .get_func(&*store, &format!("__jsx_{name}"))
+                .expect("a wrapper");
+            let mut out = [wasmi::Value::I32(0)];
+            f.call(&mut *store, &handles, &mut out).expect("call");
+            out[0].i32().unwrap()
+        };
+        let token = start(&mut store, "chain", vec![Js::Num(21.0)]);
+        assert_eq!(
+            drive_until(&mut store, &instance, token).map(|v| v.text()),
+            Ok("Error: nope after 42".to_string())
+        );
+        let token = start(&mut store, "boom", vec![]);
+        assert_eq!(
+            drive_until(&mut store, &instance, token).map(|v| v.text()),
+            Err("ValueError: bad".to_string())
+        );
+    }
+}
+
+mod web_interop {
+    use super::*;
+
+    /// JavaScript bridge & value conversion
+    ///
+    /// `js` and `pyodide.ffi` as Pyodide has them: attributes, calls,
+    /// `new`, items, iteration, and each value converted as Pyodide converts
+    /// it where it is used.
+    #[test]
+    fn javascript_bridge() {
+        let run = run_main(
+            &dedent(
+                r#"
+                import js
+                from js import JSON, Math, Object
+                from pyodide.ffi import to_js
+
+
+                def main() -> None:
+                    n: int = Math.max(3, 7)
+                    o = JSON.parse('{"s": "hi", "xs": [1, 2, 3], "z": null}')
+                    s: str = o.s
+                    print(n + 1, s.upper(), o.xs[1], len(o.xs), o.z, Math.PI)
+                    total = 0
+                    for v in o.xs:
+                        x: int = v
+                        total += x
+                    xs: list[int] = o.xs.to_py()
+                    e = Object.new()
+                    e.k = "v"
+                    print(total, xs, JSON.stringify(e), JSON.stringify(to_js({"a": [1]})))
+
+
+                if __name__ == "__main__":
+                    main()
+                "#,
+            ),
+            "",
+            &[],
+        );
+        assert_eq!(run.stderr, "");
+        assert_eq!(
+            run.stdout,
+            "8 HI 2 3 jsnull 3.141592653589793\n6 [1, 2, 3] {\"k\":\"v\"} {\"a\":[1]}\n"
         );
     }
 }

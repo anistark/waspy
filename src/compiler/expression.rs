@@ -5063,6 +5063,12 @@ pub(crate) fn emit_truthiness(func: &mut Function, ctx: &CompilationContext, ty:
         }
         // An instance asks its `__bool__`, or its `__len__`.
         IRType::Class(class) => crate::compiler::dunders::emit_truth(func, ctx, class),
+        // A JavaScript value is as true as the value Pyodide hands over.
+        IRType::JsProxy => {
+            func.instruction(&Instruction::Call(ctx.helper(
+                crate::compiler::runtime::Helper::Js(crate::compiler::js::JsFn::Truth),
+            )));
+        }
         // None is false, and a string is true when it is not empty: its
         // length is in the word before its text. The pointer alone made ""
         // true.
@@ -7621,6 +7627,8 @@ fn is_stdlib_code(name: &str, ctx: &CompilationContext) -> bool {
             crate::ir::DATETIME_FN_PREFIX,
             crate::ir::LOGGING_FN_PREFIX,
             crate::ir::RE_FN_PREFIX,
+            crate::ir::ASYNCIO_FN_PREFIX,
+            "__Coro___asyncio_",
         ]
         .iter()
         .any(|prefix| name.starts_with(prefix))
@@ -7777,6 +7785,13 @@ pub fn emit_expr(
     }
     let ty = emit_expr_inner(expr, func, ctx, memory_layout, expected_type);
     root_value(expr, &ty, func, ctx);
+    // A JavaScript value stored where a type is declared is converted to it.
+    if ty == IRType::JsProxy {
+        if let Some(converted) = crate::compiler::js::convert_at_store(func, ctx, expected_type) {
+            ctx.numeric_operand.set(false);
+            return converted;
+        }
+    }
     if ctx.reaches_finalizer(&ty) {
         ctx.touched_finalizable.set(true);
         // What a call answers may be held by nothing but this statement.
@@ -10129,6 +10144,19 @@ fn emit_function_call_expr(
         func.instruction(&Instruction::I64DivU);
         func.instruction(&Instruction::F64ConvertI64U);
         return IRType::Float;
+    }
+    if let Some(ty) = emit_asyncio_intrinsic(function_name, arguments, func, ctx, memory_layout) {
+        return ty;
+    }
+    if let Some(ty) = crate::compiler::js::emit_intrinsic(
+        function_name,
+        arguments,
+        func,
+        ctx,
+        memory_layout,
+        expected_type,
+    ) {
+        return ty;
     }
     let resolved_alias = ctx.resolve_import_alias(function_name).to_string();
     let function_name = &resolved_alias;
@@ -17115,4 +17143,80 @@ fn emit_tuple_search(
         func.instruction(&Instruction::End);
     }
     func.instruction(&Instruction::LocalGet(result));
+}
+
+/// `asyncio`'s clock and waits (`crate::ir::asyncio`), when `name` is one of
+/// them: the type it leaves, or None when it is not one.
+fn emit_asyncio_intrinsic(
+    name: &str,
+    arguments: &[IRExpr],
+    func: &mut Function,
+    ctx: &CompilationContext,
+    memory_layout: &MemoryLayout,
+) -> Option<IRType> {
+    use crate::compiler::host::{emit_poll, wasi, Wasi, CLOCK_OUT, POLL_TIMEOUT};
+    use crate::ir::asyncio::{CLOCK_FN, IDLE_FN, NS_FN, WAIT_FN};
+    if ![CLOCK_FN, NS_FN, WAIT_FN, IDLE_FN].contains(&name) || ctx.get_function_info(name).is_some()
+    {
+        return None;
+    }
+    let mem = |offset: u64| MemArg {
+        offset,
+        align: 3,
+        memory_index: 0,
+    };
+    Some(match name {
+        CLOCK_FN => {
+            let clock = wasi(ctx, Wasi::ClockTimeGet);
+            func.instruction(&Instruction::I32Const(1)); // the monotonic clock
+            func.instruction(&Instruction::I64Const(1));
+            func.instruction(&Instruction::I32Const(CLOCK_OUT));
+            func.instruction(&Instruction::Call(clock));
+            func.instruction(&Instruction::Drop);
+            func.instruction(&Instruction::I32Const(CLOCK_OUT));
+            func.instruction(&Instruction::I64Load(mem(0)));
+            func.instruction(&Instruction::F64ConvertI64U);
+            IRType::Float
+        }
+        NS_FN => {
+            ctx.numeric_operand.set(true);
+            emit_expr(
+                &arguments[0],
+                func,
+                ctx,
+                memory_layout,
+                Some(&IRType::Float),
+            );
+            func.instruction(&Instruction::F64Const(1e9_f64.into()));
+            func.instruction(&Instruction::F64Mul);
+            func.instruction(&Instruction::F64Nearest);
+            IRType::Float
+        }
+        WAIT_FN => {
+            func.instruction(&Instruction::I32Const(POLL_TIMEOUT));
+            emit_expr(
+                &arguments[0],
+                func,
+                ctx,
+                memory_layout,
+                Some(&IRType::Float),
+            );
+            func.instruction(&Instruction::I64TruncSatF64U);
+            func.instruction(&Instruction::I64Store(mem(0)));
+            emit_poll(func, ctx);
+            IRType::None
+        }
+        _ => {
+            // Nothing ready and nothing to wait for: CPython's loop waits
+            // for good.
+            func.instruction(&Instruction::Loop(wasm_encoder::BlockType::Empty));
+            func.instruction(&Instruction::I32Const(POLL_TIMEOUT));
+            func.instruction(&Instruction::I64Const(i64::MAX));
+            func.instruction(&Instruction::I64Store(mem(0)));
+            emit_poll(func, ctx);
+            func.instruction(&Instruction::Br(0));
+            func.instruction(&Instruction::End);
+            IRType::None
+        }
+    })
 }

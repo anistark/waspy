@@ -92,6 +92,8 @@ pub enum Un {
     /// values known to fit.
     ToI32,
     ToI64,
+    /// f64 -> i64, truncating, saturating outside the range (NaN to 0).
+    ToI64Sat,
 }
 
 /// An expression.
@@ -188,7 +190,7 @@ impl E {
             },
             E::Un(op, a) => match op {
                 Un::Eqz | Un::Wrap | Un::ToI32 => Ty::I32,
-                Un::Bits | Un::ExtendS | Un::ExtendU | Un::ToI64 => Ty::I64,
+                Un::Bits | Un::ExtendS | Un::ExtendU | Un::ToI64 | Un::ToI64Sat => Ty::I64,
                 Un::FromBits | Un::ToF64 | Un::ToF64U => Ty::F64,
                 _ => a.ty(),
             },
@@ -321,6 +323,7 @@ impl E {
                     (Un::ToF64U, Ty::I64) => I::F64ConvertI64U,
                     (Un::ToI32, Ty::F64) => I::I32TruncF64S,
                     (Un::ToI64, Ty::F64) => I::I64TruncF64S,
+                    (Un::ToI64Sat, Ty::F64) => I::I64TruncSatF64S,
                     (op, t) => panic!("no {op:?} on {t:?}"),
                 });
             }
@@ -520,6 +523,13 @@ pub trait X: Into<E> + Sized {
     }
     fn floor(self) -> E {
         E::un(Un::Floor, self)
+    }
+    fn trunc(self) -> E {
+        E::un(Un::Trunc, self)
+    }
+    /// An f64 truncated to an i64, saturating outside its range.
+    fn to_i64_sat(self) -> E {
+        E::un(Un::ToI64Sat, self)
     }
     fn eqz(self) -> E {
         E::un(Un::Eqz, self)

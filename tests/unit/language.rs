@@ -1210,11 +1210,33 @@ fn loops_over_views_call_the_method_or_walk_the_dict() {
 fn view_loop_over_an_unknown_instance_is_refused() {
     refused(
         r#"
-        from typing import List, Tuple
+        from typing import Dict, List, Tuple
 
         class Bag:
             def items(self) -> List[Tuple[str, int]]:
                 return [("a", 1)]
+
+        def total() -> int:
+            shelf: Dict[str, Bag] = {"a": Bag()}
+            t = 0
+            for k, v in shelf["a"].items():
+                t += v
+            return t
+        "#,
+        "a for loop over the items(), keys(), or values() of a 'Bag' instance",
+    );
+}
+
+/// A method's declared result types the instance it returns, so a loop over
+/// `.items()` of an instance a chain of calls returns calls the method.
+#[test]
+fn view_loop_over_a_method_result_calls_the_method() {
+    let src = r#"
+        from typing import List, Tuple
+
+        class Bag:
+            def items(self) -> List[Tuple[str, int]]:
+                return [("a", 1), ("b", 5)]
 
         class Shelf:
             def bag(self) -> Bag:
@@ -1225,9 +1247,8 @@ fn view_loop_over_an_unknown_instance_is_refused() {
             for k, v in Shelf().bag().items():
                 t += v
             return t
-        "#,
-        "a for loop over the items(), keys(), or values() of a 'Bag' instance",
-    );
+    "#;
+    assert_eq!(call_i32(&dedent(src), "total"), 6);
 }
 
 /// What the scan types before code generation: `sorted()` of a dict, a
@@ -1689,20 +1710,25 @@ fn a_late_import_used_in_place_is_refused() {
 }
 
 /// What a dynamic import or an import in a function cannot be compiled as is
-/// refused: a name computed at run time, the forms that take more than a name,
-/// a read before the import, an import that only runs on some paths, a name
-/// both imported and assigned, a name another function imported, and a module
-/// reached through an alias where its own name is a local.
+/// refused: `__import__` of a name computed at run time (an
+/// `importlib.import_module` of one loads through the host, on the
+/// JavaScript bridge), the forms that take more than a name, a read before
+/// the import, an import that only runs on some paths, a name both imported
+/// and assigned, a name another function imported, and a module reached
+/// through an alias where its own name is a local.
 #[test]
 fn imports_that_cannot_be_compiled_are_refused() {
-    refused(
+    let loaded = try_compile(&dedent(
         r#"
         import importlib
         def f(name: str) -> int:
             m = importlib.import_module(name)
             return 1
         "#,
-        "of a name computed at run time is not supported",
+    ));
+    assert!(
+        loaded.is_ok(),
+        "a run-time name loads through the host: {loaded:?}"
     );
     refused(
         r#"

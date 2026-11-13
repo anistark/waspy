@@ -11,6 +11,7 @@ mod format;
 mod function;
 mod gc;
 mod host;
+pub(crate) mod js;
 mod libm;
 mod module;
 mod operators;

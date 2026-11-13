@@ -1017,7 +1017,7 @@
   },
   "runtimeFeatures": {
     "title": "RUNTIME FEATURES",
-    "status": "progress",
+    "status": "done",
     "version": "0.14.0",
     "features": [
       {
@@ -1046,7 +1046,8 @@
       },
       {
         "name": "Dynamic Module Loading - a module named at run time, loaded through the host",
-        "status": "todo",
+        "status": "done",
+        "version": "upcoming",
         "test": "runtime_features::dynamic_module_loading"
       },
       {
@@ -1065,11 +1066,13 @@
   },
   "webInterop": {
     "title": "WEB INTEROP",
-    "status": "todo",
+    "status": "progress",
     "features": [
       {
         "name": "JavaScript bridge & value conversion",
-        "status": "todo"
+        "status": "done",
+        "version": "upcoming",
+        "test": "web_interop::javascript_bridge"
       },
       {
         "name": "DOM manipulation APIs",
@@ -1088,24 +1091,32 @@
   },
   "async": {
     "title": "ASYNC/AWAIT",
-    "status": "todo",
+    "status": "done",
     "features": [
       {
         "name": "Promise object representation",
-        "status": "todo"
+        "status": "done",
+        "version": "upcoming",
+        "test": "async_await::promise_representation"
       },
       {
         "name": "async/await syntax support",
-        "status": "todo",
-        "issue": 7
+        "status": "done",
+        "version": "upcoming",
+        "issue": 7,
+        "test": "async_await::async_await_syntax"
       },
       {
         "name": "Asynchronous function execution",
-        "status": "todo"
+        "status": "done",
+        "version": "upcoming",
+        "test": "async_await::asynchronous_execution"
       },
       {
         "name": "Concurrent task management",
-        "status": "todo"
+        "status": "done",
+        "version": "upcoming",
+        "test": "async_await::concurrent_tasks"
       }
     ]
   },

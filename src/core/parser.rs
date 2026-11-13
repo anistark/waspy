@@ -245,16 +245,19 @@ fn validate_body(body: &[Stmt], source: &str, function: Option<&str>) -> Result<
 
 fn validate_stmt(stmt: &Stmt, source: &str, function: Option<&str>) -> Result<()> {
     match stmt {
-        Stmt::AsyncFunctionDef(def) => Err(unsupported(
+        // A coroutine function inside another function would be a closure
+        // making coroutines, which is not supported.
+        Stmt::AsyncFunctionDef(def) if function.is_some() => Err(unsupported(
             format!(
-                "'async def {}': async functions are not supported yet. \
-                 Hint: define a regular 'def' function",
+                "'async def {}' inside a function is not supported. Hint: define it at module \
+                 level",
                 def.name
             ),
             source,
             def.range.start().into(),
             function,
         )),
+        Stmt::AsyncFunctionDef(def) => validate_body(&def.body, source, Some(def.name.as_str())),
         Stmt::AsyncFor(stmt) => Err(unsupported(
             "'async for' is not supported yet. Hint: use a regular 'for' loop",
             source,
@@ -365,32 +368,8 @@ fn validate_stmt(stmt: &Stmt, source: &str, function: Option<&str>) -> Result<()
             validate_body(&stmt.orelse, source, function)?;
             validate_body(&stmt.finalbody, source, function)
         }
-        Stmt::Expr(expr_stmt) => validate_expr(&expr_stmt.value, source, function),
-        Stmt::Assign(assign) => validate_expr(&assign.value, source, function),
-        Stmt::Return(ret) => match &ret.value {
-            Some(value) => validate_expr(value, source, function),
-            None => Ok(()),
-        },
-        _ => Ok(()),
-    }
-}
-
-/// Expression-level checks. Only constructs the compiler is known to handle
-/// incorrectly are rejected; everything else is left to the IR converter.
-fn validate_expr(expr: &Expr, source: &str, function: Option<&str>) -> Result<()> {
-    match expr {
-        Expr::Await(await_expr) => Err(unsupported(
-            "'await' is not supported yet. Hint: call the function directly",
-            source,
-            await_expr.range.start().into(),
-            function,
-        )),
-        Expr::Call(call) => {
-            for arg in &call.args {
-                validate_expr(arg, source, function)?;
-            }
-            Ok(())
-        }
+        // Expressions are the converter's to check (where an `await` may
+        // stand included).
         _ => Ok(()),
     }
 }

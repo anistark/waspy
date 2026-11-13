@@ -16,6 +16,7 @@ Waspy is a Rust library. Every entry point returns the WebAssembly binary as `Ve
 | `compile_multiple_python_files(&[(name, source)], optimize)` | several sources into one module |
 | `compile_python_project(dir, optimize)` | a project directory |
 | `get_python_file_metadata(source)` | nothing: returns each function's signature |
+| `js_loader()` | nothing: returns the JavaScript loader, an ES module to write next to a module that uses the JavaScript bridge ([JavaScript and async](/docs/javascript/#the-loader)) |
 
 Each `compile_*` function has a `_with_options` form taking `&CompilerOptions`.
 
@@ -36,6 +37,7 @@ let wasm = compile_python_to_wasm_with_options(source, &options)?;
 
 - `optimize` runs Binaryen over the output. The unoptimized module is already valid and correct; optimization only shrinks and speeds it up, at several times the cost of the rest of the pipeline, so it is worth skipping in a fast edit loop ([what it costs](/docs/programs/#what-it-costs)).
 - `verbosity` sets how much the compiler logs. `Verbosity::from_flags(verbose, debug)` maps a tool's own `--verbose` and `--debug` flags onto it.
+- `js_exports` gives every export a JavaScript-facing wrapper, so the loader calls it with JavaScript values, for a module that does not import `js` itself (a plugin a page calls with strings, or one another module loads by name). The module then imports the bridge's functions, so it is instantiated through the loader.
 
 ## Building without Binaryen
 

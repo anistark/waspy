@@ -1,7 +1,9 @@
+pub(crate) mod asyncio;
 pub(crate) mod build;
 pub(crate) mod collections;
 mod context_managers;
 mod converter;
+pub(crate) mod coroutines;
 pub(crate) mod datetime;
 pub(crate) mod decorate;
 mod decorators;
@@ -20,12 +22,14 @@ mod re;
 mod str_methods;
 mod types;
 
+pub use asyncio::ASYNCIO_FN_PREFIX;
 pub use collections::{
     lower_collections, COLLECTIONS_FN_PREFIX, DATA_METHOD, DELEGATES_VAR, FROM_METHOD, FROZEN_VAR,
     MAPPING_METHOD, REFUSED_VAR, REFUSE_COMPREHENSION, REFUSE_WALK, VIEW_METHOD, WALK_METHOD,
     WRAP_METHOD,
 };
 pub use converter::*;
+pub use coroutines::{lower_coroutines, AWAIT_FN, CORO_CLASS_PREFIX, CORO_METHOD_PREFIX};
 pub use datetime::{lower_datetime, DATETIME_FN_PREFIX};
 pub use decorate::{
     apply_user_decorators, is_internal_function, DECORATED_FN_PREFIX, DOUBLE_STAR_ARG,
