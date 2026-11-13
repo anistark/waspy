@@ -193,6 +193,22 @@ verify-runtime:
     echo ""
     echo "Every end-to-end program answers correctly under both runtimes."
 
+# The browser runtime gate: the same end-to-end programs, run in headless
+# Chromium through the playground's WASI shim, each checked against Pyodide
+# running the same Python in the same page (the reference for the web cards,
+# which CPython cannot run). Installs tests/browser's pinned dependencies on
+# first use; Chromium comes from `npx playwright install chromium` there.
+browser-verify:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "== building the end-to-end programs with their runtime checks"
+    cargo run --quiet --example verify_runtime >/dev/null
+    if [ ! -d tests/browser/node_modules ]; then
+      (cd tests/browser && npm ci --no-audit --no-fund)
+    fi
+    echo "== chromium, against pyodide"
+    node tests/browser/verify.mjs
+
 # The standard-library talk, tests/notebook/stdlib-lessons.ipynb: what porting
 # the standard library taught us, as slides whose demos run each program under
 # CPython 3.13 and compiled by Waspy, side by side. Present it with RISE (the

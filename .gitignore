@@ -22,6 +22,9 @@ docs/node_modules
 docs/_site
 docs/src/playground/compiler
 
+# The browser gate's dependencies (npm ci in tests/browser)
+tests/browser/node_modules
+
 # notebook
 __pycache__
 .ipynb_*

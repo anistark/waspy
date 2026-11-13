@@ -18,7 +18,7 @@ mod harness;
 
 use harness::{
     call_f64, call_i32, call_i32_1, call_i32_2, call_str, example_python_files, instantiate_wasm,
-    read_example, try_compile, try_compile_multi, try_instantiate, MULTI_FILE_ONLY,
+    read_example, run_main, try_compile, try_compile_multi, try_instantiate, MULTI_FILE_ONLY,
 };
 
 /// Every standalone-compilable example compiles, validates, and instantiates.
@@ -128,6 +128,18 @@ fn break_continue_in_while_loop() {
 fn break_exits_innermost_loop_only() {
     let src = read_example("loop_control.py");
     assert_eq!(call_i32(&src, "count_inner_breaks"), 3);
+}
+
+/// Imports bound every way: a standard-library alias, an import inside a
+/// function, and `importlib.import_module` / `__import__` with a constant
+/// name, printing what CPython prints.
+#[test]
+fn dynamic_imports_example() {
+    let run = run_main(&read_example("dynamic_imports.py"), "", &[]);
+    assert_eq!(
+        run.stdout,
+        "12.566 logs/app.txt\n2 {\"ok\": [1, 2], \"n\": [3]} 7.0\n"
+    );
 }
 
 /// Conditional expressions, chained and nested in f-strings, with CPython's

@@ -74,7 +74,8 @@ Waspy compiles a typed subset of Python ahead of time. The rule it holds to: a c
 
 ## Modules, files, and the standard library
 
-- Imports of your own modules: `import mod`, `import mod as m`, and `from mod import f [as g]` resolve sibling `.py` files (and `pkg/mod.py` packages) and statically link them into the single output module, each compiled once however many import paths reach it
+- Imports: `import mod`, `import mod as m`, and `from mod import f [as g]`, of your own modules and the standard library's, at module level, in a function (which binds the name in that function), or in the `if __name__ == "__main__":` block. Your own modules resolve sibling `.py` files (and `pkg/mod.py` packages) and are statically linked into the single output module, each compiled once however many import paths reach it
+- `importlib.import_module("name")` and `__import__("name")` with a constant name (a string literal or a module-level constant) are the import they name, so the module is linked when the program is compiled: `json = importlib.import_module("json")`, in a function or at module level, or used in place (`importlib.import_module("math").sqrt(2.0)`). `__import__("os.path")` answers the package `os` and `importlib.import_module("os.path")` the submodule, as in CPython
 - File I/O through WASI: `open()`, `read([n])`, `write(s)`, `close()`, and `with open(...) as f:` (see [File I/O](/docs/running/#file-i-o))
 - The standard library, module by module (the [modules board](/modules/) tracks each function; anything not listed is refused at compile time, naming the call):
   - `math`: every function on the board, on runtime values, with CPython's `ValueError` and `OverflowError`; `math.pi`, `e`, `tau`, `inf`, `nan`. The transcendental functions give musl libm's results, bit for bit (see [Numbers](/docs/numbers/#the-math-module))

@@ -154,6 +154,7 @@ fn build_commands(root: &Path, out_dir: &Path) -> Result<Vec<serde_json::Value>>
                 "program": command.name,
                 "optimized": optimize,
                 "wasm": format!("{OUT_DIR}/{file_name}"),
+                "source": command.source,
                 "args": command.args,
                 "stdin": fixture("stdin"),
                 "stdout": fixture("stdout"),
@@ -192,6 +193,7 @@ fn main() -> Result<()> {
             program.checks
         );
 
+        let python = python_source(root, program, &checks)?;
         for optimize in [false, true] {
             let wasm = build(root, program, &checks, optimize)?;
             let file_name = if optimize {
@@ -211,6 +213,7 @@ fn main() -> Result<()> {
                 "program": program.name,
                 "optimized": optimize,
                 "wasm": format!("{OUT_DIR}/{file_name}"),
+                "python": python,
                 "checks": names
                     .iter()
                     .map(|name| serde_json::json!({
@@ -257,16 +260,51 @@ fn build(root: &Path, program: &Program, checks: &str, optimize: bool) -> Result
                 .with_context(|| format!("compile {path} with its runtime checks"))
         }
         Source::Project(dir) => {
-            let src_dir = root.join(dir);
-            let dest = root.join(OUT_DIR).join(program.name);
-            copy_python_files(&src_dir, &dest)?;
-            let entry = dest.join("main.py");
-            let main = read(&entry)? + checks;
-            fs::write(&entry, main).with_context(|| format!("write {}", entry.display()))?;
+            let entry = copy_project(root, program, dir, checks)?;
             compile_python_file_with_options(&entry, &options)
                 .with_context(|| format!("compile {dir} with its runtime checks"))
         }
     }
+}
+
+/// Copy a project into the output tree with the checks appended to its
+/// `main.py`, answering that entry file.
+fn copy_project(root: &Path, program: &Program, dir: &str, checks: &str) -> Result<PathBuf> {
+    let dest = root.join(OUT_DIR).join(program.name);
+    copy_python_files(&root.join(dir), &dest)?;
+    let entry = dest.join("main.py");
+    let main = read(&entry)? + checks;
+    fs::write(&entry, main).with_context(|| format!("write {}", entry.display()))?;
+    Ok(entry)
+}
+
+/// The Python a program's module is compiled from, checks included, as a
+/// directory holding `main.py` and the modules it imports, for a runner that
+/// runs the same source under a Python of its own (the browser gate, against
+/// Pyodide). A project's copy is the one `build` compiles; a single file is
+/// written out here.
+fn python_source(root: &Path, program: &Program, checks: &str) -> Result<serde_json::Value> {
+    let dir = format!("{OUT_DIR}/{}", program.name);
+    let dest = root.join(&dir);
+    match program.source {
+        Source::File(path) => {
+            fs::create_dir_all(&dest).with_context(|| format!("create {}", dest.display()))?;
+            let source = read(&root.join(path))? + checks;
+            fs::write(dest.join("main.py"), source)
+                .with_context(|| format!("write {dir}/main.py"))?;
+        }
+        Source::Project(project) => {
+            copy_project(root, program, project, checks)?;
+        }
+    }
+    let mut files: Vec<String> = fs::read_dir(&dest)
+        .with_context(|| format!("read {}", dest.display()))?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .filter(|name| name.ends_with(".py"))
+        .collect();
+    files.sort();
+    Ok(serde_json::json!({ "dir": dir, "files": files }))
 }
 
 /// Copy a project's `.py` files into `dest`, flat: user module imports resolve

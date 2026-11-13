@@ -232,6 +232,21 @@ pub fn resolve_module_file(base_dir: &Path, module_name: &str) -> Option<PathBuf
     None
 }
 
+/// The modules a source imports, at any depth, including the constant names
+/// of its dynamic imports (`importlib.import_module("m")`). Read from the
+/// AST; a source that does not parse is scanned line by line, and the error
+/// is reported when it is compiled.
+fn module_dependencies(source: &str) -> Vec<String> {
+    use rustpython_parser::Parse;
+    match rustpython_parser::ast::Suite::parse(source, "<module>") {
+        Ok(ast) => crate::ir::module_dependencies(&ast),
+        Err(_) => extract_imports(source)
+            .into_iter()
+            .map(|import| import.module_name)
+            .collect(),
+    }
+}
+
 /// Resolve every user-written module reachable from an entry file.
 ///
 /// Walks the entry source's imports (and, transitively, the imports of each
@@ -260,15 +275,13 @@ pub fn resolve_user_modules(
     visited.insert(entry_module);
 
     let mut queue: VecDeque<String> = VecDeque::new();
-    for import in extract_imports(entry_source) {
-        queue.push_back(import.module_name);
-    }
+    queue.extend(module_dependencies(entry_source));
 
     while let Some(module_name) = queue.pop_front() {
         // Relative imports (`from . import x`) carry leading dots; resolve
         // them against the same base directory.
         let clean_name = module_name.trim_start_matches('.');
-        if clean_name.is_empty() || crate::stdlib::is_stdlib_module(clean_name) {
+        if clean_name.is_empty() || crate::stdlib::is_stdlib_module_path(clean_name) {
             continue;
         }
         if !visited.insert(clean_name.to_string()) {
@@ -284,9 +297,7 @@ pub fn resolve_user_modules(
             .with_context(|| format!("Failed to read module file: {}", file_path.display()))?;
 
         // Follow this module's own imports before recording it.
-        for import in extract_imports(&source) {
-            queue.push_back(import.module_name);
-        }
+        queue.extend(module_dependencies(&source));
 
         resolved.push((clean_name.to_string(), file_path, source));
     }

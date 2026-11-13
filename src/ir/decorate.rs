@@ -81,12 +81,23 @@ pub fn apply_user_decorators(module: &mut IRModule) -> Result<()> {
         .collect();
     // Definitions to insert, each at its decoration's position, in order.
     let mut inserts: Vec<(usize, IRVariable)> = Vec::new();
+    let mut placed: Vec<(String, Vec<String>)> = Vec::new();
     for decoration in &decorations {
+        let before = inserts.len();
         apply_one(module, decoration, &templates, &mut inserts)?;
+        let names = inserts[before..]
+            .iter()
+            .map(|(_, v)| v.name.clone())
+            .collect();
+        placed.push((decoration.function.clone(), names));
     }
     for (offset, (position, var)) in inserts.into_iter().enumerate() {
         let at = (position + offset).min(module.variables.len());
         module.variables.insert(at, var);
+    }
+    // In the top-level order, the decorators' work runs at the `def`.
+    for (function, names) in placed {
+        module.place_after(&crate::ir::IRInitItem::Def(function), names);
     }
     // A function used only as a decorator has done its work. Compiled on its
     // own, its forwarding wrapper would have no signature.

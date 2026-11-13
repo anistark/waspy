@@ -65,6 +65,22 @@ pub(crate) fn line_of(offset: usize) -> Option<usize> {
     })
 }
 
+/// The location of a byte offset into the source most recently parsed on
+/// this thread (its column counted in bytes), for a converter error.
+pub(crate) fn location_of(offset: usize, function: Option<&str>) -> Option<ErrorLocation> {
+    LINE_STARTS.with(|starts| {
+        let starts = starts.borrow();
+        let line = starts.partition_point(|&s| s <= offset);
+        let start = *starts.get(line.checked_sub(1)?)?;
+        Some(ErrorLocation {
+            file: None,
+            line,
+            column: Some(offset - start + 1),
+            function: function.map(str::to_string),
+        })
+    })
+}
+
 /// Map a byte offset into 1-based (line, column) coordinates.
 fn line_col(source: &str, offset: usize) -> (usize, usize) {
     let clamped = offset.min(source.len());

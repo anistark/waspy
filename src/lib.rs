@@ -476,6 +476,9 @@ fn compile_merged_sources(
             first_file = Some(filename.to_string());
         }
         combined_module.classes.extend(ir_module.classes);
+        // Each file's top level in order, for the order the program runs
+        // them in.
+        combined_module.sources.extend(ir_module.sources);
         combined_module
             .dispatch_tables
             .extend(ir_module.dispatch_tables);

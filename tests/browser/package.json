@@ -1,0 +1,16 @@
+{
+  "name": "waspy-browser-gate",
+  "private": true,
+  "description": "Runs compiled waspy programs in headless Chromium and checks them against Pyodide running the same source in the same page",
+  "type": "module",
+  "scripts": {
+    "verify": "node verify.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "playwright": "1.64.1",
+    "pyodide": "0.29.5"
+  }
+}

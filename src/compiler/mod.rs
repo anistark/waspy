@@ -16,6 +16,7 @@ mod module;
 mod operators;
 mod runtime;
 mod sets;
+mod start;
 mod stdlib;
 mod unicode;
 mod validate;
