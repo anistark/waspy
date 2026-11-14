@@ -108,6 +108,8 @@ exports.greet('Ada', 2);            // a str and an int in, a str out
 await exports.fetch_report(7);      // an `async def`: a Promise
 ```
 
+A program with a `__main__` block runs through the `start` the same call answers (`await start()`), which is what lets it suspend on a promise (below).
+
 The loader wraps each export by the signature the module lists (its `waspy.exports` custom section), so it takes and answers JavaScript values: numbers, strings, booleans, undefined for None, arrays and plain objects for lists, tuples, and dicts, and any value for a `JsProxy` parameter. A Python exception escaping one is thrown as a `PythonError` whose message is the last line of CPython's report (`ValueError: negative`). A program that uses the bridge gets the wrappers; for one that does not (a plugin a page calls with strings, say), set `CompilerOptions::js_exports`.
 
 ## Promises
@@ -128,7 +130,27 @@ async def double_later(p: JsProxy) -> int:
 await exports.double_later(Promise.resolve(21));   // 42
 ```
 
-A promise awaited inside `asyncio.run()` raises `RuntimeError`: the loop runs inside a call from JavaScript there and cannot hand control back to settle it, where Pyodide suspends WebAssembly to (JSPI). Export the coroutine and await it from JavaScript.
+A program's `__main__` block can await promises too. Run it through the loader's `start()`, and where the browser has JavaScript Promise Integration (JSPI: `WebAssembly.Suspending` and `WebAssembly.promising`), a promise awaited inside `asyncio.run()` suspends the program until it settles, as Pyodide's does, so promises and `asyncio` timers interleave in the order they settle:
+
+```python
+import asyncio
+import js
+
+async def main() -> None:
+    later = js.eval("(ms, v) => new Promise((r) => setTimeout(() => r(v), ms))")
+    first, second = await asyncio.gather(later(50, "slow"), later(10, "fast"))
+    print(first, second)    # slow fast
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+```js
+const { start } = await instantiate(bytes, { wasi });
+await start();
+```
+
+Without JSPI (or inside a call JavaScript made into the module, which cannot suspend), such an `await` raises `RuntimeError`; export the coroutine and await it from JavaScript instead.
 
 ## Modules loaded by name
 

@@ -10,7 +10,7 @@
 #[path = "../utils/harness.rs"]
 mod harness;
 
-use harness::{compile, dedent, link_host, run_main, try_compile, Host};
+use harness::{compile, dedent, link_host, run_main, run_main_on, try_compile, Host};
 use wasmi::{Engine, Linker, Module, Store, Value};
 
 fn prints(source: &str, want: &str) {
@@ -292,4 +292,77 @@ fn bridge_exports_take_and_answer_js_values() {
     );
     let o = Js::object(vec![("inner", Js::Str("deep".into()))]);
     assert_eq!(text(call("inner", vec![o])), "deep");
+}
+
+/// A promise awaited inside `asyncio.run()` suspends the program until it
+/// settles, as Pyodide's does through JavaScript Promise Integration (which
+/// the loader's `start()` gives a program, and the harness models): values,
+/// a rejection as `JsException`, and promises alongside timers in tasks.
+#[test]
+fn promises_awaited_inside_asyncio_run() {
+    prints(
+        r#"
+        import asyncio
+        import js
+        from pyodide.ffi import JsException
+
+
+        async def plus_one(x: int) -> int:
+            v: int = await js.Promise.resolve(x)
+            await asyncio.sleep(0.01)
+            return v + 1
+
+
+        async def main() -> None:
+            a, b = await asyncio.gather(plus_one(1), plus_one(10))
+            s: str = await js.Promise.resolve("two")
+            try:
+                await js.Promise.reject(js.Error.new("nope"))
+            except JsException as e:
+                print("rejected", e)
+            print(a, b, s)
+
+
+        if __name__ == "__main__":
+            asyncio.run(main())
+        "#,
+        "rejected Error: nope\n2 11 two\n",
+    );
+}
+
+/// Without JavaScript Promise Integration nothing can settle such a promise
+/// while the loop runs, so the `await` raises `RuntimeError` (this answer is
+/// this compiler's own: Pyodide without JSPI refuses `asyncio.run()` itself).
+#[test]
+fn promise_inside_asyncio_run_without_jspi_raises() {
+    let mut host = Host::default();
+    host.js.jspi = false;
+    let (run, _) = run_main_on(
+        &dedent(
+            r#"
+            import asyncio
+            import js
+
+
+            async def main() -> None:
+                v: int = await js.Promise.resolve(1)
+                print(v)
+
+
+            if __name__ == "__main__":
+                asyncio.run(main())
+            "#,
+        ),
+        host,
+    );
+    assert_eq!(run.stdout, "");
+    assert!(
+        run.stderr.starts_with(
+            "RuntimeError: a JavaScript promise is awaited inside asyncio.run(), which cannot \
+             hand control back to JavaScript to settle it here"
+        ),
+        "{}",
+        run.stderr
+    );
+    assert_eq!(run.exit, 1);
 }

@@ -115,6 +115,17 @@ pub enum JsImport {
     /// `(token, failed, h)`: resolve (or reject) the Promise an exported
     /// coroutine's call answered.
     Resolve,
+    /// `() -> bool`: whether the program may suspend here (JSPI, inside the
+    /// loader's `start()`).
+    CanSuspend,
+    /// `(ms: f64) -> 0`: suspend until a promise the program awaits settles,
+    /// or for `ms` milliseconds (for good when negative).
+    Suspend,
+    /// `() -> token`: the next promise that settled while suspended (-1 when
+    /// none did), whose failure and value the next two answer.
+    NextSettled,
+    SettledFailed,
+    SettledValue,
 }
 
 impl JsImport {
@@ -152,6 +163,11 @@ impl JsImport {
             JsImport::Fail => "fail",
             JsImport::Then => "then",
             JsImport::Resolve => "resolve",
+            JsImport::CanSuspend => "can_suspend",
+            JsImport::Suspend => "suspend",
+            JsImport::NextSettled => "next_settled",
+            JsImport::SettledFailed => "settled_failed",
+            JsImport::SettledValue => "settled_value",
         }
     }
 
@@ -161,9 +177,15 @@ impl JsImport {
             JsImport::Global | JsImport::String | JsImport::Parse | JsImport::ImportModule => {
                 (vec![I32; 2], vec![I32])
             }
-            JsImport::GlobalThis | JsImport::Array | JsImport::Undefined | JsImport::Error => {
-                (vec![], vec![I32])
-            }
+            JsImport::GlobalThis
+            | JsImport::Array
+            | JsImport::Undefined
+            | JsImport::Error
+            | JsImport::CanSuspend
+            | JsImport::NextSettled
+            | JsImport::SettledFailed
+            | JsImport::SettledValue => (vec![], vec![I32]),
+            JsImport::Suspend => (vec![F64], vec![I32]),
             JsImport::Get => (vec![I32; 3], vec![I32]),
             JsImport::Set | JsImport::CallMethod => (vec![I32; 4], vec![I32]),
             JsImport::Call | JsImport::Construct | JsImport::Equal | JsImport::Item => {
@@ -187,7 +209,7 @@ impl JsImport {
         }
     }
 
-    pub const ALL: [JsImport; 32] = [
+    pub const ALL: [JsImport; 37] = [
         JsImport::Global,
         JsImport::GlobalThis,
         JsImport::Get,
@@ -220,6 +242,11 @@ impl JsImport {
         JsImport::Fail,
         JsImport::Then,
         JsImport::Resolve,
+        JsImport::CanSuspend,
+        JsImport::Suspend,
+        JsImport::NextSettled,
+        JsImport::SettledFailed,
+        JsImport::SettledValue,
     ];
 }
 
@@ -1100,7 +1127,8 @@ pub(crate) fn intrinsic_type(name: &str) -> Option<IRType> {
         "float" => IRType::Float,
         "bool" | "eq" | "is_none" | "same" => IRType::Bool,
         "set" | "then" | "resolve" => IRType::None,
-        "export" | "fail" => IRType::Int,
+        "export" | "fail" | "next_settled" | "settled_failed" | "suspend" => IRType::Int,
+        "can_suspend" => IRType::Bool,
         "to_py" => IRType::Unknown,
         _ => IRType::JsProxy,
     })
@@ -1791,6 +1819,31 @@ pub(crate) fn emit_intrinsic(
             call_import(func, JsImport::Then);
             ctx.release_held();
             IRType::None
+        }
+        "can_suspend" | "next_settled" | "settled_failed" => {
+            call_import(
+                func,
+                match op {
+                    "can_suspend" => JsImport::CanSuspend,
+                    "next_settled" => JsImport::NextSettled,
+                    _ => JsImport::SettledFailed,
+                },
+            );
+            if op == "can_suspend" {
+                IRType::Bool
+            } else {
+                IRType::Int
+            }
+        }
+        "settled_value" => {
+            call_import(func, JsImport::SettledValue);
+            func.instruction(&I::Call(helper(ctx, JsFn::Wrap)));
+            IRType::JsProxy
+        }
+        "suspend" => {
+            emit_expr(&args[0], func, ctx, ml, Some(&IRType::Float));
+            call_import(func, JsImport::Suspend);
+            IRType::Int
         }
         "resolve" => {
             for (k, arg) in args.iter().enumerate() {

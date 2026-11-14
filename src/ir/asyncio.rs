@@ -702,7 +702,40 @@ pub(crate) fn bridge_functions() -> Vec<IRFunction> {
                 ),
             ],
         ),
-        // A promise settled: its future done, and the loop run.
+        // A promise settled: the future it settles done.
+        function(
+            "settle_one",
+            vec![
+                param("token", &IRType::Int),
+                param("failed", &IRType::Int),
+                param("value", &IRType::JsProxy),
+            ],
+            IRType::None,
+            vec![if_(
+                cmp(v("token"), IRCompareOp::In, loop_var("awaiting")),
+                vec![
+                    assign_typed(
+                        "fut",
+                        mcall(loop_var("awaiting"), "pop", vec![v("token")]),
+                        &promise_future(),
+                    ),
+                    if_(
+                        not(mcall(v("fut"), "done", vec![])),
+                        vec![if_else(
+                            ne(v("failed"), int(0)),
+                            vec![expr_stmt(mcall(
+                                v("fut"),
+                                "set_exception",
+                                vec![call("JsException", vec![call("str", vec![v("value")])])],
+                            ))],
+                            vec![expr_stmt(mcall(v("fut"), "set_result", vec![v("value")]))],
+                        )],
+                    ),
+                ],
+            )],
+        ),
+        // A promise settled between JavaScript's turns: its future done, and
+        // the loop run.
         method(
             "__waspy_settle",
             vec![
@@ -713,28 +746,7 @@ pub(crate) fn bridge_functions() -> Vec<IRFunction> {
             IRType::Float,
             vec![
                 assign_typed("value", js("adopt", vec![v("h")]), &IRType::JsProxy),
-                if_(
-                    cmp(v("token"), IRCompareOp::In, loop_var("awaiting")),
-                    vec![
-                        assign_typed(
-                            "fut",
-                            mcall(loop_var("awaiting"), "pop", vec![v("token")]),
-                            &promise_future(),
-                        ),
-                        if_(
-                            not(mcall(v("fut"), "done", vec![])),
-                            vec![if_else(
-                                ne(v("failed"), int(0)),
-                                vec![expr_stmt(mcall(
-                                    v("fut"),
-                                    "set_exception",
-                                    vec![call("JsException", vec![call("str", vec![v("value")])])],
-                                ))],
-                                vec![expr_stmt(mcall(v("fut"), "set_result", vec![v("value")]))],
-                            )],
-                        ),
-                    ],
-                ),
+                expr_stmt(f("settle_one", vec![v("token"), v("failed"), v("value")])),
                 ret_val(f("drive", vec![])),
             ],
         ),
@@ -2029,21 +2041,57 @@ fn timeout() -> IRClass {
 /// for a promise awaited inside `asyncio.run()`, which only JavaScript can
 /// settle and which this loop, running inside a call from JavaScript,
 /// cannot hand control back for.
-fn idle(bridge: bool) -> Vec<IRStatement> {
-    let mut out = Vec::new();
-    if bridge {
-        out.push(if_(
-            cmp(len(loop_var("awaiting")), IRCompareOp::Gt, int(0)),
-            vec![raise(
-                "RuntimeError",
-                "a JavaScript promise is awaited inside asyncio.run(), which cannot hand \
-                 control back to JavaScript to settle it. Hint: export the coroutine and \
-                 await it from JavaScript",
-            )],
-        ));
-    }
-    out.push(expr_stmt(call(IDLE_FN, vec![])));
-    out
+fn idle() -> Vec<IRStatement> {
+    vec![expr_stmt(call(IDLE_FN, vec![]))]
+}
+
+/// Nothing ready while a JavaScript promise is awaited inside
+/// `asyncio.run()`: suspend the program until one settles (or the next
+/// timer, `wait` nanoseconds off, falls due), as Pyodide's loop does through
+/// JavaScript Promise Integration, then settle the futures of those that did.
+/// Without JSPI (or inside a call JavaScript made), nothing can settle it.
+fn promise_wait() -> Vec<IRStatement> {
+    let timers = || len(loop_var("timers"));
+    vec![
+        // A timer already due needs no wait.
+        if_(
+            or(
+                eq(timers(), int(0)),
+                cmp(v("wait"), IRCompareOp::Gt, float(0.0)),
+            ),
+            vec![
+                if_(
+                    not(js("can_suspend", vec![])),
+                    vec![raise(
+                        "RuntimeError",
+                        "a JavaScript promise is awaited inside asyncio.run(), which cannot hand \
+                         control back to JavaScript to settle it here (it needs JavaScript Promise \
+                         Integration, and the loader's start()). Hint: export the coroutine and \
+                         await it from JavaScript",
+                    )],
+                ),
+                assign_typed("ms", float(-1.0), &IRType::Float),
+                if_(
+                    cmp(timers(), IRCompareOp::Gt, int(0)),
+                    vec![assign("ms", bin(v("wait"), IROp::Div, float(1e6)))],
+                ),
+                expr_stmt(js("suspend", vec![v("ms")])),
+            ],
+        ),
+        while_(
+            boolean(true),
+            vec![
+                assign_typed("token", js("next_settled", vec![]), &IRType::Int),
+                if_(
+                    cmp(v("token"), IRCompareOp::Lt, int(0)),
+                    vec![IRStatement::Break],
+                ),
+                assign_typed("failed", js("settled_failed", vec![]), &IRType::Int),
+                assign_typed("value", js("settled_value", vec![]), &IRType::JsProxy),
+                expr_stmt(f("settle_one", vec![v("token"), v("failed"), v("value")])),
+            ],
+        ),
+    ]
 }
 
 /// The loop: scheduling, the timer heap, a turn, running until a future is
@@ -2227,25 +2275,39 @@ pub(crate) fn runtime_functions(bridge: bool, finalize: bool) -> Vec<IRFunction>
                         eq(len(loop_var("ready")), int(0)),
                         not(loop_var("stopping")),
                     ),
-                    vec![if_else(
-                        cmp(len(heap()), IRCompareOp::Gt, int(0)),
-                        vec![
-                            assign_typed(
-                                "wait",
-                                bin(
-                                    attr(idx(heap(), int(0)), "when"),
-                                    IROp::Sub,
-                                    call(CLOCK_FN, vec![]),
-                                ),
-                                &IRType::Float,
-                            ),
-                            if_(
+                    {
+                        let timer_wait = if_else(
+                            cmp(len(heap()), IRCompareOp::Gt, int(0)),
+                            vec![if_(
                                 cmp(v("wait"), IRCompareOp::Gt, float(0.0)),
                                 vec![expr_stmt(call(WAIT_FN, vec![v("wait")]))],
+                            )],
+                            idle(),
+                        );
+                        vec![
+                            assign_typed("wait", float(0.0), &IRType::Float),
+                            if_(
+                                cmp(len(heap()), IRCompareOp::Gt, int(0)),
+                                vec![assign(
+                                    "wait",
+                                    bin(
+                                        attr(idx(heap(), int(0)), "when"),
+                                        IROp::Sub,
+                                        call(CLOCK_FN, vec![]),
+                                    ),
+                                )],
                             ),
-                        ],
-                        idle(bridge),
-                    )],
+                            if bridge {
+                                if_else(
+                                    cmp(len(loop_var("awaiting")), IRCompareOp::Gt, int(0)),
+                                    promise_wait(),
+                                    vec![timer_wait],
+                                )
+                            } else {
+                                timer_wait
+                            },
+                        ]
+                    },
                 ),
                 // Timers due by now (and the clock's resolution) join the
                 // ready callbacks.

@@ -1231,6 +1231,11 @@ pub struct JsWorld {
     pub settled: Vec<(i32, bool, Js)>,
     /// What each exported coroutine's call settled with, by token.
     pub resolved: HashMap<i32, (bool, Js)>,
+    /// Whether the host has JavaScript Promise Integration, so a program's
+    /// `__main__` block may suspend on a promise (the loader's `start()`).
+    pub jspi: bool,
+    /// The settled promise `next_settled` handed over last.
+    taken: Option<(bool, Js)>,
 }
 
 impl Default for JsWorld {
@@ -1245,6 +1250,8 @@ impl Default for JsWorld {
             modules: HashMap::new(),
             settled: Vec::new(),
             resolved: HashMap::new(),
+            jspi: true,
+            taken: None,
         }
     }
 }
@@ -1841,6 +1848,56 @@ pub fn link_js(linker: &mut Linker<Host>) {
                 }
                 other => w.settled.push((token, false, other)),
             }
+        })
+        .unwrap();
+    // JSPI, as the loader's `start()` gives it: suspending hands back the
+    // promises that settled, or moves the clock on to the next timer.
+    linker
+        .func_wrap(m, "can_suspend", |c: Caller<'_, Host>| -> i32 {
+            c.data().js.jspi as i32
+        })
+        .unwrap();
+    linker
+        .func_wrap(
+            m,
+            "suspend",
+            |mut c: Caller<'_, Host>, ms: wasmi::core::F64| -> i32 {
+                let ms = f64::from(ms);
+                let host = c.data_mut();
+                if !host.js.settled.is_empty() {
+                    return 0;
+                }
+                assert!(
+                    ms >= 0.0,
+                    "the program waits on a promise that never settles"
+                );
+                host.monotonic_ns += (ms * 1e6).ceil() as u64;
+                0
+            },
+        )
+        .unwrap();
+    linker
+        .func_wrap(m, "next_settled", |mut c: Caller<'_, Host>| -> i32 {
+            let w = &mut c.data_mut().js;
+            if w.settled.is_empty() {
+                w.taken = None;
+                return -1;
+            }
+            let (token, rejected, value) = w.settled.remove(0);
+            w.taken = Some((rejected, value));
+            token
+        })
+        .unwrap();
+    linker
+        .func_wrap(m, "settled_failed", |c: Caller<'_, Host>| -> i32 {
+            c.data().js.taken.as_ref().is_some_and(|t| t.0) as i32
+        })
+        .unwrap();
+    linker
+        .func_wrap(m, "settled_value", |mut c: Caller<'_, Host>| -> i32 {
+            let w = &mut c.data_mut().js;
+            let value = w.taken.as_ref().map_or(Js::Undefined, |t| t.1.clone());
+            w.add(value)
         })
         .unwrap();
     linker

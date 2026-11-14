@@ -181,7 +181,8 @@ pub fn lower_coroutines(module: &mut IRModule) -> Result<()> {
         module.functions.extend(aio::bridge_functions());
         module.memory_layout.add_string(
             "a JavaScript promise is awaited inside asyncio.run(), which cannot hand control back \
-             to JavaScript to settle it. Hint: export the coroutine and await it from JavaScript",
+             to JavaScript to settle it here (it needs JavaScript Promise Integration, and the \
+             loader's start()). Hint: export the coroutine and await it from JavaScript",
         );
     }
 
@@ -722,11 +723,26 @@ impl Lowerer<'_> {
     }
 
     /// `tg.create_task(coro)` on a task group: `coro._in_group(tg)`, the
-    /// task of the coroutine's own result type.
+    /// task of the coroutine's own result type. And `f(...)` of a JavaScript
+    /// function a variable holds, a call through the bridge, written out
+    /// here while the variable is one: a coroutine's variables become its
+    /// state's fields, which no call by name reaches.
     fn group_calls(&self, stmt: &mut IRStatement, env: &HashMap<String, IRType>) -> Result<()> {
         let group = IRType::Class(crate::ir::asyncio_sync::TASKGROUP.to_string());
         let mut err = None;
         each_expr(stmt, &mut |e| {
+            if let IRExpr::FunctionCall {
+                function_name,
+                arguments,
+            } = e
+            {
+                if env.get(function_name.as_str()) == Some(&IRType::JsProxy) {
+                    let mut args = vec![v(function_name)];
+                    args.append(arguments);
+                    *e = call("__js_call", args);
+                    return;
+                }
+            }
             let IRExpr::MethodCall {
                 object,
                 method_name,
@@ -1141,7 +1157,16 @@ impl Lowerer<'_> {
         }
         let mut x = x;
         self.api.rewrite_tree(&mut x, true)?;
+        let mut held = expr_stmt(x);
+        self.group_calls(&mut held, env)?;
+        let IRStatement::Expression(mut x) = held else {
+            unreachable!("an expression statement")
+        };
         let mut ty = self.ty(&x, env);
+        if matches!(&x, IRExpr::FunctionCall { function_name, .. } if function_name == "__js_call")
+        {
+            ty = IRType::JsProxy;
+        }
         // A JavaScript value (a promise, or any thenable): a future it
         // settles, as Pyodide awaits one.
         if ty == IRType::JsProxy {

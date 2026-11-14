@@ -25,6 +25,15 @@
 // default), and `modules` the separately compiled modules a program may load
 // by a name computed at run time (`importlib.import_module(name)`), each the
 // `exports` of another `instantiate`.
+//
+// A program with a `__main__` block runs through `start()`, which answers a
+// Promise. Where the browser has JavaScript Promise Integration
+// (`WebAssembly.Suspending` and `WebAssembly.promising`), a promise awaited
+// inside `asyncio.run()` suspends the program until it settles, as Pyodide's
+// does; without it, such an `await` raises `RuntimeError`.
+//
+//   const { start } = await instantiate(bytes, { wasi });
+//   await start();
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8');
@@ -54,6 +63,26 @@ export class Bridge {
         this.promises = new Map();
         this.settled = new Map();
         this.timer = null;
+        // While `start()` runs the program under JSPI: the promises that
+        // settled for it to collect, what wakes it, and how many calls from
+        // JavaScript into the module are under way (none may suspend).
+        this.inMain = false;
+        this.queue = [];
+        this.wake = null;
+        this.taken = null;
+        this.depth = 0;
+    }
+
+    /// A promise Python awaits settled: queued for the program `start()`
+    /// runs (waking it if it waits), or handed to the event loop the loader
+    /// runs between JavaScript's turns.
+    deliver(token, failed, value) {
+        if (this.inMain) {
+            this.queue.push({ token, failed, value });
+            if (this.wake) this.wake();
+        } else {
+            this.settle(token, failed, value);
+        }
     }
 
     /// Run the module's event loop again in `delay` milliseconds (none when
@@ -273,10 +302,35 @@ export class Bridge {
             },
             then: (p, token) => {
                 Promise.resolve(this.get(p)).then(
-                    (value) => this.settle(token, 0, value),
-                    (error) => this.settle(token, 1, error),
+                    (value) => this.deliver(token, 0, value),
+                    (error) => this.deliver(token, 1, error),
                 );
             },
+            // JSPI: whether the program may suspend here (inside `start()`,
+            // not inside a call JavaScript made into it), and the suspension
+            // itself: until a promise it awaits settles, or `ms` milliseconds
+            // (none when negative) for its next timer.
+            can_suspend: () => (this.inMain && this.depth === 0 && SUSPENDING ? 1 : 0),
+            suspend: (ms) => {
+                if (this.queue.length) return 0;
+                return new Promise((resolve) => {
+                    let timer = null;
+                    this.wake = () => {
+                        this.wake = null;
+                        if (timer !== null) clearTimeout(timer);
+                        resolve(0);
+                    };
+                    if (ms >= 0) timer = setTimeout(this.wake, ms);
+                });
+            },
+            // The next settled promise's token (-1 when there is none), then
+            // whether it failed and its value.
+            next_settled: () => {
+                this.taken = this.queue.shift() ?? null;
+                return this.taken ? this.taken.token : -1;
+            },
+            settled_failed: () => (this.taken.failed ? 1 : 0),
+            settled_value: () => this.add(this.taken.value),
             resolve: (token, failed, h) => {
                 let value = this.get(h);
                 this.drop(h);
@@ -299,7 +353,13 @@ export class Bridge {
         if (!wrapper) return exports[signature.name];
         return (...args) => {
             const handles = signature.params.map((_, k) => this.add(args[k]));
-            const r = wrapper(...handles);
+            this.depth += 1;
+            let r;
+            try {
+                r = wrapper(...handles);
+            } finally {
+                this.depth -= 1;
+            }
             if (r === -2) {
                 const message = this.failure;
                 this.failure = null;
@@ -317,6 +377,10 @@ export class Bridge {
     }
 }
 
+/// Whether the host has JavaScript Promise Integration.
+const SUSPENDING =
+    typeof WebAssembly.Suspending === 'function' && typeof WebAssembly.promising === 'function';
+
 /// The module's list of exports and their signatures.
 export function signatures(module) {
     const [section] = WebAssembly.Module.customSections(module, 'waspy.exports');
@@ -331,7 +395,10 @@ export async function instantiate(source, { wasi = undefined, globals, modules }
     const bridge = new Bridge({ globals, modules });
     const imports = {};
     const wanted = new Set(WebAssembly.Module.imports(module).map((i) => i.module));
-    if (wanted.has('waspy_js')) imports.waspy_js = bridge.imports();
+    if (wanted.has('waspy_js')) {
+        imports.waspy_js = bridge.imports();
+        if (SUSPENDING) imports.waspy_js.suspend = new WebAssembly.Suspending(imports.waspy_js.suspend);
+    }
     if (wanted.has('wasi_snapshot_preview1')) {
         if (!wasi) throw new Error('this module needs a WASI host: pass { wasi }');
         imports.wasi_snapshot_preview1 = wasi;
@@ -343,5 +410,21 @@ export async function instantiate(source, { wasi = undefined, globals, modules }
         const wrapped = bridge.wrap(signature);
         if (wrapped) exports[signature.name] = wrapped;
     }
-    return { instance, exports, bridge };
+    // Run the program's `__main__` block (`_start`), suspending where it
+    // awaits a promise when the host has JSPI.
+    const start = async () => {
+        const main = instance.exports._start;
+        if (typeof main !== 'function') throw new Error('this module has no __main__ block (_start)');
+        if (!SUSPENDING || !wanted.has('waspy_js')) {
+            main();
+            return;
+        }
+        bridge.inMain = true;
+        try {
+            await WebAssembly.promising(main)();
+        } finally {
+            bridge.inMain = false;
+        }
+    };
+    return { instance, exports, bridge, start };
 }
