@@ -1659,6 +1659,10 @@ pub(crate) struct Wanted {
     bounded: bool,
     pub(crate) timeout: bool,
     pub(crate) task_group: bool,
+    /// Whether the program makes a task it may never await
+    /// (`create_task()`, `ensure_future()`), whose exception is then reported
+    /// as the task is reclaimed.
+    pub(crate) task_finalizer: bool,
     /// `ExceptionGroup`, which a task group raises.
     groups: bool,
     queue_errors: bool,
@@ -1682,6 +1686,7 @@ impl Wanted {
             }
             "timeout" | "Timeout" => w.timeout = true,
             "TaskGroup" => w.task_group = true,
+            "create_task" | "ensure_future" => w.task_finalizer = true,
             "QueueEmpty" | "QueueFull" | "QueueShutDown" => w.queue_errors = true,
             _ => {}
         };

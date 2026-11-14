@@ -1229,6 +1229,55 @@ fn asyncio_gather_return_exceptions() {
     );
 }
 
+/// A task's exception nothing retrieves is reported as the task is
+/// reclaimed, as CPython reports it: at once for a task nothing holds, when
+/// a coroutine holding it finishes (its variables go with it), and at the
+/// end for one a module variable holds.
+#[test]
+fn asyncio_reports_never_retrieved_as_the_task_is_reclaimed() {
+    let run = run_main(
+        &dedent(
+            r#"
+            import asyncio
+            import sys
+
+
+            async def bad(n: int) -> None:
+                await asyncio.sleep(0)
+                raise ValueError("bad " + str(n))
+
+
+            async def holder() -> None:
+                t = asyncio.create_task(bad(2))
+                await asyncio.sleep(0.01)
+                print("holder ends", file=sys.stderr)
+
+
+            async def main() -> None:
+                asyncio.create_task(bad(1))
+                await asyncio.sleep(0.01)
+                print("after the first", file=sys.stderr)
+                await holder()
+                print("after the holder", file=sys.stderr)
+                kept.append(asyncio.create_task(bad(3)))
+                await asyncio.sleep(0.01)
+                print("end of main", file=sys.stderr)
+
+
+            kept: list[asyncio.Task[None]] = []
+
+            if __name__ == "__main__":
+                asyncio.run(main())
+                print("after run", file=sys.stderr)
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(run.stdout, "");
+    assert_eq!(run.stderr, "Task exception was never retrieved\nValueError: bad 1\nafter the first\nholder ends\nTask exception was never retrieved\nValueError: bad 2\nafter the holder\nend of main\nafter run\nTask exception was never retrieved\nValueError: bad 3\n");
+}
+
 #[test]
 fn coroutine_misuse_is_refused() {
     refused(

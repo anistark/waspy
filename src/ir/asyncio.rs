@@ -495,13 +495,17 @@ pub(crate) fn coroutine_functions() -> Vec<IRFunction> {
 /// Every runtime class: the loop's state, handles, callbacks, the futures'
 /// base, and `Future`, `Task`, and `_Coro` for each result type in `kinds`
 /// (which holds None).
-pub(crate) fn runtime_classes(kinds: &[IRType], bridge: bool) -> Vec<IRClass> {
+///
+/// With `finalize` (a program that makes tasks it may not await), a task
+/// reports an exception nothing retrieved as it is reclaimed, as CPython's
+/// does, rather than when the loop closes.
+pub(crate) fn runtime_classes(kinds: &[IRType], bridge: bool, finalize: bool) -> Vec<IRClass> {
     let mut out = vec![loop_state(bridge), callback(), handle(), future_base()];
     for t in kinds {
         out.push(future(t));
     }
     for t in kinds {
-        out.push(task(t));
+        out.push(task(t, finalize));
         let mut c = coro(t);
         if bridge && crosses_js(t) {
             c.methods.push(export_method(t));
@@ -774,6 +778,12 @@ fn loop_state(bridge: bool) -> IRClass {
         // The task stepping, when `has_current`.
         var(
             "current",
+            call(&name("_FutureBase"), vec![]),
+            cls("_FutureBase"),
+        ),
+        // What `current` holds between steps, so that it keeps no task alive.
+        var(
+            "idle",
             call(&name("_FutureBase"), vec![]),
             cls("_FutureBase"),
         ),
@@ -1159,8 +1169,27 @@ fn future(t: &IRType) -> IRClass {
 }
 
 /// `asyncio.Task[T]`: a future stepping a coroutine from the loop.
-fn task(t: &IRType) -> IRClass {
+fn task(t: &IRType, finalize: bool) -> IRClass {
     let c = task_class(t);
+    let stepped = || {
+        let mut out = vec![set_loop("has_current", boolean(false))];
+        if finalize {
+            out.push(set_loop("current", loop_var("idle")));
+        }
+        out
+    };
+    let mut failed = vec![expr_stmt(mcall(
+        v("self"),
+        "set_exception",
+        vec![v("failure")],
+    ))];
+    if !finalize {
+        failed.push(expr_stmt(mcall(
+            loop_var("failed"),
+            "append",
+            vec![v("self")],
+        )));
+    }
     let coro_ty = IRType::Class(coro_class(t));
     let base = || IRType::Class("BaseException".to_string());
     let finished = if *t == IRType::None {
@@ -1281,30 +1310,31 @@ fn task(t: &IRType) -> IRClass {
                         ],
                         name: Some("fatal".to_string()),
                         body: crate::ir::IRBody {
-                            statements: vec![
-                                expr_stmt(mcall(v("self"), "set_exception", vec![v("fatal")])),
-                                set_loop("has_current", boolean(false)),
-                                IRStatement::Raise {
+                            statements: {
+                                let mut out = vec![expr_stmt(mcall(
+                                    v("self"),
+                                    "set_exception",
+                                    vec![v("fatal")],
+                                ))];
+                                out.extend(stepped());
+                                out.push(IRStatement::Raise {
                                     exception: None,
                                     cause: None,
-                                },
-                            ],
+                                });
+                                out
+                            },
                         },
                     },
                     IRExceptHandler {
                         exception_types: vec!["BaseException".to_string()],
                         name: Some("failure".to_string()),
-                        body: crate::ir::IRBody {
-                            statements: vec![
-                                expr_stmt(mcall(v("self"), "set_exception", vec![v("failure")])),
-                                expr_stmt(mcall(loop_var("failed"), "append", vec![v("self")])),
-                            ],
-                        },
+                        body: crate::ir::IRBody { statements: failed },
                     },
                 ],
                 finally_body: None,
             },
-            set_loop("has_current", boolean(false)),
+            // `has_current` false, and `current` let go of.
+            if_(boolean(true), stepped()),
             // A finished task is no longer the loop's to cancel.
             if_(
                 ne(my("_state"), int(PENDING)),
@@ -1316,146 +1346,167 @@ fn task(t: &IRType) -> IRClass {
             ),
         ],
     );
+    let mut finalizer = Vec::new();
+    if finalize {
+        // `Task.__del__`: CPython's report of an exception nothing
+        // retrieved, its first and last lines.
+        finalizer.push(method(
+            "__del__",
+            vec![me(&c)],
+            IRType::None,
+            vec![if_(
+                my("_log_traceback"),
+                vec![
+                    set_attr(v("self"), "_log_traceback", boolean(false)),
+                    write_err(text("Task exception was never retrieved\n")),
+                    write_err(bin(f("exc_line", vec![my("_exc")]), IROp::Add, text("\n"))),
+                ],
+            )],
+        ));
+    }
     IRClass {
         name: c.clone(),
         bases: vec![future_class(t)],
-        methods: vec![
-            method(
-                "__init__",
-                vec![me(&c), param("coro", &coro_ty)],
-                IRType::None,
-                vec![
-                    expr_stmt(qcall(&name("_FutureBase"), "__init__", vec![v("self")])),
-                    set_my_typed("_coro", v("coro"), &coro_ty),
-                    set_my_typed("_waiter", none(), &opt(cls("_FutureBase"))),
-                    set_my_typed("_must_cancel", boolean(false), &IRType::Bool),
-                    set_my_typed("_cancels", int(0), &IRType::Int),
-                    set_loop("names", bin(loop_var("names"), IROp::Add, int(1))),
-                    set_my_typed(
-                        "_name",
-                        bin(
-                            text("Task-"),
-                            IROp::Add,
-                            call("str", vec![loop_var("names")]),
-                        ),
-                        &IRType::String,
-                    ),
-                    expr_stmt(f(
-                        "call_soon",
-                        vec![call(&name("_Step"), vec![v("self")]), none()],
-                    )),
-                    expr_stmt(mcall(loop_var("tasks"), "append", vec![v("self")])),
-                ],
-            ),
-            method(
-                "get_name",
-                vec![me(&c)],
-                IRType::String,
-                vec![ret_val(my("_name"))],
-            ),
-            method(
-                "cancel",
-                vec![me(&c)],
-                IRType::Bool,
-                vec![
-                    set_attr(v("self"), "_log_traceback", boolean(false)),
-                    if_(
-                        ne(my("_state"), int(PENDING)),
-                        vec![ret_val(boolean(false))],
-                    ),
-                    set_attr(
-                        v("self"),
-                        "_cancels",
-                        bin(my("_cancels"), IROp::Add, int(1)),
-                    ),
-                    if_(
-                        not_none(my("_waiter")),
-                        vec![if_(
-                            mcall(
-                                call(crate::ir::SOME_FN, vec![my("_waiter"), text("cancel")]),
-                                "cancel",
-                                vec![],
-                            ),
-                            vec![ret_val(boolean(true))],
-                        )],
-                    ),
-                    set_attr(v("self"), "_must_cancel", boolean(true)),
-                    ret_val(boolean(true)),
-                ],
-            ),
-            method(
-                "cancelling",
-                vec![me(&c)],
-                IRType::Int,
-                vec![ret_val(my("_cancels"))],
-            ),
-            method(
-                "uncancel",
-                vec![me(&c)],
-                IRType::Int,
-                vec![
-                    if_(
-                        cmp(my("_cancels"), IRCompareOp::Gt, int(0)),
-                        vec![
-                            set_attr(
-                                v("self"),
-                                "_cancels",
-                                bin(my("_cancels"), IROp::Sub, int(1)),
-                            ),
-                            if_(
-                                eq(my("_cancels"), int(0)),
-                                vec![set_attr(v("self"), "_must_cancel", boolean(false))],
-                            ),
-                        ],
-                    ),
-                    ret_val(my("_cancels")),
-                ],
-            ),
-            method(
-                "_step",
-                vec![me(&c)],
-                IRType::None,
-                vec![expr_stmt(mcall(
-                    v("self"),
-                    "_run",
+        methods: finalizer
+            .into_iter()
+            .chain([
+                method(
+                    "__init__",
+                    vec![me(&c), param("coro", &coro_ty)],
+                    IRType::None,
                     vec![
-                        boolean(false),
-                        call("RuntimeError", vec![text("coroutine")]),
+                        expr_stmt(qcall(&name("_FutureBase"), "__init__", vec![v("self")])),
+                        set_my_typed("_coro", v("coro"), &coro_ty),
+                        set_my_typed("_waiter", none(), &opt(cls("_FutureBase"))),
+                        set_my_typed("_must_cancel", boolean(false), &IRType::Bool),
+                        set_my_typed("_cancels", int(0), &IRType::Int),
+                        set_loop("names", bin(loop_var("names"), IROp::Add, int(1))),
+                        set_my_typed(
+                            "_name",
+                            bin(
+                                text("Task-"),
+                                IROp::Add,
+                                call("str", vec![loop_var("names")]),
+                            ),
+                            &IRType::String,
+                        ),
+                        expr_stmt(f(
+                            "call_soon",
+                            vec![call(&name("_Step"), vec![v("self")]), none()],
+                        )),
+                        expr_stmt(mcall(loop_var("tasks"), "append", vec![v("self")])),
                     ],
-                ))],
-            ),
-            method(
-                "_wakeup",
-                vec![me(&c), param("fut", &opt(cls("_FutureBase")))],
-                IRType::None,
-                vec![
-                    IRStatement::TryExcept {
-                        try_body: body(vec![expr_stmt(mcall(
-                            call(crate::ir::SOME_FN, vec![v("fut"), text("_check")]),
-                            "_check",
-                            vec![],
-                        ))]),
-                        except_handlers: vec![IRExceptHandler {
-                            exception_types: vec!["BaseException".to_string()],
-                            name: Some("e".to_string()),
-                            body: crate::ir::IRBody {
-                                statements: vec![
-                                    expr_stmt(mcall(
-                                        v("self"),
-                                        "_run",
-                                        vec![boolean(true), v("e")],
-                                    )),
-                                    ret(),
-                                ],
-                            },
-                        }],
-                        finally_body: None,
-                    },
-                    expr_stmt(mcall(v("self"), "_step", vec![])),
-                ],
-            ),
-            run,
-        ],
+                ),
+                method(
+                    "get_name",
+                    vec![me(&c)],
+                    IRType::String,
+                    vec![ret_val(my("_name"))],
+                ),
+                method(
+                    "cancel",
+                    vec![me(&c)],
+                    IRType::Bool,
+                    vec![
+                        set_attr(v("self"), "_log_traceback", boolean(false)),
+                        if_(
+                            ne(my("_state"), int(PENDING)),
+                            vec![ret_val(boolean(false))],
+                        ),
+                        set_attr(
+                            v("self"),
+                            "_cancels",
+                            bin(my("_cancels"), IROp::Add, int(1)),
+                        ),
+                        if_(
+                            not_none(my("_waiter")),
+                            vec![if_(
+                                mcall(
+                                    call(crate::ir::SOME_FN, vec![my("_waiter"), text("cancel")]),
+                                    "cancel",
+                                    vec![],
+                                ),
+                                vec![ret_val(boolean(true))],
+                            )],
+                        ),
+                        set_attr(v("self"), "_must_cancel", boolean(true)),
+                        ret_val(boolean(true)),
+                    ],
+                ),
+                method(
+                    "cancelling",
+                    vec![me(&c)],
+                    IRType::Int,
+                    vec![ret_val(my("_cancels"))],
+                ),
+                method(
+                    "uncancel",
+                    vec![me(&c)],
+                    IRType::Int,
+                    vec![
+                        if_(
+                            cmp(my("_cancels"), IRCompareOp::Gt, int(0)),
+                            vec![
+                                set_attr(
+                                    v("self"),
+                                    "_cancels",
+                                    bin(my("_cancels"), IROp::Sub, int(1)),
+                                ),
+                                if_(
+                                    eq(my("_cancels"), int(0)),
+                                    vec![set_attr(v("self"), "_must_cancel", boolean(false))],
+                                ),
+                            ],
+                        ),
+                        ret_val(my("_cancels")),
+                    ],
+                ),
+                method(
+                    "_step",
+                    vec![me(&c)],
+                    IRType::None,
+                    vec![expr_stmt(mcall(
+                        v("self"),
+                        "_run",
+                        vec![
+                            boolean(false),
+                            call("RuntimeError", vec![text("coroutine")]),
+                        ],
+                    ))],
+                ),
+                method(
+                    "_wakeup",
+                    vec![me(&c), param("fut", &opt(cls("_FutureBase")))],
+                    IRType::None,
+                    vec![
+                        IRStatement::TryExcept {
+                            try_body: body(vec![expr_stmt(mcall(
+                                call(crate::ir::SOME_FN, vec![v("fut"), text("_check")]),
+                                "_check",
+                                vec![],
+                            ))]),
+                            except_handlers: vec![IRExceptHandler {
+                                exception_types: vec!["BaseException".to_string()],
+                                name: Some("e".to_string()),
+                                body: crate::ir::IRBody {
+                                    statements: vec![
+                                        expr_stmt(mcall(
+                                            v("self"),
+                                            "_run",
+                                            vec![boolean(true), v("e")],
+                                        )),
+                                        ret(),
+                                    ],
+                                },
+                            }],
+                            finally_body: None,
+                        },
+                        expr_stmt(mcall(v("self"), "_step", vec![])),
+                    ],
+                ),
+                run,
+            ])
+            .collect(),
         class_vars: Vec::new(),
         metaclass: None,
         position: 0,
@@ -1492,7 +1543,31 @@ fn coro(t: &IRType) -> IRClass {
         set_loop("running", boolean(true)),
         assign_typed("task", call(&task_class(t), vec![v("self")]), &task_ty),
         IRStatement::TryExcept {
-            try_body: body(guarded),
+            try_body: body(vec![IRStatement::TryExcept {
+                try_body: body(guarded),
+                // `run_until_complete`: a BaseException the coroutine raised
+                // (SystemExit) is consumed, so the task does not report it.
+                except_handlers: vec![IRExceptHandler {
+                    exception_types: vec!["BaseException".to_string()],
+                    name: None,
+                    body: crate::ir::IRBody {
+                        statements: vec![
+                            if_(
+                                and(
+                                    mcall(v("task"), "done", vec![]),
+                                    not(mcall(v("task"), "cancelled", vec![])),
+                                ),
+                                vec![expr_stmt(mcall(v("task"), "exception", vec![]))],
+                            ),
+                            IRStatement::Raise {
+                                exception: None,
+                                cause: None,
+                            },
+                        ],
+                    },
+                }],
+                finally_body: None,
+            }]),
             except_handlers: Vec::new(),
             finally_body: Some(body(vec![expr_stmt(f("shutdown", vec![]))])),
         },
@@ -1973,7 +2048,7 @@ fn idle(bridge: bool) -> Vec<IRStatement> {
 
 /// The loop: scheduling, the timer heap, a turn, running until a future is
 /// done, and what `asyncio.run()` does around that.
-pub(crate) fn runtime_functions(bridge: bool) -> Vec<IRFunction> {
+pub(crate) fn runtime_functions(bridge: bool, finalize: bool) -> Vec<IRFunction> {
     let h = || cls("_Handle");
     let heap = || loop_var("timers");
     let swap = |a: IRExpr, b: IRExpr| {
@@ -2009,6 +2084,11 @@ pub(crate) fn runtime_functions(bridge: bool) -> Vec<IRFunction> {
         "Task exception was never retrieved\n",
         attr(v("t"), "_exc"),
     ));
+    let release_handle = if finalize {
+        vec![expr_stmt(call(crate::ir::DEL_NAME_FN, vec![v("h")]))]
+    } else {
+        Vec::new()
+    };
     let mut leftover = vec![if_(
         mcall(v("t"), "cancelled", vec![]),
         vec![IRStatement::Continue],
@@ -2204,6 +2284,9 @@ pub(crate) fn runtime_functions(bridge: bool) -> Vec<IRFunction> {
                                 vec![attr(v("h"), "arg")],
                             ))],
                         ),
+                        // `handle = None`: what it ran (a task's step) is let
+                        // go of here, as CPython's loop lets go of it.
+                        if_(boolean(true), release_handle.clone()),
                     ],
                 ),
             ],

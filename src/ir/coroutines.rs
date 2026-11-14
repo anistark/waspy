@@ -149,7 +149,8 @@ pub fn lower_coroutines(module: &mut IRModule) -> Result<()> {
     }
     let mut seen = HashSet::new();
     kinds.retain(|t| seen.insert(crate::ir::collections::spec::encode(t)));
-    let mut runtime = aio::runtime_classes(&kinds, bridge);
+    let finalize = sync.task_finalizer;
+    let mut runtime = aio::runtime_classes(&kinds, bridge, finalize);
     let timeout = aio::name("_Timeout");
     if let Some(t) = runtime.iter_mut().find(|c| c.name == timeout) {
         t.methods.extend(sync.timeout_methods());
@@ -173,7 +174,9 @@ pub fn lower_coroutines(module: &mut IRModule) -> Result<()> {
         .memory_layout
         .add_string(crate::ir::generators::IGNORED_GENERATOR_EXIT);
     module.classes.splice(0..0, runtime);
-    module.functions.extend(aio::runtime_functions(bridge));
+    module
+        .functions
+        .extend(aio::runtime_functions(bridge, finalize));
     if bridge {
         module.functions.extend(aio::bridge_functions());
         module.memory_layout.add_string(
@@ -220,6 +223,7 @@ pub fn lower_coroutines(module: &mut IRModule) -> Result<()> {
         types: &types,
         modules: &modules,
         counter: &mut counter,
+        finalize,
     };
     for f in &mut module.functions {
         let mut env = params_env(&f.params);
@@ -610,6 +614,9 @@ struct Lowerer<'a> {
     /// The modules the program imports, which name no value to evaluate.
     modules: &'a HashSet<String>,
     counter: &'a mut u32,
+    /// Whether a coroutine lets go of its variables as it finishes, as
+    /// CPython's frame does, so a task one held is reclaimed then.
+    finalize: bool,
 }
 
 /// What a statement's hoisting needs to know of the coroutine it is in.
@@ -684,6 +691,18 @@ impl Lowerer<'_> {
         let scope = Scope { locals };
         let mut statements = vec![throw_check()];
         statements.extend(self.statements(body.statements, env, &scope, result)?);
+        if self.finalize {
+            // However it finishes, its variables go (the generator pass
+            // writes out which: the fields it keeps them in).
+            statements = vec![IRStatement::TryExcept {
+                try_body: crate::ir::build::body(statements),
+                except_handlers: Vec::new(),
+                finally_body: Some(crate::ir::build::body(vec![expr_stmt(call(
+                    crate::ir::RELEASE_FN,
+                    vec![],
+                ))])),
+            }];
+        }
         Ok(IRBody { statements })
     }
 
