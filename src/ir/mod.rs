@@ -20,6 +20,7 @@ pub(crate) mod json;
 mod logging;
 mod metaclasses;
 mod partials;
+pub(crate) mod pyodide_http;
 mod re;
 mod str_methods;
 mod types;

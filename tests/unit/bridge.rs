@@ -483,3 +483,29 @@ fn proxy_refusals() {
         "returns a value but declares no return type",
     );
 }
+
+/// `pyfetch()`'s `json()` stored where no type is declared, and its
+/// `signal`, are refused.
+#[test]
+fn fetch_refusals() {
+    refused(
+        r#"
+        from pyodide.http import pyfetch
+
+        async def main() -> None:
+            resp = await pyfetch("https://api.test/scores")
+            data = await resp.json()
+            print(data)
+        "#,
+        "to_py() needs the type it converts into",
+    );
+    refused(
+        r#"
+        from pyodide.http import pyfetch
+
+        async def main(s) -> None:
+            resp = await pyfetch("https://api.test/scores", signal=s)
+        "#,
+        "pyfetch()'s 'signal' is not supported",
+    );
+}

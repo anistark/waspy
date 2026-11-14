@@ -1066,7 +1066,7 @@
   },
   "webInterop": {
     "title": "WEB INTEROP",
-    "status": "progress",
+    "status": "done",
     "features": [
       {
         "name": "JavaScript bridge & value conversion",
@@ -1088,8 +1088,10 @@
       },
       {
         "name": "HTTP requests (fetch API)",
-        "status": "todo",
-        "issue": 35
+        "status": "done",
+        "version": "upcoming",
+        "issue": 35,
+        "test": "web_interop::fetch_api"
       }
     ]
   },

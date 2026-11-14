@@ -40,9 +40,23 @@ const TYPES = {
 };
 
 // The repository, read-only and on loopback: the page fetches the WASI shim,
-// Pyodide, the binaries, and the Python they were compiled from.
+// Pyodide, the binaries, and the Python they were compiled from. `/__echo`
+// answers any request with what it was sent (its method, body, and
+// content type, as JSON), for the programs that fetch.
 const server = createServer(async (request, response) => {
     const path = decodeURIComponent(new URL(request.url, "http://localhost").pathname);
+    if (path === "/__echo") {
+        const chunks = [];
+        for await (const chunk of request) chunks.push(chunk);
+        const echoed = {
+            method: request.method,
+            body: Buffer.concat(chunks).toString("utf8"),
+            type: request.headers["content-type"] ?? "",
+        };
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify(echoed));
+        return;
+    }
     const file = resolve(root, `.${path}`);
     if (request.method !== "GET" || !file.startsWith(root + sep)) {
         response.writeHead(403).end();

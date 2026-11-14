@@ -669,6 +669,19 @@ pub(crate) fn build_class_name(ctx: &CompilationContext, by_id: Option<bool>) ->
                 "<class 'coroutine'>".to_string()
             }
             _ if name.starts_with(crate::ir::CORO_CLASS_PREFIX) => "coroutine".to_string(),
+            // A class of `asyncio`'s modules or `pyodide`'s is named by its
+            // module path, its `__name__` the last part (a queue's element
+            // type left off).
+            Some(true) if name.starts_with("asyncio.") || name.starts_with("pyodide.") => {
+                format!("<class '{}'>", name.split('[').next().unwrap_or(name))
+            }
+            _ if name.starts_with("asyncio.") || name.starts_with("pyodide.") => name
+                .split('[')
+                .next()
+                .unwrap_or(name)
+                .rsplit_once('.')
+                .map_or(name.as_str(), |(_, n)| n)
+                .to_string(),
             Some(true) if is_builtin_exception(name) => format!("<class '{name}'>"),
             Some(true) => format!(
                 "<class '{}.{name}'>",

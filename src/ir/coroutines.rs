@@ -792,6 +792,44 @@ impl Lowerer<'_> {
         }
     }
 
+    /// `await resp.json()` on a `pyodide.http.FetchResponse`: the parsed
+    /// JavaScript value converted into the type of the place it is stored
+    /// in, `(await resp._json()).to_py()`.
+    fn fetch_json(&self, stmt: &mut IRStatement, env: &HashMap<String, IRType>) {
+        let response = IRType::Class(crate::ir::pyodide_http::FETCH_RESPONSE.to_string());
+        // A lone `await resp.json()` parses the body and drops the value.
+        if let IRStatement::Expression(e) = stmt {
+            if let Some(IRExpr::MethodCall {
+                object,
+                method_name,
+                arguments,
+            }) = awaited(e)
+            {
+                if method_name == "json" && arguments.is_empty() && self.ty(object, env) == response
+                {
+                    let object = (**object).clone();
+                    *e = call(AWAIT_FN, vec![mcall(object, "_json", vec![])]);
+                    return;
+                }
+            }
+        }
+        each_expr(stmt, &mut |e| {
+            let Some(IRExpr::MethodCall {
+                object,
+                method_name,
+                arguments,
+            }) = awaited(e)
+            else {
+                return;
+            };
+            if method_name != "json" || !arguments.is_empty() || self.ty(object, env) != response {
+                return;
+            }
+            let parsed = call(AWAIT_FN, vec![mcall((**object).clone(), "_json", vec![])]);
+            *e = mcall(parsed, "to_py", vec![]);
+        });
+    }
+
     fn statement(
         &mut self,
         stmt: IRStatement,
@@ -801,6 +839,7 @@ impl Lowerer<'_> {
     ) -> Result<Vec<IRStatement>> {
         let mut stmt = stmt;
         self.type_queue_stmt(&mut stmt)?;
+        self.fetch_json(&mut stmt, env);
         let mut pre = Vec::new();
         let rewritten = match stmt {
             // `a, b = await asyncio.gather(x, y)`: each target takes its

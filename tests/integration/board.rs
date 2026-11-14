@@ -6982,4 +6982,62 @@ mod web_interop {
         assert_eq!(run.stderr, "");
         assert_eq!(run.stdout, "['click on go', 'bubbled to events-demo', 'click on go', 'bubbled to events-demo']\n['stopped']\n['once ping']\nFalse\nTrue\ndone 1\n");
     }
+
+    /// HTTP requests (fetch API)
+    ///
+    /// Pyodide's `pyodide.http.pyfetch`, awaited: a GET whose status, text, URL,
+    /// and headers are read and whose JSON is parsed into a typed dict, a POST
+    /// with headers and a body, `raise_for_status()` raising `HttpStatusError`, a
+    /// body read twice raising `BodyUsedError`, and a request that fails raising
+    /// `AbortError`, as Pyodide answers each for the harness's responses (the
+    /// browser gate checks `examples/fetch_demo.py` against Pyodide in Chromium).
+    #[test]
+    fn fetch_api() {
+        let run = run_main(
+            &dedent(
+                r##"
+                import asyncio
+
+                from pyodide.http import AbortError, HttpStatusError, pyfetch
+
+
+                async def main() -> None:
+                    resp = await pyfetch("https://api.test/scores")
+                    print(resp.status, resp.ok, resp.status_text, resp.url, resp.headers["content-type"])
+                    scores: dict[str, int] = await resp.json()
+                    print(sorted(scores.items()))
+                    sent = await pyfetch(
+                        "https://api.test/__echo",
+                        method="POST",
+                        headers={"Content-Type": "text/plain"},
+                        body="hello",
+                    )
+                    echoed: dict[str, str] = await sent.json()
+                    print(echoed["method"], echoed["type"], echoed["body"])
+                    missing = await pyfetch("https://api.test/missing")
+                    try:
+                        missing.raise_for_status()
+                    except HttpStatusError as e:
+                        print(e.status, e)
+                    print(repr(await missing.text()), missing.body_used)
+                    try:
+                        await missing.json()
+                    except OSError as e:
+                        print(type(e).__name__, e)
+                    try:
+                        await pyfetch("https://offline.test/")
+                    except AbortError as e:
+                        print("aborted:", e)
+
+
+                if __name__ == "__main__":
+                    asyncio.run(main())
+                "##,
+            ),
+            "",
+            &[],
+        );
+        assert_eq!(run.stderr, "");
+        assert_eq!(run.stdout, "200 True OK https://api.test/scores application/json\n[('ada', 7), ('bo', 12)]\nPOST text/plain hello\n404 404 Client Error: Not Found for url: https://api.test/missing\n'nothing here' True\nBodyUsedError Response body is already used\naborted: Failed to fetch\n");
+    }
 }

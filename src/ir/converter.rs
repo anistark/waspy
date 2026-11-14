@@ -624,6 +624,7 @@ fn lower_module(ast: &Suite, hoisted: usize) -> Result<IRModule> {
     crate::ir::lower_collections(&mut module)?;
     crate::ir::lower_dict_views(&mut module);
     crate::ir::generators::transform_generators(&mut module)?;
+    crate::ir::pyodide_http::lower_pyodide_http(&mut module)?;
     crate::ir::lower_coroutines(&mut module)?;
     crate::ir::finalize::finalize_module(&mut module)?;
 

@@ -2085,11 +2085,77 @@ fn js_globals() -> Js {
         );
         Ok(new_event(&kind, bubbles))
     });
+    // `fetch(url, init)`: a response from `fetch_routes` (an URL ending
+    // `/__echo` answers what it was sent, as JSON), or a rejected promise for
+    // any other, as a network failure.
+    let fetch = Js::function(|_, _, args| {
+        let url = args.first().map(Js::text).unwrap_or_default();
+        let init = args.get(1).cloned().unwrap_or(Js::Undefined);
+        let field = |name: &str| init.get(name).map(|v| v.text());
+        let (status, status_text, body, kind) = if url.ends_with("/__echo") {
+            let header = match init.get("headers") {
+                Some(h @ Js::Obj(..)) => h.get("Content-Type").map(|v| v.text()),
+                _ => None,
+            };
+            let echoed = serde_json::json!({
+                "method": field("method").unwrap_or_else(|| "GET".to_string()),
+                "body": field("body").unwrap_or_default(),
+                "type": header.unwrap_or_default(),
+            });
+            (200, "OK", echoed.to_string(), "application/json")
+        } else {
+            match fetch_route(&url) {
+                Some(route) => route,
+                None => {
+                    let failure = js_error("TypeError", "Failed to fetch");
+                    return Ok(Js::Promise(Rc::new(RefCell::new(Some((true, failure))))));
+                }
+            }
+        };
+        Ok(Js::Promise(Rc::new(RefCell::new(Some((
+            false,
+            fetch_response(&url, status, status_text, &body, kind),
+        ))))))
+    });
+    object
+        .set(
+            "assign",
+            Js::function(|_, _, args| {
+                let target = args.first().cloned().unwrap_or(Js::Undefined);
+                for source in args.iter().skip(1) {
+                    if let Js::Obj(props, None) = source {
+                        for (k, v) in props.borrow().iter() {
+                            target.set(k, v.clone())?;
+                        }
+                    }
+                }
+                Ok(target)
+            }),
+        )
+        .unwrap();
+    object
+        .set(
+            "fromEntries",
+            Js::function(|_, _, args| {
+                let out = Js::object(vec![]);
+                if let Some(Js::Arr(pairs)) = args.first() {
+                    for pair in pairs.borrow().iter() {
+                        if let Js::Arr(kv) = pair {
+                            let kv = kv.borrow();
+                            out.set(&kv[0].text(), kv[1].clone())?;
+                        }
+                    }
+                }
+                Ok(out)
+            }),
+        )
+        .unwrap();
     let reflect = Js::object(vec![
         ("apply", Js::function(|_, _, _| Ok(Js::Undefined))),
         ("ownKeys", Js::function(|_, _, _| Ok(Js::Undefined))),
     ]);
     let globals = Js::object(vec![
+        ("fetch", fetch),
         ("Reflect", reflect),
         ("document", new_document()),
         ("Event", event),
@@ -2105,6 +2171,80 @@ fn js_globals() -> Js {
     ]);
     globals.set("globalThis", globals.clone()).unwrap();
     globals
+}
+
+/// The responses the tests' `fetch` knows: (status, status text, body,
+/// content type) by URL.
+fn fetch_route(url: &str) -> Option<(u16, &'static str, String, &'static str)> {
+    match url {
+        "https://api.test/scores" => Some((
+            200,
+            "OK",
+            r#"{"ada": 7, "bo": 12}"#.to_string(),
+            "application/json",
+        )),
+        "https://api.test/missing" => {
+            Some((404, "Not Found", "nothing here".to_string(), "text/plain"))
+        }
+        _ => None,
+    }
+}
+
+/// A `Response`: its status, headers, and a body `text()` reads once.
+fn fetch_response(url: &str, status: u16, status_text: &str, body: &str, kind: &str) -> Js {
+    let headers = {
+        let kind = kind.to_string();
+        Js::object(vec![(
+            "entries",
+            Js::function(move |_, _, _| {
+                Ok(Js::Arr(Rc::new(RefCell::new(vec![Js::Arr(Rc::new(
+                    RefCell::new(vec![
+                        Js::Str("content-type".to_string()),
+                        Js::Str(kind.clone()),
+                    ]),
+                ))]))))
+            }),
+        )])
+    };
+    let response = Js::object(vec![
+        ("status", Js::Num(status as f64)),
+        ("ok", Js::Bool((200..300).contains(&status))),
+        ("statusText", Js::Str(status_text.to_string())),
+        ("url", Js::Str(url.to_string())),
+        ("redirected", Js::Bool(false)),
+        ("type", Js::Str("basic".to_string())),
+        ("bodyUsed", Js::Bool(false)),
+        ("headers", headers),
+        ("__body", Js::Str(body.to_string())),
+    ]);
+    let read = Js::function(|_, this, _| {
+        if matches!(this.get("bodyUsed"), Some(Js::Bool(true))) {
+            let failure = js_error(
+                "TypeError",
+                "Failed to execute 'text' on 'Response': body stream already read",
+            );
+            return Ok(Js::Promise(Rc::new(RefCell::new(Some((true, failure))))));
+        }
+        this.set("bodyUsed", Js::Bool(true))?;
+        let body = this.get("__body").unwrap_or(Js::Str(String::new()));
+        Ok(Js::Promise(Rc::new(RefCell::new(Some((false, body))))))
+    });
+    response.set("text", read).unwrap();
+    let (url, status_text, body, kind) = (
+        url.to_string(),
+        status_text.to_string(),
+        body.to_string(),
+        kind.to_string(),
+    );
+    response
+        .set(
+            "clone",
+            Js::function(move |_, _, _| {
+                Ok(fetch_response(&url, status, &status_text, &body, &kind))
+            }),
+        )
+        .unwrap();
+    response
 }
 
 /// An array's methods the tests call: `push`, and a module's exports.

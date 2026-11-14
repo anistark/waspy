@@ -136,6 +136,26 @@ listener.destroy()
 
 A query that finds nothing answers `null`, which is Pyodide's `jsnull`, not None, and false as a truth value (`if el:`). `examples/dom_demo.py` is checked against Pyodide in Chromium by the browser gate.
 
+## HTTP requests
+
+`pyodide.http.pyfetch(url, ...)` is Pyodide's, awaited: its keyword arguments are what JavaScript's `fetch` takes (`method`, `headers`, `body`, ...), and it answers a `FetchResponse` with `status`, `ok`, `status_text`, `url`, `redirected`, `type`, `body_used`, `headers` (a dict), `raise_for_status()`, `clone()`, and the coroutines `text()`, `string()`, and `json()`. `json()` parses into the type the place it is stored in declares, through `.to_py()`, since a value of no declared type has no counterpart here.
+
+```python
+import asyncio
+from pyodide.http import HttpStatusError, pyfetch
+
+async def main() -> None:
+    resp = await pyfetch("/api/scores")
+    resp.raise_for_status()
+    scores: dict[str, int] = await resp.json()
+    sent = await pyfetch("/api/scores", method="POST",
+                         headers={"Content-Type": "application/json"},
+                         body='{"ada": 9}')
+    print(sent.status)
+```
+
+A failed request raises `AbortError` with JavaScript's message, `raise_for_status()` raises `HttpStatusError` for a 4xx or 5xx status (its message as Pyodide words it), and reading a body twice raises `BodyUsedError`, all three `OSError` subclasses. The `__main__` block's `asyncio.run()` can await `pyfetch` where the browser has JSPI (see [Promises](#promises)); an exported coroutine can anywhere. `examples/fetch_demo.py` is checked against Pyodide in Chromium by the browser gate.
+
 ## The loader
 
 `waspy::js_loader()` is the JavaScript side of a compiled module, an ES module that is the same for every program. Write it next to the module (the `advanced_compiler` example's `--js` flag does) and instantiate through it:
