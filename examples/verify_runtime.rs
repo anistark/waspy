@@ -115,12 +115,56 @@ struct Command {
     exit: i32,
 }
 
-const COMMANDS: &[Command] = &[Command {
-    name: "word_frequency_cli",
-    source: "examples/word_frequency_cli.py",
-    args: &["4"],
-    exit: 0,
-}];
+const COMMANDS: &[Command] = &[
+    Command {
+        name: "word_frequency_cli",
+        source: "examples/word_frequency_cli.py",
+        args: &["4"],
+        exit: 0,
+    },
+    Command {
+        name: "async_pipeline",
+        source: "examples/async_pipeline.py",
+        args: &[],
+        exit: 0,
+    },
+];
+
+/// A program using the JavaScript bridge, run as a WASI command through the
+/// loader. Only a JavaScript host can run it, so only the browser gate does,
+/// against Pyodide running the same source in the same page.
+const WEB_COMMANDS: &[(&str, &str)] = &[("js_bridge_demo", "examples/js_bridge_demo.py")];
+
+/// Build each web command at both optimization levels.
+fn build_web(root: &Path, out_dir: &Path) -> Result<Vec<serde_json::Value>> {
+    let mut entries = Vec::new();
+    for (name, source_path) in WEB_COMMANDS {
+        let source = read(&root.join(source_path))?;
+        for optimize in [false, true] {
+            let options = CompilerOptions {
+                optimize,
+                ..CompilerOptions::default()
+            };
+            let wasm = compile_python_to_wasm_with_options(&source, &options)
+                .with_context(|| format!("compile {source_path}"))?;
+            let file_name = if optimize {
+                format!("{name}.opt.wasm")
+            } else {
+                format!("{name}.wasm")
+            };
+            let path = out_dir.join(&file_name);
+            fs::write(&path, &wasm).with_context(|| format!("write {}", path.display()))?;
+            println!("built {file_name} ({} bytes, a web command)", wasm.len());
+            entries.push(serde_json::json!({
+                "program": name,
+                "optimized": optimize,
+                "wasm": format!("{OUT_DIR}/{file_name}"),
+                "source": source_path,
+            }));
+        }
+    }
+    Ok(entries)
+}
 
 /// Build each command at both optimization levels, as manifest entries.
 fn build_commands(root: &Path, out_dir: &Path) -> Result<Vec<serde_json::Value>> {
@@ -226,6 +270,7 @@ fn main() -> Result<()> {
     }
 
     let commands = build_commands(root, &out_dir)?;
+    let web = build_web(root, &out_dir)?;
     let manifest = out_dir.join("manifest.json");
     let total: usize = entries
         .iter()
@@ -236,6 +281,7 @@ fn main() -> Result<()> {
         serde_json::to_string_pretty(&serde_json::json!({
             "modules": entries,
             "commands": commands,
+            "web": web,
         }))?,
     )
     .with_context(|| format!("write {}", manifest.display()))?;

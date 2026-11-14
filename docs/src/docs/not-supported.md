@@ -6,7 +6,7 @@ description: "Syntax the compiler rejects up front, with a located error and a h
 
 The compiler validates syntax up front and rejects these with a located error and a hint, rather than miscompiling them:
 
-- `async def`, `await`, `async for`, and `async with`
+- `async for`, `async with`, and an `async def` inside a function (`async def` and `await` themselves are supported: see [JavaScript and async](/docs/javascript/))
 - `match` statements, `type` aliases, `except*`, and `del` of an attribute or a stepped slice
 - `from module import *`
 - `*args`, `**kwargs`, and keyword-only parameters on methods other than `__init__`, `**` unpacking in a call, and positional-only parameters (`/`)

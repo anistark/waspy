@@ -29,8 +29,8 @@ fn parse_error_reports_line_and_column() {
 fn unsupported_statements_are_rejected_with_hints() {
     let cases: &[(&str, &str)] = &[
         (
-            "async def f():\n    return 1\n",
-            "async functions are not supported",
+            "async def f(y: list) -> None:\n    async for x in y:\n        pass\n",
+            "'async for' is not supported",
         ),
         (
             "def f(x: int) -> int:\n    match x:\n        case 1:\n            return 1\n    return 0\n",

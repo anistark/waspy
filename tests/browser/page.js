@@ -7,6 +7,7 @@
 // reaches the network (the runner aborts any request that tries).
 
 import { createWasi, WasiExit } from "/docs/src/playground/wasi.js";
+import { instantiate } from "/src/js/loader.js";
 import { loadPyodide } from "/tests/browser/node_modules/pyodide/pyodide.mjs";
 
 async function fetchOk(url) {
@@ -92,7 +93,9 @@ async function waspyChecks(wasm, names) {
     return answers;
 }
 
-// Run a compiled module's `_start` as a WASI command.
+// Run a compiled module's `_start` as a WASI command, through the loader
+// (`waspy::js_loader()`), which gives a program using the JavaScript bridge
+// the page's JavaScript.
 async function waspyCommand(wasm, stdin, args) {
     let stdout = "";
     let stderr = "";
@@ -102,7 +105,9 @@ async function waspyCommand(wasm, stdin, args) {
         onStdout: (t) => (stdout += t),
         onStderr: (t) => (stderr += t),
     });
-    const { instance } = await WebAssembly.instantiate(await bytes(wasm), wasi.imports);
+    const { instance } = await instantiate(await bytes(wasm), {
+        wasi: wasi.imports.wasi_snapshot_preview1,
+    });
     wasi.bind(instance);
     let exit = 0;
     try {
@@ -130,10 +135,15 @@ async function pyodideChecks(dir, files, names) {
     }
 }
 
+// A command runs through a promising call, so a program that runs an event
+// loop (`asyncio.run()`) can suspend in it, as Pyodide's needs to.
 async function pyodideCommand(source, stdin, args) {
     const run = pyodide.globals.get("_gate_command");
     try {
-        return JSON.parse(run(await text(source), source, stdin, JSON.stringify(args)));
+        const call = [await text(source), source, stdin, JSON.stringify(args)];
+        const answer =
+            typeof run.callPromising === "function" ? await run.callPromising(...call) : run(...call);
+        return JSON.parse(answer);
     } finally {
         run.destroy();
     }

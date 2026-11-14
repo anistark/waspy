@@ -6738,3 +6738,46 @@ fn str_methods_answer_as_cpython_does() {
          bbbb a-b-c baa\n"
     );
 }
+
+/// A `finally` run while an exception is in flight ran only up to its first
+/// call: the call's check after it took the exception for one the call had
+/// raised and unwound, so the rest of the `finally` was skipped. And tuple
+/// unpacking into a str variable that already held one left the variable's
+/// length where it was, so `best, n = key, 1` after `best = ""` read back as
+/// the empty string.
+#[test]
+fn finally_runs_whole_and_unpacking_keeps_str_lengths() {
+    let run = run_main(
+        &dedent(
+            r#"
+            def finally_calls() -> None:
+                try:
+                    try:
+                        raise ValueError("x")
+                    finally:
+                        print("a")
+                        print("b".upper())
+                        print("c")
+                except ValueError as e:
+                    print("caught", e)
+
+
+            def unpack_into_str() -> None:
+                best = ""
+                top = -1
+                for k in ["ada", "bo", "cyd"]:
+                    if len(k) > top:
+                        best, top = k, len(k)
+                print(f"[{best}] {top}")
+
+
+            if __name__ == "__main__":
+                finally_calls()
+                unpack_into_str()
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(run.stdout, "a\nB\nc\ncaught x\n[ada] 3\n");
+}

@@ -91,6 +91,75 @@ struct Lowering {
 
 thread_local! {
     static LOWERING: std::cell::RefCell<Lowering> = std::cell::RefCell::new(Lowering::default());
+    /// Set while the body of an `async def` is lowered (and cleared for the
+    /// functions and lambdas nested in it), where `await` may stand.
+    static IN_ASYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` with `await` allowed (`on`) or not, as in the body of an
+/// `async def` or of anything nested in one.
+fn with_async<T>(on: bool, f: impl FnOnce() -> T) -> T {
+    let previous = IN_ASYNC.with(|c| c.replace(on));
+    let result = f();
+    IN_ASYNC.with(|c| c.set(previous));
+    result
+}
+
+/// An `async def` as the `def` it is spelled like, which it lowers as but
+/// for its result (a coroutine) and its body (where `await` may stand).
+fn as_plain_def(def: &rustpython_parser::ast::StmtAsyncFunctionDef) -> Stmt {
+    Stmt::FunctionDef(rustpython_parser::ast::StmtFunctionDef {
+        range: def.range,
+        name: def.name.clone(),
+        args: def.args.clone(),
+        body: def.body.clone(),
+        decorator_list: def.decorator_list.clone(),
+        returns: def.returns.clone(),
+        type_comment: def.type_comment.clone(),
+        type_params: def.type_params.clone(),
+    })
+}
+
+/// An `async def`'s decorators are refused: each would have to wrap the
+/// coroutine function, which none of the compiler's decorators does.
+fn refuse_async_decorators(name: &str, decorators: &[Expr]) -> Result<()> {
+    if decorators.is_empty() {
+        return Ok(());
+    }
+    Err(crate::core::errors::unsupported_feature(
+        format!("a decorator on the coroutine function '{name}' is not supported"),
+        None,
+    )
+    .into())
+}
+
+/// What a coroutine's body may not hold: `yield` (an asynchronous
+/// generator), `async for`, `async with`, and a nested `async def`.
+fn refuse_in_coroutine(stmt: &Stmt) -> Result<()> {
+    let refuse = |what: &str| -> Result<()> {
+        Err(crate::core::errors::unsupported_feature(
+            format!("{what} in an async function is not supported"),
+            None,
+        )
+        .into())
+    };
+    match stmt {
+        Stmt::AsyncFor(_) => refuse("'async for'"),
+        Stmt::AsyncWith(_) => refuse("'async with'"),
+        Stmt::AsyncFunctionDef(_) => refuse("a nested 'async def'"),
+        Stmt::Expr(e) if matches!(&*e.value, Expr::Yield(_) | Expr::YieldFrom(_)) => {
+            refuse("'yield' (an asynchronous generator)")
+        }
+        Stmt::Assign(a) if matches!(&*a.value, Expr::Yield(_) | Expr::YieldFrom(_)) => {
+            refuse("'yield' (an asynchronous generator)")
+        }
+        _ => Ok(()),
+    }
+}
+
+/// `async def`'s result: a coroutine resolving to what it returns.
+fn coroutine_of(result: IRType) -> IRType {
+    IRType::Coroutine(Box::new(result))
 }
 
 /// The `logging` imports anywhere in the module: None when there are none,
@@ -187,6 +256,11 @@ pub fn lower_ast_to_ir_named(ast: &Suite, module_name: &str) -> Result<IRModule>
             .metadata
             .insert(format!("{IMPORT_VALUE_KEY}{module}"), place);
     }
+    if resolved.runtime_import {
+        lowered
+            .metadata
+            .insert(RUNTIME_IMPORT_KEY.to_string(), "true".to_string());
+    }
     Ok(lowered)
 }
 
@@ -222,6 +296,15 @@ fn lower_module(ast: &Suite, hoisted: usize) -> Result<IRModule> {
         if main_block.is_some() {
             module_statement_bindings(stmt, &mut defined_after);
         }
+        let plain;
+        let (stmt, is_async) = match stmt {
+            Stmt::AsyncFunctionDef(def) => {
+                refuse_async_decorators(def.name.as_str(), &def.decorator_list)?;
+                plain = as_plain_def(def);
+                (&plain, true)
+            }
+            other => (other, false),
+        };
         match stmt {
             Stmt::FunctionDef(fundef) => {
                 // Process function definition
@@ -349,7 +432,14 @@ fn lower_module(ast: &Suite, hoisted: usize) -> Result<IRModule> {
                     });
                 }
 
-                let body = lower_function_body(&fundef.body, &mut memory_layout)?;
+                let body = with_async(is_async, || {
+                    lower_function_body(&fundef.body, &mut memory_layout)
+                })?;
+                let return_type = if is_async {
+                    coroutine_of(return_type)
+                } else {
+                    return_type
+                };
 
                 module.functions.push(IRFunction {
                     name,
@@ -535,6 +625,7 @@ fn lower_module(ast: &Suite, hoisted: usize) -> Result<IRModule> {
     crate::ir::lower_collections(&mut module)?;
     crate::ir::lower_dict_views(&mut module);
     crate::ir::generators::transform_generators(&mut module)?;
+    crate::ir::lower_coroutines(&mut module)?;
     crate::ir::finalize::finalize_module(&mut module)?;
 
     Ok(module)
@@ -552,6 +643,27 @@ pub const AS_TUPLE_FN: &str = "__as_tuple";
 /// `x` as a sequence (a dict's keys, a set's members, a list or string
 /// itself), resolved where `x`'s type is known.
 pub const ITER_SEQ_FN: &str = "__iter_seq";
+
+/// Metadata key, set to `"true"` when the module loads a module by a name
+/// computed at run time, which goes through the JavaScript bridge.
+pub const RUNTIME_IMPORT_KEY: &str = "runtime_import";
+
+/// Metadata key, set to `"true"` when every export is to get a
+/// JavaScript-facing wrapper (`CompilerOptions::js_exports`).
+pub const JS_EXPORTS_KEY: &str = "js_exports";
+
+/// Whether a module uses the JavaScript bridge (`compiler::js`): it imports
+/// `js` or `pyodide`, loads a module by a name computed at run time, or was
+/// asked for JavaScript-facing exports.
+pub fn uses_js_bridge(module: &IRModule) -> bool {
+    module
+        .imports
+        .iter()
+        .any(|i| i.module == "js" || i.module == "pyodide" || i.module.starts_with("pyodide."))
+        || [RUNTIME_IMPORT_KEY, JS_EXPORTS_KEY]
+            .iter()
+            .any(|key| module.metadata.get(*key).is_some_and(|v| v == "true"))
+}
 
 /// `__datetime_clock_us()`: the host's realtime clock, in microseconds since
 /// the epoch, as a float.
@@ -1082,6 +1194,15 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
 
         // Process class body
         for stmt in &classdef.body {
+            let plain;
+            let (stmt, is_async) = match stmt {
+                Stmt::AsyncFunctionDef(def) => {
+                    refuse_async_decorators(&format!("{name}.{}", def.name), &def.decorator_list)?;
+                    plain = as_plain_def(def);
+                    (&plain, true)
+                }
+                other => (other, false),
+            };
             match stmt {
                 Stmt::FunctionDef(method_def) => {
                     // Process method (similar to function but with 'self' parameter)
@@ -1261,7 +1382,14 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
                         IRType::Unknown
                     };
 
-                    let body = lower_function_body(&method_def.body, memory_layout)?;
+                    let body = with_async(is_async, || {
+                        lower_function_body(&method_def.body, memory_layout)
+                    })?;
+                    let return_type = if is_async {
+                        coroutine_of(return_type)
+                    } else {
+                        return_type
+                    };
 
                     if cached {
                         methods.extend(cached_property_methods(
@@ -2600,10 +2728,20 @@ fn type_annotation_to_ir_type(expr: &Expr) -> Result<IRType> {
                 params: Vec::new(),
                 return_type: Box::new(IRType::Unknown),
             }),
+            // `pyodide.ffi.JsProxy`, a JavaScript value.
+            "JsProxy" => Ok(IRType::JsProxy),
             _ => Ok(IRType::Class(name.id.to_string())),
         },
         // `datetime.date`: a module's class, named through the module.
         Expr::Attribute(attr) => match &*attr.value {
+            // `pyodide.ffi.JsProxy`.
+            Expr::Attribute(sub)
+                if sub.attr.as_str() == "ffi"
+                    && attr.attr.as_str() == "JsProxy"
+                    && matches!(&*sub.value, Expr::Name(m) if m.id.as_str() == "pyodide") =>
+            {
+                Ok(IRType::JsProxy)
+            }
             // `logging.handlers.MemoryHandler`.
             Expr::Attribute(sub)
                 if sub.attr.as_str() == "handlers"
@@ -2640,6 +2778,24 @@ fn type_annotation_to_ir_type(expr: &Expr) -> Result<IRType> {
                 }
                 _ => None,
             };
+            // `asyncio.Task[int]`, `asyncio.Future[str]`: the runtime's class
+            // for that result.
+            if let Expr::Attribute(a) = &*subscript.value {
+                if matches!(&*a.value, Expr::Name(m) if m.id.as_str() == "asyncio")
+                    && matches!(a.attr.as_str(), "Task" | "Future")
+                {
+                    let result = type_annotation_to_ir_type(&subscript.slice)?;
+                    return match crate::ir::collections::spec::encode(&result) {
+                        Some(spelled) => {
+                            Ok(IRType::Class(format!("asyncio.{}[{spelled}]", a.attr)))
+                        }
+                        None => Err(anyhow!(
+                            "asyncio.{}[...] needs a type an annotation names",
+                            a.attr
+                        )),
+                    };
+                }
+            }
             if let Some(class) = re_class {
                 return match type_annotation_to_ir_type(&subscript.slice)? {
                     IRType::String => Ok(IRType::Class(class)),
@@ -2901,6 +3057,9 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
     let mut ir_statements = Vec::new();
 
     for stmt in stmts {
+        if IN_ASYNC.with(|c| c.get()) {
+            refuse_in_coroutine(stmt)?;
+        }
         match stmt {
             Stmt::Return(ret) => {
                 let expr = if let Some(value) = &ret.value {
@@ -3216,7 +3375,7 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                     Some(returns) => type_annotation_to_ir_type(returns)?,
                     None => IRType::Unknown,
                 };
-                let body = lower_function_body(&fundef.body, memory_layout)?;
+                let body = with_async(false, || lower_function_body(&fundef.body, memory_layout))?;
                 ir_statements.push(IRStatement::FunctionDef(Box::new(IRFunction {
                     name: fundef.name.to_string(),
                     params,
@@ -3421,6 +3580,18 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                                     if m.id.as_str() == "re" =>
                                 {
                                     Ok("PatternError".to_string())
+                                }
+                                (
+                                    Expr::Name(m),
+                                    name
+                                    @ ("CancelledError" | "InvalidStateError" | "TimeoutError"),
+                                ) if m.id.as_str() == "asyncio" => Ok(name.to_string()),
+                                // `except pyodide.ffi.JsException:`.
+                                (Expr::Attribute(sub), "JsException")
+                                    if sub.attr.as_str() == "ffi"
+                                        && matches!(&*sub.value, Expr::Name(p) if p.id.as_str() == "pyodide") =>
+                                {
+                                    Ok("JsException".to_string())
                                 }
                                 _ => Err(not_a_name()),
                             },
@@ -4823,10 +4994,18 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                             arguments,
                         });
                     }
-                    let mut arguments = Vec::new();
-                    for arg in &call.args {
-                        arguments.push(lower_expr(arg, memory_layout)?);
-                    }
+                    // `asyncio.gather(*aws)` takes its awaitables starred.
+                    let mut arguments = if matches!(&*attr.value, Expr::Name(m)
+                        if m.id.as_str() == "asyncio")
+                    {
+                        lower_call_args(call, memory_layout)?
+                    } else {
+                        let mut arguments = Vec::new();
+                        for arg in &call.args {
+                            arguments.push(lower_expr(arg, memory_layout)?);
+                        }
+                        arguments
+                    };
 
                     // Keyword arguments used to be dropped on the floor: only
                     // `call.args` was read, so `xs.sort(reverse=True)` reached
@@ -5380,10 +5559,27 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                 .into());
             }
             let params = process_function_params(args, memory_layout)?;
-            let body = Box::new(lower_expr(&lambda.body, memory_layout)?);
+            let body = Box::new(with_async(false, || {
+                lower_expr(&lambda.body, memory_layout)
+            })?);
             // Captured variables are found when the finalize pass lifts the
             // lambda into a module function.
             Ok(IRExpr::Lambda { params, body })
+        }
+        // `await x` is a call of the intrinsic `ir::coroutines` makes the
+        // suspension of, in the body of an `async def` only.
+        Expr::Await(awaited) => {
+            if !IN_ASYNC.with(|c| c.get()) {
+                return Err(crate::core::errors::unsupported_feature(
+                    "'await' outside an async function is a SyntaxError in CPython",
+                    None,
+                )
+                .into());
+            }
+            Ok(IRExpr::FunctionCall {
+                function_name: crate::ir::AWAIT_FN.to_string(),
+                arguments: vec![lower_expr(&awaited.value, memory_layout)?],
+            })
         }
         Expr::IfExp(if_exp) => Ok(IRExpr::Conditional {
             condition: Box::new(lower_expr(&if_exp.test, memory_layout)?),

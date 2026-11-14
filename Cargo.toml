@@ -13,6 +13,7 @@ documentation = "https://docs.rs/waspy"
 authors = ["Kumar Anirudha <hi@anirudha.dev>"]
 include = [
     "/src/**/*.rs",
+    "/src/**/*.js",
     "/Cargo.toml",
     "/README.md",
     "/LICENSE",
@@ -45,6 +46,8 @@ unicode_names2 = "1.3"
 
 [dev-dependencies]
 wasmi = "0.31"
+# The harness's JavaScript keeps a parsed object's keys in document order.
+serde = "1.0.228"
 # The reference the libm port is checked against, bit for bit.
 libm = "0.2"
 
@@ -136,6 +139,14 @@ path = "tests/unit/language.rs"
 [[test]]
 name = "unit_stdlib"
 path = "tests/unit/stdlib.rs"
+
+[[test]]
+name = "unit_coroutines"
+path = "tests/unit/coroutines.rs"
+
+[[test]]
+name = "unit_bridge"
+path = "tests/unit/bridge.rs"
 
 [[test]]
 name = "integration_wasmrun_plugin"

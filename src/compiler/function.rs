@@ -544,6 +544,14 @@ fn leave_handler(func: &mut Function, ctx: &mut CompilationContext, name: Option
     }
 }
 
+/// The locals the next `finally` keeps the exception in flight in, numbered
+/// with the loops so the scan and code generation agree.
+fn finally_locals(ctx: &mut CompilationContext) -> (String, String) {
+    let seq = ctx.for_loop_seq;
+    ctx.for_loop_seq += 1;
+    (format!("__fin_code_{seq}"), format!("__fin_value_{seq}"))
+}
+
 /// The local the next handler's `as` name lives in, numbered with the loops
 /// so the scan and code generation agree.
 fn handler_alias(ctx: &mut CompilationContext) -> String {
@@ -1147,6 +1155,14 @@ pub(crate) fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRTy
     if !matches!(value, IRExpr::BinaryOp { .. }) {
         if let Some(call) = crate::compiler::dunders::rewrite(value, ctx) {
             return infer_value_type(&call, ctx);
+        }
+    }
+    // A JavaScript operation answers what the bridge's intrinsic does.
+    if let IRExpr::FunctionCall { function_name, .. } = value {
+        if !ctx.js.is_empty() && ctx.get_function_info(function_name).is_none() {
+            if let Some(ty) = crate::compiler::js::intrinsic_type(function_name) {
+                return ty;
+            }
         }
     }
     // A call into the standard library answers the type its function does.
@@ -2372,6 +2388,17 @@ pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
                 target,
                 iterable,
                 body,
+                ..
+            } if crate::compiler::js::walks_js(iterable, ctx) => {
+                let seq = ctx.for_loop_seq;
+                ctx.for_loop_seq += 1;
+                let lowered = crate::compiler::js::lower_for(seq, target, iterable, body);
+                scan_and_allocate_locals(&lowered, ctx);
+            }
+            IRStatement::For {
+                target,
+                iterable,
+                body,
                 else_body,
             } => {
                 // Allocate the loop variable. Iterating a float collection binds
@@ -2475,6 +2502,12 @@ pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
                 }
 
                 if let Some(finally_body) = finally_body {
+                    // Where the exception in flight waits while `finally`
+                    // runs: its class id, and the object, typed as a
+                    // reference so the collector sees it.
+                    let (code, value) = finally_locals(ctx);
+                    ensure_local(ctx, &code, IRType::Int);
+                    ensure_local(ctx, &value, IRType::Unknown);
                     scan_and_allocate_locals(finally_body, ctx);
                 }
             }
@@ -2972,10 +3005,34 @@ fn compile_statement(
                     memory_index: 0,
                 }));
 
-                // Bind a target variable from the value on the stack.
+                // Bind a target variable from the value on the stack. A str
+                // or bytes target's companion local holds its length, which a
+                // read of the variable takes from there: it is set from the
+                // blob's prefix, or the variable read on as its old length
+                // (`best, n = key, 1` after `best = ""` read as empty).
                 let set_target = |func: &mut Function, ctx: &CompilationContext, target: &str| {
                     if let Some(local_idx) = ctx.get_local_index(target) {
-                        func.instruction(&Instruction::LocalSet(local_idx));
+                        let text = ctx.get_local_info(target).is_some_and(|info| {
+                            matches!(info.var_type, IRType::String | IRType::Bytes)
+                        });
+                        match ctx.get_local_index(&strlen_local_name(target)) {
+                            Some(len_idx) if text => {
+                                func.instruction(&Instruction::LocalTee(local_idx));
+                                func.instruction(&Instruction::I32Const(
+                                    crate::ir::STRING_LEN_PREFIX as i32,
+                                ));
+                                func.instruction(&Instruction::I32Sub);
+                                func.instruction(&Instruction::I32Load(MemArg {
+                                    offset: 0,
+                                    align: 2,
+                                    memory_index: 0,
+                                }));
+                                func.instruction(&Instruction::LocalSet(len_idx));
+                            }
+                            _ => {
+                                func.instruction(&Instruction::LocalSet(local_idx));
+                            }
+                        }
                     } else {
                         panic!("Variable {target} not found in context");
                     }
@@ -3474,6 +3531,37 @@ fn compile_statement(
                     )),
                 }
             }
+            // A JavaScript value's property.
+            IRStatement::AttributeAssign {
+                object,
+                attribute,
+                value,
+                ..
+            } if !ctx.js.is_empty() && infer_value_type(object, ctx) == IRType::JsProxy => {
+                emit_expr(
+                    &IRExpr::FunctionCall {
+                        function_name: crate::compiler::js::intrinsic("set"),
+                        arguments: vec![
+                            object.clone(),
+                            IRExpr::Const(IRConstant::String(attribute.clone())),
+                            value.clone(),
+                        ],
+                    },
+                    func,
+                    ctx,
+                    memory_layout,
+                    None,
+                );
+            }
+            IRStatement::AttributeAugAssign {
+                object, attribute, ..
+            } if !ctx.js.is_empty() && infer_value_type(object, ctx) == IRType::JsProxy => {
+                ctx.report(format!(
+                    "an augmented assignment to the JavaScript property '{attribute}' is not \
+                     supported. Hint: convert it, for example 'n: int = el.{attribute}' then \
+                     'el.{attribute} = n + 1'"
+                ));
+            }
             IRStatement::AttributeAssign {
                 object,
                 attribute,
@@ -3801,6 +3889,21 @@ fn compile_statement(
                 );
             }
 
+            // A JavaScript value walked by JavaScript's iteration protocol.
+            IRStatement::For {
+                target,
+                iterable,
+                body,
+                else_body,
+            } if crate::compiler::js::walks_js(iterable, ctx) => {
+                let seq = ctx.for_loop_seq;
+                ctx.for_loop_seq += 1;
+                if else_body.is_some() {
+                    ctx.report("a 'for' loop's 'else' over a JavaScript value is not supported");
+                }
+                let lowered = crate::compiler::js::lower_for(seq, target, iterable, body);
+                compile_body(&lowered, func, ctx, memory_layout);
+            }
             IRStatement::For {
                 target,
                 iterable,
@@ -4435,7 +4538,28 @@ fn compile_statement(
                 // paths jump past this point, so `ir::context_managers` puts a
                 // copy of the body ahead of each of them.)
                 if let Some(finally_body) = finally_body {
+                    // An exception in flight waits in two locals while the
+                    // `finally` body runs, so each call there is not taken
+                    // for one that raised, and is pending again after it. One
+                    // the body raises itself replaces it, as in CPython.
+                    let (code, value) = finally_locals(ctx);
+                    let code = ctx.get_local_index(&code).expect("the scan reserves it");
+                    let value = ctx.get_local_index(&value).expect("the scan reserves it");
+                    func.instruction(&Instruction::GlobalGet(EXC_TYPE_GLOBAL));
+                    func.instruction(&Instruction::LocalSet(code));
+                    func.instruction(&Instruction::GlobalGet(EXC_VALUE_GLOBAL));
+                    func.instruction(&Instruction::LocalSet(value));
+                    func.instruction(&Instruction::I32Const(0));
+                    func.instruction(&Instruction::GlobalSet(EXC_TYPE_GLOBAL));
+                    func.instruction(&Instruction::I32Const(0));
+                    func.instruction(&Instruction::GlobalSet(EXC_VALUE_GLOBAL));
                     compile_body(finally_body, func, ctx, memory_layout);
+                    func.instruction(&Instruction::LocalGet(code));
+                    func.instruction(&Instruction::GlobalSet(EXC_TYPE_GLOBAL));
+                    func.instruction(&Instruction::LocalGet(value));
+                    func.instruction(&Instruction::GlobalSet(EXC_VALUE_GLOBAL));
+                    func.instruction(&Instruction::I32Const(0));
+                    func.instruction(&Instruction::LocalSet(value));
                 }
 
                 // Still pending means no handler matched, so this `try` does

@@ -3,7 +3,8 @@
 // args_sizes_get, args_get, environ_sizes_get, environ_get, proc_exit,
 // random_get, and for open(), os.remove, os.rename, os.listdir, and os.path
 // path_open, path_filestat_get, path_unlink_file, path_rename, fd_readdir,
-// fd_prestat_get, fd_prestat_dir_name, fd_close), standard output and error
+// fd_prestat_get, fd_prestat_dir_name, fd_close, and for asyncio
+// clock_time_get and poll_oneoff), standard output and error
 // handed to callbacks as text, standard input served from bytes, an exit
 // raised as a WasiExit the caller can catch, and files kept in a Map (one
 // preopened directory, `.`, at fd 3). Nothing here touches a real filesystem.
@@ -173,8 +174,27 @@ export function createWasi({
             throw new WasiExit(code);
         },
         clock_time_get(clock, precision, out) {
-            // Nanoseconds since the epoch, for datetime.now().
-            view().setBigUint64(out, BigInt(Date.now()) * 1000000n, true);
+            // Nanoseconds since the epoch for the realtime clock
+            // (datetime.now()), and since the page started for the monotonic
+            // one (asyncio's loop).
+            const ns =
+                clock === 1
+                    ? BigInt(Math.round(performance.now() * 1e6))
+                    : BigInt(Date.now()) * 1000000n;
+            view().setBigUint64(out, ns, true);
+            return ESUCCESS;
+        },
+        poll_oneoff(subs, events, n, nevents) {
+            // One relative clock timeout, as asyncio's loop waits for its
+            // next timer: a busy wait, the only synchronous wait a page has.
+            const timeout = Number(view().getBigUint64(subs + 24, true));
+            const until = performance.now() + timeout / 1e6;
+            while (performance.now() < until) {
+                // waiting
+            }
+            new Uint8Array(memory.buffer, events, 32).fill(0);
+            view().setBigUint64(events, view().getBigUint64(subs, true), true);
+            view().setUint32(nevents, 1, true);
             return ESUCCESS;
         },
         random_get(buf, len) {

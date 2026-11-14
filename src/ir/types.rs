@@ -507,6 +507,15 @@ pub enum IRType {
         return_type: Box<IRType>,
     },
     Generator(Box<IRType>), // Generator yields values of this type
+    /// The coroutine an `async def` returns, whose `await` gives this type.
+    /// It exists between the converter, which gives it as an async
+    /// function's result, and `ir::coroutines`, which replaces it with the
+    /// coroutine's state class.
+    Coroutine(Box<IRType>),
+    /// A JavaScript value, as Pyodide hands one to Python (`pyodide.ffi.
+    /// JsProxy`): a block holding the value's handle in the JavaScript side's
+    /// table (`compiler::js`), converted to a Python value where it is used.
+    JsProxy,
     // A file object returned by `open()`. At runtime the value is the WASI
     // file descriptor (a single i32); read/write/close lower to the file
     // helpers over WASI's imports.

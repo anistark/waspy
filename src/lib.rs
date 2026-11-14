@@ -106,7 +106,8 @@ use std::path::Path;
 /// ```
 /// use waspy::compile_python_to_wasm;
 ///
-/// let result = compile_python_to_wasm("async def fetch() -> int:\n    return 1\n");
+/// let source = "def pick(x: int) -> int:\n    match x:\n        case 1:\n            return 1\n    return 0\n";
+/// let result = compile_python_to_wasm(source);
 /// assert!(result.is_err());
 /// ```
 pub fn compile_python_to_wasm(source: &str) -> Result<Vec<u8>> {
@@ -197,6 +198,11 @@ pub fn compile_python_to_wasm_with_options(
         ir::add_entry_point_to_module(&mut ir_module, &entry_point_info)?;
     }
 
+    if options.js_exports {
+        ir_module
+            .metadata
+            .insert(ir::JS_EXPORTS_KEY.to_string(), "true".to_string());
+    }
     // Generate WASM binary
     log_verbose!("Generating WebAssembly binary...");
     let raw_wasm = compiler::compile_ir_module(&ir_module)?;
@@ -535,6 +541,11 @@ fn compile_merged_sources(
         }
     }
 
+    if options.js_exports {
+        combined_module
+            .metadata
+            .insert(ir::JS_EXPORTS_KEY.to_string(), "true".to_string());
+    }
     // Generate WASM binary from the combined module
     let raw_wasm = compiler::compile_ir_module(&combined_module)?;
     compiler::validate_wasm(&raw_wasm)?;
@@ -1035,6 +1046,29 @@ fn module_name_of(file: &str) -> String {
         .replace(['/', '\\'], ".")
 }
 
+/// The JavaScript loader for a compiled module (an ES module, the same for
+/// every program).
+///
+/// A program that imports `js` or `pyodide` reaches JavaScript through the
+/// `waspy_js` imports, which the loader provides, so it is instantiated
+/// through the loader's `instantiate(bytes, { wasi, globals, modules })`.
+/// The loader also wraps the module's exports by the signatures it lists, so
+/// they take and answer JavaScript values (a number, a string, a boolean,
+/// undefined for None, an array or a plain object for a list, tuple, or dict,
+/// and any value for a `JsProxy` parameter), and a Python exception escaping
+/// one is thrown as a `PythonError`. Write it next to the module (as
+/// `waspy-loader.js`, say) and import it from the page.
+///
+/// # Examples
+///
+/// ```
+/// let loader = waspy::js_loader();
+/// assert!(loader.contains("export async function instantiate"));
+/// ```
+pub fn js_loader() -> &'static str {
+    include_str!("js/loader.js")
+}
+
 /// Render an IR type as the Python type name it came from.
 ///
 /// This is the formatting used by [`get_python_file_metadata`]; it is public
@@ -1094,6 +1128,8 @@ pub fn type_to_string(ir_type: &IRType) -> String {
         IRType::Unknown => "unknown".to_string(),
         IRType::Callable { .. } => "Callable".to_string(),
         IRType::Generator(yield_type) => format!("Generator[{}]", type_to_string(yield_type)),
+        IRType::Coroutine(result) => format!("Coroutine[{}]", type_to_string(result)),
+        IRType::JsProxy => "JsProxy".to_string(),
         IRType::File => "file".to_string(),
         IRType::Datetime => "datetime.datetime".to_string(),
         IRType::Date => "datetime.date".to_string(),

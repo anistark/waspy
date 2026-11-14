@@ -17,10 +17,23 @@ pub(crate) struct Types {
     pub(crate) yields: HashMap<String, IRType>,
     /// The module's classes, whose calls make instances.
     pub(crate) classes: std::collections::HashSet<String>,
+    /// Each class's bases, for a method or field it inherits.
+    pub(crate) bases: HashMap<String, Vec<String>>,
+    /// Each class's methods' declared results, keyed `(class, method)`.
+    pub(crate) methods: HashMap<(String, String), IRType>,
+    /// Each class's fields whose type a method states: an annotated
+    /// `self.x: T = ...`, or `self.x = p` of an annotated parameter `p`.
+    pub(crate) fields: HashMap<(String, String), IRType>,
+    /// `import js`, and the names imported from `js`: JavaScript values.
+    pub(crate) js_module: bool,
+    pub(crate) js_names: std::collections::HashSet<String>,
 }
 
 impl Types {
     pub(crate) fn of(&self, expr: &IRExpr, env: &HashMap<String, IRType>) -> IRType {
+        if let Some(js) = self.js_of(expr, env) {
+            return js;
+        }
         match expr {
             IRExpr::Const(IRConstant::Int(_)) => IRType::Int,
             IRExpr::Const(IRConstant::Float(_)) => IRType::Float,
@@ -127,6 +140,19 @@ impl Types {
                 (IRType::Dict(k, val), "items") => {
                     IRType::List(Box::new(IRType::Tuple(vec![*k, *val])))
                 }
+                (IRType::Class(class), method) => self
+                    .member(&class, |c| {
+                        self.methods.get(&(c.to_string(), method.to_string()))
+                    })
+                    .unwrap_or(IRType::Unknown),
+                _ => IRType::Unknown,
+            },
+            IRExpr::Attribute { object, attribute } => match self.of(object, env) {
+                IRType::Class(class) => self
+                    .member(&class, |c| {
+                        self.fields.get(&(c.to_string(), attribute.to_string()))
+                    })
+                    .unwrap_or(IRType::Unknown),
                 _ => IRType::Unknown,
             },
             IRExpr::BinaryOp { left, right, op } => {
@@ -144,6 +170,57 @@ impl Types {
             },
             _ => IRType::Unknown,
         }
+    }
+
+    /// A JavaScript value, when `expr` is one: a global of `js`, a name
+    /// imported from it, a module loaded at run time, or an attribute, a
+    /// call, or an item of a JavaScript value.
+    fn js_of(&self, expr: &IRExpr, env: &HashMap<String, IRType>) -> Option<IRType> {
+        let js_module = |e: &IRExpr| {
+            self.js_module
+                && matches!(e, IRExpr::Variable(m) if m == "js" && !env.contains_key("js"))
+        };
+        let js_name = |n: &str| self.js_names.contains(n) && !env.contains_key(n);
+        let proxy = |e: &IRExpr| self.of(e, env) == IRType::JsProxy;
+        let is_js = match expr {
+            IRExpr::Variable(n) => js_name(n),
+            IRExpr::Attribute { object, .. } => js_module(object) || proxy(object),
+            IRExpr::MethodCall {
+                object,
+                method_name,
+                ..
+            } => (js_module(object) || proxy(object)) && method_name != "to_py",
+            IRExpr::FunctionCall { function_name, .. } => {
+                js_name(function_name)
+                    || function_name == "__js_import"
+                    || env.get(function_name) == Some(&IRType::JsProxy)
+            }
+            IRExpr::Indexing { container, .. } => proxy(container),
+            _ => false,
+        };
+        is_js.then_some(IRType::JsProxy)
+    }
+
+    /// What `look` finds on `class` or the nearest of its bases that has it.
+    fn member<'a>(
+        &'a self,
+        class: &str,
+        look: impl Fn(&str) -> Option<&'a IRType>,
+    ) -> Option<IRType> {
+        let mut pending = vec![class.to_string()];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(c) = pending.pop() {
+            if !seen.insert(c.clone()) {
+                continue;
+            }
+            if let Some(t) = look(&c) {
+                return Some(t.clone());
+            }
+            if let Some(bases) = self.bases.get(&c) {
+                pending.extend(bases.iter().rev().cloned());
+            }
+        }
+        None
     }
 
     pub(crate) fn of_in(&self, env: &HashMap<String, IRType>, expr: &IRExpr) -> IRType {
@@ -244,6 +321,104 @@ impl Types {
                 })
                 .collect(),
             classes: module.classes.iter().map(|c| c.name.clone()).collect(),
+            bases: module
+                .classes
+                .iter()
+                .map(|c| (c.name.clone(), c.bases.clone()))
+                .collect(),
+            methods: module
+                .classes
+                .iter()
+                .flat_map(|c| {
+                    c.methods
+                        .iter()
+                        .filter(|m| fully_known(&m.return_type))
+                        .map(|m| ((c.name.clone(), m.name.clone()), m.return_type.clone()))
+                })
+                .collect(),
+            js_module: module
+                .imports
+                .iter()
+                .any(|i| i.module == "js" && !i.is_from_import),
+            js_names: module
+                .imports
+                .iter()
+                .filter(|i| i.module == "js" && i.is_from_import)
+                .filter_map(|i| i.alias.clone().or_else(|| i.name.clone()))
+                .collect(),
+            fields: module
+                .classes
+                .iter()
+                .flat_map(|c| {
+                    let mut out = Vec::new();
+                    for m in &c.methods {
+                        let params: HashMap<&str, &IRType> = m
+                            .params
+                            .iter()
+                            .map(|p| (p.name.as_str(), &p.param_type))
+                            .collect();
+                        stated_fields(&m.body, &params, &mut out);
+                    }
+                    out.into_iter()
+                        .map(|(f, t)| ((c.name.clone(), f), t))
+                        .collect::<Vec<_>>()
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Whether a type is known all the way down: no part of it is `Unknown` or
+/// `Any`, so it can be written as a place's annotation.
+pub(crate) fn fully_known(ty: &IRType) -> bool {
+    match ty {
+        IRType::Unknown | IRType::Any => false,
+        IRType::List(e)
+        | IRType::Set(e)
+        | IRType::VarTuple(e)
+        | IRType::Optional(e)
+        | IRType::Generator(e)
+        | IRType::Coroutine(e) => fully_known(e),
+        IRType::Dict(k, v) => fully_known(k) && fully_known(v),
+        IRType::Tuple(ms) | IRType::Union(ms) => ms.iter().all(fully_known),
+        IRType::Callable {
+            params,
+            return_type,
+        } => params.iter().all(fully_known) && fully_known(return_type),
+        _ => true,
+    }
+}
+
+/// The fields a method body states the type of: `self.x: T = ...`, and
+/// `self.x = p` for a parameter `p` annotated with a type known all the way
+/// down. The first statement of a field is the one kept.
+fn stated_fields(body: &IRBody, params: &HashMap<&str, &IRType>, out: &mut Vec<(String, IRType)>) {
+    for stmt in &body.statements {
+        if let IRStatement::AttributeAssign {
+            object,
+            attribute,
+            value,
+            annotation,
+        } = stmt
+        {
+            if matches!(object, IRExpr::Variable(n) | IRExpr::Param(n) if n == "self") {
+                let ty = match (annotation, value) {
+                    (Some(t), _) if fully_known(t) => Some(t.clone()),
+                    (None, IRExpr::Variable(p)) => params
+                        .get(p.as_str())
+                        .filter(|t| fully_known(t))
+                        .map(|t| (*t).clone()),
+                    _ => None,
+                };
+                if let Some(ty) = ty {
+                    if !out.iter().any(|(f, _)| f == attribute) {
+                        out.push((attribute.clone(), ty));
+                    }
+                }
+            }
+        }
+        for nested in nested_bodies(stmt) {
+            stated_fields(nested, params, out);
         }
     }
 }

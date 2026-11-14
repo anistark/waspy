@@ -13,9 +13,12 @@
 //! - `importlib.import_module("x")` and `__import__("x")` with a constant name
 //!   are the import they name. The statement `m = importlib.import_module("x")`
 //!   is `import x as m`, and the call anywhere else is the module itself.
-//!   `__import__("a.b")` answers the package `a`, as CPython's does. A name
-//!   computed at run time is refused: there is no loader at run time, and every
-//!   module is linked into the program when it is compiled.
+//!   `__import__("a.b")` answers the package `a`, as CPython's does.
+//!   `importlib.import_module(name)` of a name computed at run time loads a
+//!   separately compiled module through the host, on the JavaScript bridge:
+//!   the call becomes `__js_import(name)`, a JS value whose attributes and
+//!   calls are the other module's exports (`compiler::js`). `__import__` of
+//!   one is refused.
 //! - An import in a function binds the name in that function only. Every
 //!   module is linked into the program, so the import moves to module level
 //!   under the same name, and reading that name where CPython has not bound it
@@ -147,6 +150,39 @@ fn resolve_in(stack: &[Scope], i: usize, name: &str) -> Res {
 struct Dynamic {
     loaded: String,
     bound: String,
+}
+
+/// `importlib.import_module(name)` of a name that is not a constant: the name.
+fn runtime_import(
+    stack: &[Scope],
+    constants: &HashMap<String, String>,
+    expr: &Expr,
+) -> Option<Expr> {
+    let Expr::Call(call) = expr else {
+        return None;
+    };
+    let Expr::Attribute(a) = &*call.func else {
+        return None;
+    };
+    if a.attr.as_str() != "import_module" {
+        return None;
+    }
+    let Expr::Name(n) = &*a.value else {
+        return None;
+    };
+    if !matches!(resolve(stack, n.id.as_str()), Res::Binding(_, Target::Module(m)) if m == "importlib")
+    {
+        return None;
+    }
+    if call.args.len() != 1 || !call.keywords.is_empty() {
+        return None;
+    }
+    match dynamic_import(stack, constants, expr) {
+        Some(Err(message)) if message.contains("computed at run time") => {
+            Some(call.args[0].clone())
+        }
+        _ => None,
+    }
 }
 
 /// A call of `importlib.import_module` or `__import__`: None when `expr` is
@@ -856,6 +892,8 @@ struct Resolver {
     /// Imports of user modules a dynamic import at module level uses in
     /// place, which go just before the statement holding it, where they run.
     before: Vec<Stmt>,
+    /// The module loads a module by a name computed at run time.
+    runtime_import: bool,
 }
 
 impl Resolver {
@@ -1351,6 +1389,22 @@ impl Fold<TextRange> for Resolver {
             Expr::Name(n) if n.ctx == ExprContext::Load => self.load(n),
             Expr::Call(call) => {
                 let expr = Expr::Call(call);
+                // A name computed at run time: loaded through the host.
+                if let Some(name) = runtime_import(&self.stack, &self.constants, &expr) {
+                    self.runtime_import = true;
+                    let name = self.fold_expr(name)?;
+                    let range = expr_range(&expr);
+                    return Ok(Expr::Call(ast::ExprCall {
+                        range,
+                        func: Box::new(Expr::Name(ast::ExprName {
+                            range,
+                            id: Identifier::new("__js_import"),
+                            ctx: ExprContext::Load,
+                        })),
+                        args: vec![name],
+                        keywords: Vec::new(),
+                    }));
+                }
                 match dynamic_import(&self.stack, &self.constants, &expr) {
                     Some(Ok(dynamic)) => {
                         let Expr::Call(call) = expr else {
@@ -1517,6 +1571,7 @@ pub(crate) fn resolve_module_bindings(ast: &Suite) -> Result<Resolved> {
         in_main: 0,
         import_values: Vec::new(),
         before: Vec::new(),
+        runtime_import: false,
     };
     // A standard-library alias at module level binds the module's own name.
     let canonical: Vec<(String, Target)> = resolver.stack[0]
@@ -1553,6 +1608,7 @@ pub(crate) fn resolve_module_bindings(ast: &Suite) -> Result<Resolved> {
         ast: out,
         hoisted,
         import_values: resolver.import_values,
+        runtime_import: resolver.runtime_import,
     })
 }
 
@@ -1567,6 +1623,9 @@ pub(crate) struct Resolved {
     /// in place (`importlib.import_module("m").f()`), each with the place: no
     /// marker stands for that import (`converter::IMPORT_VALUE_KEY`).
     pub(crate) import_values: Vec<(String, String)>,
+    /// A module is loaded by a name computed at run time
+    /// (`converter::RUNTIME_IMPORT_KEY`).
+    pub(crate) runtime_import: bool,
 }
 
 /// The statement standing where imports of `modules` were written in a

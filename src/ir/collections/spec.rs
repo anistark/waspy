@@ -92,6 +92,7 @@ pub(crate) fn encode(ty: &IRType) -> Option<String> {
         ),
         IRType::Optional(e) => format!("Optional[{}]", encode(e)?),
         IRType::Class(c) => c.clone(),
+        IRType::JsProxy => "JsProxy".to_string(),
         _ => return None,
     })
 }

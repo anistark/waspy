@@ -204,9 +204,11 @@ fn rewrite_function(func: &mut IRFunction, resolver: &Resolver, owner: Option<&s
     }
 
     let return_type = func.return_type.clone();
-    resolver
-        .in_generator
-        .set(crate::ir::generators::body_has_yield(&func.body));
+    // A coroutine is run in steps as a generator is, by the same pass.
+    resolver.in_generator.set(
+        crate::ir::generators::body_has_yield(&func.body)
+            || matches!(func.return_type, IRType::Coroutine(_)),
+    );
     let body = std::mem::replace(
         &mut func.body,
         IRBody {
