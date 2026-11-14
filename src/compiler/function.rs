@@ -4450,6 +4450,17 @@ fn compile_statement(
                 // of the body is skipped, exactly as Python skips it. Falling
                 // off the end of the body reaches the same dispatch with no
                 // exception pending, which is the ordinary path.
+                //
+                // With a `finally`, the body and the handlers run inside one
+                // more block, whose end is the `finally`: an exception a
+                // handler raises (a bare `raise` included) goes there first
+                // and is pending again after it. It used to go straight to
+                // the enclosing `try`, so the `finally` never ran.
+                if finally_body.is_some() {
+                    func.instruction(&Instruction::Block(BlockType::Empty));
+                    ctx.block_depth += 1;
+                    ctx.try_stack.push(ctx.block_depth);
+                }
                 func.instruction(&Instruction::Block(BlockType::Empty));
                 ctx.block_depth += 1;
                 ctx.try_stack.push(ctx.block_depth);
@@ -4540,6 +4551,12 @@ fn compile_statement(
                 // a second `End` would close the function frame early.
                 ctx.block_depth -= 1;
                 func.instruction(&Instruction::End);
+                // The handlers' region ends where the `finally` begins.
+                if finally_body.is_some() {
+                    ctx.try_stack.pop();
+                    ctx.block_depth -= 1;
+                    func.instruction(&Instruction::End);
+                }
 
                 // `finally` runs on every path that reaches here: the body
                 // completed, a handler caught, or no handler matched and the
