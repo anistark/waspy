@@ -24,7 +24,29 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-Under WASI the loop waits for its next timer through `poll_oneoff` and runs to completion; in a page, an exported coroutine runs between JavaScript's turns (below). What is not supported is refused when the program is compiled: `async for`, `async with`, asynchronous generators and comprehensions, `asyncio`'s other functions and classes (queues, locks, events, task groups), a coroutine that is called and never awaited, and an `await` CPython might not evaluate or would evaluate repeatedly (the right of `and`/`or`, an arm of a conditional expression, a comprehension). A coroutine that returns a value declares its type (`-> int`).
+`async with` and `async for` follow CPython's protocols. `async with m as x:` awaits `m.__aenter__()` and binds what it answers, then awaits `m.__aexit__(...)` however the body ends: falling off the end, a `return`, `break`, or `continue`, or an exception, which a true answer from `__aexit__` suppresses. `async for x in it:` calls `it.__aiter__()` once and awaits `__anext__()` each round until it raises `StopAsyncIteration`. An `__aiter__` or `__aenter__` that answers `self` may leave its result unannotated; as with `__exit__`, the exception's class is handed to `__aexit__` as the exception itself, so that parameter may only be compared with None.
+
+```python
+class Ticker:
+    def __init__(self, n: int) -> None:
+        self.i, self.n = 0, n
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> int:
+        if self.i == self.n:
+            raise StopAsyncIteration
+        self.i += 1
+        await asyncio.sleep(0.01)
+        return self.i
+
+async def main() -> None:
+    async for tick in Ticker(3):
+        print(tick)             # 1, 2, 3
+```
+
+Under WASI the loop waits for its next timer through `poll_oneoff` and runs to completion; in a page, an exported coroutine runs between JavaScript's turns (below). What is not supported is refused when the program is compiled: asynchronous generators and comprehensions, `asyncio`'s other functions and classes (queues, locks, events, task groups), a coroutine that is called and never awaited, and an `await` CPython might not evaluate or would evaluate repeatedly (the right of `and`/`or`, an arm of a conditional expression, a comprehension). A coroutine that returns a value declares its type (`-> int`).
 
 ## JavaScript values
 

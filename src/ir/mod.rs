@@ -28,6 +28,7 @@ pub use collections::{
     MAPPING_METHOD, REFUSED_VAR, REFUSE_COMPREHENSION, REFUSE_WALK, VIEW_METHOD, WALK_METHOD,
     WRAP_METHOD,
 };
+pub use context_managers::ASYNC_WITH_FN;
 pub use converter::*;
 pub use coroutines::{lower_coroutines, AWAIT_FN, CORO_CLASS_PREFIX, CORO_METHOD_PREFIX};
 pub use datetime::{lower_datetime, DATETIME_FN_PREFIX};

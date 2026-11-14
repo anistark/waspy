@@ -650,6 +650,170 @@ fn asyncio_misuse_raises_cpython_errors() {
 
 /// The constructs CPython rejects, or that would be answered wrong, are
 /// refused at compile time.
+/// `async with` awaits `__aenter__` and `__aexit__`, and `async for` awaits
+/// `__anext__` until it raises `StopAsyncIteration`; an unannotated
+/// `__aiter__` or `__aenter__` that answers `self` is typed as its class.
+#[test]
+fn async_with_and_async_for_run_the_protocols() {
+    prints(
+        r#"
+        import asyncio
+
+
+        class Conn:
+            def __init__(self, name: str) -> None:
+                self.name = name
+
+            async def __aenter__(self):
+                print("open", self.name)
+                await asyncio.sleep(0)
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb) -> bool:
+                print("close", self.name, exc is None)
+                return False
+
+
+        class Ticker:
+            def __init__(self, n: int) -> None:
+                self.i = 0
+                self.n = n
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self) -> int:
+                if self.i >= self.n:
+                    raise StopAsyncIteration
+                self.i += 1
+                await asyncio.sleep(0)
+                return self.i * 10
+
+
+        async def main() -> None:
+            async with Conn("db") as c:
+                print("using", c.name)
+            total = 0
+            async for v in Ticker(3):
+                print("tick", v)
+                total += v
+            else:
+                print("done", total)
+            try:
+                async with Conn("x"):
+                    raise ValueError("boom")
+            except ValueError as e:
+                print("caught", e)
+
+
+        if __name__ == "__main__":
+            asyncio.run(main())
+        "#,
+        "open db\nusing db\nclose db True\ntick 10\ntick 20\ntick 30\ndone 60\nopen x\nclose x False\ncaught boom\n",
+    );
+}
+
+/// `async with` on every way out: suppression by `__aexit__`, a `return`, a
+/// `break` and a `continue` through it, several managers in one statement, an
+/// `__aexit__` answering None, and a task cancelled inside one (whose manager
+/// suppresses the cancellation, so the task finishes). `async for` unpacks a
+/// tuple target and runs its `else` only without a `break`.
+#[test]
+fn async_with_and_async_for_on_every_exit() {
+    prints(
+        r#"
+        import asyncio
+
+
+        class Quiet:
+            def __init__(self, tag: str) -> None:
+                self.tag = tag
+
+            async def __aenter__(self) -> "Quiet":
+                print("enter", self.tag)
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb) -> bool:
+                print("exit", self.tag, exc is not None)
+                return exc is not None
+
+
+        class Plain:
+            async def __aenter__(self) -> int:
+                return 7
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                print("plain exit", exc is None)
+
+
+        class Pairs:
+            def __init__(self) -> None:
+                self.k = 0
+
+            def __aiter__(self) -> "Pairs":
+                return self
+
+            async def __anext__(self) -> tuple[str, int]:
+                self.k += 1
+                if self.k > 4:
+                    raise StopAsyncIteration
+                await asyncio.sleep(0.001 * self.k)
+                return ("p" + str(self.k), self.k)
+
+
+        async def early(n: int) -> int:
+            async with Quiet("r") as q:
+                if n > 0:
+                    return n * 2
+                print("not returned")
+            return -1
+
+
+        async def slow() -> None:
+            async with Quiet("slow"):
+                async with Plain() as v:
+                    print("v", v)
+                    await asyncio.sleep(1)
+                    print("never")
+
+
+        async def main() -> None:
+            async with Quiet("a"):
+                raise KeyError("hidden")
+            print("after suppressed")
+            print("early", await early(5))
+            for i in range(3):
+                async with Quiet("loop" + str(i)):
+                    if i == 1:
+                        continue
+                    if i == 2:
+                        break
+                    print("body", i)
+            async for name, k in Pairs():
+                if k == 3:
+                    print("break at", name)
+                    break
+                print(name, k)
+            else:
+                print("no break")
+            async with Quiet("m1") as a, Plain() as b:
+                print("both", a.tag, b)
+            t = asyncio.create_task(slow())
+            await asyncio.sleep(0.01)
+            t.cancel()
+            try:
+                await t
+            except asyncio.CancelledError:
+                print("cancelled", t.cancelled())
+
+
+        if __name__ == "__main__":
+            asyncio.run(main())
+        "#,
+        "enter a\nexit a True\nafter suppressed\nenter r\nexit r False\nearly 10\nenter loop0\nbody 0\nexit loop0 False\nenter loop1\nexit loop1 False\nenter loop2\nexit loop2 False\np1 1\np2 2\nbreak at p3\nenter m1\nboth m1 7\nplain exit True\nexit m1 False\nenter slow\nv 7\nplain exit False\nexit slow True\n",
+    );
+}
+
 #[test]
 fn coroutine_misuse_is_refused() {
     refused(
@@ -744,5 +908,40 @@ fn coroutine_misuse_is_refused() {
             await 5
         "#,
         "can't be used in 'await' expression",
+    );
+    refused(
+        r#"
+        class A:
+            async def __aenter__(self) -> int:
+                return 1
+
+        async def main() -> None:
+            async with A() as a:
+                print(a)
+        "#,
+        "asynchronous context manager protocol (it has no '__aexit__' method)",
+    );
+    refused(
+        r#"
+        class A:
+            async def __aenter__(self) -> int:
+                return 1
+
+            async def __aexit__(self, t, e, tb) -> None:
+                pass
+
+        def f() -> None:
+            async with A():
+                pass
+        "#,
+        "'async with' outside an async function",
+    );
+    refused(
+        r#"
+        def f(xs: list[int]) -> None:
+            async for x in xs:
+                print(x)
+        "#,
+        "'async for' outside an async function",
     );
 }

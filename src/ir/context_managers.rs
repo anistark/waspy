@@ -43,12 +43,24 @@ use std::sync::atomic::{AtomicU32, Ordering};
 /// modules are lowered and merged into one binary.
 static WITH_COUNTER: AtomicU32 = AtomicU32::new(0);
 
+/// `async with x:` as the converter lowers it: a `with` whose context
+/// expression is a call of this marker around `x`, which this pass writes
+/// out over `__aenter__` and `__aexit__`, each awaited.
+pub const ASYNC_WITH_FN: &str = "__waspy_async_with";
+
 /// What a class contributes to the context-manager protocol, resolved through
 /// its inheritance chain.
 struct ProtocolMethods {
     /// Return type of `__enter__`, used to type the local bound by `as`.
     enter_returns: Option<IRType>,
     has_exit: bool,
+    /// What `__aenter__`'s coroutine resolves to, and whether there is an
+    /// `__aexit__`: the asynchronous protocol.
+    aenter_returns: Option<IRType>,
+    has_aexit: bool,
+    /// Whether `__aexit__`'s coroutine answers a value (one that can
+    /// suppress the exception), rather than None.
+    aexit_answers: bool,
 }
 
 /// Rewrite every `with` statement in the module into explicit
@@ -76,9 +88,30 @@ pub fn desugar_with_statements(module: &mut IRModule) -> Result<()> {
     // object (or None) as `exc`. Classes are not values here, so `exc_type`
     // is given the same object, and `tb` None: either may only be compared
     // with None (or tested for truth), which reads the same of both.
+    // `__aiter__` and `__aenter__` most often answer `self`, which they may
+    // leave unannotated, as an iterator's `__iter__` may.
+    for class in &mut module.classes {
+        let owner = IRType::Class(class.name.clone());
+        for method in &mut class.methods {
+            let answers_self = || answers_only_self(&method.body);
+            match (method.name.as_str(), &method.return_type) {
+                ("__aiter__", IRType::Unknown) if answers_self() => {
+                    method.return_type = owner.clone();
+                }
+                ("__aenter__", IRType::Coroutine(result))
+                    if matches!(**result, IRType::Unknown) && answers_self() =>
+                {
+                    method.return_type = IRType::Coroutine(Box::new(owner.clone()));
+                }
+                _ => {}
+            }
+        }
+    }
+
     for class in &mut module.classes {
         for method in &mut class.methods {
-            if method.name != "__exit__" || method.params.len() != 4 {
+            if !matches!(method.name.as_str(), "__exit__" | "__aexit__") || method.params.len() != 4
+            {
                 continue;
             }
             for (position, param) in method.params.iter_mut().enumerate().skip(1) {
@@ -93,10 +126,10 @@ pub fn desugar_with_statements(module: &mut IRModule) -> Result<()> {
                     if uses_beyond_none_checks(&mut method.body, &name) {
                         return Err(crate::core::errors::unsupported_feature(
                             format!(
-                                "'{name}' in {}.__exit__ can only be compared with None: \
+                                "'{name}' in {}.{} can only be compared with None: \
                                  exception classes and tracebacks are not values here. Hint: \
                                  use the exception itself, the second parameter",
-                                class.name
+                                class.name, method.name
                             ),
                             None,
                         )
@@ -161,6 +194,9 @@ fn resolve_protocols(module: &IRModule) -> HashMap<String, ProtocolMethods> {
     for class in &module.classes {
         let mut enter_returns = None;
         let mut has_exit = false;
+        let mut aenter_returns = None;
+        let mut has_aexit = false;
+        let mut aexit_answers = false;
         let mut current = Some(class.name.as_str());
         // Bounded by the class count: a cycle in the base links would otherwise
         // loop forever, and lowering does not guarantee an acyclic chain.
@@ -173,6 +209,17 @@ fn resolve_protocols(module: &IRModule) -> HashMap<String, ProtocolMethods> {
                     enter_returns = Some(method.return_type.clone());
                 } else if method.name == "__exit__" {
                     has_exit = true;
+                } else if method.name == "__aenter__" && aenter_returns.is_none() {
+                    aenter_returns = Some(match &method.return_type {
+                        IRType::Coroutine(result) => (**result).clone(),
+                        other => other.clone(),
+                    });
+                } else if method.name == "__aexit__" && !has_aexit {
+                    has_aexit = true;
+                    aexit_answers = !matches!(
+                        &method.return_type,
+                        IRType::Coroutine(r) if matches!(**r, IRType::None | IRType::Unknown)
+                    );
                 }
             }
             current = node.bases.first().map(|b| b.as_str());
@@ -182,6 +229,9 @@ fn resolve_protocols(module: &IRModule) -> HashMap<String, ProtocolMethods> {
             ProtocolMethods {
                 enter_returns,
                 has_exit,
+                aenter_returns,
+                has_aexit,
+                aexit_answers,
             },
         );
     }
@@ -231,6 +281,25 @@ fn rewrite_body(
 
     for stmt in body.statements {
         match stmt {
+            IRStatement::With {
+                context_expr:
+                    IRExpr::FunctionCall {
+                        function_name,
+                        mut arguments,
+                    },
+                optional_vars,
+                body,
+            } if function_name == ASYNC_WITH_FN && arguments.len() == 1 => {
+                let expanded = expand_async_with(
+                    arguments.remove(0),
+                    optional_vars,
+                    *body,
+                    resolver,
+                    env,
+                    return_type,
+                )?;
+                out.extend(expanded);
+            }
             IRStatement::With {
                 context_expr,
                 optional_vars,
@@ -545,6 +614,177 @@ fn expand_with(
     }
 
     Ok(out)
+}
+
+/// `async with expr as name:`, the asynchronous protocol written out as
+/// CPython runs it, each call awaited:
+///
+/// ```text
+/// __with_cm = expr
+/// name = await __with_cm.__aenter__()
+/// try:
+///     <body>             # a return, break, or continue awaits
+///                        # __with_cm.__aexit__(None, None, None) first
+/// except BaseException as e:
+///     if not await __with_cm.__aexit__(e, e, None): raise
+/// else:
+///     await __with_cm.__aexit__(None, None, None)
+/// ```
+///
+/// A manager of the program's own classes must have both methods; one of
+/// `asyncio`'s (a lock, a timeout, a task group), whose classes the
+/// coroutine pass adds, is typed there.
+fn expand_async_with(
+    context_expr: IRExpr,
+    optional_vars: Option<String>,
+    body: IRBody,
+    resolver: &Resolver,
+    env: &mut HashMap<String, String>,
+    return_type: &IRType,
+) -> Result<Vec<IRStatement>> {
+    let class_name = resolver.class_of(&context_expr, env);
+    let mut enter_returns = None;
+    // `asyncio`'s managers answer a bool.
+    let mut aexit_answers = true;
+    if let Some(class_name) = &class_name {
+        let protocol = resolver.protocols.get(class_name).ok_or_else(|| {
+            crate::core::errors::type_error(format!("Unknown class '{class_name}'"), None)
+        })?;
+        let refuse = |missing: &str| {
+            crate::core::errors::type_error(
+                format!(
+                    "'{class_name}' object does not support the asynchronous context manager \
+                     protocol (it has no '{missing}' method)"
+                ),
+                None,
+            )
+        };
+        if protocol.aenter_returns.is_none() {
+            return Err(refuse("__aenter__").into());
+        }
+        if !protocol.has_aexit {
+            return Err(refuse("__aexit__").into());
+        }
+        enter_returns = protocol.aenter_returns.clone();
+        aexit_answers = protocol.aexit_answers;
+    }
+    let awaited = |e: IRExpr| IRExpr::FunctionCall {
+        function_name: crate::ir::AWAIT_FN.to_string(),
+        arguments: vec![e],
+    };
+    let none = || IRExpr::Const(crate::ir::IRConstant::None);
+    let seq = WITH_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let manager = format!("__with_cm_{seq}");
+    let aexit = |args: Vec<IRExpr>| {
+        awaited(IRExpr::MethodCall {
+            object: Box::new(IRExpr::Variable(manager.clone())),
+            method_name: "__aexit__".to_string(),
+            arguments: args,
+        })
+    };
+    let mut out = vec![IRStatement::Assign {
+        target: manager.clone(),
+        value: context_expr,
+        var_type: class_name.clone().map(IRType::Class),
+    }];
+    let hidden_value = optional_vars.is_none().then(|| format!("__with_val_{seq}"));
+    let bound = optional_vars.unwrap_or_else(|| format!("__with_val_{seq}"));
+    match &enter_returns {
+        Some(IRType::Class(name)) => {
+            env.insert(bound.clone(), name.clone());
+        }
+        _ => {
+            env.remove(&bound);
+        }
+    }
+    out.push(IRStatement::Assign {
+        target: bound,
+        value: awaited(IRExpr::MethodCall {
+            object: Box::new(IRExpr::Variable(manager.clone())),
+            method_name: "__aenter__".to_string(),
+            arguments: Vec::new(),
+        }),
+        var_type: enter_returns.filter(|t| !matches!(t, IRType::Unknown | IRType::None)),
+    });
+    let mut inner = rewrite_body(body, resolver, &mut env.clone(), return_type)?;
+    let normal_exit = vec![IRStatement::Expression(aexit(vec![none(), none(), none()]))];
+    run_cleanup_before_exits(&mut inner, &normal_exit, return_type, false);
+    let ok = format!("__with_ok_{seq}");
+    let caught = format!("__with_exc_{seq}");
+    let flag = |value: bool| IRStatement::Assign {
+        target: ok.clone(),
+        value: IRExpr::Const(crate::ir::IRConstant::Bool(value)),
+        var_type: Some(IRType::Bool),
+    };
+    let exc = || IRExpr::Variable(caught.clone());
+    out.push(flag(true));
+    out.push(IRStatement::TryExcept {
+        try_body: Box::new(inner),
+        except_handlers: vec![crate::ir::IRExceptHandler {
+            exception_types: vec!["BaseException".to_string()],
+            name: Some(caught.clone()),
+            body: IRBody {
+                statements: {
+                    let reraise = IRStatement::Raise {
+                        exception: None,
+                        cause: None,
+                    };
+                    let handed = aexit(vec![exc(), exc(), none()]);
+                    if aexit_answers {
+                        vec![
+                            flag(false),
+                            IRStatement::If {
+                                condition: IRExpr::UnaryOp {
+                                    operand: Box::new(handed),
+                                    op: crate::ir::IRUnaryOp::Not,
+                                },
+                                then_body: Box::new(IRBody {
+                                    statements: vec![reraise],
+                                }),
+                                else_body: None,
+                            },
+                        ]
+                    } else {
+                        // An `__aexit__` answering None never suppresses.
+                        vec![flag(false), IRStatement::Expression(handed), reraise]
+                    }
+                },
+            },
+        }],
+        finally_body: None,
+    });
+    out.push(IRStatement::If {
+        condition: IRExpr::Variable(ok),
+        then_body: Box::new(IRBody {
+            statements: normal_exit,
+        }),
+        else_body: None,
+    });
+    for hidden in std::iter::once(manager).chain(hidden_value) {
+        out.push(IRStatement::Expression(IRExpr::FunctionCall {
+            function_name: crate::ir::DEL_NAME_FN.to_string(),
+            arguments: vec![IRExpr::Variable(hidden)],
+        }));
+    }
+    Ok(out)
+}
+
+/// Whether every `return` in a body answers `self` (and there is one).
+fn answers_only_self(body: &IRBody) -> bool {
+    fn walk(body: &IRBody, seen: &mut bool) -> bool {
+        body.statements.iter().all(|s| match s {
+            IRStatement::Return(Some(IRExpr::Variable(n) | IRExpr::Param(n))) if n == "self" => {
+                *seen = true;
+                true
+            }
+            IRStatement::Return(_) => false,
+            other => crate::ir::infer::nested_bodies(other)
+                .into_iter()
+                .all(|b| walk(b, seen)),
+        })
+    }
+    let mut seen = false;
+    walk(body, &mut seen) && seen
 }
 
 /// Whether `name` is used in `body` other than in `name is None`,
