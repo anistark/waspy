@@ -10,6 +10,25 @@ description: "Coroutines and asyncio, JavaScript values from Python as Pyodide h
 
 `asyncio` is CPython 3.13's event loop, futures, and tasks, compiled with the program: `run`, `create_task`, `ensure_future`, `gather` (awaited directly, with `*aws` or a fixed list, and its results unpacked when their types differ), `sleep`, `wait_for` (awaited directly, `timeout=None`, zero, and a deadline that cancels what it waits on into `TimeoutError`), a task's `result`, `exception`, `done`, `cancelled`, `cancel`, and `get_name`, and `CancelledError`, `TimeoutError`, and `InvalidStateError`. Which task runs when, and so what each `print` interleaves with, is CPython's: tasks start in the order they are made, a `sleep(0)` lets every other ready task run once, timers fall due in deadline order, and `asyncio.run()` cancels the tasks still pending when its coroutine finishes, running their cleanup before it returns.
 
+`asyncio.timeout(delay)` (or `timeout(None)`, no deadline) is the context manager `wait_for` runs under, for a block: `async with asyncio.timeout(0.5):` cancels the block at the deadline and raises `TimeoutError` out of it, and its `expired()` says whether it did. `Lock`, `Event`, `Semaphore`, and `BoundedSemaphore` are CPython 3.13's, waking their waiters in the same order, with `async with` for a lock or a semaphore. `Queue`, `LifoQueue`, and `PriorityQueue` hold one type of item, named where the queue is made (`q: asyncio.Queue[int] = asyncio.Queue(maxsize=10)`, or a field `self.q: asyncio.Queue[str] = asyncio.Queue()`): `put`, `get`, `join`, `put_nowait`, `get_nowait`, `task_done`, `qsize`, `empty`, `full`, `maxsize`, and `shutdown`, with `QueueEmpty`, `QueueFull`, and `QueueShutDown`.
+
+```python
+async def worker(name: str, q: asyncio.Queue[int]) -> None:
+    while True:
+        n = await q.get()
+        print(name, n * n)
+        q.task_done()
+
+async def main() -> None:
+    q: asyncio.Queue[int] = asyncio.Queue()
+    for n in range(4):
+        q.put_nowait(n)
+    workers = [asyncio.create_task(worker(w, q)) for w in ["a", "b"]]
+    await q.join()                  # a 0, a 1, a 4, a 9: "a" never waits
+    for w in workers:
+        w.cancel()
+```
+
 ```python
 import asyncio
 
@@ -46,7 +65,7 @@ async def main() -> None:
         print(tick)             # 1, 2, 3
 ```
 
-Under WASI the loop waits for its next timer through `poll_oneoff` and runs to completion; in a page, an exported coroutine runs between JavaScript's turns (below). What is not supported is refused when the program is compiled: asynchronous generators and comprehensions, `asyncio`'s other functions and classes (queues, locks, events, task groups), a coroutine that is called and never awaited, and an `await` CPython might not evaluate or would evaluate repeatedly (the right of `and`/`or`, an arm of a conditional expression, a comprehension). A coroutine that returns a value declares its type (`-> int`).
+Under WASI the loop waits for its next timer through `poll_oneoff` and runs to completion; in a page, an exported coroutine runs between JavaScript's turns (below). What is not supported is refused when the program is compiled: asynchronous generators and comprehensions, `asyncio`'s other functions and classes, a coroutine that is called and never awaited, and an `await` CPython might not evaluate or would evaluate repeatedly (the right of `and`/`or`, an arm of a conditional expression, a comprehension). A coroutine that returns a value declares its type (`-> int`).
 
 ## JavaScript values
 

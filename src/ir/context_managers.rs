@@ -642,14 +642,16 @@ fn expand_async_with(
     env: &mut HashMap<String, String>,
     return_type: &IRType,
 ) -> Result<Vec<IRStatement>> {
-    let class_name = resolver.class_of(&context_expr, env);
+    // A class this pass does not know (one of `asyncio`'s, which the
+    // coroutine pass adds) is typed there.
+    let class_name = resolver
+        .class_of(&context_expr, env)
+        .filter(|c| resolver.protocols.contains_key(c));
     let mut enter_returns = None;
     // `asyncio`'s managers answer a bool.
     let mut aexit_answers = true;
     if let Some(class_name) = &class_name {
-        let protocol = resolver.protocols.get(class_name).ok_or_else(|| {
-            crate::core::errors::type_error(format!("Unknown class '{class_name}'"), None)
-        })?;
+        let protocol = &resolver.protocols[class_name];
         let refuse = |missing: &str| {
             crate::core::errors::type_error(
                 format!(

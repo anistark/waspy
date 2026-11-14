@@ -1,4 +1,5 @@
 pub(crate) mod asyncio;
+pub(crate) mod asyncio_sync;
 pub(crate) mod build;
 pub(crate) mod collections;
 mod context_managers;

@@ -814,6 +814,234 @@ fn async_with_and_async_for_on_every_exit() {
     );
 }
 
+/// `asyncio.Lock`, `Event`, `Semaphore`, `BoundedSemaphore`, `Queue`,
+/// `LifoQueue`, and `PriorityQueue` (heapq's order for equal keys), and
+/// `asyncio.timeout()` expiring, finishing in time, and with no deadline, as
+/// CPython 3.13 schedules them.
+#[test]
+fn asyncio_locks_events_semaphores_queues_and_timeouts() {
+    prints(
+        r#"
+        import asyncio
+
+        lock = asyncio.Lock()
+
+
+        async def guarded(name: str, delay: float) -> None:
+            async with lock:
+                print(name, "has the lock", lock.locked())
+                await asyncio.sleep(delay)
+                print(name, "lets go")
+
+
+        async def waiter(ev: asyncio.Event, name: str) -> None:
+            print(name, "waits")
+            await ev.wait()
+            print(name, "woke", ev.is_set())
+
+
+        async def limited(sem: asyncio.Semaphore, n: int) -> int:
+            async with sem:
+                print("in", n)
+                await asyncio.sleep(0.01)
+                print("out", n)
+            return n * n
+
+
+        async def producer(q: asyncio.Queue[int], n: int) -> None:
+            for i in range(n):
+                await q.put(i)
+                print("put", i, q.qsize())
+            await q.put(-1)
+
+
+        async def consumer(q: asyncio.Queue[int]) -> int:
+            total = 0
+            while True:
+                item = await q.get()
+                q.task_done()
+                if item < 0:
+                    break
+                print("got", item)
+                total += item
+            return total
+
+
+        async def main() -> None:
+            await asyncio.gather(guarded("a", 0.02), guarded("b", 0.01), guarded("c", 0.0))
+            ev = asyncio.Event()
+            t1 = asyncio.create_task(waiter(ev, "w1"))
+            t2 = asyncio.create_task(waiter(ev, "w2"))
+            await asyncio.sleep(0)
+            print("setting")
+            ev.set()
+            await t1
+            await t2
+            sem = asyncio.Semaphore(2)
+            print(await asyncio.gather(*[limited(sem, i) for i in range(4)]))
+            q: asyncio.Queue[int] = asyncio.Queue(maxsize=2)
+            p = asyncio.create_task(producer(q, 5))
+            total = await consumer(q)
+            await p
+            await q.join()
+            print("total", total, q.empty(), q.maxsize)
+            try:
+                q.get_nowait()
+            except asyncio.QueueEmpty:
+                print("empty")
+            try:
+                async with asyncio.timeout(0.05):
+                    await asyncio.sleep(1)
+            except TimeoutError:
+                print("timed out")
+            async with asyncio.timeout(1) as cm:
+                await asyncio.sleep(0.01)
+            print("in time", cm.expired())
+            async with asyncio.timeout(None):
+                await asyncio.sleep(0)
+            print("no deadline")
+            try:
+                lock.release()
+            except RuntimeError as e:
+                print("error:", e)
+            b = asyncio.BoundedSemaphore(1)
+            await b.acquire()
+            b.release()
+            try:
+                b.release()
+            except ValueError as e:
+                print("error:", e)
+            lq: asyncio.LifoQueue[str] = asyncio.LifoQueue()
+            pq: asyncio.PriorityQueue[tuple[int, str]] = asyncio.PriorityQueue()
+            for w in ["x", "y", "z"]:
+                lq.put_nowait(w)
+            for item in [(3, "c"), (1, "a"), (2, "b"), (1, "aa")]:
+                pq.put_nowait(item)
+            print([lq.get_nowait() for _ in range(3)])
+            print([pq.get_nowait() for _ in range(4)])
+
+
+        if __name__ == "__main__":
+            asyncio.run(main())
+        "#,
+        "a has the lock True\na lets go\nb has the lock True\nb lets go\nc has the lock True\nc lets go\nw1 waits\nw2 waits\nsetting\nw1 woke True\nw2 woke True\nin 0\nin 1\nout 0\nout 1\nin 2\nin 3\nout 2\nout 3\n[0, 1, 4, 9]\nput 0 1\nput 1 2\ngot 0\ngot 1\nput 2 1\nput 3 2\ngot 2\ngot 3\nput 4 1\ngot 4\ntotal 10 True 2\nempty\ntimed out\nin time False\nno deadline\nerror: Lock is not acquired.\nerror: BoundedSemaphore released too many times\n['z', 'y', 'x']\n[(1, 'a'), (1, 'aa'), (2, 'b'), (3, 'c')]\n",
+    );
+}
+
+/// A lock in a field, a lock waiter cancelled while it waits (the next one
+/// wakes), `wait_for()` over `Queue.get()` leaving no getter behind, a put
+/// blocked on a full queue, `Queue.shutdown()`, and a semaphore made at zero.
+#[test]
+fn asyncio_primitives_under_cancellation() {
+    prints(
+        r#"
+        import asyncio
+
+
+        class Account:
+            def __init__(self) -> None:
+                self.balance = 0
+                self.lock = asyncio.Lock()
+
+            async def deposit(self, n: int) -> None:
+                async with self.lock:
+                    current = self.balance
+                    await asyncio.sleep(0)
+                    self.balance = current + n
+
+
+        async def holder(lock: asyncio.Lock, name: str) -> None:
+            await lock.acquire()
+            try:
+                print(name, "holds")
+                await asyncio.sleep(0.05)
+            finally:
+                lock.release()
+                print(name, "released")
+
+
+        async def want(lock: asyncio.Lock, name: str) -> str:
+            async with lock:
+                print(name, "got it")
+            return name
+
+
+        async def take(q: asyncio.Queue[str]) -> str:
+            return await q.get()
+
+
+        async def main() -> None:
+            acct = Account()
+            await asyncio.gather(*[acct.deposit(i) for i in range(1, 6)])
+            print("balance", acct.balance)
+
+            lock = asyncio.Lock()
+            h = asyncio.create_task(holder(lock, "h"))
+            await asyncio.sleep(0)
+            w1 = asyncio.create_task(want(lock, "w1"))
+            w2 = asyncio.create_task(want(lock, "w2"))
+            await asyncio.sleep(0.01)
+            w1.cancel()
+            print(await w2, w1.cancelled())
+            await h
+
+            q: asyncio.Queue[str] = asyncio.Queue()
+            try:
+                await asyncio.wait_for(q.get(), 0.02)
+            except TimeoutError:
+                print("get timed out", len(q._getters))
+            t = asyncio.create_task(take(q))
+            await asyncio.sleep(0)
+            q.put_nowait("hello")
+            print(await t)
+
+            full: asyncio.Queue[int] = asyncio.Queue(1)
+            full.put_nowait(1)
+            try:
+                full.put_nowait(2)
+            except asyncio.QueueFull:
+                print("full", full.full())
+            putter = asyncio.create_task(full.put(3))
+            await asyncio.sleep(0)
+            print("putter waiting", putter.done())
+            print(full.get_nowait())
+            await asyncio.sleep(0)
+            print("putter done", putter.done(), full.qsize())
+
+            ev = asyncio.Event()
+            ev.set()
+            print(await ev.wait())
+            ev.clear()
+            print(ev.is_set())
+
+            sd: asyncio.Queue[int] = asyncio.Queue()
+            sd.put_nowait(5)
+            sd.shutdown()
+            print(await sd.get())
+            try:
+                await sd.get()
+            except asyncio.QueueShutDown:
+                print("shut down")
+            try:
+                sd.put_nowait(1)
+            except asyncio.QueueShutDown:
+                print("no put after shutdown")
+
+            sem = asyncio.Semaphore(0)
+            print(sem.locked())
+            rel = asyncio.create_task(sem.acquire())
+            await asyncio.sleep(0)
+            sem.release()
+            print(await rel, sem.locked())
+
+
+        if __name__ == "__main__":
+            asyncio.run(main())
+        "#,
+        "balance 15\nh holds\nh released\nw2 got it\nw2 True\nget timed out 0\nhello\nfull True\nputter waiting False\n1\nputter done True 1\nTrue\nFalse\n5\nshut down\nno put after shutdown\nTrue\nTrue True\n",
+    );
+}
+
 #[test]
 fn coroutine_misuse_is_refused() {
     refused(
@@ -943,5 +1171,15 @@ fn coroutine_misuse_is_refused() {
                 print(x)
         "#,
         "'async for' outside an async function",
+    );
+    refused(
+        r#"
+        import asyncio
+
+        async def main() -> None:
+            q = asyncio.Queue()
+            await q.put(1)
+        "#,
+        "needs the type of what it holds",
     );
 }

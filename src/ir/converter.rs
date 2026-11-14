@@ -2763,6 +2763,13 @@ fn type_annotation_to_ir_type(expr: &Expr) -> Result<IRType> {
             {
                 Ok(IRType::Class(format!("{}.{}", module.id, attr.attr)))
             }
+            // `asyncio.Lock`, `asyncio.Event`, `asyncio.Timeout`.
+            Expr::Name(module) if module.id.as_str() == "asyncio" => {
+                match crate::ir::asyncio_sync::annotated_class(attr.attr.as_str()) {
+                    Some(class) => Ok(IRType::Class(class)),
+                    None => Ok(IRType::Any),
+                }
+            }
             Expr::Name(module) if matches!(module.id.as_str(), "collections" | "typing") => {
                 type_annotation_to_ir_type(&Expr::Name(rustpython_parser::ast::ExprName {
                     range: attr.range,
@@ -2790,6 +2797,22 @@ fn type_annotation_to_ir_type(expr: &Expr) -> Result<IRType> {
             // `asyncio.Task[int]`, `asyncio.Future[str]`: the runtime's class
             // for that result.
             if let Expr::Attribute(a) = &*subscript.value {
+                // `asyncio.Queue[int]`: the queue of that kind for that type.
+                if matches!(&*a.value, Expr::Name(m) if m.id.as_str() == "asyncio")
+                    && crate::ir::asyncio_sync::QUEUE_KINDS.contains(&a.attr.as_str())
+                {
+                    let item = type_annotation_to_ir_type(&subscript.slice)?;
+                    return match crate::ir::collections::spec::encode(&item) {
+                        Some(_) => Ok(IRType::Class(crate::ir::asyncio_sync::queue_class(
+                            a.attr.as_str(),
+                            &item,
+                        ))),
+                        None => Err(anyhow!(
+                            "asyncio.{}[...] needs a type an annotation names",
+                            a.attr
+                        )),
+                    };
+                }
                 if matches!(&*a.value, Expr::Name(m) if m.id.as_str() == "asyncio")
                     && matches!(a.attr.as_str(), "Task" | "Future")
                 {
@@ -3601,6 +3624,15 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                                     name
                                     @ ("CancelledError" | "InvalidStateError" | "TimeoutError"),
                                 ) if m.id.as_str() == "asyncio" => Ok(name.to_string()),
+                                (Expr::Name(m), name)
+                                    if m.id.as_str() == "asyncio"
+                                        && crate::ir::asyncio_sync::exception_class(name)
+                                            .is_some() =>
+                                {
+                                    Ok(crate::ir::asyncio_sync::exception_class(name)
+                                        .expect("checked")
+                                        .to_string())
+                                }
                                 // `except pyodide.ffi.JsException:`.
                                 (Expr::Attribute(sub), "JsException")
                                     if sub.attr.as_str() == "ffi"

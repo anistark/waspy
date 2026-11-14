@@ -100,8 +100,11 @@ pub fn lower_coroutines(module: &mut IRModule) -> Result<()> {
         return Ok(());
     }
     lift_coroutine_methods(module)?;
+    // The locks, events, queues, and timeouts the program names.
+    let sync = crate::ir::asyncio_sync::Wanted::of(module, &api);
     if api.used() {
         module.functions.extend(aio::coroutine_functions());
+        module.functions.extend(sync.coroutine_functions());
     }
 
     // What each coroutine function resolves to.
@@ -146,8 +149,16 @@ pub fn lower_coroutines(module: &mut IRModule) -> Result<()> {
     }
     let mut seen = HashSet::new();
     kinds.retain(|t| seen.insert(crate::ir::collections::spec::encode(t)));
-    let runtime = aio::runtime_classes(&kinds, bridge);
-    for name in aio::runtime_strings() {
+    let mut runtime = aio::runtime_classes(&kinds, bridge);
+    let timeout = aio::name("_Timeout");
+    if let Some(t) = runtime.iter_mut().find(|c| c.name == timeout) {
+        t.methods.extend(sync.timeout_methods());
+    }
+    runtime.extend(sync.classes());
+    for name in aio::runtime_strings()
+        .into_iter()
+        .chain(crate::ir::asyncio_sync::Wanted::strings())
+    {
         module.memory_layout.add_string(name);
     }
     module
@@ -168,6 +179,23 @@ pub fn lower_coroutines(module: &mut IRModule) -> Result<()> {
         if results.contains_key(&f.name) {
             f.return_type = IRType::Class(state_class(&f.name));
         }
+    }
+    // `asyncio`'s classes made anywhere (`self.lock = asyncio.Lock()`), so
+    // what holds one is typed as it.
+    make_constructors(module, &api)?;
+    // A module's (or a class's) variable made at import (`lock =
+    // asyncio.Lock()`), before anything is typed from it.
+    let variables = module.variables.iter_mut().chain(
+        module
+            .classes
+            .iter_mut()
+            .flat_map(|c| c.class_vars.iter_mut()),
+    );
+    for var in variables {
+        if let Some(t) = &var.var_type {
+            type_queue(&api, &mut var.value, t)?;
+        }
+        api.rewrite_tree(&mut var.value, false)?;
     }
     let types = coroutine_types(module, &results);
     let modules: HashSet<String> = module
@@ -231,10 +259,90 @@ pub fn lower_coroutines(module: &mut IRModule) -> Result<()> {
     Ok(())
 }
 
+/// Rewrite every call of a constructor of `asyncio`'s (`asyncio.Lock()`, an
+/// annotated `asyncio.Queue()`) into its class's, ahead of the rest.
+fn make_constructors(module: &mut IRModule, api: &Api) -> Result<()> {
+    const CONSTRUCTORS: [&str; 5] = ["Lock", "Event", "Semaphore", "BoundedSemaphore", "timeout"];
+    fn statements(body: &mut IRBody, api: &Api) -> Result<()> {
+        for stmt in &mut body.statements {
+            if let IRStatement::Assign {
+                value,
+                var_type: Some(t),
+                ..
+            }
+            | IRStatement::AttributeAssign {
+                value,
+                annotation: Some(t),
+                ..
+            } = stmt
+            {
+                let t = t.clone();
+                type_queue(api, value, &t)?;
+            }
+            for nested in sub_bodies_mut(stmt) {
+                statements(nested, api)?;
+            }
+        }
+        let mut err = None;
+        let _ = crate::ir::visit_body(body, &mut |e: &mut IRExpr| {
+            let wanted = api
+                .call_of(e)
+                .is_some_and(|(n, _)| CONSTRUCTORS.contains(&n.as_str()));
+            if wanted && err.is_none() {
+                if let Err(x) = api.rewrite(e, false) {
+                    err = Some(x);
+                }
+            }
+            Ok(())
+        });
+        match err {
+            Some(x) => Err(x),
+            None => Ok(()),
+        }
+    }
+    for f in &mut module.functions {
+        statements(&mut f.body, api)?;
+    }
+    for c in &mut module.classes {
+        for m in &mut c.methods {
+            statements(&mut m.body, api)?;
+        }
+    }
+    Ok(())
+}
+
+/// `x: asyncio.Queue[int] = asyncio.Queue()`: the queue's class is the kind
+/// the call makes, holding what the annotation names.
+fn type_queue(api: &Api, value: &mut IRExpr, declared: &IRType) -> Result<()> {
+    let Some((kind, args)) = api.call_of(value) else {
+        return Ok(());
+    };
+    if !crate::ir::asyncio_sync::QUEUE_KINDS.contains(&kind.as_str()) {
+        return Ok(());
+    }
+    let Some(class) = crate::ir::asyncio_sync::typed_queue(&kind, declared) else {
+        return Ok(());
+    };
+    let args = args.to_vec();
+    *value = crate::ir::asyncio_sync::queue_call(&class, &args, &kind)?;
+    Ok(())
+}
+
 /// The types the module shows, with each coroutine function making its state
-/// class, a subclass of the runtime's coroutine class for its result.
+/// class, a subclass of the runtime's coroutine class for its result, and
+/// the module's variables typed (`lock = asyncio.Lock()`).
 fn coroutine_types(module: &IRModule, results: &BTreeMap<String, IRType>) -> Types {
     let mut types = Types::of_module(module);
+    let none = HashMap::new();
+    for var in &module.variables {
+        let ty = match &var.var_type {
+            Some(t) if fully_known(t) => t.clone(),
+            _ => types.of(&var.value, &none),
+        };
+        if fully_known(&ty) {
+            types.globals.insert(var.name.clone(), ty);
+        }
+    }
     for (f, t) in results {
         // A coroutine's suspensions are not a generator's.
         types.yields.remove(f);
@@ -511,6 +619,7 @@ impl Lowerer<'_> {
     fn plain_body(&mut self, body: &mut IRBody, env: &mut HashMap<String, IRType>) -> Result<()> {
         for stmt in &mut body.statements {
             self.check_dropped(stmt, env)?;
+            self.type_queue_stmt(stmt)?;
             let mut err = None;
             each_expr(stmt, &mut |e| {
                 if err.is_none() {
@@ -577,6 +686,25 @@ impl Lowerer<'_> {
         Ok(out)
     }
 
+    fn type_queue_stmt(&self, stmt: &mut IRStatement) -> Result<()> {
+        match stmt {
+            IRStatement::Assign {
+                value,
+                var_type: Some(t),
+                ..
+            }
+            | IRStatement::AttributeAssign {
+                value,
+                annotation: Some(t),
+                ..
+            } => {
+                let t = t.clone();
+                type_queue(self.api, value, &t)
+            }
+            _ => Ok(()),
+        }
+    }
+
     fn statement(
         &mut self,
         stmt: IRStatement,
@@ -584,6 +712,8 @@ impl Lowerer<'_> {
         scope: &Scope,
         result: &IRType,
     ) -> Result<Vec<IRStatement>> {
+        let mut stmt = stmt;
+        self.type_queue_stmt(&mut stmt)?;
         let mut pre = Vec::new();
         let rewritten = match stmt {
             // `a, b = await asyncio.gather(x, y)`: each target takes its

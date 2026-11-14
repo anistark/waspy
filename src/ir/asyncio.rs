@@ -50,7 +50,7 @@ pub(crate) fn name(short: &str) -> String {
 pub(crate) fn fname(short: &str) -> String {
     format!("{ASYNCIO_FN_PREFIX}{short}")
 }
-fn spelled(t: &IRType) -> String {
+pub(crate) fn spelled(t: &IRType) -> String {
     encode(t).expect("a result type an annotation can name")
 }
 /// The class every coroutine resolving to `t` derives from.
@@ -75,49 +75,49 @@ pub(crate) fn is_awaitable_class(class: &str) -> bool {
         || class == name("_Gathering")
 }
 
-fn cls(short: &str) -> IRType {
+pub(crate) fn cls(short: &str) -> IRType {
     IRType::Class(name(short))
 }
-fn opt(t: IRType) -> IRType {
+pub(crate) fn opt(t: IRType) -> IRType {
     IRType::Optional(Box::new(t))
 }
-fn list(t: IRType) -> IRType {
+pub(crate) fn list(t: IRType) -> IRType {
     IRType::List(Box::new(t))
 }
-fn me(class: &str) -> crate::ir::IRParam {
+pub(crate) fn me(class: &str) -> crate::ir::IRParam {
     param("self", &IRType::Class(class.to_string()))
 }
-fn loop_var(var: &str) -> IRExpr {
+pub(crate) fn loop_var(var: &str) -> IRExpr {
     attr(v(&name("_Loop")), var)
 }
-fn set_loop(var: &str, value: IRExpr) -> IRStatement {
+pub(crate) fn set_loop(var: &str, value: IRExpr) -> IRStatement {
     set_attr(v(&name("_Loop")), var, value)
 }
-fn f(short: &str, args: Vec<IRExpr>) -> IRExpr {
+pub(crate) fn f(short: &str, args: Vec<IRExpr>) -> IRExpr {
     call(&fname(short), args)
 }
-fn qcall(class: &str, method: &str, args: Vec<IRExpr>) -> IRExpr {
+pub(crate) fn qcall(class: &str, method: &str, args: Vec<IRExpr>) -> IRExpr {
     call(&format!("{class}::{method}"), args)
 }
-fn eq(l: IRExpr, r: IRExpr) -> IRExpr {
+pub(crate) fn eq(l: IRExpr, r: IRExpr) -> IRExpr {
     cmp(l, IRCompareOp::Eq, r)
 }
-fn ne(l: IRExpr, r: IRExpr) -> IRExpr {
+pub(crate) fn ne(l: IRExpr, r: IRExpr) -> IRExpr {
     cmp(l, IRCompareOp::NotEq, r)
 }
-fn is_none(e: IRExpr) -> IRExpr {
+pub(crate) fn is_none(e: IRExpr) -> IRExpr {
     cmp(e, IRCompareOp::Is, none())
 }
-fn not_none(e: IRExpr) -> IRExpr {
+pub(crate) fn not_none(e: IRExpr) -> IRExpr {
     cmp(e, IRCompareOp::IsNot, none())
 }
-fn raise_new(class: &str) -> IRStatement {
+pub(crate) fn raise_new(class: &str) -> IRStatement {
     IRStatement::Raise {
         exception: Some(call(class, vec![])),
         cause: None,
     }
 }
-fn class(short: &str, base: Option<String>, methods: Vec<IRFunction>) -> IRClass {
+pub(crate) fn class(short: &str, base: Option<String>, methods: Vec<IRFunction>) -> IRClass {
     IRClass {
         name: name(short),
         bases: base.into_iter().collect(),
@@ -128,7 +128,7 @@ fn class(short: &str, base: Option<String>, methods: Vec<IRFunction>) -> IRClass
         deferred_vars: Vec::new(),
     }
 }
-fn function(
+pub(crate) fn function(
     short: &str,
     params: Vec<crate::ir::IRParam>,
     ret: IRType,
@@ -210,6 +210,19 @@ impl Api {
         self.module || !self.names.is_empty()
     }
 
+    /// `asyncio.X` read as a name, or `X` imported from it: what it names.
+    pub(crate) fn name_of(&self, e: &IRExpr) -> Option<String> {
+        match e {
+            IRExpr::Attribute { object, attribute }
+                if self.module && matches!(&**object, IRExpr::Variable(m) if m == "asyncio") =>
+            {
+                Some(attribute.clone())
+            }
+            IRExpr::Variable(n) => self.names.get(n).cloned(),
+            _ => None,
+        }
+    }
+
     /// `asyncio.f(args)`, or `f(args)` for a name imported from it: the
     /// function's name in `asyncio`, and the arguments.
     pub(crate) fn call_of<'e>(&self, e: &'e IRExpr) -> Option<(String, &'e [IRExpr])> {
@@ -259,7 +272,9 @@ impl Api {
     pub(crate) fn rewrite(&self, e: &mut IRExpr, awaited: bool) -> Result<()> {
         if let IRExpr::Attribute { object, attribute } = e {
             if self.module && matches!(&**object, IRExpr::Variable(m) if m == "asyncio") {
-                let Some(class) = exception_class(attribute) else {
+                let Some(class) = exception_class(attribute)
+                    .or_else(|| crate::ir::asyncio_sync::exception_class(attribute))
+                else {
                     return Err(refused(format!(
                         "asyncio.{attribute} is not supported here"
                     )));
@@ -269,7 +284,9 @@ impl Api {
             return Ok(());
         }
         if let IRExpr::Variable(n) = e {
-            if let Some(class) = self.names.get(n.as_str()).and_then(|a| exception_class(a)) {
+            if let Some(class) = self.names.get(n.as_str()).and_then(|a| {
+                exception_class(a).or_else(|| crate::ir::asyncio_sync::exception_class(a))
+            }) {
                 *e = v(class);
             }
             return Ok(());
@@ -278,7 +295,9 @@ impl Api {
             return Ok(());
         };
         let args = args.to_vec();
-        if let Some(class) = exception_class(&function) {
+        if let Some(class) = exception_class(&function)
+            .or_else(|| crate::ir::asyncio_sync::exception_class(&function))
+        {
             *e = call(class, args);
             return Ok(());
         }
@@ -319,6 +338,47 @@ impl Api {
                     ))
                 }
             },
+            "Lock" | "Event" => {
+                if !args.is_empty() {
+                    return Err(refused(format!("asyncio.{function}() takes no arguments")));
+                }
+                let class = if function == "Lock" {
+                    crate::ir::asyncio_sync::LOCK
+                } else {
+                    crate::ir::asyncio_sync::EVENT
+                };
+                call(class, vec![])
+            }
+            "Semaphore" | "BoundedSemaphore" => {
+                let value = match args.as_slice() {
+                    [] => int(1),
+                    [IRExpr::Keyword { name, value }] if name == "value" => (**value).clone(),
+                    [IRExpr::Keyword { name, .. }] => {
+                        return Err(refused(format!(
+                            "asyncio.{function}() got an unexpected keyword argument '{name}'"
+                        )))
+                    }
+                    [x] => x.clone(),
+                    _ => {
+                        return Err(refused(format!(
+                            "asyncio.{function}() takes at most 1 argument"
+                        )))
+                    }
+                };
+                let class = if function == "Semaphore" {
+                    crate::ir::asyncio_sync::SEMAPHORE
+                } else {
+                    crate::ir::asyncio_sync::BOUNDED
+                };
+                call(class, vec![value])
+            }
+            "timeout" => crate::ir::asyncio_sync::timeout_call(one(args)?),
+            "Queue" | "LifoQueue" | "PriorityQueue" => {
+                return Err(refused(format!(
+                    "asyncio.{function}() needs the type of what it holds: make it where that \
+                     is declared, for example 'q: asyncio.{function}[int] = asyncio.{function}()'"
+                )))
+            }
             "gather" | "wait_for" if !awaited => {
                 return Err(refused(format!(
                     "asyncio.{function}() is supported only where it is awaited directly: \
@@ -329,7 +389,8 @@ impl Api {
             other => {
                 return Err(refused(format!(
                     "asyncio.{other}() is not supported. Supported: run, create_task, \
-                     ensure_future, gather, sleep, wait_for, and the methods of a task"
+                     ensure_future, gather, sleep, wait_for, timeout, Lock, Event, Semaphore, \
+                     BoundedSemaphore, Queue, LifoQueue, PriorityQueue, and their methods"
                 )))
             }
         };
@@ -1780,10 +1841,10 @@ fn timeout() -> IRClass {
         vec![
             method(
                 "__init__",
-                vec![me(&c), param("when", &IRType::Float)],
+                vec![me(&c), param("when", &opt(IRType::Float))],
                 IRType::None,
                 vec![
-                    set_my_typed("_when", v("when"), &IRType::Float),
+                    set_my_typed("_when", v("when"), &opt(IRType::Float)),
                     set_my_typed("_state", int(0), &IRType::Int),
                     set_my_typed("_handler", none(), &opt(cls("_Handle"))),
                     set_my_typed("_task", none(), &opt(cls("_FutureBase"))),
@@ -1810,24 +1871,34 @@ fn timeout() -> IRClass {
                         "_cancelling",
                         mcall(v("t"), "cancelling", vec![]),
                     ),
-                    if_else(
-                        cmp(my("_when"), IRCompareOp::LtE, call(CLOCK_FN, vec![])),
-                        vec![set_attr(
-                            v("self"),
-                            "_handler",
-                            f(
-                                "call_soon",
-                                vec![call(&name("_TimeoutFire"), vec![v("self")]), none()],
+                    // `reschedule(self._when)`: no deadline for None.
+                    if_(
+                        not_none(my("_when")),
+                        vec![
+                            assign_typed("when", my("_when"), &IRType::Float),
+                            if_else(
+                                cmp(v("when"), IRCompareOp::LtE, call(CLOCK_FN, vec![])),
+                                vec![set_attr(
+                                    v("self"),
+                                    "_handler",
+                                    f(
+                                        "call_soon",
+                                        vec![call(&name("_TimeoutFire"), vec![v("self")]), none()],
+                                    ),
+                                )],
+                                vec![set_attr(
+                                    v("self"),
+                                    "_handler",
+                                    f(
+                                        "call_at",
+                                        vec![
+                                            v("when"),
+                                            call(&name("_TimeoutFire"), vec![v("self")]),
+                                        ],
+                                    ),
+                                )],
                             ),
-                        )],
-                        vec![set_attr(
-                            v("self"),
-                            "_handler",
-                            f(
-                                "call_at",
-                                vec![my("_when"), call(&name("_TimeoutFire"), vec![v("self")])],
-                            ),
-                        )],
+                        ],
                     ),
                 ],
             ),
