@@ -614,6 +614,7 @@ fn lower_module(ast: &Suite, hoisted: usize) -> Result<IRModule> {
     crate::ir::lower_json(&mut module)?;
     crate::ir::apply_user_decorators(&mut module)?;
     crate::ir::apply_metaclasses(&mut module)?;
+    crate::ir::js_proxies::lower_js_proxies(&mut module)?;
     crate::ir::finalize::lift_nested_functions(&mut module)?;
     crate::ir::lower_partials(&mut module)?;
     crate::ir::lower_datetime(&mut module)?;

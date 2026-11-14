@@ -1928,6 +1928,7 @@ fn scan_expr_locals(expr: &IRExpr, ctx: &mut CompilationContext, depth: u32) {
                         IRType::Optional(inner) if matches!(*inner, IRType::Class(_)) => {
                             IRType::Optional(inner)
                         }
+                        IRType::JsProxy => IRType::JsProxy,
                         // A tuple or collection element is a pointer whose
                         // type the reads of the target need: an untyped one
                         // rendered its address.
@@ -2427,6 +2428,8 @@ pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
                         IRType::Optional(inner) if matches!(*inner, IRType::Class(_)) => {
                             IRType::Optional(inner)
                         }
+                        // A JavaScript value: a proxy's block.
+                        IRType::JsProxy => IRType::JsProxy,
                         // A str element, so what the body computes from it
                         // (`line.strip()`) is typed for the scan too; code
                         // generation would make it a str in any case.

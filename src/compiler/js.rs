@@ -126,6 +126,10 @@ pub enum JsImport {
     NextSettled,
     SettledFailed,
     SettledValue,
+    /// `(env, arity, once, id) -> h`: a JavaScript function calling the
+    /// Python function `env` through the export `__waspy_call_<arity>`
+    /// (`create_proxy`), whose `destroy()` calls `__waspy_forget(id)`.
+    Function,
 }
 
 impl JsImport {
@@ -168,6 +172,7 @@ impl JsImport {
             JsImport::NextSettled => "next_settled",
             JsImport::SettledFailed => "settled_failed",
             JsImport::SettledValue => "settled_value",
+            JsImport::Function => "function",
         }
     }
 
@@ -187,7 +192,7 @@ impl JsImport {
             | JsImport::SettledValue => (vec![], vec![I32]),
             JsImport::Suspend => (vec![F64], vec![I32]),
             JsImport::Get => (vec![I32; 3], vec![I32]),
-            JsImport::Set | JsImport::CallMethod => (vec![I32; 4], vec![I32]),
+            JsImport::Set | JsImport::CallMethod | JsImport::Function => (vec![I32; 4], vec![I32]),
             JsImport::Call | JsImport::Construct | JsImport::Equal | JsImport::Item => {
                 (vec![I32; 2], vec![I32])
             }
@@ -209,7 +214,7 @@ impl JsImport {
         }
     }
 
-    pub const ALL: [JsImport; 37] = [
+    pub const ALL: [JsImport; 38] = [
         JsImport::Global,
         JsImport::GlobalThis,
         JsImport::Get,
@@ -247,6 +252,7 @@ impl JsImport {
         JsImport::NextSettled,
         JsImport::SettledFailed,
         JsImport::SettledValue,
+        JsImport::Function,
     ];
 }
 
@@ -1365,7 +1371,7 @@ pub(crate) fn with_bridge(module: &IRModule) -> Option<IRModule> {
 
 /// `(e) -> str`: the last line of CPython's report of an exception, which a
 /// call from JavaScript throws as its message.
-fn exception_line(name: &str) -> crate::ir::IRFunction {
+pub(crate) fn exception_line(name: &str) -> crate::ir::IRFunction {
     use crate::ir::build::*;
     use crate::ir::{IRCompareOp, IROp};
     let s = || IRType::String;
@@ -1473,6 +1479,14 @@ fn emit_value(
         IRType::JsProxy => {
             func.instruction(&I::I32Load(crate::compiler::runtime::w32(0)));
             return false;
+        }
+        IRType::Callable { .. } => {
+            ctx.report(
+                "a function passed to JavaScript needs a proxy: pass create_proxy(f) (from \
+                 pyodide.ffi), which JavaScript can call until its destroy()",
+            );
+            func.instruction(&I::Drop);
+            func.instruction(&I::Call(imp(ctx, JsImport::Undefined)));
         }
         other => {
             ctx.report(format!(
@@ -1848,21 +1862,44 @@ pub(crate) fn emit_intrinsic(
             IRType::JsProxy
         }
         "export" => {
-            // A handle the caller in JavaScript owns.
+            // A handle the caller in JavaScript owns. A call answering None
+            // is one word too here, so the value is converted by the type
+            // it was emitted as.
             if matches!(args.first(), Some(IRExpr::Const(IRConstant::None))) {
                 call_import(func, JsImport::Undefined);
                 return Some(IRType::Int);
             }
-            let ty = crate::compiler::function::infer_value_type(&args[0], ctx);
-            if scalar(&ty) {
-                if emit_value(&args[0], func, ctx, ml) {
-                    return Some(IRType::Int);
+            let ty = crate::compiler::expression::emit_value(&args[0], func, ctx, ml, None);
+            // `__js_export(f(...), True)`: a function called for its effect,
+            // whose word is dropped for undefined.
+            if matches!(args.get(1), Some(IRExpr::Const(IRConstant::Bool(true)))) {
+                emit_drop(func, &ty);
+                if ty == IRType::None {
+                    func.instruction(&I::Drop);
                 }
-                call_import(func, JsImport::Keep);
-            } else {
-                let ty = emit_expr(&args[0], func, ctx, ml, None);
-                func.instruction(&I::Call(helper(ctx, JsFn::ToJs(ty))));
-                emit_post_call_check(func, ctx);
+                call_import(func, JsImport::Undefined);
+                return Some(IRType::Int);
+            }
+            match &ty {
+                IRType::None => {
+                    func.instruction(&I::Drop);
+                    call_import(func, JsImport::Undefined);
+                }
+                IRType::Int => {
+                    func.instruction(&I::F64ConvertI32S);
+                    call_import(func, JsImport::Number);
+                }
+                IRType::Float => call_import(func, JsImport::Number),
+                IRType::Bool => call_import(func, JsImport::Boolean),
+                IRType::String => call_import(func, JsImport::String),
+                IRType::JsProxy => {
+                    func.instruction(&I::I32Load(crate::compiler::runtime::w32(0)));
+                    call_import(func, JsImport::Keep);
+                }
+                _ => {
+                    func.instruction(&I::Call(helper(ctx, JsFn::ToJs(ty.clone()))));
+                    emit_post_call_check(func, ctx);
+                }
             }
             IRType::Int
         }
@@ -1894,6 +1931,20 @@ pub(crate) fn emit_intrinsic(
             } else {
                 IRType::Int
             }
+        }
+        "function" => {
+            // The Python function (its environment's address), then the
+            // arity, whether it is called once, and its registry id.
+            emit_expr(&args[0], func, ctx, ml, None);
+            for (k, arg) in args.iter().enumerate().skip(1) {
+                let ty = emit_expr(arg, func, ctx, ml, None);
+                if !matches!(ty, IRType::Int | IRType::Bool) {
+                    ctx.report(format!("__js_function argument {k} is not an int"));
+                }
+            }
+            call_import(func, JsImport::Function);
+            func.instruction(&I::Call(helper(ctx, JsFn::Wrap)));
+            IRType::JsProxy
         }
         "settled_value" => {
             call_import(func, JsImport::SettledValue);

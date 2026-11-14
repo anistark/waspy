@@ -393,3 +393,93 @@ fn keyword_arguments_and_property_augmented_assignment() {
         "[1,{\"once\":true,\"name\":\"x\"}]\n{\"n\":30,\"s\":\"ab\",\"f\":2}\n",
     );
 }
+
+/// A Python function JavaScript calls through `create_proxy`: its
+/// unannotated parameters take JavaScript values, what it answers goes back
+/// converted, a lambda works the same, a function called for its effect
+/// answers undefined, and a destroyed proxy can no longer be called.
+#[test]
+fn proxies_of_python_functions() {
+    prints(
+        r#"
+        import js
+        from pyodide.ffi import JsException, create_proxy, to_js
+
+        calls: list[str] = []
+
+
+        def add(a, b) -> int:
+            x: int = a
+            y: int = b
+            return x + y
+
+
+        def note(v):
+            s: str = v
+            calls.append(s)
+
+
+        def main() -> None:
+            p = create_proxy(add)
+            print(js.Reflect.apply(p, None, to_js([2, 3])))
+            shout = create_proxy(lambda s: str(s).upper() + "!")
+            print(js.Reflect.apply(shout, None, to_js(["hi"])))
+            n = create_proxy(note)
+            print(js.Reflect.apply(n, None, to_js(["seen"])), calls)
+            p.destroy()
+            try:
+                js.Reflect.apply(p, None, to_js([1, 1]))
+            except JsException as e:
+                print("destroyed:", str(e).splitlines()[0])
+            for i in range(200):
+                q = create_proxy(lambda v: v)
+                q.destroy()
+            print(js.Reflect.apply(shout, None, to_js(["again"])))
+
+
+        if __name__ == "__main__":
+            main()
+        "#,
+        "5\nHI!\nNone ['seen']\ndestroyed: Error: Object has already been destroyed\nAGAIN!\n",
+    );
+}
+
+/// A Python function handed to JavaScript without a proxy, and a proxy of
+/// something other than a function or a lambda, are refused.
+#[test]
+fn proxy_refusals() {
+    refused(
+        r#"
+        from js import document
+
+        def on_click(e) -> None:
+            pass
+
+        def main() -> None:
+            document.body.addEventListener("click", on_click)
+        "#,
+        "pass create_proxy(f)",
+    );
+    refused(
+        r#"
+        from pyodide.ffi import create_proxy
+
+        def main() -> None:
+            handlers = [print]
+            p = create_proxy(handlers[0])
+        "#,
+        "take a function defined with 'def' at module level, or a lambda",
+    );
+    refused(
+        r#"
+        from pyodide.ffi import create_proxy
+
+        def twice(x):
+            return x
+
+        def main() -> None:
+            p = create_proxy(twice)
+        "#,
+        "returns a value but declares no return type",
+    );
+}

@@ -1017,6 +1017,19 @@ pub enum Js {
     Node(Rc<RefCell<Node>>),
     /// An element's `classList`.
     ClassList(Rc<RefCell<Node>>),
+    /// A Python function JavaScript can call (`create_proxy`).
+    PyFunc(Rc<PyFn>),
+}
+
+/// What the loader's `function` import makes of a Python function: its
+/// environment, how many arguments it takes, whether it is called once, its
+/// registry id, and whether it was destroyed.
+pub struct PyFn {
+    pub env: i32,
+    pub arity: usize,
+    pub once: bool,
+    pub id: i32,
+    pub alive: std::cell::Cell<bool>,
 }
 
 /// A DOM node, as much of one as the tests need: an element's tag, its
@@ -1338,6 +1351,7 @@ impl Js {
                 }
             }
             Js::ClassList(n) => n.borrow().classes().join(" "),
+            Js::PyFunc(_) => "function () { [python code] }".to_string(),
         }
     }
     fn same(&self, other: &Js) -> bool {
@@ -1350,6 +1364,7 @@ impl Js {
             (Js::Obj(a, _), Js::Obj(b, _)) => Rc::ptr_eq(a, b),
             (Js::Module(a), Js::Module(b)) => a == b,
             (Js::Node(a), Js::Node(b)) | (Js::ClassList(a), Js::ClassList(b)) => Rc::ptr_eq(a, b),
+            (Js::PyFunc(a), Js::PyFunc(b)) => Rc::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -2070,7 +2085,12 @@ fn js_globals() -> Js {
         );
         Ok(new_event(&kind, bubbles))
     });
+    let reflect = Js::object(vec![
+        ("apply", Js::function(|_, _, _| Ok(Js::Undefined))),
+        ("ownKeys", Js::function(|_, _, _| Ok(Js::Undefined))),
+    ]);
     let globals = Js::object(vec![
+        ("Reflect", reflect),
         ("document", new_document()),
         ("Event", event),
         ("Promise", promise),
@@ -2113,6 +2133,19 @@ fn call_method(
                 ),
         )),
         (Js::Module(module), export) => call_module(caller, module, export, args),
+        (Js::PyFunc(p), "destroy") => destroy_python(caller, &p.clone()),
+        // `Reflect.apply(f, this, args)`.
+        (Js::Obj(..), "apply")
+            if target.get("apply").is_some() && target.get("ownKeys").is_some() =>
+        {
+            let f = args.first().cloned().unwrap_or(Js::Undefined);
+            let this = args.get(1).cloned().unwrap_or(Js::Undefined);
+            let items = match args.get(2) {
+                Some(Js::Arr(items)) => items.borrow().clone(),
+                _ => Vec::new(),
+            };
+            call_value(caller, &f, &this, &items)
+        }
         (Js::Node(_) | Js::ClassList(_), _) if DOM_METHODS.contains(&name) => {
             dom_method(caller, target, name, &args)
                 .unwrap_or_else(|| Err(js_error("TypeError", format!("{name} is not a function"))))
@@ -2131,8 +2164,66 @@ fn call_value(caller: &mut Caller<'_, Host>, f: &Js, this: &Js, args: &[Js]) -> 
             let function = function.clone();
             function(&mut caller.data_mut().js, this, args)
         }
+        Js::PyFunc(p) => call_python(caller, p, args),
         _ => Err(js_error("TypeError", "not a function")),
     }
+}
+
+/// A call of a Python function's proxy, as the loader makes it: through the
+/// export `__waspy_call_<arity>`.
+fn call_python(caller: &mut Caller<'_, Host>, p: &Rc<PyFn>, args: &[Js]) -> Result<Js, Js> {
+    if !p.alive.get() {
+        return Err(js_error("Error", "Object has already been destroyed"));
+    }
+    if args.len() != p.arity {
+        let s = |n: usize| if n == 1 { "" } else { "s" };
+        return Err(js_error(
+            "PythonError",
+            format!(
+                "TypeError: the function takes {} positional argument{} but {} {} given",
+                p.arity,
+                s(p.arity),
+                args.len(),
+                if args.len() == 1 { "was" } else { "were" }
+            ),
+        ));
+    }
+    let name = format!("__waspy_call_{}", p.arity);
+    let Some(Extern::Func(f)) = caller.get_export(&name) else {
+        return Err(js_error("TypeError", format!("no export {name}")));
+    };
+    let mut params = vec![Value::I32(p.env)];
+    for a in args {
+        params.push(Value::I32(caller.data_mut().js.add(a.clone())));
+    }
+    let mut out = [Value::I32(0)];
+    f.call(&mut *caller, &params, &mut out)
+        .map_err(|e| js_error("RuntimeError", e))?;
+    if p.once {
+        destroy_python(caller, p)?;
+    }
+    let r = out[0].i32().unwrap_or(-2);
+    let world = &mut caller.data_mut().js;
+    if r == -2 {
+        let message = world.failure.take().unwrap_or_default();
+        return Err(js_error("PythonError", message));
+    }
+    let value = world.value(r);
+    world.drop_handle(r);
+    Ok(value)
+}
+
+/// A Python function's proxy's `destroy()`: Python lets go of it.
+fn destroy_python(caller: &mut Caller<'_, Host>, p: &Rc<PyFn>) -> Result<Js, Js> {
+    if p.alive.replace(false) {
+        let Some(Extern::Func(f)) = caller.get_export("__waspy_forget") else {
+            return Err(js_error("TypeError", "no export __waspy_forget"));
+        };
+        let mut out = [Value::I32(0)];
+        f.call(&mut *caller, &[Value::I32(p.id)], &mut out)
+            .map_err(|e| js_error("RuntimeError", e))?;
+    }
+    Ok(Js::Undefined)
 }
 
 /// A call of a separately compiled module's export, through its wrapper,
@@ -2243,7 +2334,7 @@ pub fn link_js(linker: &mut Linker<Host>) {
                 };
                 let Js::Arr(items) = argv else { unreachable!() };
                 let items = items.borrow().clone();
-                if !matches!(fv, Js::Obj(_, Some(_))) {
+                if !matches!(fv, Js::Obj(_, Some(_)) | Js::PyFunc(_)) {
                     return -3;
                 }
                 match call_value(&mut c, &fv, &Js::Undefined, &items) {
@@ -2268,7 +2359,8 @@ pub fn link_js(linker: &mut Linker<Host>) {
                 let builtin = matches!((&target, name.as_str()), (Js::Arr(_), "push" | "join"))
                     || matches!(target, Js::Module(_))
                     || (matches!(target, Js::Node(_) | Js::ClassList(_))
-                        && DOM_METHODS.contains(&name.as_str()));
+                        && DOM_METHODS.contains(&name.as_str()))
+                    || (matches!(target, Js::PyFunc(_)) && name == "destroy");
                 if !builtin {
                     match target.get(&name) {
                         None => return -1,
@@ -2294,7 +2386,7 @@ pub fn link_js(linker: &mut Linker<Host>) {
                 };
                 let Js::Arr(items) = argv else { unreachable!() };
                 let items = items.borrow().clone();
-                if !matches!(fv, Js::Obj(_, Some(_))) {
+                if !matches!(fv, Js::Obj(_, Some(_)) | Js::PyFunc(_)) {
                     return -3;
                 }
                 match call_value(&mut c, &fv, &Js::Undefined, &items) {
@@ -2359,7 +2451,7 @@ pub fn link_js(linker: &mut Linker<Host>) {
                 Js::Num(x) if x == x.trunc() && x.abs() <= 9007199254740991.0 => 4,
                 Js::Num(_) => 5,
                 Js::Str(_) => 6,
-                Js::Obj(_, Some(_)) => 7,
+                Js::Obj(_, Some(_)) | Js::PyFunc(_) => 7,
                 Js::Arr(_) => 8,
                 Js::Obj(..)
                 | Js::Error(_)
@@ -2555,6 +2647,21 @@ pub fn link_js(linker: &mut Linker<Host>) {
                 other => w.settled.push((token, false, other)),
             }
         })
+        .unwrap();
+    linker
+        .func_wrap(
+            m,
+            "function",
+            |mut c: Caller<'_, Host>, env: i32, arity: i32, once: i32, id: i32| -> i32 {
+                c.data_mut().js.add(Js::PyFunc(Rc::new(PyFn {
+                    env,
+                    arity: arity as usize,
+                    once: once != 0,
+                    id,
+                    alive: std::cell::Cell::new(true),
+                })))
+            },
+        )
         .unwrap();
     // JSPI, as the loader's `start()` gives it: suspending hands back the
     // promises that settled, or moves the clock on to the next timer.

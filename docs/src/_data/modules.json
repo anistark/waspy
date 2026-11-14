@@ -1082,7 +1082,9 @@
       },
       {
         "name": "Event handling system",
-        "status": "todo"
+        "status": "done",
+        "version": "upcoming",
+        "test": "web_interop::event_handling"
       },
       {
         "name": "HTTP requests (fetch API)",

@@ -15,6 +15,7 @@ mod generators;
 mod imports;
 pub(crate) mod infer;
 mod itertools;
+pub(crate) mod js_proxies;
 pub(crate) mod json;
 mod logging;
 mod metaclasses;

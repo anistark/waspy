@@ -331,6 +331,46 @@ export class Bridge {
             },
             settled_failed: () => (this.taken.failed ? 1 : 0),
             settled_value: () => this.add(this.taken.value),
+            // `create_proxy(f)`: a JavaScript function calling the Python
+            // function `env` with the values it is given, whose `destroy()`
+            // lets Python let go of it; `once` destroys it after one call.
+            function: (env, arity, once, id) => {
+                let alive = true;
+                const fn = (...args) => {
+                    if (!alive) throw new Error('Object has already been destroyed');
+                    if (args.length !== arity) {
+                        const s = (n) => (n === 1 ? '' : 's');
+                        throw new PythonError(
+                            `TypeError: the function takes ${arity} positional argument${s(arity)} ` +
+                                `but ${args.length} ${args.length === 1 ? 'was' : 'were'} given`,
+                        );
+                    }
+                    const handles = args.map((a) => this.add(a));
+                    this.depth += 1;
+                    let r;
+                    try {
+                        r = this.instance.exports[`__waspy_call_${arity}`](env, ...handles);
+                    } finally {
+                        this.depth -= 1;
+                    }
+                    if (once) fn.destroy();
+                    if (r === -2) {
+                        const message = this.failure;
+                        this.failure = null;
+                        throw new PythonError(message);
+                    }
+                    const value = this.get(r);
+                    this.drop(r);
+                    return value;
+                };
+                fn.destroy = () => {
+                    if (alive) {
+                        alive = false;
+                        this.instance.exports.__waspy_forget(id);
+                    }
+                };
+                return this.add(fn);
+            },
             resolve: (token, failed, h) => {
                 let value = this.get(h);
                 this.drop(h);

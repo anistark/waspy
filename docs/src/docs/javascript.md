@@ -112,6 +112,28 @@ first.style.color = "green"
 print(len(items.children), first.className)    # 2 item done
 ```
 
+## Events
+
+A Python function becomes a JavaScript function through `pyodide.ffi.create_proxy(f)`, as in Pyodide, so it can be an event listener, a timer's callback, or anything else JavaScript calls. Its unannotated parameters take JavaScript values (an event listener's event is a `JsProxy`), what it answers goes back converted as an export's result does, and an exception it raises is thrown into JavaScript as a `PythonError`. The proxy keeps the function alive until its `destroy()`, as Pyodide's does; `create_once_callable(f)` destroys itself after one call.
+
+```python
+from js import document
+from pyodide.ffi import create_proxy
+
+def on_click(event):
+    kind: str = event.type
+    print("clicked", kind)
+
+button = document.createElement("button")
+listener = create_proxy(on_click)
+button.addEventListener("click", listener)
+button.click()                                   # clicked click
+button.removeEventListener("click", listener)
+listener.destroy()
+```
+
+`create_proxy` takes a function defined at module level or a lambda; a function that returns a value declares its type. `examples/events_demo.py` (bubbling, `stopPropagation()`, `once=True`, `preventDefault()`) is checked against Pyodide in Chromium by the browser gate.
+
 A query that finds nothing answers `null`, which is Pyodide's `jsnull`, not None, and false as a truth value (`if el:`). `examples/dom_demo.py` is checked against Pyodide in Chromium by the browser gate.
 
 ## The loader

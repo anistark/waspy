@@ -137,6 +137,7 @@ const WEB_COMMANDS: &[(&str, &str)] = &[
     ("js_bridge_demo", "examples/js_bridge_demo.py"),
     ("js_promises_demo", "examples/js_promises_demo.py"),
     ("dom_demo", "examples/dom_demo.py"),
+    ("events_demo", "examples/events_demo.py"),
 ];
 
 /// Build each web command at both optimization levels.
