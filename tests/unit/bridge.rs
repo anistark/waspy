@@ -169,7 +169,7 @@ fn bridge_refusals() {
 
         def f() -> int:
             o = JSON.parse('{"n": 1}')
-            o.n += 1
+            o.n += [1]
             return 0
         "#,
         "augmented assignment to the JavaScript property",
@@ -365,4 +365,31 @@ fn promise_inside_asyncio_run_without_jspi_raises() {
         run.stderr
     );
     assert_eq!(run.exit, 1);
+}
+
+/// Keyword arguments in a call to JavaScript are one object after the
+/// others, as Pyodide passes them, and an augmented assignment to a property
+/// reads it as the right-hand side's kind and sets the result.
+#[test]
+fn keyword_arguments_and_property_augmented_assignment() {
+    prints(
+        r#"
+        from js import Array, JSON
+
+
+        def main() -> None:
+            print(JSON.stringify(Array(1, once=True, name="x")))
+            o = JSON.parse('{"n": 1, "s": "a", "f": 1.5}')
+            o.n += 2
+            o.s += "b"
+            o.f += 0.5
+            o.n *= 10
+            print(JSON.stringify(o))
+
+
+        if __name__ == "__main__":
+            main()
+        "#,
+        "[1,{\"once\":true,\"name\":\"x\"}]\n{\"n\":30,\"s\":\"ab\",\"f\":2}\n",
+    );
 }

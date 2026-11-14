@@ -3562,14 +3562,70 @@ fn compile_statement(
                     None,
                 );
             }
+            // `el.textContent += "!"`: the property read as the kind of the
+            // right-hand side (a str, an int, or a float, as Pyodide hands
+            // it over), combined, and set.
             IRStatement::AttributeAugAssign {
-                object, attribute, ..
+                object,
+                attribute,
+                value,
+                op,
             } if !ctx.js.is_empty() && infer_value_type(object, ctx) == IRType::JsProxy => {
-                ctx.report(format!(
-                    "an augmented assignment to the JavaScript property '{attribute}' is not \
-                     supported. Hint: convert it, for example 'n: int = el.{attribute}' then \
-                     'el.{attribute} = n + 1'"
-                ));
+                fn plain(e: &IRExpr) -> bool {
+                    match e {
+                        IRExpr::Variable(_) | IRExpr::Param(_) => true,
+                        IRExpr::Attribute { object, .. } => plain(object),
+                        _ => false,
+                    }
+                }
+                let read = IRExpr::Attribute {
+                    object: Box::new(object.clone()),
+                    attribute: attribute.clone(),
+                };
+                let kind = match value {
+                    IRExpr::Const(IRConstant::Int(_)) => IRType::Int,
+                    IRExpr::Const(IRConstant::Float(_)) => IRType::Float,
+                    IRExpr::Const(IRConstant::String(_)) => IRType::String,
+                    other => infer_value_type(other, ctx),
+                };
+                let as_kind = match kind {
+                    IRType::String => Some("as_str"),
+                    IRType::Int => Some("as_int"),
+                    IRType::Float => Some("float"),
+                    _ => None,
+                };
+                match as_kind {
+                    Some(conv) if plain(object) => emit_expr(
+                        &IRExpr::FunctionCall {
+                            function_name: crate::compiler::js::intrinsic("set"),
+                            arguments: vec![
+                                object.clone(),
+                                IRExpr::Const(IRConstant::String(attribute.clone())),
+                                IRExpr::BinaryOp {
+                                    left: Box::new(IRExpr::FunctionCall {
+                                        function_name: crate::compiler::js::intrinsic(conv),
+                                        arguments: vec![read],
+                                    }),
+                                    right: Box::new(value.clone()),
+                                    op: op.clone(),
+                                },
+                            ],
+                        },
+                        func,
+                        ctx,
+                        memory_layout,
+                        None,
+                    ),
+                    _ => {
+                        ctx.report(format!(
+                            "an augmented assignment to the JavaScript property '{attribute}' \
+                             is supported with a str, int, or float on the right of a variable's \
+                             property. Hint: convert it, for example 'n: int = el.{attribute}' \
+                             then 'el.{attribute} = n + 1'"
+                        ));
+                        IRType::None
+                    }
+                };
             }
             IRStatement::AttributeAssign {
                 object,

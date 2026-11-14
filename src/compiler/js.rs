@@ -1122,7 +1122,8 @@ fn ffi(f: &str, args: &[IRExpr], ctx: &CompilationContext) -> Option<IRExpr> {
 pub(crate) fn intrinsic_type(name: &str) -> Option<IRType> {
     let op = name.strip_prefix(JS_PREFIX)?;
     Some(match op {
-        "len" | "int" => IRType::Int,
+        "len" | "int" | "as_int" => IRType::Int,
+        "as_str" => IRType::String,
         "str" | "repr" => IRType::String,
         "float" => IRType::Float,
         "bool" | "eq" | "is_none" | "same" => IRType::Bool,
@@ -1223,11 +1224,17 @@ pub(crate) fn with_bridge(module: &IRModule) -> Option<IRModule> {
                 IRExpr::MethodCall { method_name, .. } => {
                     names.insert(method_name.clone());
                 }
+                // A keyword argument names a property of the object it is
+                // passed to JavaScript as.
+                IRExpr::Keyword { name, .. } => {
+                    names.insert(name.clone());
+                }
                 _ => {}
             }
             Ok(())
         });
     }
+    names.insert("{}".to_string());
     for imp in &m.imports {
         if imp.module == "js" {
             if let Some(n) = &imp.name {
@@ -1493,18 +1500,13 @@ fn emit_value(
 }
 
 /// The arguments, as a fresh JS array whose handle is left on the stack.
+/// Keyword arguments are one object after the others, as Pyodide passes
+/// them (`el.addEventListener("click", f, once=True)`).
 fn emit_args(args: &[IRExpr], func: &mut Function, ctx: &CompilationContext, ml: &MemoryLayout) {
     let arr = hold(ctx);
     func.instruction(&I::Call(imp(ctx, JsImport::Array)));
     func.instruction(&I::LocalSet(arr));
-    for arg in args {
-        if let IRExpr::Keyword { name, .. } = arg {
-            ctx.report(format!(
-                "a keyword argument ('{name}=') in a call to JavaScript is not supported"
-            ));
-            continue;
-        }
-        let temp = emit_value(arg, func, ctx, ml);
+    let push = |func: &mut Function, temp: bool| {
         func.instruction(&I::LocalSet(ctx.temp_local));
         func.instruction(&I::LocalGet(arr));
         func.instruction(&I::LocalGet(ctx.temp_local));
@@ -1513,6 +1515,47 @@ fn emit_args(args: &[IRExpr], func: &mut Function, ctx: &CompilationContext, ml:
             func.instruction(&I::LocalGet(ctx.temp_local));
             func.instruction(&I::Call(imp(ctx, JsImport::Release)));
         }
+    };
+    let mut keywords = Vec::new();
+    for arg in args {
+        match arg {
+            IRExpr::Keyword { name, .. } if name == crate::ir::STARRED_ARG => {
+                ctx.report("'*args' in a call to JavaScript is not supported");
+            }
+            IRExpr::Keyword { name, value } => keywords.push((name, value)),
+            _ => {
+                let temp = emit_value(arg, func, ctx, ml);
+                push(func, temp);
+            }
+        }
+    }
+    if !keywords.is_empty() {
+        let obj = hold(ctx);
+        let (off, len) = name_of(Some(&lit("{}")), ml, ctx);
+        func.instruction(&I::I32Const(off));
+        func.instruction(&I::I32Const(len));
+        func.instruction(&I::Call(imp(ctx, JsImport::Parse)));
+        func.instruction(&I::LocalSet(obj));
+        for (name, value) in keywords {
+            let (off, len) = name_of(Some(&lit(name)), ml, ctx);
+            let v = hold(ctx);
+            let temp = emit_value(value, func, ctx, ml);
+            func.instruction(&I::LocalSet(v));
+            func.instruction(&I::LocalGet(obj));
+            func.instruction(&I::I32Const(off));
+            func.instruction(&I::I32Const(len));
+            func.instruction(&I::LocalGet(v));
+            func.instruction(&I::Call(imp(ctx, JsImport::Set)));
+            func.instruction(&I::Drop);
+            if temp {
+                func.instruction(&I::LocalGet(v));
+                func.instruction(&I::Call(imp(ctx, JsImport::Release)));
+            }
+            ctx.release_held();
+        }
+        func.instruction(&I::LocalGet(obj));
+        push(func, true);
+        ctx.release_held();
     }
     func.instruction(&I::LocalGet(arr));
     ctx.release_held();
@@ -1668,6 +1711,23 @@ pub(crate) fn emit_intrinsic(
             ctx.release_held();
             ctx.release_held();
             IRType::JsProxy
+        }
+        // A property read as the kind of what an augmented assignment
+        // combines it with (`el.textContent += "!"`), a TypeError for
+        // another kind.
+        "as_int" | "as_str" => {
+            emit_expr(&args[0], func, ctx, ml, None);
+            let ty = if op == "as_int" {
+                IRType::Int
+            } else {
+                IRType::String
+            };
+            func.instruction(&I::Call(helper(ctx, JsFn::As(ty.clone()))));
+            emit_post_call_check(func, ctx);
+            if ty == IRType::String {
+                recover_str_pair(func, ctx);
+            }
+            ty
         }
         "len" | "str" | "repr" | "int" | "float" | "bool" => {
             emit_expr(&args[0], func, ctx, ml, None);
