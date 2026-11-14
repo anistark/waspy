@@ -27,6 +27,9 @@ pub(crate) struct Types {
     /// `import js`, and the names imported from `js`: JavaScript values.
     pub(crate) js_module: bool,
     pub(crate) js_names: std::collections::HashSet<String>,
+    /// The module's variables a pass has typed (the coroutine pass does),
+    /// read where a function has no local of the name.
+    pub(crate) globals: HashMap<String, IRType>,
 }
 
 impl Types {
@@ -41,9 +44,11 @@ impl Types {
             IRExpr::Const(IRConstant::Bool(_)) => IRType::Bool,
             IRExpr::Const(IRConstant::Bytes(_)) => IRType::Bytes,
             IRExpr::Const(IRConstant::None) => IRType::None,
-            IRExpr::Variable(n) | IRExpr::Param(n) => {
-                env.get(n).cloned().unwrap_or(IRType::Unknown)
-            }
+            IRExpr::Variable(n) | IRExpr::Param(n) => env
+                .get(n)
+                .or_else(|| self.globals.get(n))
+                .cloned()
+                .unwrap_or(IRType::Unknown),
             IRExpr::ListLiteral(items) => IRType::List(Box::new(self.common(items, env))),
             IRExpr::SetLiteral(items) => IRType::Set(Box::new(self.common(items, env))),
             IRExpr::TupleLiteral(items) => {
@@ -346,6 +351,7 @@ impl Types {
                 .filter(|i| i.module == "js" && i.is_from_import)
                 .filter_map(|i| i.alias.clone().or_else(|| i.name.clone()))
                 .collect(),
+            globals: HashMap::new(),
             fields: module
                 .classes
                 .iter()
@@ -408,6 +414,14 @@ fn stated_fields(body: &IRBody, params: &HashMap<&str, &IRType>, out: &mut Vec<(
                         .get(p.as_str())
                         .filter(|t| fully_known(t))
                         .map(|t| (*t).clone()),
+                    // One of `asyncio`'s classes made in place
+                    // (`self.lock = asyncio.Lock()`, as the coroutine pass
+                    // has rewritten it).
+                    (None, IRExpr::FunctionCall { function_name, .. })
+                        if function_name.starts_with("asyncio.") =>
+                    {
+                        Some(IRType::Class(function_name.clone()))
+                    }
                     _ => None,
                 };
                 if let Some(ty) = ty {

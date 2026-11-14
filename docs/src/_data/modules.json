@@ -1066,7 +1066,7 @@
   },
   "webInterop": {
     "title": "WEB INTEROP",
-    "status": "progress",
+    "status": "done",
     "features": [
       {
         "name": "JavaScript bridge & value conversion",
@@ -1076,16 +1076,22 @@
       },
       {
         "name": "DOM manipulation APIs",
-        "status": "todo"
+        "status": "done",
+        "version": "upcoming",
+        "test": "web_interop::dom_manipulation"
       },
       {
         "name": "Event handling system",
-        "status": "todo"
+        "status": "done",
+        "version": "upcoming",
+        "test": "web_interop::event_handling"
       },
       {
         "name": "HTTP requests (fetch API)",
-        "status": "todo",
-        "issue": 35
+        "status": "done",
+        "version": "upcoming",
+        "issue": 35,
+        "test": "web_interop::fetch_api"
       }
     ]
   },

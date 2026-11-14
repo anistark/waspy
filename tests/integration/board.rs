@@ -6803,4 +6803,241 @@ mod web_interop {
             "8 HI 2 3 jsnull 3.141592653589793\n6 [1, 2, 3] {\"k\":\"v\"} {\"a\":[1]}\n"
         );
     }
+
+    /// DOM manipulation APIs
+    ///
+    /// The page's DOM through Pyodide's `js`: elements made, their text,
+    /// attributes, classes, and styles set and read, queried by id and selector,
+    /// moved, inserted, removed, and taken out. Pyodide's output, which the
+    /// browser gate checks `examples/dom_demo.py` against in Chromium.
+    #[test]
+    fn dom_manipulation() {
+        let run = run_main(
+            &dedent(
+                r##"
+                """The page's DOM from Python, through Pyodide's `js`: make elements, set
+                their text, attributes, classes, and styles, query them, move them around
+                the tree, and take them out again."""
+
+                from js import document
+                from pyodide.ffi import JsProxy
+
+
+                def texts(parent: JsProxy) -> list[str]:
+                    out: list[str] = []
+                    for child in parent.children:
+                        text: str = child.textContent
+                        out.append(text)
+                    return out
+
+
+                def main() -> None:
+                    app = document.createElement("div")
+                    app.id = "dom-demo"
+                    document.body.appendChild(app)
+
+                    title = document.createElement("h2")
+                    title.textContent = "Groceries"
+                    app.appendChild(title)
+                    items = document.createElement("ul")
+                    items.className = "list"
+                    app.appendChild(items)
+                    for name in ["apples", "bread", "milk"]:
+                        li = document.createElement("li")
+                        li.textContent = name
+                        li.classList.add("item")
+                        li.setAttribute("data-name", name)
+                        items.appendChild(li)
+
+                    print(len(items.children), items.children[1].textContent, texts(items))
+                    print(document.getElementById("dom-demo").tagName, items.innerHTML)
+
+                    first = items.firstElementChild
+                    first.classList.add("done", "fresh")
+                    done = document.querySelector("#dom-demo li.done")
+                    print(done.textContent, done.classList.contains("done"), done.getAttribute("data-name"))
+                    print(done.getAttribute("data-missing"), len(document.querySelectorAll("#dom-demo .item")))
+                    print(first.classList.toggle("fresh"), first.className, len(first.classList))
+
+                    items.appendChild(first)
+                    print("moved", texts(items), first.previousElementSibling.textContent)
+                    extra = document.createElement("li")
+                    extra.textContent = "eggs"
+                    items.insertBefore(extra, items.firstElementChild)
+                    print("inserted", texts(items))
+                    gone = items.removeChild(items.lastElementChild)
+                    print("removed", gone.textContent, items.childElementCount, items.contains(gone))
+
+                    title.textContent += "!"
+                    title.style.color = "green"
+                    title.setAttribute("title", "list")
+                    print(title.textContent, title.style.color, title.hasAttribute("title"))
+                    title.removeAttribute("title")
+                    print(title.hasAttribute("title"), app.firstElementChild.tagName)
+
+                    app.remove()
+                    print(document.getElementById("dom-demo"), document.body.contains(app))
+
+
+                if __name__ == "__main__":
+                    main()
+                "##,
+            ),
+            "",
+            &[],
+        );
+        assert_eq!(run.stderr, "");
+        assert_eq!(run.stdout, "3 bread ['apples', 'bread', 'milk']\nDIV <li class=\"item\" data-name=\"apples\">apples</li><li class=\"item\" data-name=\"bread\">bread</li><li class=\"item\" data-name=\"milk\">milk</li>\napples True apples\njsnull 3\nFalse item done 2\nmoved ['bread', 'milk', 'apples'] milk\ninserted ['eggs', 'bread', 'milk', 'apples']\nremoved apples 3 False\nGroceries! green True\nFalse H2\njsnull False\n");
+    }
+
+    /// Event handling system
+    ///
+    /// Python functions as listeners through Pyodide's `create_proxy` and
+    /// `create_once_callable`: the event objects they are handed, bubbling to an
+    /// ancestor's listener, `stopPropagation()`, a listener called once
+    /// (`once=True`), `preventDefault()` as `dispatchEvent()` reports it, and a
+    /// listener removed and its proxy destroyed. Pyodide's output, which the
+    /// browser gate checks `examples/events_demo.py` against in Chromium.
+    #[test]
+    fn event_handling() {
+        let run = run_main(
+            &dedent(
+                r##"
+                """Events from Python, through Pyodide's `create_proxy`: Python functions as
+                listeners on page elements, the event objects they are handed, bubbling,
+                stopping it, a listener called once, preventing a default, and removing a
+                listener and destroying its proxy."""
+
+                from js import Event, document
+                from pyodide.ffi import JsProxy, create_once_callable, create_proxy
+
+                log: list[str] = []
+
+
+                def on_click(event):
+                    kind: str = event.type
+                    target: str = event.target.id
+                    log.append(kind + " on " + target)
+
+
+                def on_bubble(event: JsProxy) -> None:
+                    here: str = event.currentTarget.id
+                    log.append("bubbled to " + here)
+
+
+                def stop_here(event):
+                    event.stopPropagation()
+                    log.append("stopped")
+
+
+                def main() -> None:
+                    app = document.createElement("div")
+                    app.id = "events-demo"
+                    document.body.appendChild(app)
+                    button = document.createElement("button")
+                    button.id = "go"
+                    app.appendChild(button)
+
+                    clicked = create_proxy(on_click)
+                    bubbled = create_proxy(on_bubble)
+                    button.addEventListener("click", clicked)
+                    app.addEventListener("click", bubbled)
+                    button.click()
+                    button.click()
+                    print(log)
+                    log.clear()
+
+                    button.removeEventListener("click", clicked)
+                    clicked.destroy()
+                    stopper = create_proxy(stop_here)
+                    button.addEventListener("click", stopper)
+                    button.click()
+                    print(log)
+                    log.clear()
+
+                    once = create_once_callable(lambda e: log.append("once " + str(e.type)))
+                    button.addEventListener("ping", once, once=True)
+                    button.dispatchEvent(Event.new("ping"))
+                    button.dispatchEvent(Event.new("ping"))
+                    print(log)
+
+                    preventer = create_proxy(lambda e: e.preventDefault())
+                    button.addEventListener("check", preventer)
+                    print(button.dispatchEvent(Event.new("check", cancelable=True)))
+                    print(button.dispatchEvent(Event.new("other", cancelable=True)))
+
+                    app.remove()
+                    for proxy in [bubbled, stopper, preventer]:
+                        proxy.destroy()
+                    print("done", len(log))
+
+
+                if __name__ == "__main__":
+                    main()
+                "##,
+            ),
+            "",
+            &[],
+        );
+        assert_eq!(run.stderr, "");
+        assert_eq!(run.stdout, "['click on go', 'bubbled to events-demo', 'click on go', 'bubbled to events-demo']\n['stopped']\n['once ping']\nFalse\nTrue\ndone 1\n");
+    }
+
+    /// HTTP requests (fetch API)
+    ///
+    /// Pyodide's `pyodide.http.pyfetch`, awaited: a GET whose status, text, URL,
+    /// and headers are read and whose JSON is parsed into a typed dict, a POST
+    /// with headers and a body, `raise_for_status()` raising `HttpStatusError`, a
+    /// body read twice raising `BodyUsedError`, and a request that fails raising
+    /// `AbortError`, as Pyodide answers each for the harness's responses (the
+    /// browser gate checks `examples/fetch_demo.py` against Pyodide in Chromium).
+    #[test]
+    fn fetch_api() {
+        let run = run_main(
+            &dedent(
+                r##"
+                import asyncio
+
+                from pyodide.http import AbortError, HttpStatusError, pyfetch
+
+
+                async def main() -> None:
+                    resp = await pyfetch("https://api.test/scores")
+                    print(resp.status, resp.ok, resp.status_text, resp.url, resp.headers["content-type"])
+                    scores: dict[str, int] = await resp.json()
+                    print(sorted(scores.items()))
+                    sent = await pyfetch(
+                        "https://api.test/__echo",
+                        method="POST",
+                        headers={"Content-Type": "text/plain"},
+                        body="hello",
+                    )
+                    echoed: dict[str, str] = await sent.json()
+                    print(echoed["method"], echoed["type"], echoed["body"])
+                    missing = await pyfetch("https://api.test/missing")
+                    try:
+                        missing.raise_for_status()
+                    except HttpStatusError as e:
+                        print(e.status, e)
+                    print(repr(await missing.text()), missing.body_used)
+                    try:
+                        await missing.json()
+                    except OSError as e:
+                        print(type(e).__name__, e)
+                    try:
+                        await pyfetch("https://offline.test/")
+                    except AbortError as e:
+                        print("aborted:", e)
+
+
+                if __name__ == "__main__":
+                    asyncio.run(main())
+                "##,
+            ),
+            "",
+            &[],
+        );
+        assert_eq!(run.stderr, "");
+        assert_eq!(run.stdout, "200 True OK https://api.test/scores application/json\n[('ada', 7), ('bo', 12)]\nPOST text/plain hello\n404 404 Client Error: Not Found for url: https://api.test/missing\n'nothing here' True\nBodyUsedError Response body is already used\naborted: Failed to fetch\n");
+    }
 }

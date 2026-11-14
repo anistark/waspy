@@ -10,7 +10,7 @@
 #[path = "../utils/harness.rs"]
 mod harness;
 
-use harness::{compile, dedent, link_host, run_main, try_compile, Host};
+use harness::{compile, dedent, link_host, run_main, run_main_on, try_compile, Host};
 use wasmi::{Engine, Linker, Module, Store, Value};
 
 fn prints(source: &str, want: &str) {
@@ -169,7 +169,7 @@ fn bridge_refusals() {
 
         def f() -> int:
             o = JSON.parse('{"n": 1}')
-            o.n += 1
+            o.n += [1]
             return 0
         "#,
         "augmented assignment to the JavaScript property",
@@ -292,4 +292,220 @@ fn bridge_exports_take_and_answer_js_values() {
     );
     let o = Js::object(vec![("inner", Js::Str("deep".into()))]);
     assert_eq!(text(call("inner", vec![o])), "deep");
+}
+
+/// A promise awaited inside `asyncio.run()` suspends the program until it
+/// settles, as Pyodide's does through JavaScript Promise Integration (which
+/// the loader's `start()` gives a program, and the harness models): values,
+/// a rejection as `JsException`, and promises alongside timers in tasks.
+#[test]
+fn promises_awaited_inside_asyncio_run() {
+    prints(
+        r#"
+        import asyncio
+        import js
+        from pyodide.ffi import JsException
+
+
+        async def plus_one(x: int) -> int:
+            v: int = await js.Promise.resolve(x)
+            await asyncio.sleep(0.01)
+            return v + 1
+
+
+        async def main() -> None:
+            a, b = await asyncio.gather(plus_one(1), plus_one(10))
+            s: str = await js.Promise.resolve("two")
+            try:
+                await js.Promise.reject(js.Error.new("nope"))
+            except JsException as e:
+                print("rejected", e)
+            print(a, b, s)
+
+
+        if __name__ == "__main__":
+            asyncio.run(main())
+        "#,
+        "rejected Error: nope\n2 11 two\n",
+    );
+}
+
+/// Without JavaScript Promise Integration nothing can settle such a promise
+/// while the loop runs, so the `await` raises `RuntimeError` (this answer is
+/// this compiler's own: Pyodide without JSPI refuses `asyncio.run()` itself).
+#[test]
+fn promise_inside_asyncio_run_without_jspi_raises() {
+    let mut host = Host::default();
+    host.js.jspi = false;
+    let (run, _) = run_main_on(
+        &dedent(
+            r#"
+            import asyncio
+            import js
+
+
+            async def main() -> None:
+                v: int = await js.Promise.resolve(1)
+                print(v)
+
+
+            if __name__ == "__main__":
+                asyncio.run(main())
+            "#,
+        ),
+        host,
+    );
+    assert_eq!(run.stdout, "");
+    assert!(
+        run.stderr.starts_with(
+            "RuntimeError: a JavaScript promise is awaited inside asyncio.run(), which cannot \
+             hand control back to JavaScript to settle it here"
+        ),
+        "{}",
+        run.stderr
+    );
+    assert_eq!(run.exit, 1);
+}
+
+/// Keyword arguments in a call to JavaScript are one object after the
+/// others, as Pyodide passes them, and an augmented assignment to a property
+/// reads it as the right-hand side's kind and sets the result.
+#[test]
+fn keyword_arguments_and_property_augmented_assignment() {
+    prints(
+        r#"
+        from js import Array, JSON
+
+
+        def main() -> None:
+            print(JSON.stringify(Array(1, once=True, name="x")))
+            o = JSON.parse('{"n": 1, "s": "a", "f": 1.5}')
+            o.n += 2
+            o.s += "b"
+            o.f += 0.5
+            o.n *= 10
+            print(JSON.stringify(o))
+
+
+        if __name__ == "__main__":
+            main()
+        "#,
+        "[1,{\"once\":true,\"name\":\"x\"}]\n{\"n\":30,\"s\":\"ab\",\"f\":2}\n",
+    );
+}
+
+/// A Python function JavaScript calls through `create_proxy`: its
+/// unannotated parameters take JavaScript values, what it answers goes back
+/// converted, a lambda works the same, a function called for its effect
+/// answers undefined, and a destroyed proxy can no longer be called.
+#[test]
+fn proxies_of_python_functions() {
+    prints(
+        r#"
+        import js
+        from pyodide.ffi import JsException, create_proxy, to_js
+
+        calls: list[str] = []
+
+
+        def add(a, b) -> int:
+            x: int = a
+            y: int = b
+            return x + y
+
+
+        def note(v):
+            s: str = v
+            calls.append(s)
+
+
+        def main() -> None:
+            p = create_proxy(add)
+            print(js.Reflect.apply(p, None, to_js([2, 3])))
+            shout = create_proxy(lambda s: str(s).upper() + "!")
+            print(js.Reflect.apply(shout, None, to_js(["hi"])))
+            n = create_proxy(note)
+            print(js.Reflect.apply(n, None, to_js(["seen"])), calls)
+            p.destroy()
+            try:
+                js.Reflect.apply(p, None, to_js([1, 1]))
+            except JsException as e:
+                print("destroyed:", str(e).splitlines()[0])
+            for i in range(200):
+                q = create_proxy(lambda v: v)
+                q.destroy()
+            print(js.Reflect.apply(shout, None, to_js(["again"])))
+
+
+        if __name__ == "__main__":
+            main()
+        "#,
+        "5\nHI!\nNone ['seen']\ndestroyed: Error: Object has already been destroyed\nAGAIN!\n",
+    );
+}
+
+/// A Python function handed to JavaScript without a proxy, and a proxy of
+/// something other than a function or a lambda, are refused.
+#[test]
+fn proxy_refusals() {
+    refused(
+        r#"
+        from js import document
+
+        def on_click(e) -> None:
+            pass
+
+        def main() -> None:
+            document.body.addEventListener("click", on_click)
+        "#,
+        "pass create_proxy(f)",
+    );
+    refused(
+        r#"
+        from pyodide.ffi import create_proxy
+
+        def main() -> None:
+            handlers = [print]
+            p = create_proxy(handlers[0])
+        "#,
+        "take a function defined with 'def' at module level, or a lambda",
+    );
+    refused(
+        r#"
+        from pyodide.ffi import create_proxy
+
+        def twice(x):
+            return x
+
+        def main() -> None:
+            p = create_proxy(twice)
+        "#,
+        "returns a value but declares no return type",
+    );
+}
+
+/// `pyfetch()`'s `json()` stored where no type is declared, and its
+/// `signal`, are refused.
+#[test]
+fn fetch_refusals() {
+    refused(
+        r#"
+        from pyodide.http import pyfetch
+
+        async def main() -> None:
+            resp = await pyfetch("https://api.test/scores")
+            data = await resp.json()
+            print(data)
+        "#,
+        "to_py() needs the type it converts into",
+    );
+    refused(
+        r#"
+        from pyodide.http import pyfetch
+
+        async def main(s) -> None:
+            resp = await pyfetch("https://api.test/scores", signal=s)
+        "#,
+        "pyfetch()'s 'signal' is not supported",
+    );
 }

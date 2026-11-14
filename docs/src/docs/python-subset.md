@@ -74,7 +74,8 @@ Waspy compiles a typed subset of Python ahead of time. The rule it holds to: a c
 
 ## Coroutines and JavaScript
 
-- `async def` and `await`, coroutine methods, and `asyncio`'s `run`, `create_task`, `ensure_future`, `gather`, `sleep`, and `wait_for`, on CPython 3.13's event loop, so tasks interleave in CPython's order (see [JavaScript and async](/docs/javascript/#coroutines-and-asyncio))
+- `async def` and `await`, coroutine methods, `async with` and `async for` over classes of the program, and `asyncio`'s `run`, `create_task`, `ensure_future`, `gather`, `sleep`, `wait_for`, and `timeout`, `TaskGroup` and `ExceptionGroup`, its locks, events, semaphores, and queues, on CPython 3.13's event loop, so tasks interleave in CPython's order (see [JavaScript and async](/docs/javascript/#coroutines-and-asyncio))
+- The page through Pyodide's surface: `js.document` and its elements, listeners through `pyodide.ffi.create_proxy`, and HTTP requests through `pyodide.http.pyfetch` (see [JavaScript and async](/docs/javascript/#the-dom))
 - JavaScript values through Pyodide's `js` and `pyodide.ffi`: attributes, calls, `new`, items, iteration, conversions as Pyodide makes them, `to_js()`, `.to_py()`, `JsException`, an `await` of a promise, and exports a page calls with JavaScript values (an `async def` answering a Promise), through the loader `waspy::js_loader()` (see [JavaScript and async](/docs/javascript/#javascript-values))
 
 ## Modules, files, and the standard library

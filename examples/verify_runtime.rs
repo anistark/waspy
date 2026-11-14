@@ -133,7 +133,13 @@ const COMMANDS: &[Command] = &[
 /// A program using the JavaScript bridge, run as a WASI command through the
 /// loader. Only a JavaScript host can run it, so only the browser gate does,
 /// against Pyodide running the same source in the same page.
-const WEB_COMMANDS: &[(&str, &str)] = &[("js_bridge_demo", "examples/js_bridge_demo.py")];
+const WEB_COMMANDS: &[(&str, &str)] = &[
+    ("js_bridge_demo", "examples/js_bridge_demo.py"),
+    ("js_promises_demo", "examples/js_promises_demo.py"),
+    ("dom_demo", "examples/dom_demo.py"),
+    ("events_demo", "examples/events_demo.py"),
+    ("fetch_demo", "examples/fetch_demo.py"),
+];
 
 /// Build each web command at both optimization levels.
 fn build_web(root: &Path, out_dir: &Path) -> Result<Vec<serde_json::Value>> {

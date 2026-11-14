@@ -258,18 +258,11 @@ fn validate_stmt(stmt: &Stmt, source: &str, function: Option<&str>) -> Result<()
             function,
         )),
         Stmt::AsyncFunctionDef(def) => validate_body(&def.body, source, Some(def.name.as_str())),
-        Stmt::AsyncFor(stmt) => Err(unsupported(
-            "'async for' is not supported yet. Hint: use a regular 'for' loop",
-            source,
-            stmt.range.start().into(),
-            function,
-        )),
-        Stmt::AsyncWith(stmt) => Err(unsupported(
-            "'async with' is not supported yet. Hint: use a regular 'with' block",
-            source,
-            stmt.range.start().into(),
-            function,
-        )),
+        Stmt::AsyncFor(stmt) => {
+            validate_body(&stmt.body, source, function)?;
+            validate_body(&stmt.orelse, source, function)
+        }
+        Stmt::AsyncWith(stmt) => validate_body(&stmt.body, source, function),
         Stmt::Match(stmt) => Err(unsupported(
             "'match' statements are not supported. Hint: use an if/elif chain",
             source,

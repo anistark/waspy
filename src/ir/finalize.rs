@@ -1832,6 +1832,8 @@ fn collect_free_names(
             && !globals.contains(name)
             && !crate::stdlib::is_stdlib_module(name)
             && !BUILTIN_NAMES.contains(&name)
+            // The JavaScript bridge's intrinsics (`__js_export`).
+            && !name.starts_with("__js_")
             && !out.iter().any(|c| c == name)
         {
             out.push(name.to_string());

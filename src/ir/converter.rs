@@ -134,7 +134,7 @@ fn refuse_async_decorators(name: &str, decorators: &[Expr]) -> Result<()> {
 }
 
 /// What a coroutine's body may not hold: `yield` (an asynchronous
-/// generator), `async for`, `async with`, and a nested `async def`.
+/// generator) and a nested `async def`.
 fn refuse_in_coroutine(stmt: &Stmt) -> Result<()> {
     let refuse = |what: &str| -> Result<()> {
         Err(crate::core::errors::unsupported_feature(
@@ -144,8 +144,6 @@ fn refuse_in_coroutine(stmt: &Stmt) -> Result<()> {
         .into())
     };
     match stmt {
-        Stmt::AsyncFor(_) => refuse("'async for'"),
-        Stmt::AsyncWith(_) => refuse("'async with'"),
         Stmt::AsyncFunctionDef(_) => refuse("a nested 'async def'"),
         Stmt::Expr(e) if matches!(&*e.value, Expr::Yield(_) | Expr::YieldFrom(_)) => {
             refuse("'yield' (an asynchronous generator)")
@@ -616,6 +614,7 @@ fn lower_module(ast: &Suite, hoisted: usize) -> Result<IRModule> {
     crate::ir::lower_json(&mut module)?;
     crate::ir::apply_user_decorators(&mut module)?;
     crate::ir::apply_metaclasses(&mut module)?;
+    crate::ir::js_proxies::lower_js_proxies(&mut module)?;
     crate::ir::finalize::lift_nested_functions(&mut module)?;
     crate::ir::lower_partials(&mut module)?;
     crate::ir::lower_datetime(&mut module)?;
@@ -625,6 +624,7 @@ fn lower_module(ast: &Suite, hoisted: usize) -> Result<IRModule> {
     crate::ir::lower_collections(&mut module)?;
     crate::ir::lower_dict_views(&mut module);
     crate::ir::generators::transform_generators(&mut module)?;
+    crate::ir::pyodide_http::lower_pyodide_http(&mut module)?;
     crate::ir::lower_coroutines(&mut module)?;
     crate::ir::finalize::finalize_module(&mut module)?;
 
@@ -2467,7 +2467,12 @@ fn walk_block_statements(stmts: &[Stmt], f: &mut impl FnMut(&Stmt)) {
                 walk_block_statements(&s.body, f);
                 walk_block_statements(&s.orelse, f);
             }
+            Stmt::AsyncFor(s) => {
+                walk_block_statements(&s.body, f);
+                walk_block_statements(&s.orelse, f);
+            }
             Stmt::With(s) => walk_block_statements(&s.body, f),
+            Stmt::AsyncWith(s) => walk_block_statements(&s.body, f),
             Stmt::Try(s) => {
                 walk_block_statements(&s.body, f);
                 for handler in &s.handlers {
@@ -2507,7 +2512,13 @@ fn statement_bindings(stmt: &Stmt, out: &mut Vec<String>) {
         Stmt::AnnAssign(s) => targets(&s.target, out),
         Stmt::AugAssign(s) => targets(&s.target, out),
         Stmt::For(s) => targets(&s.target, out),
+        Stmt::AsyncFor(s) => targets(&s.target, out),
         Stmt::With(s) => s
+            .items
+            .iter()
+            .filter_map(|i| i.optional_vars.as_deref())
+            .for_each(|t| targets(t, out)),
+        Stmt::AsyncWith(s) => s
             .items
             .iter()
             .filter_map(|i| i.optional_vars.as_deref())
@@ -2754,6 +2765,13 @@ fn type_annotation_to_ir_type(expr: &Expr) -> Result<IRType> {
             {
                 Ok(IRType::Class(format!("{}.{}", module.id, attr.attr)))
             }
+            // `asyncio.Lock`, `asyncio.Event`, `asyncio.Timeout`.
+            Expr::Name(module) if module.id.as_str() == "asyncio" => {
+                match crate::ir::asyncio_sync::annotated_class(attr.attr.as_str()) {
+                    Some(class) => Ok(IRType::Class(class)),
+                    None => Ok(IRType::Any),
+                }
+            }
             Expr::Name(module) if matches!(module.id.as_str(), "collections" | "typing") => {
                 type_annotation_to_ir_type(&Expr::Name(rustpython_parser::ast::ExprName {
                     range: attr.range,
@@ -2781,6 +2799,22 @@ fn type_annotation_to_ir_type(expr: &Expr) -> Result<IRType> {
             // `asyncio.Task[int]`, `asyncio.Future[str]`: the runtime's class
             // for that result.
             if let Expr::Attribute(a) = &*subscript.value {
+                // `asyncio.Queue[int]`: the queue of that kind for that type.
+                if matches!(&*a.value, Expr::Name(m) if m.id.as_str() == "asyncio")
+                    && crate::ir::asyncio_sync::QUEUE_KINDS.contains(&a.attr.as_str())
+                {
+                    let item = type_annotation_to_ir_type(&subscript.slice)?;
+                    return match crate::ir::collections::spec::encode(&item) {
+                        Some(_) => Ok(IRType::Class(crate::ir::asyncio_sync::queue_class(
+                            a.attr.as_str(),
+                            &item,
+                        ))),
+                        None => Err(anyhow!(
+                            "asyncio.{}[...] needs a type an annotation names",
+                            a.attr
+                        )),
+                    };
+                }
                 if matches!(&*a.value, Expr::Name(m) if m.id.as_str() == "asyncio")
                     && matches!(a.attr.as_str(), "Task" | "Future")
                 {
@@ -3542,6 +3576,12 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
             Stmt::For(for_stmt) => {
                 ir_statements.extend(lower_for_statement(for_stmt, memory_layout)?);
             }
+            Stmt::AsyncFor(for_stmt) => {
+                ir_statements.extend(lower_async_for(for_stmt, memory_layout)?);
+            }
+            Stmt::AsyncWith(with_stmt) => {
+                ir_statements.extend(lower_async_with(with_stmt, memory_layout)?);
+            }
             Stmt::Try(try_stmt) => {
                 // Handle try-except-finally statements
                 let try_body = Box::new(lower_function_body(&try_stmt.body, memory_layout)?);
@@ -3586,6 +3626,15 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                                     name
                                     @ ("CancelledError" | "InvalidStateError" | "TimeoutError"),
                                 ) if m.id.as_str() == "asyncio" => Ok(name.to_string()),
+                                (Expr::Name(m), name)
+                                    if m.id.as_str() == "asyncio"
+                                        && crate::ir::asyncio_sync::exception_class(name)
+                                            .is_some() =>
+                                {
+                                    Ok(crate::ir::asyncio_sync::exception_class(name)
+                                        .expect("checked")
+                                        .to_string())
+                                }
                                 // `except pyodide.ffi.JsException:`.
                                 (Expr::Attribute(sub), "JsException")
                                     if sub.attr.as_str() == "ffi"
@@ -3880,6 +3929,169 @@ fn lower_for_targets(target: &Expr) -> Result<(Vec<String>, Option<usize>)> {
 ///   entry slots in place once the program's classes are known.
 ///
 /// A `for`-`else` clause is dropped, matching the existing `for` codegen.
+/// `async with a as x, b:` as the `with` statements it nests, each with its
+/// context expression marked (`ASYNC_WITH_FN`) for `ir::context_managers`,
+/// which writes the asynchronous protocol out: `await a.__aenter__()`, and
+/// `await a.__aexit__(...)` on every way out of the body.
+fn lower_async_with(
+    with_stmt: &rustpython_parser::ast::StmtAsyncWith,
+    memory_layout: &mut MemoryLayout,
+) -> Result<Vec<IRStatement>> {
+    if !IN_ASYNC.with(|c| c.get()) {
+        return Err(crate::core::errors::unsupported_feature(
+            "'async with' outside an async function is a SyntaxError in CPython",
+            None,
+        )
+        .into());
+    }
+    let mut items = Vec::new();
+    for item in &with_stmt.items {
+        let context_expr = lower_expr(&item.context_expr, memory_layout)?;
+        let optional_vars = match item.optional_vars.as_deref() {
+            None => None,
+            Some(Expr::Name(name)) => Some(name.id.to_string()),
+            Some(_) => {
+                return Err(crate::core::errors::unsupported_feature(
+                    "'async with ... as' binds one name here. Hint: unpack it in the body",
+                    None,
+                )
+                .into())
+            }
+        };
+        items.push((context_expr, optional_vars));
+    }
+    let mut body = lower_function_body(&with_stmt.body, memory_layout)?;
+    // The first item is entered first, so it is the outermost.
+    for (context_expr, optional_vars) in items.into_iter().rev() {
+        body = IRBody {
+            statements: vec![IRStatement::With {
+                context_expr: IRExpr::FunctionCall {
+                    function_name: crate::ir::ASYNC_WITH_FN.to_string(),
+                    arguments: vec![context_expr],
+                },
+                optional_vars,
+                body: Box::new(body),
+            }],
+        };
+    }
+    Ok(body.statements)
+}
+
+/// `async for x in it:` as CPython runs it: `__aiter__()` once, then an
+/// awaited `__anext__()` per round until it raises `StopAsyncIteration`,
+/// which ends the loop (and runs its `else`). Only the call of `__anext__`
+/// is inside the handler, so a `StopAsyncIteration` the body raises goes on.
+///
+/// ```text
+/// __afor_it = it.__aiter__()
+/// while True:
+///     try:
+///         x = await __afor_it.__anext__()
+///     except StopAsyncIteration:
+///         break
+///     <body>
+/// ```
+fn lower_async_for(
+    for_stmt: &rustpython_parser::ast::StmtAsyncFor,
+    memory_layout: &mut MemoryLayout,
+) -> Result<Vec<IRStatement>> {
+    if !IN_ASYNC.with(|c| c.get()) {
+        return Err(crate::core::errors::unsupported_feature(
+            "'async for' outside an async function is a SyntaxError in CPython",
+            None,
+        )
+        .into());
+    }
+    let (targets, starred) = lower_for_targets(&for_stmt.target)?;
+    let uniq = memory_layout.comp_var_counter;
+    memory_layout.comp_var_counter += 1;
+    let it = format!("__afor_it_{uniq}");
+    let flag = format!("__fbrk_{uniq}");
+    let set_flag = |value: bool| IRStatement::Assign {
+        target: flag.clone(),
+        value: IRExpr::Const(IRConstant::Bool(value)),
+        var_type: None,
+    };
+    let iterable = lower_expr(&for_stmt.iter, memory_layout)?;
+    let mut body = lower_function_body(&for_stmt.body, memory_layout)?;
+    let has_else = !for_stmt.orelse.is_empty();
+    if has_else {
+        mark_breaks(&mut body, &set_flag(true));
+    }
+    let next = IRExpr::FunctionCall {
+        function_name: crate::ir::AWAIT_FN.to_string(),
+        arguments: vec![IRExpr::MethodCall {
+            object: Box::new(IRExpr::Variable(it.clone())),
+            method_name: "__anext__".to_string(),
+            arguments: Vec::new(),
+        }],
+    };
+    let (pulled, unpack) = if matches!(&*for_stmt.target, Expr::Name(_)) {
+        (targets[0].clone(), None)
+    } else {
+        let value = format!("__afor_v_{uniq}");
+        (
+            value.clone(),
+            Some(IRStatement::TupleUnpack {
+                targets,
+                value: IRExpr::Variable(value),
+                starred,
+            }),
+        )
+    };
+    let mut round = vec![IRStatement::TryExcept {
+        try_body: Box::new(IRBody {
+            statements: vec![IRStatement::Assign {
+                target: pulled,
+                value: next,
+                var_type: None,
+            }],
+        }),
+        except_handlers: vec![IRExceptHandler {
+            exception_types: vec!["StopAsyncIteration".to_string()],
+            name: None,
+            body: IRBody {
+                statements: vec![IRStatement::Break],
+            },
+        }],
+        finally_body: None,
+    }];
+    round.extend(unpack);
+    round.extend(body.statements);
+    let mut statements = vec![IRStatement::Assign {
+        target: it.clone(),
+        value: IRExpr::MethodCall {
+            object: Box::new(iterable),
+            method_name: "__aiter__".to_string(),
+            arguments: Vec::new(),
+        },
+        var_type: None,
+    }];
+    if has_else {
+        statements.push(set_flag(false));
+    }
+    statements.push(IRStatement::While {
+        condition: IRExpr::Const(IRConstant::Bool(true)),
+        body: Box::new(IRBody { statements: round }),
+    });
+    if has_else {
+        statements.push(IRStatement::If {
+            condition: IRExpr::UnaryOp {
+                operand: Box::new(IRExpr::Variable(flag)),
+                op: IRUnaryOp::Not,
+            },
+            then_body: Box::new(lower_function_body(&for_stmt.orelse, memory_layout)?),
+            else_body: None,
+        });
+    }
+    // The statement held the iterator, and lets go of it here.
+    statements.push(IRStatement::Expression(IRExpr::FunctionCall {
+        function_name: crate::ir::DEL_NAME_FN.to_string(),
+        arguments: vec![IRExpr::Variable(it)],
+    }));
+    Ok(statements)
+}
+
 fn lower_for_statement(
     for_stmt: &rustpython_parser::ast::StmtFor,
     memory_layout: &mut MemoryLayout,

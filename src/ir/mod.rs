@@ -1,4 +1,5 @@
 pub(crate) mod asyncio;
+pub(crate) mod asyncio_sync;
 pub(crate) mod build;
 pub(crate) mod collections;
 mod context_managers;
@@ -14,10 +15,12 @@ mod generators;
 mod imports;
 pub(crate) mod infer;
 mod itertools;
+pub(crate) mod js_proxies;
 pub(crate) mod json;
 mod logging;
 mod metaclasses;
 mod partials;
+pub(crate) mod pyodide_http;
 mod re;
 mod str_methods;
 mod types;
@@ -28,6 +31,7 @@ pub use collections::{
     MAPPING_METHOD, REFUSED_VAR, REFUSE_COMPREHENSION, REFUSE_WALK, VIEW_METHOD, WALK_METHOD,
     WRAP_METHOD,
 };
+pub use context_managers::ASYNC_WITH_FN;
 pub use converter::*;
 pub use coroutines::{lower_coroutines, AWAIT_FN, CORO_CLASS_PREFIX, CORO_METHOD_PREFIX};
 pub use datetime::{lower_datetime, DATETIME_FN_PREFIX};

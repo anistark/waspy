@@ -1013,6 +1013,242 @@ pub enum Js {
     Module(String),
     /// A promise: settled (rejected or not, with the value), or pending.
     Promise(Rc<RefCell<Option<(bool, Js)>>>),
+    /// A DOM node (`document`, an element, a text node).
+    Node(Rc<RefCell<Node>>),
+    /// An element's `classList`.
+    ClassList(Rc<RefCell<Node>>),
+    /// A Python function JavaScript can call (`create_proxy`).
+    PyFunc(Rc<PyFn>),
+}
+
+/// What the loader's `function` import makes of a Python function: its
+/// environment, how many arguments it takes, whether it is called once, its
+/// registry id, and whether it was destroyed.
+pub struct PyFn {
+    pub env: i32,
+    pub arity: usize,
+    pub once: bool,
+    pub id: i32,
+    pub alive: std::cell::Cell<bool>,
+}
+
+/// A DOM node, as much of one as the tests need: an element's tag, its
+/// attributes in the order they were set, its own properties (`value`), its
+/// `style`, its children, and its event listeners; a text node's data.
+pub struct Node {
+    /// `DIV` for an element, `#text`, or `#document`.
+    pub name: String,
+    pub data: String,
+    pub attrs: Vec<(String, String)>,
+    pub props: Vec<(String, Js)>,
+    pub style: Js,
+    pub children: Vec<Rc<RefCell<Node>>>,
+    pub parent: Option<std::rc::Weak<RefCell<Node>>>,
+    /// (type, listener, once).
+    pub listeners: Vec<(String, Js, bool)>,
+}
+
+impl Node {
+    fn new(name: &str) -> Rc<RefCell<Node>> {
+        Rc::new(RefCell::new(Node {
+            name: name.to_string(),
+            data: String::new(),
+            attrs: Vec::new(),
+            props: Vec::new(),
+            style: Js::object(vec![]),
+            children: Vec::new(),
+            parent: None,
+            listeners: Vec::new(),
+        }))
+    }
+    fn text_node(data: &str) -> Rc<RefCell<Node>> {
+        let n = Node::new("#text");
+        n.borrow_mut().data = data.to_string();
+        n
+    }
+    fn is_element(&self) -> bool {
+        !self.name.starts_with('#')
+    }
+    fn attr(&self, name: &str) -> Option<String> {
+        self.attrs
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+    }
+    fn set_attr(&mut self, name: &str, value: String) {
+        match self.attrs.iter_mut().find(|(k, _)| k == name) {
+            Some(slot) => slot.1 = value,
+            None => self.attrs.push((name.to_string(), value)),
+        }
+    }
+    fn classes(&self) -> Vec<String> {
+        self.attr("class")
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_string)
+            .collect()
+    }
+    fn set_classes(&mut self, classes: &[String]) {
+        self.set_attr("class", classes.join(" "));
+    }
+    fn text_content(&self) -> String {
+        if self.name == "#text" {
+            return self.data.clone();
+        }
+        self.children
+            .iter()
+            .map(|c| c.borrow().text_content())
+            .collect()
+    }
+    fn outer_html(&self) -> String {
+        if self.name == "#text" {
+            return self
+                .data
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
+        }
+        let tag = self.name.to_lowercase();
+        let attrs: String = self
+            .attrs
+            .iter()
+            .map(|(k, v)| {
+                format!(
+                    " {k}=\"{}\"",
+                    v.replace('&', "&amp;").replace('"', "&quot;")
+                )
+            })
+            .collect();
+        format!("<{tag}{attrs}>{}</{tag}>", self.inner_html())
+    }
+    fn inner_html(&self) -> String {
+        self.children
+            .iter()
+            .map(|c| c.borrow().outer_html())
+            .collect()
+    }
+}
+
+/// Detach a node from its parent.
+fn detach(node: &Rc<RefCell<Node>>) {
+    let parent = node.borrow().parent.as_ref().and_then(|p| p.upgrade());
+    if let Some(parent) = parent {
+        parent
+            .borrow_mut()
+            .children
+            .retain(|c| !Rc::ptr_eq(c, node));
+    }
+    node.borrow_mut().parent = None;
+}
+
+/// Insert `child` into `parent` at `at` (the end when None), moving it from
+/// wherever it was.
+fn insert(parent: &Rc<RefCell<Node>>, child: &Rc<RefCell<Node>>, at: Option<usize>) {
+    detach(child);
+    child.borrow_mut().parent = Some(Rc::downgrade(parent));
+    let mut p = parent.borrow_mut();
+    let at = at.unwrap_or(p.children.len()).min(p.children.len());
+    p.children.insert(at, child.clone());
+}
+
+/// Each descendant of `node`, in document order.
+fn descendants(node: &Rc<RefCell<Node>>, out: &mut Vec<Rc<RefCell<Node>>>) {
+    for c in node.borrow().children.iter() {
+        out.push(c.clone());
+        descendants(c, out);
+    }
+}
+
+/// Whether an element matches a compound selector (`li`, `#id`, `.a.b`,
+/// `li.done`).
+fn matches_compound(node: &Node, compound: &str) -> bool {
+    if !node.is_element() {
+        return false;
+    }
+    let mut rest = compound;
+    let tag_end = rest.find(['#', '.']).unwrap_or(rest.len());
+    let tag = &rest[..tag_end];
+    if !tag.is_empty() && tag != "*" && !tag.eq_ignore_ascii_case(&node.name) {
+        return false;
+    }
+    rest = &rest[tag_end..];
+    while !rest.is_empty() {
+        let kind = rest.as_bytes()[0];
+        let body = &rest[1..];
+        let end = body.find(['#', '.']).unwrap_or(body.len());
+        let part = &body[..end];
+        let ok = match kind {
+            b'#' => node.attr("id").as_deref() == Some(part),
+            _ => node.classes().iter().any(|c| c == part),
+        };
+        if !ok {
+            return false;
+        }
+        rest = &body[end..];
+    }
+    true
+}
+
+/// Whether an element matches a selector of compound parts joined by
+/// descendant combinators (`ul .item`), or any of a comma-separated list.
+fn matches_selector(node: &Rc<RefCell<Node>>, selector: &str) -> bool {
+    selector.split(',').any(|one| {
+        let parts: Vec<&str> = one.split_whitespace().collect();
+        let Some((last, ancestors)) = parts.split_last() else {
+            return false;
+        };
+        if !matches_compound(&node.borrow(), last) {
+            return false;
+        }
+        let mut at = node.borrow().parent.as_ref().and_then(|p| p.upgrade());
+        for want in ancestors.iter().rev() {
+            loop {
+                let Some(a) = at else { return false };
+                let next = a.borrow().parent.as_ref().and_then(|p| p.upgrade());
+                if matches_compound(&a.borrow(), want) {
+                    at = next;
+                    break;
+                }
+                at = next;
+            }
+        }
+        true
+    })
+}
+
+fn query(root: &Rc<RefCell<Node>>, selector: &str) -> Vec<Rc<RefCell<Node>>> {
+    let mut all = Vec::new();
+    descendants(root, &mut all);
+    all.into_iter()
+        .filter(|n| matches_selector(n, selector))
+        .collect()
+}
+
+/// `document`: an `html` element holding `head` and `body`.
+fn new_document() -> Js {
+    let doc = Node::new("#document");
+    let html = Node::new("HTML");
+    insert(&doc, &html, None);
+    insert(&html, &Node::new("HEAD"), None);
+    insert(&html, &Node::new("BODY"), None);
+    Js::Node(doc)
+}
+
+/// The JavaScript class a DOM element is an instance of, as `String(el)`
+/// names it.
+fn element_class(tag: &str) -> &'static str {
+    match tag {
+        "DIV" => "HTMLDivElement",
+        "SPAN" => "HTMLSpanElement",
+        "P" => "HTMLParagraphElement",
+        "UL" => "HTMLUListElement",
+        "OL" => "HTMLOListElement",
+        "LI" => "HTMLLIElement",
+        "BUTTON" => "HTMLButtonElement",
+        "INPUT" => "HTMLInputElement",
+        "BODY" => "HTMLBodyElement",
+        _ => "HTMLElement",
+    }
 }
 
 impl std::fmt::Debug for Js {
@@ -1042,11 +1278,22 @@ impl Js {
                 .map(|(_, v)| v.clone()),
             Js::Arr(items) if name == "length" => Some(Js::Num(items.borrow().len() as f64)),
             Js::Str(s) if name == "length" => Some(Js::Num(s.encode_utf16().count() as f64)),
+            Js::ClassList(n) if name == "length" => {
+                Some(Js::Num(n.borrow().classes().len() as f64))
+            }
+            Js::ClassList(_) => DOM_METHODS
+                .contains(&name)
+                .then(|| Js::function(|_, _, _| Ok(Js::Undefined))),
+            Js::Node(n) => node_get(n, name),
             _ => None,
         }
     }
     fn set(&self, name: &str, value: Js) -> Result<(), Js> {
         match self {
+            Js::Node(n) => {
+                node_set(n, name, value);
+                Ok(())
+            }
             Js::Obj(props, _) => {
                 let mut props = props.borrow_mut();
                 match props.iter_mut().find(|(k, _)| k == name) {
@@ -1095,6 +1342,16 @@ impl Js {
             Js::Error(e) => e.clone(),
             Js::Module(_) => "[object Module]".to_string(),
             Js::Promise(_) => "[object Promise]".to_string(),
+            Js::Node(n) => {
+                let n = n.borrow();
+                match n.name.as_str() {
+                    "#document" => "[object HTMLDocument]".to_string(),
+                    "#text" => "[object Text]".to_string(),
+                    tag => format!("[object {}]", element_class(tag)),
+                }
+            }
+            Js::ClassList(n) => n.borrow().classes().join(" "),
+            Js::PyFunc(_) => "function () { [python code] }".to_string(),
         }
     }
     fn same(&self, other: &Js) -> bool {
@@ -1106,6 +1363,8 @@ impl Js {
             (Js::Arr(a), Js::Arr(b)) => Rc::ptr_eq(a, b),
             (Js::Obj(a, _), Js::Obj(b, _)) => Rc::ptr_eq(a, b),
             (Js::Module(a), Js::Module(b)) => a == b,
+            (Js::Node(a), Js::Node(b)) | (Js::ClassList(a), Js::ClassList(b)) => Rc::ptr_eq(a, b),
+            (Js::PyFunc(a), Js::PyFunc(b)) => Rc::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -1213,6 +1472,442 @@ impl Js {
     }
 }
 
+/// The methods a DOM node or a `classList` answers (through `call_method`).
+const DOM_METHODS: [&str; 26] = [
+    "createElement",
+    "createTextNode",
+    "getElementById",
+    "querySelector",
+    "querySelectorAll",
+    "appendChild",
+    "append",
+    "removeChild",
+    "remove",
+    "insertBefore",
+    "replaceChildren",
+    "setAttribute",
+    "getAttribute",
+    "hasAttribute",
+    "removeAttribute",
+    "contains",
+    "addEventListener",
+    "removeEventListener",
+    "dispatchEvent",
+    "click",
+    "add",
+    "toggle",
+    "item",
+    "closest",
+    "hasChildNodes",
+    "cloneNode",
+];
+
+fn node_or_null(n: Option<Rc<RefCell<Node>>>) -> Js {
+    n.map_or(Js::Null, Js::Node)
+}
+
+fn node_get(node: &Rc<RefCell<Node>>, name: &str) -> Option<Js> {
+    let n = node.borrow();
+    let parent = || n.parent.as_ref().and_then(|p| p.upgrade());
+    let siblings = |elements: bool, offset: isize| -> Js {
+        let Some(p) = parent() else { return Js::Null };
+        let p = p.borrow();
+        let list: Vec<&Rc<RefCell<Node>>> = p
+            .children
+            .iter()
+            .filter(|c| !elements || c.borrow().is_element())
+            .collect();
+        let at = list.iter().position(|c| Rc::ptr_eq(c, node));
+        at.and_then(|i| {
+            list.get((i as isize + offset) as usize)
+                .map(|c| (*c).clone())
+        })
+        .map_or(Js::Null, Js::Node)
+    };
+    let elements = || -> Vec<Rc<RefCell<Node>>> {
+        n.children
+            .iter()
+            .filter(|c| c.borrow().is_element())
+            .cloned()
+            .collect()
+    };
+    let arr = |items: Vec<Rc<RefCell<Node>>>| {
+        Js::Arr(Rc::new(RefCell::new(
+            items.into_iter().map(Js::Node).collect(),
+        )))
+    };
+    Some(match name {
+        "tagName" | "nodeName" if n.is_element() => Js::Str(n.name.clone()),
+        "nodeName" => Js::Str(n.name.clone()),
+        "nodeType" => Js::Num(match n.name.as_str() {
+            "#text" => 3.0,
+            "#document" => 9.0,
+            _ => 1.0,
+        }),
+        "id" => Js::Str(n.attr("id").unwrap_or_default()),
+        "className" => Js::Str(n.attr("class").unwrap_or_default()),
+        "textContent" if n.name == "#document" => Js::Null,
+        "textContent" | "innerText" => Js::Str(n.text_content()),
+        "data" | "nodeValue" if n.name == "#text" => Js::Str(n.data.clone()),
+        "innerHTML" => Js::Str(n.inner_html()),
+        "outerHTML" => Js::Str(n.outer_html()),
+        "children" => arr(elements()),
+        "childNodes" => arr(n.children.clone()),
+        "childElementCount" => Js::Num(elements().len() as f64),
+        "firstChild" => node_or_null(n.children.first().cloned()),
+        "lastChild" => node_or_null(n.children.last().cloned()),
+        "firstElementChild" => node_or_null(elements().first().cloned()),
+        "lastElementChild" => node_or_null(elements().last().cloned()),
+        "parentNode" => node_or_null(parent()),
+        "parentElement" => node_or_null(parent().filter(|p| p.borrow().is_element())),
+        "nextSibling" => siblings(false, 1),
+        "previousSibling" => siblings(false, -1),
+        "nextElementSibling" => siblings(true, 1),
+        "previousElementSibling" => siblings(true, -1),
+        "style" => n.style.clone(),
+        "classList" => Js::ClassList(node.clone()),
+        "documentElement" if n.name == "#document" => node_or_null(n.children.first().cloned()),
+        "body" | "head" if n.name == "#document" => {
+            let html = n.children.first()?.clone();
+            let found = html
+                .borrow()
+                .children
+                .iter()
+                .find(|c| c.borrow().name.eq_ignore_ascii_case(name))
+                .cloned();
+            node_or_null(found)
+        }
+        method if DOM_METHODS.contains(&method) => Js::function(|_, _, _| Ok(Js::Undefined)),
+        other => {
+            return n
+                .props
+                .iter()
+                .find(|(k, _)| k == other)
+                .map(|(_, v)| v.clone())
+        }
+    })
+}
+
+fn node_set(node: &Rc<RefCell<Node>>, name: &str, value: Js) {
+    match name {
+        "id" => node.borrow_mut().set_attr("id", value.text()),
+        "className" => node.borrow_mut().set_attr("class", value.text()),
+        "textContent" | "innerText" | "innerHTML" => {
+            let text = value.text();
+            assert!(
+                name != "innerHTML" || !text.contains('<'),
+                "the harness DOM does not parse HTML: {text}"
+            );
+            let children = std::mem::take(&mut node.borrow_mut().children);
+            for c in children {
+                c.borrow_mut().parent = None;
+            }
+            if !text.is_empty() {
+                insert(node, &Node::text_node(&text), None);
+            }
+        }
+        "data" | "nodeValue" => node.borrow_mut().data = value.text(),
+        other => {
+            let mut n = node.borrow_mut();
+            match n.props.iter_mut().find(|(k, _)| k == other) {
+                Some(slot) => slot.1 = value,
+                None => n.props.push((other.to_string(), value)),
+            }
+        }
+    }
+}
+
+/// The node a value is (a DOM method's argument), or a TypeError.
+fn as_node(value: &Js, what: &str) -> Result<Rc<RefCell<Node>>, Js> {
+    match value {
+        Js::Node(n) => Ok(n.clone()),
+        Js::Str(s) => Ok(Node::text_node(s)),
+        other => Err(js_error(
+            "TypeError",
+            format!(
+                "Failed to execute '{what}' on 'Node': parameter 1 is not of type 'Node' ({})",
+                other.text()
+            ),
+        )),
+    }
+}
+
+/// A DOM node's or a `classList`'s method.
+fn dom_method(
+    caller: &mut Caller<'_, Host>,
+    target: &Js,
+    name: &str,
+    args: &[Js],
+) -> Option<Result<Js, Js>> {
+    let arg = |k: usize| args.get(k).cloned().unwrap_or(Js::Undefined);
+    let text = |k: usize| arg(k).text();
+    if let Js::ClassList(node) = target {
+        let mut classes = node.borrow().classes();
+        let answer = match name {
+            "add" => {
+                for a in args {
+                    let c = a.text();
+                    if !classes.contains(&c) {
+                        classes.push(c);
+                    }
+                }
+                Js::Undefined
+            }
+            "remove" => {
+                classes.retain(|c| !args.iter().any(|a| a.text() == *c));
+                Js::Undefined
+            }
+            "toggle" => {
+                let c = text(0);
+                let on = match args.get(1) {
+                    Some(Js::Bool(b)) => *b,
+                    _ => !classes.contains(&c),
+                };
+                classes.retain(|x| *x != c);
+                if on {
+                    classes.push(c);
+                }
+                Js::Bool(on)
+            }
+            "contains" => return Some(Ok(Js::Bool(classes.contains(&text(0))))),
+            "item" => {
+                let i = arg(0).number() as usize;
+                return Some(Ok(classes.get(i).cloned().map_or(Js::Null, Js::Str)));
+            }
+            _ => return None,
+        };
+        node.borrow_mut().set_classes(&classes);
+        return Some(Ok(answer));
+    }
+    let Js::Node(node) = target else {
+        return None;
+    };
+    let node = node.clone();
+    Some(match name {
+        "createElement" => Ok(Js::Node(Node::new(&text(0).to_uppercase()))),
+        "createTextNode" => Ok(Js::Node(Node::text_node(&text(0)))),
+        "getElementById" => {
+            let id = text(0);
+            let mut all = Vec::new();
+            descendants(&node, &mut all);
+            Ok(node_or_null(all.into_iter().find(|n| {
+                n.borrow().attr("id").as_deref() == Some(id.as_str())
+            })))
+        }
+        "querySelector" => Ok(node_or_null(query(&node, &text(0)).into_iter().next())),
+        "querySelectorAll" => Ok(Js::Arr(Rc::new(RefCell::new(
+            query(&node, &text(0)).into_iter().map(Js::Node).collect(),
+        )))),
+        "closest" => {
+            let sel = text(0);
+            let mut at = Some(node.clone());
+            while let Some(n) = at {
+                if matches_selector(&n, &sel) {
+                    return Some(Ok(Js::Node(n)));
+                }
+                at = n.borrow().parent.as_ref().and_then(|p| p.upgrade());
+            }
+            Ok(Js::Null)
+        }
+        "appendChild" => as_node(&arg(0), "appendChild").map(|c| {
+            insert(&node, &c, None);
+            Js::Node(c)
+        }),
+        "append" => {
+            for a in args {
+                match as_node(a, "append") {
+                    Ok(c) => insert(&node, &c, None),
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+            Ok(Js::Undefined)
+        }
+        "replaceChildren" => {
+            let old = std::mem::take(&mut node.borrow_mut().children);
+            for c in old {
+                c.borrow_mut().parent = None;
+            }
+            for a in args {
+                match as_node(a, "replaceChildren") {
+                    Ok(c) => insert(&node, &c, None),
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+            Ok(Js::Undefined)
+        }
+        "insertBefore" => as_node(&arg(0), "insertBefore").and_then(|c| {
+            let at =
+                match arg(1) {
+                    Js::Node(r) => match node
+                        .borrow()
+                        .children
+                        .iter()
+                        .position(|x| Rc::ptr_eq(x, &r))
+                    {
+                        Some(i) => Some(i),
+                        None => return Err(js_error(
+                            "NotFoundError",
+                            "Failed to execute 'insertBefore' on 'Node': The node before which \
+                             the new node is to be inserted is not a child of this node.",
+                        )),
+                    },
+                    _ => None,
+                };
+            let before = at.map(|i| node.borrow().children[i].clone());
+            detach(&c);
+            let at = before.and_then(|b| {
+                node.borrow()
+                    .children
+                    .iter()
+                    .position(|x| Rc::ptr_eq(x, &b))
+            });
+            insert(&node, &c, at);
+            Ok(Js::Node(c))
+        }),
+        "removeChild" => as_node(&arg(0), "removeChild").and_then(|c| {
+            let ours = c
+                .borrow()
+                .parent
+                .as_ref()
+                .and_then(|p| p.upgrade())
+                .is_some_and(|p| Rc::ptr_eq(&p, &node));
+            if !ours {
+                return Err(js_error(
+                    "NotFoundError",
+                    "Failed to execute 'removeChild' on 'Node': The node to be removed is not a \
+                     child of this node.",
+                ));
+            }
+            detach(&c);
+            Ok(Js::Node(c))
+        }),
+        "remove" => {
+            detach(&node);
+            Ok(Js::Undefined)
+        }
+        "hasChildNodes" => Ok(Js::Bool(!node.borrow().children.is_empty())),
+        "contains" => Ok(Js::Bool(match arg(0) {
+            Js::Node(other) => {
+                let mut at = Some(other);
+                let mut found = false;
+                while let Some(n) = at {
+                    if Rc::ptr_eq(&n, &node) {
+                        found = true;
+                        break;
+                    }
+                    at = n.borrow().parent.as_ref().and_then(|p| p.upgrade());
+                }
+                found
+            }
+            _ => false,
+        })),
+        "setAttribute" => {
+            node.borrow_mut().set_attr(&text(0), text(1));
+            Ok(Js::Undefined)
+        }
+        "getAttribute" => Ok(node.borrow().attr(&text(0)).map_or(Js::Null, Js::Str)),
+        "hasAttribute" => Ok(Js::Bool(node.borrow().attr(&text(0)).is_some())),
+        "removeAttribute" => {
+            let k = text(0);
+            node.borrow_mut().attrs.retain(|(a, _)| *a != k);
+            Ok(Js::Undefined)
+        }
+        "addEventListener" => {
+            let once = match arg(2) {
+                options @ Js::Obj(..) => matches!(options.get("once"), Some(Js::Bool(true))),
+                _ => false,
+            };
+            let (kind, listener) = (text(0), arg(1));
+            let mut n = node.borrow_mut();
+            if !n
+                .listeners
+                .iter()
+                .any(|(k, l, _)| *k == kind && l.same(&listener))
+            {
+                n.listeners.push((kind, listener, once));
+            }
+            Ok(Js::Undefined)
+        }
+        "removeEventListener" => {
+            let (kind, listener) = (text(0), arg(1));
+            node.borrow_mut()
+                .listeners
+                .retain(|(k, l, _)| !(*k == kind && l.same(&listener)));
+            Ok(Js::Undefined)
+        }
+        "dispatchEvent" => dispatch(caller, &node, arg(0)),
+        "click" => {
+            let event = new_event("click", true);
+            dispatch(caller, &node, event).map(|_| Js::Undefined)
+        }
+        _ => return None,
+    })
+}
+
+/// `new Event(type, {bubbles})`.
+fn new_event(kind: &str, bubbles: bool) -> Js {
+    let flag = |name: &'static str| {
+        Js::function(move |_, this, _| {
+            this.set(name, Js::Bool(true))?;
+            Ok(Js::Undefined)
+        })
+    };
+    Js::object(vec![
+        ("type", Js::Str(kind.to_string())),
+        ("bubbles", Js::Bool(bubbles)),
+        ("defaultPrevented", Js::Bool(false)),
+        ("target", Js::Null),
+        ("currentTarget", Js::Null),
+        ("preventDefault", flag("defaultPrevented")),
+        ("stopPropagation", flag("__stopped")),
+    ])
+}
+
+/// Dispatch an event at a node: its listeners for the event's type, then,
+/// for one that bubbles, each ancestor's, until one stops it. Whether no
+/// listener prevented its default.
+fn dispatch(
+    caller: &mut Caller<'_, Host>,
+    target: &Rc<RefCell<Node>>,
+    event: Js,
+) -> Result<Js, Js> {
+    let kind = event.get("type").map(|t| t.text()).unwrap_or_default();
+    let bubbles = matches!(event.get("bubbles"), Some(Js::Bool(true)));
+    event.set("target", Js::Node(target.clone()))?;
+    let mut at = Some(target.clone());
+    while let Some(node) = at {
+        event.set("currentTarget", Js::Node(node.clone()))?;
+        let listeners: Vec<(Js, bool)> = node
+            .borrow()
+            .listeners
+            .iter()
+            .filter(|(k, _, _)| *k == kind)
+            .map(|(_, l, once)| (l.clone(), *once))
+            .collect();
+        for (listener, once) in listeners {
+            if once {
+                node.borrow_mut()
+                    .listeners
+                    .retain(|(k, l, _)| !(*k == kind && l.same(&listener)));
+            }
+            call_value(
+                caller,
+                &listener,
+                &Js::Node(node.clone()),
+                std::slice::from_ref(&event),
+            )?;
+        }
+        if !bubbles || matches!(event.get("__stopped"), Some(Js::Bool(true))) {
+            break;
+        }
+        at = node.borrow().parent.as_ref().and_then(|p| p.upgrade());
+    }
+    Ok(Js::Bool(!matches!(
+        event.get("defaultPrevented"),
+        Some(Js::Bool(true))
+    )))
+}
+
 /// The JavaScript side of a bridge: its globals, the table of the values
 /// Python holds by handle, the modules it can load, and what it threw last.
 pub struct JsWorld {
@@ -1231,6 +1926,11 @@ pub struct JsWorld {
     pub settled: Vec<(i32, bool, Js)>,
     /// What each exported coroutine's call settled with, by token.
     pub resolved: HashMap<i32, (bool, Js)>,
+    /// Whether the host has JavaScript Promise Integration, so a program's
+    /// `__main__` block may suspend on a promise (the loader's `start()`).
+    pub jspi: bool,
+    /// The settled promise `next_settled` handed over last.
+    taken: Option<(bool, Js)>,
 }
 
 impl Default for JsWorld {
@@ -1245,6 +1945,8 @@ impl Default for JsWorld {
             modules: HashMap::new(),
             settled: Vec::new(),
             resolved: HashMap::new(),
+            jspi: true,
+            taken: None,
         }
     }
 }
@@ -1375,7 +2077,88 @@ fn js_globals() -> Js {
             args.first().map(Js::text).unwrap_or_default()
         )))
     });
+    let event = Js::function(|_, _, args| {
+        let kind = args.first().map(Js::text).unwrap_or_default();
+        let bubbles = matches!(
+            args.get(1).and_then(|init| init.get("bubbles")),
+            Some(Js::Bool(true))
+        );
+        Ok(new_event(&kind, bubbles))
+    });
+    // `fetch(url, init)`: a response from `fetch_routes` (an URL ending
+    // `/__echo` answers what it was sent, as JSON), or a rejected promise for
+    // any other, as a network failure.
+    let fetch = Js::function(|_, _, args| {
+        let url = args.first().map(Js::text).unwrap_or_default();
+        let init = args.get(1).cloned().unwrap_or(Js::Undefined);
+        let field = |name: &str| init.get(name).map(|v| v.text());
+        let (status, status_text, body, kind) = if url.ends_with("/__echo") {
+            let header = match init.get("headers") {
+                Some(h @ Js::Obj(..)) => h.get("Content-Type").map(|v| v.text()),
+                _ => None,
+            };
+            let echoed = serde_json::json!({
+                "method": field("method").unwrap_or_else(|| "GET".to_string()),
+                "body": field("body").unwrap_or_default(),
+                "type": header.unwrap_or_default(),
+            });
+            (200, "OK", echoed.to_string(), "application/json")
+        } else {
+            match fetch_route(&url) {
+                Some(route) => route,
+                None => {
+                    let failure = js_error("TypeError", "Failed to fetch");
+                    return Ok(Js::Promise(Rc::new(RefCell::new(Some((true, failure))))));
+                }
+            }
+        };
+        Ok(Js::Promise(Rc::new(RefCell::new(Some((
+            false,
+            fetch_response(&url, status, status_text, &body, kind),
+        ))))))
+    });
+    object
+        .set(
+            "assign",
+            Js::function(|_, _, args| {
+                let target = args.first().cloned().unwrap_or(Js::Undefined);
+                for source in args.iter().skip(1) {
+                    if let Js::Obj(props, None) = source {
+                        for (k, v) in props.borrow().iter() {
+                            target.set(k, v.clone())?;
+                        }
+                    }
+                }
+                Ok(target)
+            }),
+        )
+        .unwrap();
+    object
+        .set(
+            "fromEntries",
+            Js::function(|_, _, args| {
+                let out = Js::object(vec![]);
+                if let Some(Js::Arr(pairs)) = args.first() {
+                    for pair in pairs.borrow().iter() {
+                        if let Js::Arr(kv) = pair {
+                            let kv = kv.borrow();
+                            out.set(&kv[0].text(), kv[1].clone())?;
+                        }
+                    }
+                }
+                Ok(out)
+            }),
+        )
+        .unwrap();
+    let reflect = Js::object(vec![
+        ("apply", Js::function(|_, _, _| Ok(Js::Undefined))),
+        ("ownKeys", Js::function(|_, _, _| Ok(Js::Undefined))),
+    ]);
     let globals = Js::object(vec![
+        ("fetch", fetch),
+        ("Reflect", reflect),
+        ("document", new_document()),
+        ("Event", event),
         ("Promise", promise),
         ("Error", error),
         ("Math", math),
@@ -1388,6 +2171,80 @@ fn js_globals() -> Js {
     ]);
     globals.set("globalThis", globals.clone()).unwrap();
     globals
+}
+
+/// The responses the tests' `fetch` knows: (status, status text, body,
+/// content type) by URL.
+fn fetch_route(url: &str) -> Option<(u16, &'static str, String, &'static str)> {
+    match url {
+        "https://api.test/scores" => Some((
+            200,
+            "OK",
+            r#"{"ada": 7, "bo": 12}"#.to_string(),
+            "application/json",
+        )),
+        "https://api.test/missing" => {
+            Some((404, "Not Found", "nothing here".to_string(), "text/plain"))
+        }
+        _ => None,
+    }
+}
+
+/// A `Response`: its status, headers, and a body `text()` reads once.
+fn fetch_response(url: &str, status: u16, status_text: &str, body: &str, kind: &str) -> Js {
+    let headers = {
+        let kind = kind.to_string();
+        Js::object(vec![(
+            "entries",
+            Js::function(move |_, _, _| {
+                Ok(Js::Arr(Rc::new(RefCell::new(vec![Js::Arr(Rc::new(
+                    RefCell::new(vec![
+                        Js::Str("content-type".to_string()),
+                        Js::Str(kind.clone()),
+                    ]),
+                ))]))))
+            }),
+        )])
+    };
+    let response = Js::object(vec![
+        ("status", Js::Num(status as f64)),
+        ("ok", Js::Bool((200..300).contains(&status))),
+        ("statusText", Js::Str(status_text.to_string())),
+        ("url", Js::Str(url.to_string())),
+        ("redirected", Js::Bool(false)),
+        ("type", Js::Str("basic".to_string())),
+        ("bodyUsed", Js::Bool(false)),
+        ("headers", headers),
+        ("__body", Js::Str(body.to_string())),
+    ]);
+    let read = Js::function(|_, this, _| {
+        if matches!(this.get("bodyUsed"), Some(Js::Bool(true))) {
+            let failure = js_error(
+                "TypeError",
+                "Failed to execute 'text' on 'Response': body stream already read",
+            );
+            return Ok(Js::Promise(Rc::new(RefCell::new(Some((true, failure))))));
+        }
+        this.set("bodyUsed", Js::Bool(true))?;
+        let body = this.get("__body").unwrap_or(Js::Str(String::new()));
+        Ok(Js::Promise(Rc::new(RefCell::new(Some((false, body))))))
+    });
+    response.set("text", read).unwrap();
+    let (url, status_text, body, kind) = (
+        url.to_string(),
+        status_text.to_string(),
+        body.to_string(),
+        kind.to_string(),
+    );
+    response
+        .set(
+            "clone",
+            Js::function(move |_, _, _| {
+                Ok(fetch_response(&url, status, &status_text, &body, &kind))
+            }),
+        )
+        .unwrap();
+    response
 }
 
 /// An array's methods the tests call: `push`, and a module's exports.
@@ -1416,6 +2273,23 @@ fn call_method(
                 ),
         )),
         (Js::Module(module), export) => call_module(caller, module, export, args),
+        (Js::PyFunc(p), "destroy") => destroy_python(caller, &p.clone()),
+        // `Reflect.apply(f, this, args)`.
+        (Js::Obj(..), "apply")
+            if target.get("apply").is_some() && target.get("ownKeys").is_some() =>
+        {
+            let f = args.first().cloned().unwrap_or(Js::Undefined);
+            let this = args.get(1).cloned().unwrap_or(Js::Undefined);
+            let items = match args.get(2) {
+                Some(Js::Arr(items)) => items.borrow().clone(),
+                _ => Vec::new(),
+            };
+            call_value(caller, &f, &this, &items)
+        }
+        (Js::Node(_) | Js::ClassList(_), _) if DOM_METHODS.contains(&name) => {
+            dom_method(caller, target, name, &args)
+                .unwrap_or_else(|| Err(js_error("TypeError", format!("{name} is not a function"))))
+        }
         _ => match target.get(name) {
             Some(f @ Js::Obj(_, Some(_))) => call_value(caller, &f, target, &args),
             Some(_) => Err(js_error("TypeError", format!("{name} is not a function"))),
@@ -1430,8 +2304,66 @@ fn call_value(caller: &mut Caller<'_, Host>, f: &Js, this: &Js, args: &[Js]) -> 
             let function = function.clone();
             function(&mut caller.data_mut().js, this, args)
         }
+        Js::PyFunc(p) => call_python(caller, p, args),
         _ => Err(js_error("TypeError", "not a function")),
     }
+}
+
+/// A call of a Python function's proxy, as the loader makes it: through the
+/// export `__waspy_call_<arity>`.
+fn call_python(caller: &mut Caller<'_, Host>, p: &Rc<PyFn>, args: &[Js]) -> Result<Js, Js> {
+    if !p.alive.get() {
+        return Err(js_error("Error", "Object has already been destroyed"));
+    }
+    if args.len() != p.arity {
+        let s = |n: usize| if n == 1 { "" } else { "s" };
+        return Err(js_error(
+            "PythonError",
+            format!(
+                "TypeError: the function takes {} positional argument{} but {} {} given",
+                p.arity,
+                s(p.arity),
+                args.len(),
+                if args.len() == 1 { "was" } else { "were" }
+            ),
+        ));
+    }
+    let name = format!("__waspy_call_{}", p.arity);
+    let Some(Extern::Func(f)) = caller.get_export(&name) else {
+        return Err(js_error("TypeError", format!("no export {name}")));
+    };
+    let mut params = vec![Value::I32(p.env)];
+    for a in args {
+        params.push(Value::I32(caller.data_mut().js.add(a.clone())));
+    }
+    let mut out = [Value::I32(0)];
+    f.call(&mut *caller, &params, &mut out)
+        .map_err(|e| js_error("RuntimeError", e))?;
+    if p.once {
+        destroy_python(caller, p)?;
+    }
+    let r = out[0].i32().unwrap_or(-2);
+    let world = &mut caller.data_mut().js;
+    if r == -2 {
+        let message = world.failure.take().unwrap_or_default();
+        return Err(js_error("PythonError", message));
+    }
+    let value = world.value(r);
+    world.drop_handle(r);
+    Ok(value)
+}
+
+/// A Python function's proxy's `destroy()`: Python lets go of it.
+fn destroy_python(caller: &mut Caller<'_, Host>, p: &Rc<PyFn>) -> Result<Js, Js> {
+    if p.alive.replace(false) {
+        let Some(Extern::Func(f)) = caller.get_export("__waspy_forget") else {
+            return Err(js_error("TypeError", "no export __waspy_forget"));
+        };
+        let mut out = [Value::I32(0)];
+        f.call(&mut *caller, &[Value::I32(p.id)], &mut out)
+            .map_err(|e| js_error("RuntimeError", e))?;
+    }
+    Ok(Js::Undefined)
 }
 
 /// A call of a separately compiled module's export, through its wrapper,
@@ -1542,7 +2474,7 @@ pub fn link_js(linker: &mut Linker<Host>) {
                 };
                 let Js::Arr(items) = argv else { unreachable!() };
                 let items = items.borrow().clone();
-                if !matches!(fv, Js::Obj(_, Some(_))) {
+                if !matches!(fv, Js::Obj(_, Some(_)) | Js::PyFunc(_)) {
                     return -3;
                 }
                 match call_value(&mut c, &fv, &Js::Undefined, &items) {
@@ -1565,7 +2497,10 @@ pub fn link_js(linker: &mut Linker<Host>) {
                 let Js::Arr(items) = argv else { unreachable!() };
                 let items = items.borrow().clone();
                 let builtin = matches!((&target, name.as_str()), (Js::Arr(_), "push" | "join"))
-                    || matches!(target, Js::Module(_));
+                    || matches!(target, Js::Module(_))
+                    || (matches!(target, Js::Node(_) | Js::ClassList(_))
+                        && DOM_METHODS.contains(&name.as_str()))
+                    || (matches!(target, Js::PyFunc(_)) && name == "destroy");
                 if !builtin {
                     match target.get(&name) {
                         None => return -1,
@@ -1591,7 +2526,7 @@ pub fn link_js(linker: &mut Linker<Host>) {
                 };
                 let Js::Arr(items) = argv else { unreachable!() };
                 let items = items.borrow().clone();
-                if !matches!(fv, Js::Obj(_, Some(_))) {
+                if !matches!(fv, Js::Obj(_, Some(_)) | Js::PyFunc(_)) {
                     return -3;
                 }
                 match call_value(&mut c, &fv, &Js::Undefined, &items) {
@@ -1656,9 +2591,15 @@ pub fn link_js(linker: &mut Linker<Host>) {
                 Js::Num(x) if x == x.trunc() && x.abs() <= 9007199254740991.0 => 4,
                 Js::Num(_) => 5,
                 Js::Str(_) => 6,
-                Js::Obj(_, Some(_)) => 7,
+                Js::Obj(_, Some(_)) | Js::PyFunc(_) => 7,
                 Js::Arr(_) => 8,
-                Js::Obj(..) | Js::Error(_) | Js::Module(_) | Js::Iter(_) | Js::Promise(_) => 9,
+                Js::Obj(..)
+                | Js::Error(_)
+                | Js::Module(_)
+                | Js::Iter(_)
+                | Js::Promise(_)
+                | Js::Node(_)
+                | Js::ClassList(_) => 9,
             }
         })
         .unwrap();
@@ -1703,7 +2644,7 @@ pub fn link_js(linker: &mut Linker<Host>) {
             match c.data().js.value(h) {
                 Js::Arr(items) => items.borrow().len() as i32,
                 Js::Str(s) => s.encode_utf16().count() as i32,
-                v @ Js::Obj(..) => match v.get("length") {
+                v @ (Js::Obj(..) | Js::ClassList(_)) => match v.get("length") {
                     Some(Js::Num(n)) => n as i32,
                     _ => -1,
                 },
@@ -1740,6 +2681,10 @@ pub fn link_js(linker: &mut Linker<Host>) {
                 Js::Str(s) => {
                     let chars = s.chars().map(|ch| Js::Str(ch.to_string())).collect();
                     w.add(Js::Iter(Rc::new(RefCell::new((chars, 0)))))
+                }
+                Js::ClassList(n) => {
+                    let classes = n.borrow().classes().into_iter().map(Js::Str).collect();
+                    w.add(Js::Iter(Rc::new(RefCell::new((classes, 0)))))
                 }
                 _ => -3,
             }
@@ -1841,6 +2786,71 @@ pub fn link_js(linker: &mut Linker<Host>) {
                 }
                 other => w.settled.push((token, false, other)),
             }
+        })
+        .unwrap();
+    linker
+        .func_wrap(
+            m,
+            "function",
+            |mut c: Caller<'_, Host>, env: i32, arity: i32, once: i32, id: i32| -> i32 {
+                c.data_mut().js.add(Js::PyFunc(Rc::new(PyFn {
+                    env,
+                    arity: arity as usize,
+                    once: once != 0,
+                    id,
+                    alive: std::cell::Cell::new(true),
+                })))
+            },
+        )
+        .unwrap();
+    // JSPI, as the loader's `start()` gives it: suspending hands back the
+    // promises that settled, or moves the clock on to the next timer.
+    linker
+        .func_wrap(m, "can_suspend", |c: Caller<'_, Host>| -> i32 {
+            c.data().js.jspi as i32
+        })
+        .unwrap();
+    linker
+        .func_wrap(
+            m,
+            "suspend",
+            |mut c: Caller<'_, Host>, ms: wasmi::core::F64| -> i32 {
+                let ms = f64::from(ms);
+                let host = c.data_mut();
+                if !host.js.settled.is_empty() {
+                    return 0;
+                }
+                assert!(
+                    ms >= 0.0,
+                    "the program waits on a promise that never settles"
+                );
+                host.monotonic_ns += (ms * 1e6).ceil() as u64;
+                0
+            },
+        )
+        .unwrap();
+    linker
+        .func_wrap(m, "next_settled", |mut c: Caller<'_, Host>| -> i32 {
+            let w = &mut c.data_mut().js;
+            if w.settled.is_empty() {
+                w.taken = None;
+                return -1;
+            }
+            let (token, rejected, value) = w.settled.remove(0);
+            w.taken = Some((rejected, value));
+            token
+        })
+        .unwrap();
+    linker
+        .func_wrap(m, "settled_failed", |c: Caller<'_, Host>| -> i32 {
+            c.data().js.taken.as_ref().is_some_and(|t| t.0) as i32
+        })
+        .unwrap();
+    linker
+        .func_wrap(m, "settled_value", |mut c: Caller<'_, Host>| -> i32 {
+            let w = &mut c.data_mut().js;
+            let value = w.taken.as_ref().map_or(Js::Undefined, |t| t.1.clone());
+            w.add(value)
         })
         .unwrap();
     linker

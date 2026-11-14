@@ -105,13 +105,15 @@ async function waspyCommand(wasm, stdin, args) {
         onStdout: (t) => (stdout += t),
         onStderr: (t) => (stderr += t),
     });
-    const { instance } = await instantiate(await bytes(wasm), {
+    const { instance, start } = await instantiate(await bytes(wasm), {
         wasi: wasi.imports.wasi_snapshot_preview1,
     });
     wasi.bind(instance);
     let exit = 0;
     try {
-        instance.exports._start();
+        // Through the loader's `start()`, so a program awaiting a promise
+        // inside `asyncio.run()` suspends as Pyodide's does (JSPI).
+        await start();
     } catch (error) {
         if (error instanceof WasiExit) exit = error.code;
         else return { error: error.message };

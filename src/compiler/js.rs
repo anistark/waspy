@@ -115,6 +115,21 @@ pub enum JsImport {
     /// `(token, failed, h)`: resolve (or reject) the Promise an exported
     /// coroutine's call answered.
     Resolve,
+    /// `() -> bool`: whether the program may suspend here (JSPI, inside the
+    /// loader's `start()`).
+    CanSuspend,
+    /// `(ms: f64) -> 0`: suspend until a promise the program awaits settles,
+    /// or for `ms` milliseconds (for good when negative).
+    Suspend,
+    /// `() -> token`: the next promise that settled while suspended (-1 when
+    /// none did), whose failure and value the next two answer.
+    NextSettled,
+    SettledFailed,
+    SettledValue,
+    /// `(env, arity, once, id) -> h`: a JavaScript function calling the
+    /// Python function `env` through the export `__waspy_call_<arity>`
+    /// (`create_proxy`), whose `destroy()` calls `__waspy_forget(id)`.
+    Function,
 }
 
 impl JsImport {
@@ -152,6 +167,12 @@ impl JsImport {
             JsImport::Fail => "fail",
             JsImport::Then => "then",
             JsImport::Resolve => "resolve",
+            JsImport::CanSuspend => "can_suspend",
+            JsImport::Suspend => "suspend",
+            JsImport::NextSettled => "next_settled",
+            JsImport::SettledFailed => "settled_failed",
+            JsImport::SettledValue => "settled_value",
+            JsImport::Function => "function",
         }
     }
 
@@ -161,11 +182,17 @@ impl JsImport {
             JsImport::Global | JsImport::String | JsImport::Parse | JsImport::ImportModule => {
                 (vec![I32; 2], vec![I32])
             }
-            JsImport::GlobalThis | JsImport::Array | JsImport::Undefined | JsImport::Error => {
-                (vec![], vec![I32])
-            }
+            JsImport::GlobalThis
+            | JsImport::Array
+            | JsImport::Undefined
+            | JsImport::Error
+            | JsImport::CanSuspend
+            | JsImport::NextSettled
+            | JsImport::SettledFailed
+            | JsImport::SettledValue => (vec![], vec![I32]),
+            JsImport::Suspend => (vec![F64], vec![I32]),
             JsImport::Get => (vec![I32; 3], vec![I32]),
-            JsImport::Set | JsImport::CallMethod => (vec![I32; 4], vec![I32]),
+            JsImport::Set | JsImport::CallMethod | JsImport::Function => (vec![I32; 4], vec![I32]),
             JsImport::Call | JsImport::Construct | JsImport::Equal | JsImport::Item => {
                 (vec![I32; 2], vec![I32])
             }
@@ -187,7 +214,7 @@ impl JsImport {
         }
     }
 
-    pub const ALL: [JsImport; 32] = [
+    pub const ALL: [JsImport; 38] = [
         JsImport::Global,
         JsImport::GlobalThis,
         JsImport::Get,
@@ -220,6 +247,12 @@ impl JsImport {
         JsImport::Fail,
         JsImport::Then,
         JsImport::Resolve,
+        JsImport::CanSuspend,
+        JsImport::Suspend,
+        JsImport::NextSettled,
+        JsImport::SettledFailed,
+        JsImport::SettledValue,
+        JsImport::Function,
     ];
 }
 
@@ -1095,12 +1128,14 @@ fn ffi(f: &str, args: &[IRExpr], ctx: &CompilationContext) -> Option<IRExpr> {
 pub(crate) fn intrinsic_type(name: &str) -> Option<IRType> {
     let op = name.strip_prefix(JS_PREFIX)?;
     Some(match op {
-        "len" | "int" => IRType::Int,
+        "len" | "int" | "as_int" => IRType::Int,
+        "as_str" => IRType::String,
         "str" | "repr" => IRType::String,
         "float" => IRType::Float,
         "bool" | "eq" | "is_none" | "same" => IRType::Bool,
         "set" | "then" | "resolve" => IRType::None,
-        "export" | "fail" => IRType::Int,
+        "export" | "fail" | "next_settled" | "settled_failed" | "suspend" => IRType::Int,
+        "can_suspend" => IRType::Bool,
         "to_py" => IRType::Unknown,
         _ => IRType::JsProxy,
     })
@@ -1195,11 +1230,17 @@ pub(crate) fn with_bridge(module: &IRModule) -> Option<IRModule> {
                 IRExpr::MethodCall { method_name, .. } => {
                     names.insert(method_name.clone());
                 }
+                // A keyword argument names a property of the object it is
+                // passed to JavaScript as.
+                IRExpr::Keyword { name, .. } => {
+                    names.insert(name.clone());
+                }
                 _ => {}
             }
             Ok(())
         });
     }
+    names.insert("{}".to_string());
     for imp in &m.imports {
         if imp.module == "js" {
             if let Some(n) = &imp.name {
@@ -1330,7 +1371,7 @@ pub(crate) fn with_bridge(module: &IRModule) -> Option<IRModule> {
 
 /// `(e) -> str`: the last line of CPython's report of an exception, which a
 /// call from JavaScript throws as its message.
-fn exception_line(name: &str) -> crate::ir::IRFunction {
+pub(crate) fn exception_line(name: &str) -> crate::ir::IRFunction {
     use crate::ir::build::*;
     use crate::ir::{IRCompareOp, IROp};
     let s = || IRType::String;
@@ -1439,6 +1480,14 @@ fn emit_value(
             func.instruction(&I::I32Load(crate::compiler::runtime::w32(0)));
             return false;
         }
+        IRType::Callable { .. } => {
+            ctx.report(
+                "a function passed to JavaScript needs a proxy: pass create_proxy(f) (from \
+                 pyodide.ffi), which JavaScript can call until its destroy()",
+            );
+            func.instruction(&I::Drop);
+            func.instruction(&I::Call(imp(ctx, JsImport::Undefined)));
+        }
         other => {
             ctx.report(format!(
                 "a {} passed to JavaScript is not supported: Pyodide would pass a proxy of the \
@@ -1465,18 +1514,13 @@ fn emit_value(
 }
 
 /// The arguments, as a fresh JS array whose handle is left on the stack.
+/// Keyword arguments are one object after the others, as Pyodide passes
+/// them (`el.addEventListener("click", f, once=True)`).
 fn emit_args(args: &[IRExpr], func: &mut Function, ctx: &CompilationContext, ml: &MemoryLayout) {
     let arr = hold(ctx);
     func.instruction(&I::Call(imp(ctx, JsImport::Array)));
     func.instruction(&I::LocalSet(arr));
-    for arg in args {
-        if let IRExpr::Keyword { name, .. } = arg {
-            ctx.report(format!(
-                "a keyword argument ('{name}=') in a call to JavaScript is not supported"
-            ));
-            continue;
-        }
-        let temp = emit_value(arg, func, ctx, ml);
+    let push = |func: &mut Function, temp: bool| {
         func.instruction(&I::LocalSet(ctx.temp_local));
         func.instruction(&I::LocalGet(arr));
         func.instruction(&I::LocalGet(ctx.temp_local));
@@ -1485,6 +1529,47 @@ fn emit_args(args: &[IRExpr], func: &mut Function, ctx: &CompilationContext, ml:
             func.instruction(&I::LocalGet(ctx.temp_local));
             func.instruction(&I::Call(imp(ctx, JsImport::Release)));
         }
+    };
+    let mut keywords = Vec::new();
+    for arg in args {
+        match arg {
+            IRExpr::Keyword { name, .. } if name == crate::ir::STARRED_ARG => {
+                ctx.report("'*args' in a call to JavaScript is not supported");
+            }
+            IRExpr::Keyword { name, value } => keywords.push((name, value)),
+            _ => {
+                let temp = emit_value(arg, func, ctx, ml);
+                push(func, temp);
+            }
+        }
+    }
+    if !keywords.is_empty() {
+        let obj = hold(ctx);
+        let (off, len) = name_of(Some(&lit("{}")), ml, ctx);
+        func.instruction(&I::I32Const(off));
+        func.instruction(&I::I32Const(len));
+        func.instruction(&I::Call(imp(ctx, JsImport::Parse)));
+        func.instruction(&I::LocalSet(obj));
+        for (name, value) in keywords {
+            let (off, len) = name_of(Some(&lit(name)), ml, ctx);
+            let v = hold(ctx);
+            let temp = emit_value(value, func, ctx, ml);
+            func.instruction(&I::LocalSet(v));
+            func.instruction(&I::LocalGet(obj));
+            func.instruction(&I::I32Const(off));
+            func.instruction(&I::I32Const(len));
+            func.instruction(&I::LocalGet(v));
+            func.instruction(&I::Call(imp(ctx, JsImport::Set)));
+            func.instruction(&I::Drop);
+            if temp {
+                func.instruction(&I::LocalGet(v));
+                func.instruction(&I::Call(imp(ctx, JsImport::Release)));
+            }
+            ctx.release_held();
+        }
+        func.instruction(&I::LocalGet(obj));
+        push(func, true);
+        ctx.release_held();
     }
     func.instruction(&I::LocalGet(arr));
     ctx.release_held();
@@ -1641,6 +1726,23 @@ pub(crate) fn emit_intrinsic(
             ctx.release_held();
             IRType::JsProxy
         }
+        // A property read as the kind of what an augmented assignment
+        // combines it with (`el.textContent += "!"`), a TypeError for
+        // another kind.
+        "as_int" | "as_str" => {
+            emit_expr(&args[0], func, ctx, ml, None);
+            let ty = if op == "as_int" {
+                IRType::Int
+            } else {
+                IRType::String
+            };
+            func.instruction(&I::Call(helper(ctx, JsFn::As(ty.clone()))));
+            emit_post_call_check(func, ctx);
+            if ty == IRType::String {
+                recover_str_pair(func, ctx);
+            }
+            ty
+        }
         "len" | "str" | "repr" | "int" | "float" | "bool" => {
             emit_expr(&args[0], func, ctx, ml, None);
             let (f, ty) = match op {
@@ -1760,21 +1862,44 @@ pub(crate) fn emit_intrinsic(
             IRType::JsProxy
         }
         "export" => {
-            // A handle the caller in JavaScript owns.
+            // A handle the caller in JavaScript owns. A call answering None
+            // is one word too here, so the value is converted by the type
+            // it was emitted as.
             if matches!(args.first(), Some(IRExpr::Const(IRConstant::None))) {
                 call_import(func, JsImport::Undefined);
                 return Some(IRType::Int);
             }
-            let ty = crate::compiler::function::infer_value_type(&args[0], ctx);
-            if scalar(&ty) {
-                if emit_value(&args[0], func, ctx, ml) {
-                    return Some(IRType::Int);
+            let ty = crate::compiler::expression::emit_value(&args[0], func, ctx, ml, None);
+            // `__js_export(f(...), True)`: a function called for its effect,
+            // whose word is dropped for undefined.
+            if matches!(args.get(1), Some(IRExpr::Const(IRConstant::Bool(true)))) {
+                emit_drop(func, &ty);
+                if ty == IRType::None {
+                    func.instruction(&I::Drop);
                 }
-                call_import(func, JsImport::Keep);
-            } else {
-                let ty = emit_expr(&args[0], func, ctx, ml, None);
-                func.instruction(&I::Call(helper(ctx, JsFn::ToJs(ty))));
-                emit_post_call_check(func, ctx);
+                call_import(func, JsImport::Undefined);
+                return Some(IRType::Int);
+            }
+            match &ty {
+                IRType::None => {
+                    func.instruction(&I::Drop);
+                    call_import(func, JsImport::Undefined);
+                }
+                IRType::Int => {
+                    func.instruction(&I::F64ConvertI32S);
+                    call_import(func, JsImport::Number);
+                }
+                IRType::Float => call_import(func, JsImport::Number),
+                IRType::Bool => call_import(func, JsImport::Boolean),
+                IRType::String => call_import(func, JsImport::String),
+                IRType::JsProxy => {
+                    func.instruction(&I::I32Load(crate::compiler::runtime::w32(0)));
+                    call_import(func, JsImport::Keep);
+                }
+                _ => {
+                    func.instruction(&I::Call(helper(ctx, JsFn::ToJs(ty.clone()))));
+                    emit_post_call_check(func, ctx);
+                }
             }
             IRType::Int
         }
@@ -1791,6 +1916,45 @@ pub(crate) fn emit_intrinsic(
             call_import(func, JsImport::Then);
             ctx.release_held();
             IRType::None
+        }
+        "can_suspend" | "next_settled" | "settled_failed" => {
+            call_import(
+                func,
+                match op {
+                    "can_suspend" => JsImport::CanSuspend,
+                    "next_settled" => JsImport::NextSettled,
+                    _ => JsImport::SettledFailed,
+                },
+            );
+            if op == "can_suspend" {
+                IRType::Bool
+            } else {
+                IRType::Int
+            }
+        }
+        "function" => {
+            // The Python function (its environment's address), then the
+            // arity, whether it is called once, and its registry id.
+            emit_expr(&args[0], func, ctx, ml, None);
+            for (k, arg) in args.iter().enumerate().skip(1) {
+                let ty = emit_expr(arg, func, ctx, ml, None);
+                if !matches!(ty, IRType::Int | IRType::Bool) {
+                    ctx.report(format!("__js_function argument {k} is not an int"));
+                }
+            }
+            call_import(func, JsImport::Function);
+            func.instruction(&I::Call(helper(ctx, JsFn::Wrap)));
+            IRType::JsProxy
+        }
+        "settled_value" => {
+            call_import(func, JsImport::SettledValue);
+            func.instruction(&I::Call(helper(ctx, JsFn::Wrap)));
+            IRType::JsProxy
+        }
+        "suspend" => {
+            emit_expr(&args[0], func, ctx, ml, Some(&IRType::Float));
+            call_import(func, JsImport::Suspend);
+            IRType::Int
         }
         "resolve" => {
             for (k, arg) in args.iter().enumerate() {

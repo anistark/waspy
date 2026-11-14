@@ -1924,6 +1924,11 @@ fn scan_expr_locals(expr: &IRExpr, ctx: &mut CompilationContext, depth: u32) {
                         | IRType::Int
                         | IRType::Bool) => ty,
                         class @ IRType::Class(_) => class,
+                        // An optional instance: its pointer or 0.
+                        IRType::Optional(inner) if matches!(*inner, IRType::Class(_)) => {
+                            IRType::Optional(inner)
+                        }
+                        IRType::JsProxy => IRType::JsProxy,
                         // A tuple or collection element is a pointer whose
                         // type the reads of the target need: an untyped one
                         // rendered its address.
@@ -2418,6 +2423,13 @@ pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
                         // class, so `for it in items: it.field` resolves the
                         // field instead of reading 0 off an untyped pointer.
                         class @ IRType::Class(_) => class,
+                        // An optional instance is one word too, its pointer
+                        // or 0 (`gather(..., return_exceptions=True)`'s).
+                        IRType::Optional(inner) if matches!(*inner, IRType::Class(_)) => {
+                            IRType::Optional(inner)
+                        }
+                        // A JavaScript value: a proxy's block.
+                        IRType::JsProxy => IRType::JsProxy,
                         // A str element, so what the body computes from it
                         // (`line.strip()`) is typed for the scan too; code
                         // generation would make it a str in any case.
@@ -3553,14 +3565,70 @@ fn compile_statement(
                     None,
                 );
             }
+            // `el.textContent += "!"`: the property read as the kind of the
+            // right-hand side (a str, an int, or a float, as Pyodide hands
+            // it over), combined, and set.
             IRStatement::AttributeAugAssign {
-                object, attribute, ..
+                object,
+                attribute,
+                value,
+                op,
             } if !ctx.js.is_empty() && infer_value_type(object, ctx) == IRType::JsProxy => {
-                ctx.report(format!(
-                    "an augmented assignment to the JavaScript property '{attribute}' is not \
-                     supported. Hint: convert it, for example 'n: int = el.{attribute}' then \
-                     'el.{attribute} = n + 1'"
-                ));
+                fn plain(e: &IRExpr) -> bool {
+                    match e {
+                        IRExpr::Variable(_) | IRExpr::Param(_) => true,
+                        IRExpr::Attribute { object, .. } => plain(object),
+                        _ => false,
+                    }
+                }
+                let read = IRExpr::Attribute {
+                    object: Box::new(object.clone()),
+                    attribute: attribute.clone(),
+                };
+                let kind = match value {
+                    IRExpr::Const(IRConstant::Int(_)) => IRType::Int,
+                    IRExpr::Const(IRConstant::Float(_)) => IRType::Float,
+                    IRExpr::Const(IRConstant::String(_)) => IRType::String,
+                    other => infer_value_type(other, ctx),
+                };
+                let as_kind = match kind {
+                    IRType::String => Some("as_str"),
+                    IRType::Int => Some("as_int"),
+                    IRType::Float => Some("float"),
+                    _ => None,
+                };
+                match as_kind {
+                    Some(conv) if plain(object) => emit_expr(
+                        &IRExpr::FunctionCall {
+                            function_name: crate::compiler::js::intrinsic("set"),
+                            arguments: vec![
+                                object.clone(),
+                                IRExpr::Const(IRConstant::String(attribute.clone())),
+                                IRExpr::BinaryOp {
+                                    left: Box::new(IRExpr::FunctionCall {
+                                        function_name: crate::compiler::js::intrinsic(conv),
+                                        arguments: vec![read],
+                                    }),
+                                    right: Box::new(value.clone()),
+                                    op: op.clone(),
+                                },
+                            ],
+                        },
+                        func,
+                        ctx,
+                        memory_layout,
+                        None,
+                    ),
+                    _ => {
+                        ctx.report(format!(
+                            "an augmented assignment to the JavaScript property '{attribute}' \
+                             is supported with a str, int, or float on the right of a variable's \
+                             property. Hint: convert it, for example 'n: int = el.{attribute}' \
+                             then 'el.{attribute} = n + 1'"
+                        ));
+                        IRType::None
+                    }
+                };
             }
             IRStatement::AttributeAssign {
                 object,
@@ -4441,6 +4509,17 @@ fn compile_statement(
                 // of the body is skipped, exactly as Python skips it. Falling
                 // off the end of the body reaches the same dispatch with no
                 // exception pending, which is the ordinary path.
+                //
+                // With a `finally`, the body and the handlers run inside one
+                // more block, whose end is the `finally`: an exception a
+                // handler raises (a bare `raise` included) goes there first
+                // and is pending again after it. It used to go straight to
+                // the enclosing `try`, so the `finally` never ran.
+                if finally_body.is_some() {
+                    func.instruction(&Instruction::Block(BlockType::Empty));
+                    ctx.block_depth += 1;
+                    ctx.try_stack.push(ctx.block_depth);
+                }
                 func.instruction(&Instruction::Block(BlockType::Empty));
                 ctx.block_depth += 1;
                 ctx.try_stack.push(ctx.block_depth);
@@ -4531,6 +4610,12 @@ fn compile_statement(
                 // a second `End` would close the function frame early.
                 ctx.block_depth -= 1;
                 func.instruction(&Instruction::End);
+                // The handlers' region ends where the `finally` begins.
+                if finally_body.is_some() {
+                    ctx.try_stack.pop();
+                    ctx.block_depth -= 1;
+                    func.instruction(&Instruction::End);
+                }
 
                 // `finally` runs on every path that reaches here: the body
                 // completed, a handler caught, or no handler matched and the

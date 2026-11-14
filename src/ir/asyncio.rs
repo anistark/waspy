@@ -50,7 +50,7 @@ pub(crate) fn name(short: &str) -> String {
 pub(crate) fn fname(short: &str) -> String {
     format!("{ASYNCIO_FN_PREFIX}{short}")
 }
-fn spelled(t: &IRType) -> String {
+pub(crate) fn spelled(t: &IRType) -> String {
     encode(t).expect("a result type an annotation can name")
 }
 /// The class every coroutine resolving to `t` derives from.
@@ -75,49 +75,49 @@ pub(crate) fn is_awaitable_class(class: &str) -> bool {
         || class == name("_Gathering")
 }
 
-fn cls(short: &str) -> IRType {
+pub(crate) fn cls(short: &str) -> IRType {
     IRType::Class(name(short))
 }
-fn opt(t: IRType) -> IRType {
+pub(crate) fn opt(t: IRType) -> IRType {
     IRType::Optional(Box::new(t))
 }
-fn list(t: IRType) -> IRType {
+pub(crate) fn list(t: IRType) -> IRType {
     IRType::List(Box::new(t))
 }
-fn me(class: &str) -> crate::ir::IRParam {
+pub(crate) fn me(class: &str) -> crate::ir::IRParam {
     param("self", &IRType::Class(class.to_string()))
 }
-fn loop_var(var: &str) -> IRExpr {
+pub(crate) fn loop_var(var: &str) -> IRExpr {
     attr(v(&name("_Loop")), var)
 }
-fn set_loop(var: &str, value: IRExpr) -> IRStatement {
+pub(crate) fn set_loop(var: &str, value: IRExpr) -> IRStatement {
     set_attr(v(&name("_Loop")), var, value)
 }
-fn f(short: &str, args: Vec<IRExpr>) -> IRExpr {
+pub(crate) fn f(short: &str, args: Vec<IRExpr>) -> IRExpr {
     call(&fname(short), args)
 }
-fn qcall(class: &str, method: &str, args: Vec<IRExpr>) -> IRExpr {
+pub(crate) fn qcall(class: &str, method: &str, args: Vec<IRExpr>) -> IRExpr {
     call(&format!("{class}::{method}"), args)
 }
-fn eq(l: IRExpr, r: IRExpr) -> IRExpr {
+pub(crate) fn eq(l: IRExpr, r: IRExpr) -> IRExpr {
     cmp(l, IRCompareOp::Eq, r)
 }
-fn ne(l: IRExpr, r: IRExpr) -> IRExpr {
+pub(crate) fn ne(l: IRExpr, r: IRExpr) -> IRExpr {
     cmp(l, IRCompareOp::NotEq, r)
 }
-fn is_none(e: IRExpr) -> IRExpr {
+pub(crate) fn is_none(e: IRExpr) -> IRExpr {
     cmp(e, IRCompareOp::Is, none())
 }
-fn not_none(e: IRExpr) -> IRExpr {
+pub(crate) fn not_none(e: IRExpr) -> IRExpr {
     cmp(e, IRCompareOp::IsNot, none())
 }
-fn raise_new(class: &str) -> IRStatement {
+pub(crate) fn raise_new(class: &str) -> IRStatement {
     IRStatement::Raise {
         exception: Some(call(class, vec![])),
         cause: None,
     }
 }
-fn class(short: &str, base: Option<String>, methods: Vec<IRFunction>) -> IRClass {
+pub(crate) fn class(short: &str, base: Option<String>, methods: Vec<IRFunction>) -> IRClass {
     IRClass {
         name: name(short),
         bases: base.into_iter().collect(),
@@ -128,7 +128,7 @@ fn class(short: &str, base: Option<String>, methods: Vec<IRFunction>) -> IRClass
         deferred_vars: Vec::new(),
     }
 }
-fn function(
+pub(crate) fn function(
     short: &str,
     params: Vec<crate::ir::IRParam>,
     ret: IRType,
@@ -210,6 +210,19 @@ impl Api {
         self.module || !self.names.is_empty()
     }
 
+    /// `asyncio.X` read as a name, or `X` imported from it: what it names.
+    pub(crate) fn name_of(&self, e: &IRExpr) -> Option<String> {
+        match e {
+            IRExpr::Attribute { object, attribute }
+                if self.module && matches!(&**object, IRExpr::Variable(m) if m == "asyncio") =>
+            {
+                Some(attribute.clone())
+            }
+            IRExpr::Variable(n) => self.names.get(n).cloned(),
+            _ => None,
+        }
+    }
+
     /// `asyncio.f(args)`, or `f(args)` for a name imported from it: the
     /// function's name in `asyncio`, and the arguments.
     pub(crate) fn call_of<'e>(&self, e: &'e IRExpr) -> Option<(String, &'e [IRExpr])> {
@@ -259,7 +272,9 @@ impl Api {
     pub(crate) fn rewrite(&self, e: &mut IRExpr, awaited: bool) -> Result<()> {
         if let IRExpr::Attribute { object, attribute } = e {
             if self.module && matches!(&**object, IRExpr::Variable(m) if m == "asyncio") {
-                let Some(class) = exception_class(attribute) else {
+                let Some(class) = exception_class(attribute)
+                    .or_else(|| crate::ir::asyncio_sync::exception_class(attribute))
+                else {
                     return Err(refused(format!(
                         "asyncio.{attribute} is not supported here"
                     )));
@@ -269,7 +284,9 @@ impl Api {
             return Ok(());
         }
         if let IRExpr::Variable(n) = e {
-            if let Some(class) = self.names.get(n.as_str()).and_then(|a| exception_class(a)) {
+            if let Some(class) = self.names.get(n.as_str()).and_then(|a| {
+                exception_class(a).or_else(|| crate::ir::asyncio_sync::exception_class(a))
+            }) {
                 *e = v(class);
             }
             return Ok(());
@@ -278,7 +295,9 @@ impl Api {
             return Ok(());
         };
         let args = args.to_vec();
-        if let Some(class) = exception_class(&function) {
+        if let Some(class) = exception_class(&function)
+            .or_else(|| crate::ir::asyncio_sync::exception_class(&function))
+        {
             *e = call(class, args);
             return Ok(());
         }
@@ -319,6 +338,55 @@ impl Api {
                     ))
                 }
             },
+            "Lock" | "Event" => {
+                if !args.is_empty() {
+                    return Err(refused(format!("asyncio.{function}() takes no arguments")));
+                }
+                let class = if function == "Lock" {
+                    crate::ir::asyncio_sync::LOCK
+                } else {
+                    crate::ir::asyncio_sync::EVENT
+                };
+                call(class, vec![])
+            }
+            "Semaphore" | "BoundedSemaphore" => {
+                let value = match args.as_slice() {
+                    [] => int(1),
+                    [IRExpr::Keyword { name, value }] if name == "value" => (**value).clone(),
+                    [IRExpr::Keyword { name, .. }] => {
+                        return Err(refused(format!(
+                            "asyncio.{function}() got an unexpected keyword argument '{name}'"
+                        )))
+                    }
+                    [x] => x.clone(),
+                    _ => {
+                        return Err(refused(format!(
+                            "asyncio.{function}() takes at most 1 argument"
+                        )))
+                    }
+                };
+                let class = if function == "Semaphore" {
+                    crate::ir::asyncio_sync::SEMAPHORE
+                } else {
+                    crate::ir::asyncio_sync::BOUNDED
+                };
+                call(class, vec![value])
+            }
+            "timeout" => crate::ir::asyncio_sync::timeout_call(one(args)?),
+            "TaskGroup" => {
+                if !args.is_empty() {
+                    return Err(refused(
+                        "asyncio.TaskGroup() takes no arguments".to_string(),
+                    ));
+                }
+                call(crate::ir::asyncio_sync::TASKGROUP, vec![])
+            }
+            "Queue" | "LifoQueue" | "PriorityQueue" => {
+                return Err(refused(format!(
+                    "asyncio.{function}() needs the type of what it holds: make it where that \
+                     is declared, for example 'q: asyncio.{function}[int] = asyncio.{function}()'"
+                )))
+            }
             "gather" | "wait_for" if !awaited => {
                 return Err(refused(format!(
                     "asyncio.{function}() is supported only where it is awaited directly: \
@@ -329,7 +397,9 @@ impl Api {
             other => {
                 return Err(refused(format!(
                     "asyncio.{other}() is not supported. Supported: run, create_task, \
-                     ensure_future, gather, sleep, wait_for, and the methods of a task"
+                     ensure_future, gather, sleep, wait_for, timeout, TaskGroup, Lock, Event, \
+                     Semaphore, BoundedSemaphore, Queue, LifoQueue, PriorityQueue, and their \
+                     methods"
                 )))
             }
         };
@@ -425,13 +495,17 @@ pub(crate) fn coroutine_functions() -> Vec<IRFunction> {
 /// Every runtime class: the loop's state, handles, callbacks, the futures'
 /// base, and `Future`, `Task`, and `_Coro` for each result type in `kinds`
 /// (which holds None).
-pub(crate) fn runtime_classes(kinds: &[IRType], bridge: bool) -> Vec<IRClass> {
+///
+/// With `finalize` (a program that makes tasks it may not await), a task
+/// reports an exception nothing retrieved as it is reclaimed, as CPython's
+/// does, rather than when the loop closes.
+pub(crate) fn runtime_classes(kinds: &[IRType], bridge: bool, finalize: bool) -> Vec<IRClass> {
     let mut out = vec![loop_state(bridge), callback(), handle(), future_base()];
     for t in kinds {
         out.push(future(t));
     }
     for t in kinds {
-        out.push(task(t));
+        out.push(task(t, finalize));
         let mut c = coro(t);
         if bridge && crosses_js(t) {
             c.methods.push(export_method(t));
@@ -628,7 +702,40 @@ pub(crate) fn bridge_functions() -> Vec<IRFunction> {
                 ),
             ],
         ),
-        // A promise settled: its future done, and the loop run.
+        // A promise settled: the future it settles done.
+        function(
+            "settle_one",
+            vec![
+                param("token", &IRType::Int),
+                param("failed", &IRType::Int),
+                param("value", &IRType::JsProxy),
+            ],
+            IRType::None,
+            vec![if_(
+                cmp(v("token"), IRCompareOp::In, loop_var("awaiting")),
+                vec![
+                    assign_typed(
+                        "fut",
+                        mcall(loop_var("awaiting"), "pop", vec![v("token")]),
+                        &promise_future(),
+                    ),
+                    if_(
+                        not(mcall(v("fut"), "done", vec![])),
+                        vec![if_else(
+                            ne(v("failed"), int(0)),
+                            vec![expr_stmt(mcall(
+                                v("fut"),
+                                "set_exception",
+                                vec![call("JsException", vec![call("str", vec![v("value")])])],
+                            ))],
+                            vec![expr_stmt(mcall(v("fut"), "set_result", vec![v("value")]))],
+                        )],
+                    ),
+                ],
+            )],
+        ),
+        // A promise settled between JavaScript's turns: its future done, and
+        // the loop run.
         method(
             "__waspy_settle",
             vec![
@@ -639,28 +746,7 @@ pub(crate) fn bridge_functions() -> Vec<IRFunction> {
             IRType::Float,
             vec![
                 assign_typed("value", js("adopt", vec![v("h")]), &IRType::JsProxy),
-                if_(
-                    cmp(v("token"), IRCompareOp::In, loop_var("awaiting")),
-                    vec![
-                        assign_typed(
-                            "fut",
-                            mcall(loop_var("awaiting"), "pop", vec![v("token")]),
-                            &promise_future(),
-                        ),
-                        if_(
-                            not(mcall(v("fut"), "done", vec![])),
-                            vec![if_else(
-                                ne(v("failed"), int(0)),
-                                vec![expr_stmt(mcall(
-                                    v("fut"),
-                                    "set_exception",
-                                    vec![call("JsException", vec![call("str", vec![v("value")])])],
-                                ))],
-                                vec![expr_stmt(mcall(v("fut"), "set_result", vec![v("value")]))],
-                            )],
-                        ),
-                    ],
-                ),
+                expr_stmt(f("settle_one", vec![v("token"), v("failed"), v("value")])),
                 ret_val(f("drive", vec![])),
             ],
         ),
@@ -704,6 +790,12 @@ fn loop_state(bridge: bool) -> IRClass {
         // The task stepping, when `has_current`.
         var(
             "current",
+            call(&name("_FutureBase"), vec![]),
+            cls("_FutureBase"),
+        ),
+        // What `current` holds between steps, so that it keeps no task alive.
+        var(
+            "idle",
             call(&name("_FutureBase"), vec![]),
             cls("_FutureBase"),
         ),
@@ -935,6 +1027,22 @@ fn future_base() -> IRClass {
                     set_attr(v("self"), "_log_traceback", boolean(true)),
                 ],
             ),
+            // What `gather(..., return_exceptions=True)` lists for it: the
+            // exception it failed with (a `CancelledError('')` when it was
+            // cancelled), or None.
+            method(
+                "_exc_or_none",
+                vec![me(&c)],
+                opt(IRType::Class("BaseException".to_string())),
+                vec![
+                    if_(
+                        eq(state(), int(CANCELLED)),
+                        vec![ret_val(call("CancelledError", vec![text("")]))],
+                    ),
+                    if_(my("_has_exc"), vec![ret_val(my("_exc"))]),
+                    ret_val(none()),
+                ],
+            ),
             // A task's, reached through the loop's callbacks.
             method("_step", vec![me(&c)], IRType::None, vec![ret()]),
             method(
@@ -1073,8 +1181,27 @@ fn future(t: &IRType) -> IRClass {
 }
 
 /// `asyncio.Task[T]`: a future stepping a coroutine from the loop.
-fn task(t: &IRType) -> IRClass {
+fn task(t: &IRType, finalize: bool) -> IRClass {
     let c = task_class(t);
+    let stepped = || {
+        let mut out = vec![set_loop("has_current", boolean(false))];
+        if finalize {
+            out.push(set_loop("current", loop_var("idle")));
+        }
+        out
+    };
+    let mut failed = vec![expr_stmt(mcall(
+        v("self"),
+        "set_exception",
+        vec![v("failure")],
+    ))];
+    if !finalize {
+        failed.push(expr_stmt(mcall(
+            loop_var("failed"),
+            "append",
+            vec![v("self")],
+        )));
+    }
     let coro_ty = IRType::Class(coro_class(t));
     let base = || IRType::Class("BaseException".to_string());
     let finished = if *t == IRType::None {
@@ -1195,30 +1322,31 @@ fn task(t: &IRType) -> IRClass {
                         ],
                         name: Some("fatal".to_string()),
                         body: crate::ir::IRBody {
-                            statements: vec![
-                                expr_stmt(mcall(v("self"), "set_exception", vec![v("fatal")])),
-                                set_loop("has_current", boolean(false)),
-                                IRStatement::Raise {
+                            statements: {
+                                let mut out = vec![expr_stmt(mcall(
+                                    v("self"),
+                                    "set_exception",
+                                    vec![v("fatal")],
+                                ))];
+                                out.extend(stepped());
+                                out.push(IRStatement::Raise {
                                     exception: None,
                                     cause: None,
-                                },
-                            ],
+                                });
+                                out
+                            },
                         },
                     },
                     IRExceptHandler {
                         exception_types: vec!["BaseException".to_string()],
                         name: Some("failure".to_string()),
-                        body: crate::ir::IRBody {
-                            statements: vec![
-                                expr_stmt(mcall(v("self"), "set_exception", vec![v("failure")])),
-                                expr_stmt(mcall(loop_var("failed"), "append", vec![v("self")])),
-                            ],
-                        },
+                        body: crate::ir::IRBody { statements: failed },
                     },
                 ],
                 finally_body: None,
             },
-            set_loop("has_current", boolean(false)),
+            // `has_current` false, and `current` let go of.
+            if_(boolean(true), stepped()),
             // A finished task is no longer the loop's to cancel.
             if_(
                 ne(my("_state"), int(PENDING)),
@@ -1230,146 +1358,167 @@ fn task(t: &IRType) -> IRClass {
             ),
         ],
     );
+    let mut finalizer = Vec::new();
+    if finalize {
+        // `Task.__del__`: CPython's report of an exception nothing
+        // retrieved, its first and last lines.
+        finalizer.push(method(
+            "__del__",
+            vec![me(&c)],
+            IRType::None,
+            vec![if_(
+                my("_log_traceback"),
+                vec![
+                    set_attr(v("self"), "_log_traceback", boolean(false)),
+                    write_err(text("Task exception was never retrieved\n")),
+                    write_err(bin(f("exc_line", vec![my("_exc")]), IROp::Add, text("\n"))),
+                ],
+            )],
+        ));
+    }
     IRClass {
         name: c.clone(),
         bases: vec![future_class(t)],
-        methods: vec![
-            method(
-                "__init__",
-                vec![me(&c), param("coro", &coro_ty)],
-                IRType::None,
-                vec![
-                    expr_stmt(qcall(&name("_FutureBase"), "__init__", vec![v("self")])),
-                    set_my_typed("_coro", v("coro"), &coro_ty),
-                    set_my_typed("_waiter", none(), &opt(cls("_FutureBase"))),
-                    set_my_typed("_must_cancel", boolean(false), &IRType::Bool),
-                    set_my_typed("_cancels", int(0), &IRType::Int),
-                    set_loop("names", bin(loop_var("names"), IROp::Add, int(1))),
-                    set_my_typed(
-                        "_name",
-                        bin(
-                            text("Task-"),
-                            IROp::Add,
-                            call("str", vec![loop_var("names")]),
-                        ),
-                        &IRType::String,
-                    ),
-                    expr_stmt(f(
-                        "call_soon",
-                        vec![call(&name("_Step"), vec![v("self")]), none()],
-                    )),
-                    expr_stmt(mcall(loop_var("tasks"), "append", vec![v("self")])),
-                ],
-            ),
-            method(
-                "get_name",
-                vec![me(&c)],
-                IRType::String,
-                vec![ret_val(my("_name"))],
-            ),
-            method(
-                "cancel",
-                vec![me(&c)],
-                IRType::Bool,
-                vec![
-                    set_attr(v("self"), "_log_traceback", boolean(false)),
-                    if_(
-                        ne(my("_state"), int(PENDING)),
-                        vec![ret_val(boolean(false))],
-                    ),
-                    set_attr(
-                        v("self"),
-                        "_cancels",
-                        bin(my("_cancels"), IROp::Add, int(1)),
-                    ),
-                    if_(
-                        not_none(my("_waiter")),
-                        vec![if_(
-                            mcall(
-                                call(crate::ir::SOME_FN, vec![my("_waiter"), text("cancel")]),
-                                "cancel",
-                                vec![],
-                            ),
-                            vec![ret_val(boolean(true))],
-                        )],
-                    ),
-                    set_attr(v("self"), "_must_cancel", boolean(true)),
-                    ret_val(boolean(true)),
-                ],
-            ),
-            method(
-                "cancelling",
-                vec![me(&c)],
-                IRType::Int,
-                vec![ret_val(my("_cancels"))],
-            ),
-            method(
-                "uncancel",
-                vec![me(&c)],
-                IRType::Int,
-                vec![
-                    if_(
-                        cmp(my("_cancels"), IRCompareOp::Gt, int(0)),
-                        vec![
-                            set_attr(
-                                v("self"),
-                                "_cancels",
-                                bin(my("_cancels"), IROp::Sub, int(1)),
-                            ),
-                            if_(
-                                eq(my("_cancels"), int(0)),
-                                vec![set_attr(v("self"), "_must_cancel", boolean(false))],
-                            ),
-                        ],
-                    ),
-                    ret_val(my("_cancels")),
-                ],
-            ),
-            method(
-                "_step",
-                vec![me(&c)],
-                IRType::None,
-                vec![expr_stmt(mcall(
-                    v("self"),
-                    "_run",
+        methods: finalizer
+            .into_iter()
+            .chain([
+                method(
+                    "__init__",
+                    vec![me(&c), param("coro", &coro_ty)],
+                    IRType::None,
                     vec![
-                        boolean(false),
-                        call("RuntimeError", vec![text("coroutine")]),
+                        expr_stmt(qcall(&name("_FutureBase"), "__init__", vec![v("self")])),
+                        set_my_typed("_coro", v("coro"), &coro_ty),
+                        set_my_typed("_waiter", none(), &opt(cls("_FutureBase"))),
+                        set_my_typed("_must_cancel", boolean(false), &IRType::Bool),
+                        set_my_typed("_cancels", int(0), &IRType::Int),
+                        set_loop("names", bin(loop_var("names"), IROp::Add, int(1))),
+                        set_my_typed(
+                            "_name",
+                            bin(
+                                text("Task-"),
+                                IROp::Add,
+                                call("str", vec![loop_var("names")]),
+                            ),
+                            &IRType::String,
+                        ),
+                        expr_stmt(f(
+                            "call_soon",
+                            vec![call(&name("_Step"), vec![v("self")]), none()],
+                        )),
+                        expr_stmt(mcall(loop_var("tasks"), "append", vec![v("self")])),
                     ],
-                ))],
-            ),
-            method(
-                "_wakeup",
-                vec![me(&c), param("fut", &opt(cls("_FutureBase")))],
-                IRType::None,
-                vec![
-                    IRStatement::TryExcept {
-                        try_body: body(vec![expr_stmt(mcall(
-                            call(crate::ir::SOME_FN, vec![v("fut"), text("_check")]),
-                            "_check",
-                            vec![],
-                        ))]),
-                        except_handlers: vec![IRExceptHandler {
-                            exception_types: vec!["BaseException".to_string()],
-                            name: Some("e".to_string()),
-                            body: crate::ir::IRBody {
-                                statements: vec![
-                                    expr_stmt(mcall(
-                                        v("self"),
-                                        "_run",
-                                        vec![boolean(true), v("e")],
-                                    )),
-                                    ret(),
-                                ],
-                            },
-                        }],
-                        finally_body: None,
-                    },
-                    expr_stmt(mcall(v("self"), "_step", vec![])),
-                ],
-            ),
-            run,
-        ],
+                ),
+                method(
+                    "get_name",
+                    vec![me(&c)],
+                    IRType::String,
+                    vec![ret_val(my("_name"))],
+                ),
+                method(
+                    "cancel",
+                    vec![me(&c)],
+                    IRType::Bool,
+                    vec![
+                        set_attr(v("self"), "_log_traceback", boolean(false)),
+                        if_(
+                            ne(my("_state"), int(PENDING)),
+                            vec![ret_val(boolean(false))],
+                        ),
+                        set_attr(
+                            v("self"),
+                            "_cancels",
+                            bin(my("_cancels"), IROp::Add, int(1)),
+                        ),
+                        if_(
+                            not_none(my("_waiter")),
+                            vec![if_(
+                                mcall(
+                                    call(crate::ir::SOME_FN, vec![my("_waiter"), text("cancel")]),
+                                    "cancel",
+                                    vec![],
+                                ),
+                                vec![ret_val(boolean(true))],
+                            )],
+                        ),
+                        set_attr(v("self"), "_must_cancel", boolean(true)),
+                        ret_val(boolean(true)),
+                    ],
+                ),
+                method(
+                    "cancelling",
+                    vec![me(&c)],
+                    IRType::Int,
+                    vec![ret_val(my("_cancels"))],
+                ),
+                method(
+                    "uncancel",
+                    vec![me(&c)],
+                    IRType::Int,
+                    vec![
+                        if_(
+                            cmp(my("_cancels"), IRCompareOp::Gt, int(0)),
+                            vec![
+                                set_attr(
+                                    v("self"),
+                                    "_cancels",
+                                    bin(my("_cancels"), IROp::Sub, int(1)),
+                                ),
+                                if_(
+                                    eq(my("_cancels"), int(0)),
+                                    vec![set_attr(v("self"), "_must_cancel", boolean(false))],
+                                ),
+                            ],
+                        ),
+                        ret_val(my("_cancels")),
+                    ],
+                ),
+                method(
+                    "_step",
+                    vec![me(&c)],
+                    IRType::None,
+                    vec![expr_stmt(mcall(
+                        v("self"),
+                        "_run",
+                        vec![
+                            boolean(false),
+                            call("RuntimeError", vec![text("coroutine")]),
+                        ],
+                    ))],
+                ),
+                method(
+                    "_wakeup",
+                    vec![me(&c), param("fut", &opt(cls("_FutureBase")))],
+                    IRType::None,
+                    vec![
+                        IRStatement::TryExcept {
+                            try_body: body(vec![expr_stmt(mcall(
+                                call(crate::ir::SOME_FN, vec![v("fut"), text("_check")]),
+                                "_check",
+                                vec![],
+                            ))]),
+                            except_handlers: vec![IRExceptHandler {
+                                exception_types: vec!["BaseException".to_string()],
+                                name: Some("e".to_string()),
+                                body: crate::ir::IRBody {
+                                    statements: vec![
+                                        expr_stmt(mcall(
+                                            v("self"),
+                                            "_run",
+                                            vec![boolean(true), v("e")],
+                                        )),
+                                        ret(),
+                                    ],
+                                },
+                            }],
+                            finally_body: None,
+                        },
+                        expr_stmt(mcall(v("self"), "_step", vec![])),
+                    ],
+                ),
+                run,
+            ])
+            .collect(),
         class_vars: Vec::new(),
         metaclass: None,
         position: 0,
@@ -1406,7 +1555,31 @@ fn coro(t: &IRType) -> IRClass {
         set_loop("running", boolean(true)),
         assign_typed("task", call(&task_class(t), vec![v("self")]), &task_ty),
         IRStatement::TryExcept {
-            try_body: body(guarded),
+            try_body: body(vec![IRStatement::TryExcept {
+                try_body: body(guarded),
+                // `run_until_complete`: a BaseException the coroutine raised
+                // (SystemExit) is consumed, so the task does not report it.
+                except_handlers: vec![IRExceptHandler {
+                    exception_types: vec!["BaseException".to_string()],
+                    name: None,
+                    body: crate::ir::IRBody {
+                        statements: vec![
+                            if_(
+                                and(
+                                    mcall(v("task"), "done", vec![]),
+                                    not(mcall(v("task"), "cancelled", vec![])),
+                                ),
+                                vec![expr_stmt(mcall(v("task"), "exception", vec![]))],
+                            ),
+                            IRStatement::Raise {
+                                exception: None,
+                                cause: None,
+                            },
+                        ],
+                    },
+                }],
+                finally_body: None,
+            }]),
             except_handlers: Vec::new(),
             finally_body: Some(body(vec![expr_stmt(f("shutdown", vec![]))])),
         },
@@ -1780,10 +1953,10 @@ fn timeout() -> IRClass {
         vec![
             method(
                 "__init__",
-                vec![me(&c), param("when", &IRType::Float)],
+                vec![me(&c), param("when", &opt(IRType::Float))],
                 IRType::None,
                 vec![
-                    set_my_typed("_when", v("when"), &IRType::Float),
+                    set_my_typed("_when", v("when"), &opt(IRType::Float)),
                     set_my_typed("_state", int(0), &IRType::Int),
                     set_my_typed("_handler", none(), &opt(cls("_Handle"))),
                     set_my_typed("_task", none(), &opt(cls("_FutureBase"))),
@@ -1810,24 +1983,34 @@ fn timeout() -> IRClass {
                         "_cancelling",
                         mcall(v("t"), "cancelling", vec![]),
                     ),
-                    if_else(
-                        cmp(my("_when"), IRCompareOp::LtE, call(CLOCK_FN, vec![])),
-                        vec![set_attr(
-                            v("self"),
-                            "_handler",
-                            f(
-                                "call_soon",
-                                vec![call(&name("_TimeoutFire"), vec![v("self")]), none()],
+                    // `reschedule(self._when)`: no deadline for None.
+                    if_(
+                        not_none(my("_when")),
+                        vec![
+                            assign_typed("when", my("_when"), &IRType::Float),
+                            if_else(
+                                cmp(v("when"), IRCompareOp::LtE, call(CLOCK_FN, vec![])),
+                                vec![set_attr(
+                                    v("self"),
+                                    "_handler",
+                                    f(
+                                        "call_soon",
+                                        vec![call(&name("_TimeoutFire"), vec![v("self")]), none()],
+                                    ),
+                                )],
+                                vec![set_attr(
+                                    v("self"),
+                                    "_handler",
+                                    f(
+                                        "call_at",
+                                        vec![
+                                            v("when"),
+                                            call(&name("_TimeoutFire"), vec![v("self")]),
+                                        ],
+                                    ),
+                                )],
                             ),
-                        )],
-                        vec![set_attr(
-                            v("self"),
-                            "_handler",
-                            f(
-                                "call_at",
-                                vec![my("_when"), call(&name("_TimeoutFire"), vec![v("self")])],
-                            ),
-                        )],
+                        ],
                     ),
                 ],
             ),
@@ -1858,26 +2041,62 @@ fn timeout() -> IRClass {
 /// for a promise awaited inside `asyncio.run()`, which only JavaScript can
 /// settle and which this loop, running inside a call from JavaScript,
 /// cannot hand control back for.
-fn idle(bridge: bool) -> Vec<IRStatement> {
-    let mut out = Vec::new();
-    if bridge {
-        out.push(if_(
-            cmp(len(loop_var("awaiting")), IRCompareOp::Gt, int(0)),
-            vec![raise(
-                "RuntimeError",
-                "a JavaScript promise is awaited inside asyncio.run(), which cannot hand \
-                 control back to JavaScript to settle it. Hint: export the coroutine and \
-                 await it from JavaScript",
-            )],
-        ));
-    }
-    out.push(expr_stmt(call(IDLE_FN, vec![])));
-    out
+fn idle() -> Vec<IRStatement> {
+    vec![expr_stmt(call(IDLE_FN, vec![]))]
+}
+
+/// Nothing ready while a JavaScript promise is awaited inside
+/// `asyncio.run()`: suspend the program until one settles (or the next
+/// timer, `wait` nanoseconds off, falls due), as Pyodide's loop does through
+/// JavaScript Promise Integration, then settle the futures of those that did.
+/// Without JSPI (or inside a call JavaScript made), nothing can settle it.
+fn promise_wait() -> Vec<IRStatement> {
+    let timers = || len(loop_var("timers"));
+    vec![
+        // A timer already due needs no wait.
+        if_(
+            or(
+                eq(timers(), int(0)),
+                cmp(v("wait"), IRCompareOp::Gt, float(0.0)),
+            ),
+            vec![
+                if_(
+                    not(js("can_suspend", vec![])),
+                    vec![raise(
+                        "RuntimeError",
+                        "a JavaScript promise is awaited inside asyncio.run(), which cannot hand \
+                         control back to JavaScript to settle it here (it needs JavaScript Promise \
+                         Integration, and the loader's start()). Hint: export the coroutine and \
+                         await it from JavaScript",
+                    )],
+                ),
+                assign_typed("ms", float(-1.0), &IRType::Float),
+                if_(
+                    cmp(timers(), IRCompareOp::Gt, int(0)),
+                    vec![assign("ms", bin(v("wait"), IROp::Div, float(1e6)))],
+                ),
+                expr_stmt(js("suspend", vec![v("ms")])),
+            ],
+        ),
+        while_(
+            boolean(true),
+            vec![
+                assign_typed("token", js("next_settled", vec![]), &IRType::Int),
+                if_(
+                    cmp(v("token"), IRCompareOp::Lt, int(0)),
+                    vec![IRStatement::Break],
+                ),
+                assign_typed("failed", js("settled_failed", vec![]), &IRType::Int),
+                assign_typed("value", js("settled_value", vec![]), &IRType::JsProxy),
+                expr_stmt(f("settle_one", vec![v("token"), v("failed"), v("value")])),
+            ],
+        ),
+    ]
 }
 
 /// The loop: scheduling, the timer heap, a turn, running until a future is
 /// done, and what `asyncio.run()` does around that.
-pub(crate) fn runtime_functions(bridge: bool) -> Vec<IRFunction> {
+pub(crate) fn runtime_functions(bridge: bool, finalize: bool) -> Vec<IRFunction> {
     let h = || cls("_Handle");
     let heap = || loop_var("timers");
     let swap = |a: IRExpr, b: IRExpr| {
@@ -1913,6 +2132,11 @@ pub(crate) fn runtime_functions(bridge: bool) -> Vec<IRFunction> {
         "Task exception was never retrieved\n",
         attr(v("t"), "_exc"),
     ));
+    let release_handle = if finalize {
+        vec![expr_stmt(call(crate::ir::DEL_NAME_FN, vec![v("h")]))]
+    } else {
+        Vec::new()
+    };
     let mut leftover = vec![if_(
         mcall(v("t"), "cancelled", vec![]),
         vec![IRStatement::Continue],
@@ -2051,25 +2275,39 @@ pub(crate) fn runtime_functions(bridge: bool) -> Vec<IRFunction> {
                         eq(len(loop_var("ready")), int(0)),
                         not(loop_var("stopping")),
                     ),
-                    vec![if_else(
-                        cmp(len(heap()), IRCompareOp::Gt, int(0)),
-                        vec![
-                            assign_typed(
-                                "wait",
-                                bin(
-                                    attr(idx(heap(), int(0)), "when"),
-                                    IROp::Sub,
-                                    call(CLOCK_FN, vec![]),
-                                ),
-                                &IRType::Float,
-                            ),
-                            if_(
+                    {
+                        let timer_wait = if_else(
+                            cmp(len(heap()), IRCompareOp::Gt, int(0)),
+                            vec![if_(
                                 cmp(v("wait"), IRCompareOp::Gt, float(0.0)),
                                 vec![expr_stmt(call(WAIT_FN, vec![v("wait")]))],
+                            )],
+                            idle(),
+                        );
+                        vec![
+                            assign_typed("wait", float(0.0), &IRType::Float),
+                            if_(
+                                cmp(len(heap()), IRCompareOp::Gt, int(0)),
+                                vec![assign(
+                                    "wait",
+                                    bin(
+                                        attr(idx(heap(), int(0)), "when"),
+                                        IROp::Sub,
+                                        call(CLOCK_FN, vec![]),
+                                    ),
+                                )],
                             ),
-                        ],
-                        idle(bridge),
-                    )],
+                            if bridge {
+                                if_else(
+                                    cmp(len(loop_var("awaiting")), IRCompareOp::Gt, int(0)),
+                                    promise_wait(),
+                                    vec![timer_wait],
+                                )
+                            } else {
+                                timer_wait
+                            },
+                        ]
+                    },
                 ),
                 // Timers due by now (and the clock's resolution) join the
                 // ready callbacks.
@@ -2108,6 +2346,9 @@ pub(crate) fn runtime_functions(bridge: bool) -> Vec<IRFunction> {
                                 vec![attr(v("h"), "arg")],
                             ))],
                         ),
+                        // `handle = None`: what it ran (a task's step) is let
+                        // go of here, as CPython's loop lets go of it.
+                        if_(boolean(true), release_handle.clone()),
                     ],
                 ),
             ],

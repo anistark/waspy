@@ -6781,3 +6781,132 @@ fn finally_runs_whole_and_unpacking_keeps_str_lengths() {
     );
     assert_eq!(run.stdout, "a\nB\nc\ncaught x\n[ada] 3\n");
 }
+
+/// A `finally` runs when a handler of its `try` raises, a bare `raise` or a
+/// new exception, before the exception goes on: in a function, caught by an
+/// outer `try` of the same function, nested in a handler, in a loop, in a
+/// generator, and in a coroutine. The handlers ran outside the `try`'s
+/// region, so the exception went straight to the enclosing `try` and the
+/// `finally` was skipped.
+#[test]
+fn finally_runs_when_a_handler_raises() {
+    let run = run_main(
+        &dedent(
+            r#"
+            import asyncio
+
+
+            def convert(n: int) -> int:
+                try:
+                    if n < 0:
+                        raise ValueError("negative")
+                    return n * 2
+                except ValueError as e:
+                    print("converting", e)
+                    raise KeyError("bad " + str(n))
+                finally:
+                    print("finally", n)
+
+
+            def same_function() -> str:
+                log = []
+                try:
+                    try:
+                        raise ValueError("inner")
+                    except ValueError:
+                        log.append("handler")
+                        raise
+                    finally:
+                        log.append("finally")
+                except ValueError as e:
+                    log.append("outer " + str(e))
+                return ",".join(log)
+
+
+            def nested() -> None:
+                try:
+                    raise IndexError("a")
+                except IndexError:
+                    try:
+                        raise TypeError("b")
+                    except TypeError:
+                        print("inner handler")
+                        raise
+                    finally:
+                        print("inner finally")
+                finally:
+                    print("outer finally")
+
+
+            def looped() -> int:
+                total = 0
+                for i in range(3):
+                    try:
+                        try:
+                            if i == 1:
+                                raise ValueError("one")
+                            total += i
+                        except ValueError:
+                            raise RuntimeError("wrapped")
+                        finally:
+                            total += 10
+                    except RuntimeError as e:
+                        print("caught", e, total)
+                return total
+
+
+            def gen():
+                try:
+                    yield 1
+                    raise ValueError("in gen")
+                except ValueError:
+                    print("gen handler")
+                    raise
+                finally:
+                    print("gen finally")
+
+
+            async def coro() -> None:
+                try:
+                    await asyncio.sleep(0)
+                    raise ValueError("in coro")
+                except ValueError:
+                    print("coro handler")
+                    raise
+                finally:
+                    print("coro finally")
+
+
+            async def main() -> None:
+                try:
+                    await coro()
+                except ValueError as e:
+                    print("main caught", e)
+
+
+            if __name__ == "__main__":
+                print(convert(3))
+                try:
+                    convert(-1)
+                except KeyError as e:
+                    print("caught", e)
+                print(same_function())
+                try:
+                    nested()
+                except TypeError as e:
+                    print("nested caught", e)
+                print(looped())
+                try:
+                    for v in gen():
+                        print("got", v)
+                except ValueError as e:
+                    print("gen caught", e)
+                asyncio.run(main())
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(run.stderr, "");
+    assert_eq!(run.stdout, "finally 3\n6\nconverting negative\nfinally -1\ncaught 'bad -1'\nhandler,finally,outer inner\ninner handler\ninner finally\nouter finally\nnested caught b\ncaught wrapped 20\n32\ngot 1\ngen handler\ngen finally\ngen caught in gen\ncoro handler\ncoro finally\nmain caught in coro\n");
+}

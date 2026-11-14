@@ -100,8 +100,11 @@ pub fn lower_coroutines(module: &mut IRModule) -> Result<()> {
         return Ok(());
     }
     lift_coroutine_methods(module)?;
+    // The locks, events, queues, and timeouts the program names.
+    let sync = crate::ir::asyncio_sync::Wanted::of(module, &api);
     if api.used() {
         module.functions.extend(aio::coroutine_functions());
+        module.functions.extend(sync.coroutine_functions());
     }
 
     // What each coroutine function resolves to.
@@ -146,20 +149,40 @@ pub fn lower_coroutines(module: &mut IRModule) -> Result<()> {
     }
     let mut seen = HashSet::new();
     kinds.retain(|t| seen.insert(crate::ir::collections::spec::encode(t)));
-    let runtime = aio::runtime_classes(&kinds, bridge);
-    for name in aio::runtime_strings() {
+    let finalize = sync.task_finalizer;
+    let mut runtime = aio::runtime_classes(&kinds, bridge, finalize);
+    let timeout = aio::name("_Timeout");
+    if let Some(t) = runtime.iter_mut().find(|c| c.name == timeout) {
+        t.methods.extend(sync.timeout_methods());
+    }
+    if sync.task_group {
+        for t in &kinds {
+            let coro = aio::coro_class(t);
+            if let Some(c) = runtime.iter_mut().find(|c| c.name == coro) {
+                c.methods.push(crate::ir::asyncio_sync::in_group_method(t));
+            }
+        }
+    }
+    runtime.extend(sync.classes());
+    for name in aio::runtime_strings()
+        .into_iter()
+        .chain(crate::ir::asyncio_sync::Wanted::strings())
+    {
         module.memory_layout.add_string(name);
     }
     module
         .memory_layout
         .add_string(crate::ir::generators::IGNORED_GENERATOR_EXIT);
     module.classes.splice(0..0, runtime);
-    module.functions.extend(aio::runtime_functions(bridge));
+    module
+        .functions
+        .extend(aio::runtime_functions(bridge, finalize));
     if bridge {
         module.functions.extend(aio::bridge_functions());
         module.memory_layout.add_string(
             "a JavaScript promise is awaited inside asyncio.run(), which cannot hand control back \
-             to JavaScript to settle it. Hint: export the coroutine and await it from JavaScript",
+             to JavaScript to settle it here (it needs JavaScript Promise Integration, and the \
+             loader's start()). Hint: export the coroutine and await it from JavaScript",
         );
     }
 
@@ -168,6 +191,23 @@ pub fn lower_coroutines(module: &mut IRModule) -> Result<()> {
         if results.contains_key(&f.name) {
             f.return_type = IRType::Class(state_class(&f.name));
         }
+    }
+    // `asyncio`'s classes made anywhere (`self.lock = asyncio.Lock()`), so
+    // what holds one is typed as it.
+    make_constructors(module, &api)?;
+    // A module's (or a class's) variable made at import (`lock =
+    // asyncio.Lock()`), before anything is typed from it.
+    let variables = module.variables.iter_mut().chain(
+        module
+            .classes
+            .iter_mut()
+            .flat_map(|c| c.class_vars.iter_mut()),
+    );
+    for var in variables {
+        if let Some(t) = &var.var_type {
+            type_queue(&api, &mut var.value, t)?;
+        }
+        api.rewrite_tree(&mut var.value, false)?;
     }
     let types = coroutine_types(module, &results);
     let modules: HashSet<String> = module
@@ -184,6 +224,7 @@ pub fn lower_coroutines(module: &mut IRModule) -> Result<()> {
         types: &types,
         modules: &modules,
         counter: &mut counter,
+        finalize,
     };
     for f in &mut module.functions {
         let mut env = params_env(&f.params);
@@ -231,10 +272,97 @@ pub fn lower_coroutines(module: &mut IRModule) -> Result<()> {
     Ok(())
 }
 
+/// Rewrite every call of a constructor of `asyncio`'s (`asyncio.Lock()`, an
+/// annotated `asyncio.Queue()`) into its class's, ahead of the rest.
+fn make_constructors(module: &mut IRModule, api: &Api) -> Result<()> {
+    const CONSTRUCTORS: [&str; 6] = [
+        "Lock",
+        "Event",
+        "Semaphore",
+        "BoundedSemaphore",
+        "timeout",
+        "TaskGroup",
+    ];
+    fn statements(body: &mut IRBody, api: &Api) -> Result<()> {
+        for stmt in &mut body.statements {
+            if let IRStatement::Assign {
+                value,
+                var_type: Some(t),
+                ..
+            }
+            | IRStatement::AttributeAssign {
+                value,
+                annotation: Some(t),
+                ..
+            } = stmt
+            {
+                let t = t.clone();
+                type_queue(api, value, &t)?;
+            }
+            for nested in sub_bodies_mut(stmt) {
+                statements(nested, api)?;
+            }
+        }
+        let mut err = None;
+        let _ = crate::ir::visit_body(body, &mut |e: &mut IRExpr| {
+            let wanted = api
+                .call_of(e)
+                .is_some_and(|(n, _)| CONSTRUCTORS.contains(&n.as_str()));
+            if wanted && err.is_none() {
+                if let Err(x) = api.rewrite(e, false) {
+                    err = Some(x);
+                }
+            }
+            Ok(())
+        });
+        match err {
+            Some(x) => Err(x),
+            None => Ok(()),
+        }
+    }
+    for f in &mut module.functions {
+        statements(&mut f.body, api)?;
+    }
+    for c in &mut module.classes {
+        for m in &mut c.methods {
+            statements(&mut m.body, api)?;
+        }
+    }
+    Ok(())
+}
+
+/// `x: asyncio.Queue[int] = asyncio.Queue()`: the queue's class is the kind
+/// the call makes, holding what the annotation names.
+fn type_queue(api: &Api, value: &mut IRExpr, declared: &IRType) -> Result<()> {
+    let Some((kind, args)) = api.call_of(value) else {
+        return Ok(());
+    };
+    if !crate::ir::asyncio_sync::QUEUE_KINDS.contains(&kind.as_str()) {
+        return Ok(());
+    }
+    let Some(class) = crate::ir::asyncio_sync::typed_queue(&kind, declared) else {
+        return Ok(());
+    };
+    let args = args.to_vec();
+    *value = crate::ir::asyncio_sync::queue_call(&class, &args, &kind)?;
+    Ok(())
+}
+
 /// The types the module shows, with each coroutine function making its state
-/// class, a subclass of the runtime's coroutine class for its result.
+/// class, a subclass of the runtime's coroutine class for its result, and
+/// the module's variables typed (`lock = asyncio.Lock()`).
 fn coroutine_types(module: &IRModule, results: &BTreeMap<String, IRType>) -> Types {
     let mut types = Types::of_module(module);
+    let none = HashMap::new();
+    for var in &module.variables {
+        let ty = match &var.var_type {
+            Some(t) if fully_known(t) => t.clone(),
+            _ => types.of(&var.value, &none),
+        };
+        if fully_known(&ty) {
+            types.globals.insert(var.name.clone(), ty);
+        }
+    }
     for (f, t) in results {
         // A coroutine's suspensions are not a generator's.
         types.yields.remove(f);
@@ -487,6 +615,9 @@ struct Lowerer<'a> {
     /// The modules the program imports, which name no value to evaluate.
     modules: &'a HashSet<String>,
     counter: &'a mut u32,
+    /// Whether a coroutine lets go of its variables as it finishes, as
+    /// CPython's frame does, so a task one held is reclaimed then.
+    finalize: bool,
 }
 
 /// What a statement's hoisting needs to know of the coroutine it is in.
@@ -511,6 +642,8 @@ impl Lowerer<'_> {
     fn plain_body(&mut self, body: &mut IRBody, env: &mut HashMap<String, IRType>) -> Result<()> {
         for stmt in &mut body.statements {
             self.check_dropped(stmt, env)?;
+            self.type_queue_stmt(stmt)?;
+            self.group_calls(stmt, env)?;
             let mut err = None;
             each_expr(stmt, &mut |e| {
                 if err.is_none() {
@@ -559,6 +692,18 @@ impl Lowerer<'_> {
         let scope = Scope { locals };
         let mut statements = vec![throw_check()];
         statements.extend(self.statements(body.statements, env, &scope, result)?);
+        if self.finalize {
+            // However it finishes, its variables go (the generator pass
+            // writes out which: the fields it keeps them in).
+            statements = vec![IRStatement::TryExcept {
+                try_body: crate::ir::build::body(statements),
+                except_handlers: Vec::new(),
+                finally_body: Some(crate::ir::build::body(vec![expr_stmt(call(
+                    crate::ir::RELEASE_FN,
+                    vec![],
+                ))])),
+            }];
+        }
         Ok(IRBody { statements })
     }
 
@@ -577,6 +722,114 @@ impl Lowerer<'_> {
         Ok(out)
     }
 
+    /// `tg.create_task(coro)` on a task group: `coro._in_group(tg)`, the
+    /// task of the coroutine's own result type. And `f(...)` of a JavaScript
+    /// function a variable holds, a call through the bridge, written out
+    /// here while the variable is one: a coroutine's variables become its
+    /// state's fields, which no call by name reaches.
+    fn group_calls(&self, stmt: &mut IRStatement, env: &HashMap<String, IRType>) -> Result<()> {
+        let group = IRType::Class(crate::ir::asyncio_sync::TASKGROUP.to_string());
+        let mut err = None;
+        each_expr(stmt, &mut |e| {
+            if let IRExpr::FunctionCall {
+                function_name,
+                arguments,
+            } = e
+            {
+                if env.get(function_name.as_str()) == Some(&IRType::JsProxy) {
+                    let mut args = vec![v(function_name)];
+                    args.append(arguments);
+                    *e = call("__js_call", args);
+                    return;
+                }
+            }
+            let IRExpr::MethodCall {
+                object,
+                method_name,
+                arguments,
+            } = e
+            else {
+                return;
+            };
+            if method_name != "create_task" || self.ty(object, env) != group {
+                return;
+            }
+            match arguments.as_slice() {
+                [x] if !matches!(x, IRExpr::Keyword { .. }) => {
+                    let (x, o) = (x.clone(), (**object).clone());
+                    *e = mcall(x, "_in_group", vec![o]);
+                }
+                _ => {
+                    err.get_or_insert(refuse(
+                        "TaskGroup.create_task() takes the coroutine alone here; its 'name' and \
+                         'context' are not supported",
+                    ));
+                }
+            }
+        });
+        match err {
+            Some(x) => Err(x),
+            None => Ok(()),
+        }
+    }
+
+    fn type_queue_stmt(&self, stmt: &mut IRStatement) -> Result<()> {
+        match stmt {
+            IRStatement::Assign {
+                value,
+                var_type: Some(t),
+                ..
+            }
+            | IRStatement::AttributeAssign {
+                value,
+                annotation: Some(t),
+                ..
+            } => {
+                let t = t.clone();
+                type_queue(self.api, value, &t)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// `await resp.json()` on a `pyodide.http.FetchResponse`: the parsed
+    /// JavaScript value converted into the type of the place it is stored
+    /// in, `(await resp._json()).to_py()`.
+    fn fetch_json(&self, stmt: &mut IRStatement, env: &HashMap<String, IRType>) {
+        let response = IRType::Class(crate::ir::pyodide_http::FETCH_RESPONSE.to_string());
+        // A lone `await resp.json()` parses the body and drops the value.
+        if let IRStatement::Expression(e) = stmt {
+            if let Some(IRExpr::MethodCall {
+                object,
+                method_name,
+                arguments,
+            }) = awaited(e)
+            {
+                if method_name == "json" && arguments.is_empty() && self.ty(object, env) == response
+                {
+                    let object = (**object).clone();
+                    *e = call(AWAIT_FN, vec![mcall(object, "_json", vec![])]);
+                    return;
+                }
+            }
+        }
+        each_expr(stmt, &mut |e| {
+            let Some(IRExpr::MethodCall {
+                object,
+                method_name,
+                arguments,
+            }) = awaited(e)
+            else {
+                return;
+            };
+            if method_name != "json" || !arguments.is_empty() || self.ty(object, env) != response {
+                return;
+            }
+            let parsed = call(AWAIT_FN, vec![mcall((**object).clone(), "_json", vec![])]);
+            *e = mcall(parsed, "to_py", vec![]);
+        });
+    }
+
     fn statement(
         &mut self,
         stmt: IRStatement,
@@ -584,6 +837,9 @@ impl Lowerer<'_> {
         scope: &Scope,
         result: &IRType,
     ) -> Result<Vec<IRStatement>> {
+        let mut stmt = stmt;
+        self.type_queue_stmt(&mut stmt)?;
+        self.fetch_json(&mut stmt, env);
         let mut pre = Vec::new();
         let rewritten = match stmt {
             // `a, b = await asyncio.gather(x, y)`: each target takes its
@@ -593,11 +849,13 @@ impl Lowerer<'_> {
                 value,
                 starred: None,
             } if self.gather_of(&value).is_some_and(|args| {
-                args.len() == targets.len() && !args.iter().any(is_starred)
+                matches!(split_return_exceptions(args.to_vec()), Ok((args, false))
+                    if args.len() == targets.len() && !args.iter().any(is_starred))
             }) =>
             {
                 let args = self.gather_of(&value).expect("checked").to_vec();
-                let tasks = self.gather_tasks(args, &mut pre, env, scope)?;
+                let (args, _) = split_return_exceptions(args)?;
+                let tasks = self.gather_tasks(args, false, &mut pre, env, scope)?;
                 for (target, task) in targets.iter().zip(&tasks) {
                     pre.extend(self.read_result(target, v(task), env));
                 }
@@ -900,6 +1158,7 @@ impl Lowerer<'_> {
                     out.extend(self.suspension(&target, x, env, scope, result)?);
                 }
                 mut other => {
+                    self.group_calls(&mut other, env)?;
                     let mut err = None;
                     each_expr(&mut other, &mut |e| {
                         if err.is_none() {
@@ -937,7 +1196,16 @@ impl Lowerer<'_> {
         }
         let mut x = x;
         self.api.rewrite_tree(&mut x, true)?;
+        let mut held = expr_stmt(x);
+        self.group_calls(&mut held, env)?;
+        let IRStatement::Expression(mut x) = held else {
+            unreachable!("an expression statement")
+        };
         let mut ty = self.ty(&x, env);
+        if matches!(&x, IRExpr::FunctionCall { function_name, .. } if function_name == "__js_call")
+        {
+            ty = IRType::JsProxy;
+        }
         // A JavaScript value (a promise, or any thenable): a future it
         // settles, as Pyodide awaits one.
         if ty == IRType::JsProxy {
@@ -1041,6 +1309,7 @@ impl Lowerer<'_> {
     fn gather_tasks(
         &mut self,
         args: Vec<IRExpr>,
+        return_exceptions: bool,
         pre: &mut Vec<IRStatement>,
         env: &mut HashMap<String, IRType>,
         scope: &Scope,
@@ -1083,6 +1352,9 @@ impl Lowerer<'_> {
         for task in &tasks {
             pre.push(expr_stmt(mcall(v(&outer), "_add", vec![v(task)])));
         }
+        if return_exceptions {
+            pre.push(set_attr(v(&outer), "_return_exceptions", boolean(true)));
+        }
         pre.push(expr_stmt(mcall(v(&outer), "_start", vec![])));
         let done = self.fresh("aw_r");
         pre.push(assign(&done, call(AWAIT_FN, vec![v(&outer)])));
@@ -1099,6 +1371,18 @@ impl Lowerer<'_> {
         result: &IRType,
     ) -> Result<Vec<IRStatement>> {
         let mut pre = Vec::new();
+        let (args, return_exceptions) = split_return_exceptions(args)?;
+        // With `return_exceptions=True` each element is a result or an
+        // exception, which one type holds only when every result is None.
+        let refuse_results = || {
+            refuse(
+                "asyncio.gather(..., return_exceptions=True) is supported where every awaitable \
+                 resolves to None, since its list holds a result or an exception, which no one \
+                 type here holds otherwise. Hint: catch the exception in the coroutine and \
+                 return a value for it",
+            )
+        };
+        let exception = || IRType::Optional(Box::new(IRType::Class("BaseException".to_string())));
         if let [IRExpr::Keyword { name, value }] = args.as_slice() {
             if name == crate::ir::STARRED_ARG {
                 // `gather(*xs)`: a task for each element, in order.
@@ -1134,14 +1418,24 @@ impl Lowerer<'_> {
                     v(&list),
                     vec![expr_stmt(mcall(v(&outer), "_add", vec![v(&t)]))],
                 ));
+                if return_exceptions {
+                    pre.push(set_attr(v(&outer), "_return_exceptions", boolean(true)));
+                }
                 pre.push(expr_stmt(mcall(v(&outer), "_start", vec![])));
                 let done = self.fresh("aw_r");
                 pre.push(assign(&done, call(AWAIT_FN, vec![v(&outer)])));
                 let c = self.fresh("gc");
                 let mut inner = env.clone();
                 inner.insert(c.clone(), task_ty);
-                let r = mcall(v(&c), "result", vec![]);
-                let rty = self.ty(&r, &inner);
+                let mut r = mcall(v(&c), "result", vec![]);
+                let mut rty = self.ty(&r, &inner);
+                if return_exceptions {
+                    if rty != IRType::None {
+                        return Err(refuse_results());
+                    }
+                    r = mcall(v(&c), "_exc_or_none", vec![]);
+                    rty = exception();
+                }
                 let results = IRExpr::Comprehension {
                     kind: crate::ir::IRComprehensionKind::List,
                     element: Box::new(r),
@@ -1162,7 +1456,25 @@ impl Lowerer<'_> {
                  list a type",
             ));
         }
-        let tasks = self.gather_tasks(args, &mut pre, env, scope)?;
+        let tasks = self.gather_tasks(args, return_exceptions, &mut pre, env, scope)?;
+        if return_exceptions {
+            if tasks
+                .iter()
+                .any(|t| self.ty(&mcall(v(t), "result", vec![]), env) != IRType::None)
+            {
+                return Err(refuse_results());
+            }
+            let results = tasks
+                .iter()
+                .map(|t| mcall(v(t), "_exc_or_none", vec![]))
+                .collect();
+            pre.push(assign_typed(
+                target,
+                IRExpr::ListLiteral(results),
+                &IRType::List(Box::new(exception())),
+            ));
+            return self.expand(pre, env, scope, result);
+        }
         let results: Vec<IRExpr> = tasks
             .iter()
             .map(|t| {
@@ -1493,6 +1805,28 @@ fn awaited(value: &IRExpr) -> Option<&IRExpr> {
         } if function_name == AWAIT_FN => arguments.first(),
         _ => None,
     }
+}
+
+/// `gather()`'s arguments without its `return_exceptions=` keyword, and
+/// what that says (a constant, since it decides the result's type).
+fn split_return_exceptions(args: Vec<IRExpr>) -> Result<(Vec<IRExpr>, bool)> {
+    let mut flag = false;
+    let mut rest = Vec::new();
+    for a in args {
+        match a {
+            IRExpr::Keyword { name, value } if name == "return_exceptions" => {
+                match *value {
+                    IRExpr::Const(IRConstant::Bool(b)) => flag = b,
+                    _ => return Err(refuse(
+                        "asyncio.gather()'s return_exceptions must be True or False written out, \
+                         since it decides what the list holds",
+                    )),
+                }
+            }
+            other => rest.push(other),
+        }
+    }
+    Ok((rest, flag))
 }
 
 fn is_starred(e: &IRExpr) -> bool {

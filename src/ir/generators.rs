@@ -64,6 +64,13 @@ pub const DRAIN_FN_PREFIX: &str = "__drain_";
 /// this name, and the converter lowers the assignment through it.
 pub const GEN_SENT_FIELD: &str = "__gen_sent";
 
+/// `__waspy_release_locals()`, a coroutine's last `finally` in a program
+/// whose tasks report an unretrieved exception as they are reclaimed
+/// (`ir::coroutines`): written out here as a `del` of every field the state
+/// keeps a variable in, as CPython's frame lets go of its locals when it
+/// finishes. Its result is not a variable.
+pub const RELEASE_FN: &str = "__waspy_release_locals";
+
 /// State-class field holding the block id to resume at; -1 once exhausted.
 const GEN_PC_FIELD: &str = "__gen_pc";
 
@@ -1330,6 +1337,63 @@ fn for_each_child(expr: &mut IRExpr, f: &mut impl FnMut(&mut IRExpr)) {
 
 /// Build the state class for one generator function and leave `func`'s body
 /// untouched (the caller replaces it with the constructor call).
+/// Replace each `__waspy_release_locals()` with a `del` of each name.
+fn expand_release(body: &mut IRBody, names: &[String]) {
+    let mut out = Vec::with_capacity(body.statements.len());
+    for mut stmt in std::mem::take(&mut body.statements) {
+        if matches!(&stmt, IRStatement::Expression(IRExpr::FunctionCall { function_name, .. })
+            if function_name == RELEASE_FN)
+        {
+            out.extend(names.iter().map(|n| {
+                IRStatement::Expression(IRExpr::FunctionCall {
+                    function_name: crate::ir::DEL_NAME_FN.to_string(),
+                    arguments: vec![IRExpr::Variable(n.clone())],
+                })
+            }));
+            continue;
+        }
+        match &mut stmt {
+            IRStatement::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                expand_release(then_body, names);
+                if let Some(b) = else_body {
+                    expand_release(b, names);
+                }
+            }
+            IRStatement::While { body, .. } | IRStatement::With { body, .. } => {
+                expand_release(body, names)
+            }
+            IRStatement::For {
+                body, else_body, ..
+            } => {
+                expand_release(body, names);
+                if let Some(b) = else_body {
+                    expand_release(b, names);
+                }
+            }
+            IRStatement::TryExcept {
+                try_body,
+                except_handlers,
+                finally_body,
+            } => {
+                expand_release(try_body, names);
+                for h in except_handlers {
+                    expand_release(&mut h.body, names);
+                }
+                if let Some(b) = finally_body {
+                    expand_release(b, names);
+                }
+            }
+            _ => {}
+        }
+        out.push(stmt);
+    }
+    body.statements = out;
+}
+
 pub(crate) fn build_state_class(
     func: &mut IRFunction,
     class_name: &str,
@@ -1380,6 +1444,13 @@ pub(crate) fn build_state_class(
         for name in &exempt {
             lift.remove(name);
         }
+        let mut released: Vec<String> = lift
+            .iter()
+            .filter(|n| *n != GEN_SENT_FIELD && *n != "__coro_result")
+            .cloned()
+            .collect();
+        released.sort();
+        expand_release(&mut body, &released);
         lift_body(&mut body, &lift);
         let mut flattener = Flattener::new();
         flattener.flatten_body(body.statements, &func.name)?;
