@@ -373,6 +373,14 @@ impl Api {
                 call(class, vec![value])
             }
             "timeout" => crate::ir::asyncio_sync::timeout_call(one(args)?),
+            "TaskGroup" => {
+                if !args.is_empty() {
+                    return Err(refused(
+                        "asyncio.TaskGroup() takes no arguments".to_string(),
+                    ));
+                }
+                call(crate::ir::asyncio_sync::TASKGROUP, vec![])
+            }
             "Queue" | "LifoQueue" | "PriorityQueue" => {
                 return Err(refused(format!(
                     "asyncio.{function}() needs the type of what it holds: make it where that \
@@ -389,8 +397,9 @@ impl Api {
             other => {
                 return Err(refused(format!(
                     "asyncio.{other}() is not supported. Supported: run, create_task, \
-                     ensure_future, gather, sleep, wait_for, timeout, Lock, Event, Semaphore, \
-                     BoundedSemaphore, Queue, LifoQueue, PriorityQueue, and their methods"
+                     ensure_future, gather, sleep, wait_for, timeout, TaskGroup, Lock, Event, \
+                     Semaphore, BoundedSemaphore, Queue, LifoQueue, PriorityQueue, and their \
+                     methods"
                 )))
             }
         };

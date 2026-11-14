@@ -1042,6 +1042,143 @@ fn asyncio_primitives_under_cancellation() {
     );
 }
 
+/// `asyncio.TaskGroup`: it waits for its tasks, a failing task cancels the
+/// others and the group raises `ExceptionGroup` (its `str()`, `exceptions`,
+/// and `message` as CPython words them), the body raising does the same, and
+/// `create_task()` outside the group raises CPython's `RuntimeError`.
+#[test]
+fn asyncio_task_groups() {
+    prints(
+        r#"
+        import asyncio
+
+
+        async def work(n: int, delay: float) -> int:
+            try:
+                await asyncio.sleep(delay)
+                print("done", n)
+                return n * 10
+            except asyncio.CancelledError:
+                print("cancelled", n)
+                raise
+
+
+        async def fail(msg: str, delay: float) -> int:
+            await asyncio.sleep(delay)
+            raise ValueError(msg)
+
+
+        async def main() -> None:
+            async with asyncio.TaskGroup() as tg:
+                t1 = tg.create_task(work(1, 0.02))
+                t2 = tg.create_task(work(2, 0.01))
+                print("spawned")
+            print("results", t1.result(), t2.result())
+
+            try:
+                async with asyncio.TaskGroup() as tg:
+                    tg.create_task(work(3, 0.05))
+                    tg.create_task(fail("bad", 0.01))
+                    tg.create_task(work(4, 0.005))
+                    await asyncio.sleep(1)
+                    print("never")
+            except ExceptionGroup as eg:
+                print("group:", eg)
+                for e in eg.exceptions:
+                    print(" ", type(e).__name__, e)
+
+            try:
+                async with asyncio.TaskGroup() as tg:
+                    tg.create_task(fail("one", 0.01))
+                    tg.create_task(fail("two", 0.01))
+            except ExceptionGroup as eg:
+                print("group:", eg, len(eg.exceptions), eg.message)
+
+            try:
+                async with asyncio.TaskGroup() as tg:
+                    tg.create_task(work(5, 0.05))
+                    raise KeyError("body")
+            except ExceptionGroup as eg:
+                print("group:", eg, [str(e) for e in eg.exceptions])
+
+            tg2 = asyncio.TaskGroup()
+            try:
+                tg2.create_task(work(6, 0.0))
+            except RuntimeError as e:
+                print("error:", e)
+            async with tg2:
+                pass
+            try:
+                tg2.create_task(work(7, 0.0))
+            except RuntimeError as e:
+                print("error:", e)
+
+
+        if __name__ == "__main__":
+            asyncio.run(main())
+        "#,
+        "spawned\ndone 2\ndone 1\nresults 10 20\ndone 4\ncancelled 3\ngroup: unhandled errors in a TaskGroup (1 sub-exception)\n  ValueError bad\ngroup: unhandled errors in a TaskGroup (2 sub-exceptions) 2 unhandled errors in a TaskGroup\ngroup: unhandled errors in a TaskGroup (1 sub-exception) [\"'body'\"]\nerror: TaskGroup <TaskGroup> has not been entered\nerror: TaskGroup <TaskGroup entered> is finished\n",
+    );
+}
+
+/// A task group whose parent is cancelled from outside cancels its tasks
+/// (nested groups included), `asyncio.timeout()` around a group, and tasks
+/// made in a comprehension inside one.
+#[test]
+fn asyncio_task_groups_cancelled_nested_and_timed_out() {
+    prints(
+        r#"
+        import asyncio
+
+
+        async def tick(name: str, n: int) -> str:
+            try:
+                for i in range(n):
+                    await asyncio.sleep(0.01)
+                    print(name, i)
+                return name
+            finally:
+                print(name, "cleanup")
+
+
+        async def outer() -> None:
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(tick("x", 10))
+                async with asyncio.TaskGroup() as inner:
+                    inner.create_task(tick("y", 2))
+                print("inner done")
+
+
+        async def main() -> None:
+            t = asyncio.create_task(outer())
+            await asyncio.sleep(0.045)
+            t.cancel()
+            try:
+                await t
+            except asyncio.CancelledError:
+                print("outer cancelled", t.cancelled())
+            try:
+                async with asyncio.timeout(0.025):
+                    async with asyncio.TaskGroup() as tg:
+                        tg.create_task(tick("z", 5))
+                        tg.create_task(tick("w", 1))
+            except TimeoutError:
+                print("timed out")
+            results: list[str] = []
+            async with asyncio.TaskGroup() as tg:
+                tasks = [tg.create_task(tick(c, 1)) for c in "ab"]
+            for task in tasks:
+                results.append(task.result())
+            print(results)
+
+
+        if __name__ == "__main__":
+            asyncio.run(main())
+        "#,
+        "x 0\ny 0\nx 1\ny 1\ny cleanup\ninner done\nx 2\nx 3\nx cleanup\nouter cancelled True\nz 0\nw 0\nw cleanup\nz 1\nz cleanup\ntimed out\na 0\na cleanup\nb 0\nb cleanup\n['a', 'b']\n",
+    );
+}
+
 #[test]
 fn coroutine_misuse_is_refused() {
     refused(

@@ -17,8 +17,8 @@
 //! carries none of this.
 
 use super::asyncio::{
-    eq, fname, future_class, is_none, list, me, opt, qcall, raise_new, spelled, Api, CLOCK_FN,
-    NS_FN,
+    eq, fname, future_class, is_none, list, me, not_none, opt, qcall, raise_new, spelled, Api,
+    CLOCK_FN, NS_FN,
 };
 use super::build::*;
 use crate::ir::{IRClass, IRCompareOp, IRExceptHandler, IRExpr, IRFunction, IRModule, IROp};
@@ -31,6 +31,8 @@ pub(crate) const BOUNDED: &str = "asyncio.locks.BoundedSemaphore";
 pub(crate) const QUEUE_EMPTY: &str = "asyncio.queues.QueueEmpty";
 pub(crate) const QUEUE_FULL: &str = "asyncio.queues.QueueFull";
 pub(crate) const QUEUE_SHUTDOWN: &str = "asyncio.queues.QueueShutDown";
+pub(crate) const TASKGROUP: &str = "asyncio.taskgroups.TaskGroup";
+const GROUP_DONE: &str = "asyncio.taskgroups._Done";
 /// The queue kinds, each a class of `asyncio.queues` per element type.
 pub(crate) const QUEUE_KINDS: [&str; 3] = ["Queue", "LifoQueue", "PriorityQueue"];
 
@@ -48,6 +50,7 @@ pub(crate) fn annotated_class(attr: &str) -> Option<String> {
         "Semaphore" => SEMAPHORE.to_string(),
         "BoundedSemaphore" => BOUNDED.to_string(),
         "Timeout" => super::asyncio::name("_Timeout"),
+        "TaskGroup" => TASKGROUP.to_string(),
         "QueueEmpty" => QUEUE_EMPTY.to_string(),
         "QueueFull" => QUEUE_FULL.to_string(),
         "QueueShutDown" => QUEUE_SHUTDOWN.to_string(),
@@ -1113,6 +1116,538 @@ pub(crate) fn timeout_call(delay: IRExpr) -> IRExpr {
     )
 }
 
+// ---- taskgroups.py -------------------------------------------------------------------
+
+fn some(e: IRExpr, why: &str) -> IRExpr {
+    call(crate::ir::SOME_FN, vec![e, text(why)])
+}
+fn isinstance(e: IRExpr, class: &str) -> IRExpr {
+    call("isinstance", vec![e, v(class)])
+}
+
+/// `BaseExceptionGroup` and `ExceptionGroup`, what a task group raises: the
+/// message, the exceptions as a tuple, and `str()` as CPython words it.
+fn exception_groups() -> Vec<IRClass> {
+    let base = "BaseExceptionGroup";
+    let n = || len(my("exceptions"));
+    vec![
+        plain_class(
+            base,
+            Some("BaseException"),
+            vec![
+                method(
+                    "__init__",
+                    vec![
+                        me(base),
+                        param("message", &IRType::String),
+                        param("exceptions", &list(base_exc())),
+                    ],
+                    IRType::None,
+                    vec![
+                        expr_stmt(mcall(call("super", vec![]), "__init__", vec![v("message")])),
+                        set_my_typed("message", v("message"), &IRType::String),
+                        set_my_typed(
+                            "exceptions",
+                            as_tuple(v("exceptions")),
+                            &IRType::VarTuple(Box::new(base_exc())),
+                        ),
+                    ],
+                ),
+                method(
+                    "__str__",
+                    vec![me(base)],
+                    IRType::String,
+                    vec![
+                        assign_typed("s", text(" sub-exception"), &IRType::String),
+                        if_(
+                            cmp(n(), IRCompareOp::NotEq, int(1)),
+                            vec![assign("s", text(" sub-exceptions"))],
+                        ),
+                        ret_val(bin(
+                            bin(
+                                bin(my("message"), IROp::Add, text(" (")),
+                                IROp::Add,
+                                bin(call("str", vec![n()]), IROp::Add, v("s")),
+                            ),
+                            IROp::Add,
+                            text(")"),
+                        )),
+                    ],
+                ),
+            ],
+        ),
+        IRClass {
+            bases: vec![base.to_string(), "Exception".to_string()],
+            ..plain_class("ExceptionGroup", None, Vec::new())
+        },
+    ]
+}
+
+/// `asyncio.TaskGroup`: its tasks in the order they were made (CPython's
+/// is a set's, whose order is usually this), which is the order a failure
+/// cancels the others in.
+fn task_group() -> IRClass {
+    let c = TASKGROUP;
+    let tasks_ty = || list(cls_base());
+    let check = |cond: IRExpr, what: &str| {
+        if_(
+            cond,
+            vec![IRStatement::Raise {
+                exception: Some(call(
+                    "RuntimeError",
+                    vec![bin(
+                        bin(
+                            text("TaskGroup "),
+                            IROp::Add,
+                            mcall(v("self"), "_repr", vec![]),
+                        ),
+                        IROp::Add,
+                        text(what),
+                    )],
+                )),
+                cause: None,
+            }],
+        )
+    };
+    let mut methods = vec![
+        method(
+            "__init__",
+            vec![me(c)],
+            IRType::None,
+            vec![
+                set_my_typed("_entered", boolean(false), &IRType::Bool),
+                set_my_typed("_exiting", boolean(false), &IRType::Bool),
+                set_my_typed("_aborting", boolean(false), &IRType::Bool),
+                set_my_typed("_parent_task", none(), &opt(cls_base())),
+                set_my_typed("_parent_cancel_requested", boolean(false), &IRType::Bool),
+                set_my_typed("_tasks", IRExpr::ListLiteral(vec![]), &tasks_ty()),
+                set_my_typed("_errors", IRExpr::ListLiteral(vec![]), &list(base_exc())),
+                set_my_typed("_base_error", none(), &opt(base_exc())),
+                set_my_typed("_on_completed_fut", none(), &opt(future_none())),
+            ],
+        ),
+        method(
+            "_repr",
+            vec![me(c)],
+            IRType::String,
+            vec![
+                assign_typed("info", text(""), &IRType::String),
+                if_(
+                    cmp(len(my("_tasks")), IRCompareOp::Gt, int(0)),
+                    vec![add_to(
+                        "info",
+                        bin(
+                            text(" tasks="),
+                            IROp::Add,
+                            call("str", vec![len(my("_tasks"))]),
+                        ),
+                    )],
+                ),
+                if_(
+                    cmp(len(my("_errors")), IRCompareOp::Gt, int(0)),
+                    vec![add_to(
+                        "info",
+                        bin(
+                            text(" errors="),
+                            IROp::Add,
+                            call("str", vec![len(my("_errors"))]),
+                        ),
+                    )],
+                ),
+                if_else(
+                    my("_aborting"),
+                    vec![add_to("info", text(" cancelling"))],
+                    vec![if_(my("_entered"), vec![add_to("info", text(" entered"))])],
+                ),
+                ret_val(bin(
+                    bin(text("<TaskGroup"), IROp::Add, v("info")),
+                    IROp::Add,
+                    text(">"),
+                )),
+            ],
+        ),
+        // `create_task()`'s checks, made before the task is.
+        method(
+            "_check_open",
+            vec![me(c)],
+            IRType::None,
+            vec![
+                check(not(my("_entered")), " has not been entered"),
+                check(
+                    and(my("_exiting"), eq(len(my("_tasks")), int(0))),
+                    " is finished",
+                ),
+                check(my("_aborting"), " is shutting down"),
+            ],
+        ),
+        method(
+            "_adopt",
+            vec![me(c), param("task", &cls_base())],
+            IRType::None,
+            vec![
+                expr_stmt(mcall(my("_tasks"), "append", vec![v("task")])),
+                expr_stmt(mcall(
+                    v("task"),
+                    "_add_cb",
+                    vec![call(GROUP_DONE, vec![v("self")])],
+                )),
+            ],
+        ),
+        method(
+            "_is_base_error",
+            vec![me(c), param("e", &base_exc())],
+            IRType::Bool,
+            vec![ret_val(or(
+                isinstance(v("e"), "SystemExit"),
+                isinstance(v("e"), "KeyboardInterrupt"),
+            ))],
+        ),
+        method(
+            "_abort",
+            vec![me(c)],
+            IRType::None,
+            vec![
+                set_attr(v("self"), "_aborting", boolean(true)),
+                for_(
+                    "t",
+                    my("_tasks"),
+                    vec![if_(
+                        not(mcall(v("t"), "done", vec![])),
+                        vec![expr_stmt(mcall(v("t"), "cancel", vec![]))],
+                    )],
+                ),
+            ],
+        ),
+        method(
+            "_on_task_done",
+            vec![me(c), param("done", &opt(cls_base()))],
+            IRType::None,
+            vec![
+                assign_typed("task", some(v("done"), "_on_task_done"), &cls_base()),
+                assign_typed("kept", IRExpr::ListLiteral(vec![]), &tasks_ty()),
+                for_(
+                    "t",
+                    my("_tasks"),
+                    vec![if_(
+                        cmp(v("t"), IRCompareOp::IsNot, v("task")),
+                        vec![expr_stmt(mcall(v("kept"), "append", vec![v("t")]))],
+                    )],
+                ),
+                set_attr(v("self"), "_tasks", v("kept")),
+                if_(
+                    and(
+                        not_none(my("_on_completed_fut")),
+                        eq(len(my("_tasks")), int(0)),
+                    ),
+                    vec![
+                        assign_typed(
+                            "fut",
+                            some(my("_on_completed_fut"), "_on_task_done"),
+                            &future_none(),
+                        ),
+                        if_(
+                            not(mcall(v("fut"), "done", vec![])),
+                            vec![expr_stmt(mcall(v("fut"), "_set_none", vec![]))],
+                        ),
+                    ],
+                ),
+                if_(mcall(v("task"), "cancelled", vec![]), vec![ret()]),
+                assign_typed(
+                    "exc",
+                    mcall(v("task"), "exception", vec![]),
+                    &opt(base_exc()),
+                ),
+                if_(is_none(v("exc")), vec![ret()]),
+                assign_typed("e", some(v("exc"), "_on_task_done"), &base_exc()),
+                expr_stmt(mcall(my("_errors"), "append", vec![v("e")])),
+                if_(
+                    and(
+                        mcall(v("self"), "_is_base_error", vec![v("e")]),
+                        is_none(my("_base_error")),
+                    ),
+                    vec![set_attr(v("self"), "_base_error", v("e"))],
+                ),
+                assign_typed(
+                    "parent",
+                    some(my("_parent_task"), "_on_task_done"),
+                    &cls_base(),
+                ),
+                // Unreachable while `__aexit__` waits for every task.
+                if_(mcall(v("parent"), "done", vec![]), vec![ret()]),
+                if_(
+                    and(not(my("_aborting")), not(my("_parent_cancel_requested"))),
+                    vec![
+                        expr_stmt(mcall(v("self"), "_abort", vec![])),
+                        set_attr(v("self"), "_parent_cancel_requested", boolean(true)),
+                        expr_stmt(mcall(v("parent"), "cancel", vec![])),
+                    ],
+                ),
+            ],
+        ),
+    ];
+    let opt_exc = || opt(base_exc());
+    methods.push(coroutine_method(
+        "__aenter__",
+        c,
+        vec![],
+        "tg_aenter",
+        vec![],
+    ));
+    methods.push(coroutine_method(
+        "__aexit__",
+        c,
+        vec![
+            param("t", &opt_exc()),
+            param("e", &opt_exc()),
+            param("tb", &opt_exc()),
+        ],
+        "tg_aexit",
+        vec![v("e")],
+    ));
+    plain_class(c, None, methods)
+}
+
+fn cls_base() -> IRType {
+    obj(&super::asyncio::name("_FutureBase"))
+}
+
+/// The callback a task group's task runs when it is done.
+fn group_done() -> IRClass {
+    plain_class(
+        GROUP_DONE,
+        Some(&super::asyncio::name("_Callback")),
+        vec![
+            method(
+                "__init__",
+                vec![me(GROUP_DONE), param("group", &obj(TASKGROUP))],
+                IRType::None,
+                vec![set_my_typed("group", v("group"), &obj(TASKGROUP))],
+            ),
+            method(
+                "run",
+                vec![me(GROUP_DONE), param("fut", &opt(cls_base()))],
+                IRType::None,
+                vec![expr_stmt(mcall(
+                    my("group"),
+                    "_on_task_done",
+                    vec![v("fut")],
+                ))],
+            ),
+        ],
+    )
+}
+
+fn task_group_coroutines() -> Vec<IRFunction> {
+    let tg = || v("tg");
+    let field = |f: &str| attr(tg(), f);
+    let set = |f: &str, value: IRExpr| set_attr(tg(), f, value);
+    let raise_text = |what: &str| IRStatement::Raise {
+        exception: Some(call(
+            "RuntimeError",
+            vec![bin(
+                bin(text("TaskGroup "), IROp::Add, mcall(tg(), "_repr", vec![])),
+                IROp::Add,
+                text(what),
+            )],
+        )),
+        cause: None,
+    };
+    let raise_some = |e: IRExpr| IRStatement::Raise {
+        exception: Some(some(e, "raise")),
+        cause: None,
+    };
+    let group = |class: &str| IRStatement::Raise {
+        exception: Some(call(
+            class,
+            vec![text("unhandled errors in a TaskGroup"), field("_errors")],
+        )),
+        cause: None,
+    };
+    let aexit = vec![
+        set("_exiting", boolean(true)),
+        assign_typed("propagate", none(), &opt(base_exc())),
+        assign_typed("cancelled_exit", boolean(false), &IRType::Bool),
+        if_(
+            not_none(v("e")),
+            vec![
+                assign_typed("err", some(v("e"), "__aexit__"), &base_exc()),
+                if_(
+                    and(
+                        mcall(tg(), "_is_base_error", vec![v("err")]),
+                        is_none(field("_base_error")),
+                    ),
+                    vec![set("_base_error", v("err"))],
+                ),
+                if_(
+                    isinstance(v("err"), "CancelledError"),
+                    vec![
+                        assign("propagate", v("err")),
+                        assign("cancelled_exit", boolean(true)),
+                    ],
+                ),
+                if_(
+                    not(field("_aborting")),
+                    vec![expr_stmt(mcall(tg(), "_abort", vec![]))],
+                ),
+            ],
+        ),
+        while_(
+            cmp(len(field("_tasks")), IRCompareOp::Gt, int(0)),
+            vec![
+                if_(
+                    is_none(field("_on_completed_fut")),
+                    vec![set(
+                        "_on_completed_fut",
+                        call(&future_class(&IRType::None), vec![]),
+                    )],
+                ),
+                assign_typed(
+                    "waiter",
+                    some(field("_on_completed_fut"), "__aexit__"),
+                    &future_none(),
+                ),
+                IRStatement::TryExcept {
+                    try_body: body(vec![awaited(v("waiter"))]),
+                    except_handlers: vec![IRExceptHandler {
+                        exception_types: vec!["CancelledError".to_string()],
+                        name: Some("ex".to_string()),
+                        body: crate::ir::IRBody {
+                            statements: vec![if_(
+                                not(field("_aborting")),
+                                vec![
+                                    assign("propagate", v("ex")),
+                                    expr_stmt(mcall(tg(), "_abort", vec![])),
+                                ],
+                            )],
+                        },
+                    }],
+                    finally_body: None,
+                },
+                set("_on_completed_fut", none()),
+            ],
+        ),
+        if_(
+            not_none(field("_base_error")),
+            vec![raise_some(field("_base_error"))],
+        ),
+        if_(
+            field("_parent_cancel_requested"),
+            vec![if_(
+                eq(
+                    mcall(some(field("_parent_task"), "__aexit__"), "uncancel", vec![]),
+                    int(0),
+                ),
+                vec![assign("propagate", none())],
+            )],
+        ),
+        if_(
+            and(not_none(v("propagate")), eq(len(field("_errors")), int(0))),
+            vec![raise_some(v("propagate"))],
+        ),
+        if_(
+            and(not_none(v("e")), not(v("cancelled_exit"))),
+            vec![expr_stmt(mcall(
+                field("_errors"),
+                "append",
+                vec![some(v("e"), "__aexit__")],
+            ))],
+        ),
+        if_(
+            cmp(len(field("_errors")), IRCompareOp::Gt, int(0)),
+            vec![
+                assign_typed(
+                    "parent",
+                    some(field("_parent_task"), "__aexit__"),
+                    &cls_base(),
+                ),
+                if_(
+                    cmp(
+                        mcall(v("parent"), "cancelling", vec![]),
+                        IRCompareOp::Gt,
+                        int(0),
+                    ),
+                    vec![
+                        expr_stmt(mcall(v("parent"), "uncancel", vec![])),
+                        expr_stmt(mcall(v("parent"), "cancel", vec![])),
+                    ],
+                ),
+                // `BaseExceptionGroup(...)` makes an `ExceptionGroup` when
+                // every exception is an `Exception`.
+                assign_typed("all_exceptions", boolean(true), &IRType::Bool),
+                for_(
+                    "x",
+                    field("_errors"),
+                    vec![if_(
+                        not(isinstance(v("x"), "Exception")),
+                        vec![assign("all_exceptions", boolean(false))],
+                    )],
+                ),
+                if_else(
+                    v("all_exceptions"),
+                    vec![group("ExceptionGroup")],
+                    vec![group("BaseExceptionGroup")],
+                ),
+            ],
+        ),
+        ret_val(boolean(false)),
+    ];
+    vec![
+        coroutine(
+            "tg_aenter",
+            vec![param("tg", &obj(TASKGROUP))],
+            obj(TASKGROUP),
+            vec![
+                if_(
+                    field("_entered"),
+                    vec![raise_text(" has already been entered")],
+                ),
+                if_(
+                    not(super::asyncio::loop_var("has_current")),
+                    vec![raise_text(" cannot determine the parent task")],
+                ),
+                set("_parent_task", super::asyncio::loop_var("current")),
+                set("_entered", boolean(true)),
+                ret_val(tg()),
+            ],
+        ),
+        coroutine(
+            "tg_aexit",
+            vec![param("tg", &obj(TASKGROUP)), param("e", &opt(base_exc()))],
+            IRType::Bool,
+            vec![try_finally(
+                aexit,
+                vec![
+                    set("_parent_task", none()),
+                    set("_errors", IRExpr::ListLiteral(vec![])),
+                    set("_base_error", none()),
+                ],
+            )],
+        ),
+    ]
+}
+
+/// `_Coro[T]._in_group(tg)`: `tg.create_task(coro)`, its checks made before
+/// the task is.
+pub(crate) fn in_group_method(t: &IRType) -> IRFunction {
+    let c = super::asyncio::coro_class(t);
+    let task_ty = IRType::Class(super::asyncio::task_class(t));
+    method(
+        "_in_group",
+        vec![me(&c), param("tg", &obj(TASKGROUP))],
+        task_ty.clone(),
+        vec![
+            expr_stmt(mcall(v("tg"), "_check_open", vec![])),
+            assign_typed(
+                "task",
+                call(&super::asyncio::task_class(t), vec![v("self")]),
+                &task_ty,
+            ),
+            expr_stmt(mcall(v("tg"), "_adopt", vec![v("task")])),
+            ret_val(v("task")),
+        ],
+    )
+}
+
 // ---- what the program uses ------------------------------------------------------------
 
 /// What of these modules the program names, so that only that is written.
@@ -1123,6 +1658,9 @@ pub(crate) struct Wanted {
     semaphore: bool,
     bounded: bool,
     pub(crate) timeout: bool,
+    pub(crate) task_group: bool,
+    /// `ExceptionGroup`, which a task group raises.
+    groups: bool,
     queue_errors: bool,
     /// The queues, each its kind and element type.
     queues: Vec<(String, IRType)>,
@@ -1143,6 +1681,7 @@ impl Wanted {
                 w.bounded = true;
             }
             "timeout" | "Timeout" => w.timeout = true,
+            "TaskGroup" => w.task_group = true,
             "QueueEmpty" | "QueueFull" | "QueueShutDown" => w.queue_errors = true,
             _ => {}
         };
@@ -1185,6 +1724,7 @@ impl Wanted {
             (QUEUE_EMPTY, "QueueEmpty"),
             (QUEUE_FULL, "QueueFull"),
             (QUEUE_SHUTDOWN, "QueueShutDown"),
+            (TASKGROUP, "TaskGroup"),
         ] {
             if spelled_types.contains(&format!("\"{class}\"")) {
                 mark(name, &mut w);
@@ -1214,6 +1754,9 @@ impl Wanted {
             w.event = true;
             w.queue_errors = true;
         }
+        w.groups = w.task_group
+            || spelled_types.contains("\"ExceptionGroup\"")
+            || spelled_types.contains("\"BaseExceptionGroup\"");
         w
     }
 
@@ -1243,6 +1786,9 @@ impl Wanted {
         if self.timeout {
             out.extend(timeout_coroutines());
         }
+        if self.task_group {
+            out.extend(task_group_coroutines());
+        }
         for t in self.element_types() {
             out.extend(queue_coroutines(&t));
         }
@@ -1269,6 +1815,13 @@ impl Wanted {
                 out.push(error_class(name));
             }
         }
+        if self.groups {
+            out.extend(exception_groups());
+        }
+        if self.task_group {
+            out.push(task_group());
+            out.push(group_done());
+        }
         for t in self.element_types() {
             out.push(queue(&t));
         }
@@ -1292,8 +1845,26 @@ impl Wanted {
     }
 
     /// The messages the code raises.
-    pub(crate) fn strings() -> [&'static str; 6] {
+    pub(crate) fn strings() -> [&'static str; 24] {
         [
+            " (",
+            ")",
+            ">",
+            "",
+            "TaskGroup ",
+            " has not been entered",
+            " is finished",
+            " is shutting down",
+            " has already been entered",
+            " cannot determine the parent task",
+            "<TaskGroup",
+            " tasks=",
+            " errors=",
+            " cancelling",
+            " entered",
+            "unhandled errors in a TaskGroup",
+            " sub-exception",
+            " sub-exceptions",
             "Lock is not acquired.",
             "Semaphore initial value must be >= 0",
             "BoundedSemaphore released too many times",

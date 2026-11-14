@@ -154,6 +154,14 @@ pub fn lower_coroutines(module: &mut IRModule) -> Result<()> {
     if let Some(t) = runtime.iter_mut().find(|c| c.name == timeout) {
         t.methods.extend(sync.timeout_methods());
     }
+    if sync.task_group {
+        for t in &kinds {
+            let coro = aio::coro_class(t);
+            if let Some(c) = runtime.iter_mut().find(|c| c.name == coro) {
+                c.methods.push(crate::ir::asyncio_sync::in_group_method(t));
+            }
+        }
+    }
     runtime.extend(sync.classes());
     for name in aio::runtime_strings()
         .into_iter()
@@ -262,7 +270,14 @@ pub fn lower_coroutines(module: &mut IRModule) -> Result<()> {
 /// Rewrite every call of a constructor of `asyncio`'s (`asyncio.Lock()`, an
 /// annotated `asyncio.Queue()`) into its class's, ahead of the rest.
 fn make_constructors(module: &mut IRModule, api: &Api) -> Result<()> {
-    const CONSTRUCTORS: [&str; 5] = ["Lock", "Event", "Semaphore", "BoundedSemaphore", "timeout"];
+    const CONSTRUCTORS: [&str; 6] = [
+        "Lock",
+        "Event",
+        "Semaphore",
+        "BoundedSemaphore",
+        "timeout",
+        "TaskGroup",
+    ];
     fn statements(body: &mut IRBody, api: &Api) -> Result<()> {
         for stmt in &mut body.statements {
             if let IRStatement::Assign {
@@ -620,6 +635,7 @@ impl Lowerer<'_> {
         for stmt in &mut body.statements {
             self.check_dropped(stmt, env)?;
             self.type_queue_stmt(stmt)?;
+            self.group_calls(stmt, env)?;
             let mut err = None;
             each_expr(stmt, &mut |e| {
                 if err.is_none() {
@@ -684,6 +700,42 @@ impl Lowerer<'_> {
             out.extend(self.statement(stmt, env, scope, result)?);
         }
         Ok(out)
+    }
+
+    /// `tg.create_task(coro)` on a task group: `coro._in_group(tg)`, the
+    /// task of the coroutine's own result type.
+    fn group_calls(&self, stmt: &mut IRStatement, env: &HashMap<String, IRType>) -> Result<()> {
+        let group = IRType::Class(crate::ir::asyncio_sync::TASKGROUP.to_string());
+        let mut err = None;
+        each_expr(stmt, &mut |e| {
+            let IRExpr::MethodCall {
+                object,
+                method_name,
+                arguments,
+            } = e
+            else {
+                return;
+            };
+            if method_name != "create_task" || self.ty(object, env) != group {
+                return;
+            }
+            match arguments.as_slice() {
+                [x] if !matches!(x, IRExpr::Keyword { .. }) => {
+                    let (x, o) = (x.clone(), (**object).clone());
+                    *e = mcall(x, "_in_group", vec![o]);
+                }
+                _ => {
+                    err.get_or_insert(refuse(
+                        "TaskGroup.create_task() takes the coroutine alone here; its 'name' and \
+                         'context' are not supported",
+                    ));
+                }
+            }
+        });
+        match err {
+            Some(x) => Err(x),
+            None => Ok(()),
+        }
     }
 
     fn type_queue_stmt(&self, stmt: &mut IRStatement) -> Result<()> {
@@ -1030,6 +1082,7 @@ impl Lowerer<'_> {
                     out.extend(self.suspension(&target, x, env, scope, result)?);
                 }
                 mut other => {
+                    self.group_calls(&mut other, env)?;
                     let mut err = None;
                     each_expr(&mut other, &mut |e| {
                         if err.is_none() {
