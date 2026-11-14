@@ -1005,6 +1005,22 @@ fn future_base() -> IRClass {
                     set_attr(v("self"), "_log_traceback", boolean(true)),
                 ],
             ),
+            // What `gather(..., return_exceptions=True)` lists for it: the
+            // exception it failed with (a `CancelledError('')` when it was
+            // cancelled), or None.
+            method(
+                "_exc_or_none",
+                vec![me(&c)],
+                opt(IRType::Class("BaseException".to_string())),
+                vec![
+                    if_(
+                        eq(state(), int(CANCELLED)),
+                        vec![ret_val(call("CancelledError", vec![text("")]))],
+                    ),
+                    if_(my("_has_exc"), vec![ret_val(my("_exc"))]),
+                    ret_val(none()),
+                ],
+            ),
             // A task's, reached through the loop's callbacks.
             method("_step", vec![me(&c)], IRType::None, vec![ret()]),
             method(

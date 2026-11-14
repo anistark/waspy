@@ -1179,6 +1179,56 @@ fn asyncio_task_groups_cancelled_nested_and_timed_out() {
     );
 }
 
+/// `gather(..., return_exceptions=True)` lists each awaitable's exception (a
+/// cancelled task's as `CancelledError('')`) or None, in argument order, with
+/// `*aws` too; the list's elements answer `isinstance()` and `is None`.
+#[test]
+fn asyncio_gather_return_exceptions() {
+    prints(
+        r#"
+        import asyncio
+
+
+        async def job(n: int) -> None:
+            await asyncio.sleep(0.01 * n)
+            if n % 2 == 0:
+                raise ValueError(f"job {n} failed")
+            print("job", n, "ok")
+
+
+        async def slow() -> None:
+            await asyncio.sleep(1)
+
+
+        async def main() -> None:
+            results = await asyncio.gather(job(1), job(2), job(3), job(4), return_exceptions=True)
+            print(results)
+            for r in results:
+                if isinstance(r, Exception):
+                    print("failed:", r)
+                else:
+                    print("ok:", r)
+            t = asyncio.create_task(slow())
+            rs = await asyncio.gather(*[job(i) for i in range(3)], return_exceptions=True)
+            print(len(rs), [x is None for x in rs], [str(x) for x in rs if x is not None])
+            t.cancel()
+            both = await asyncio.gather(t, job(5), return_exceptions=True)
+            print(both)
+            print(repr(both[0]), str(both[0]) == "")
+            try:
+                a, b = await asyncio.gather(job(6), job(7), return_exceptions=False)
+                print(a, b)
+            except ValueError as e:
+                print("raised", e)
+
+
+        if __name__ == "__main__":
+            asyncio.run(main())
+        "#,
+        "job 1 ok\njob 3 ok\n[None, ValueError('job 2 failed'), None, ValueError('job 4 failed')]\nok: None\nfailed: job 2 failed\nok: None\nfailed: job 4 failed\njob 1 ok\n3 [False, True, False] ['job 0 failed', 'job 2 failed']\njob 5 ok\n[CancelledError(''), None]\nCancelledError('') True\nraised job 6 failed\n",
+    );
+}
+
 #[test]
 fn coroutine_misuse_is_refused() {
     refused(
@@ -1318,5 +1368,18 @@ fn coroutine_misuse_is_refused() {
             await q.put(1)
         "#,
         "needs the type of what it holds",
+    );
+    refused(
+        r#"
+        import asyncio
+
+        async def f() -> int:
+            return 1
+
+        async def main() -> None:
+            rs = await asyncio.gather(f(), f(), return_exceptions=True)
+            print(rs)
+        "#,
+        "where every awaitable resolves to None",
     );
 }

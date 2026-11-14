@@ -1924,6 +1924,10 @@ fn scan_expr_locals(expr: &IRExpr, ctx: &mut CompilationContext, depth: u32) {
                         | IRType::Int
                         | IRType::Bool) => ty,
                         class @ IRType::Class(_) => class,
+                        // An optional instance: its pointer or 0.
+                        IRType::Optional(inner) if matches!(*inner, IRType::Class(_)) => {
+                            IRType::Optional(inner)
+                        }
                         // A tuple or collection element is a pointer whose
                         // type the reads of the target need: an untyped one
                         // rendered its address.
@@ -2418,6 +2422,11 @@ pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
                         // class, so `for it in items: it.field` resolves the
                         // field instead of reading 0 off an untyped pointer.
                         class @ IRType::Class(_) => class,
+                        // An optional instance is one word too, its pointer
+                        // or 0 (`gather(..., return_exceptions=True)`'s).
+                        IRType::Optional(inner) if matches!(*inner, IRType::Class(_)) => {
+                            IRType::Optional(inner)
+                        }
                         // A str element, so what the body computes from it
                         // (`line.strip()`) is typed for the scan too; code
                         // generation would make it a str in any case.

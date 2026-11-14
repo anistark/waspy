@@ -775,11 +775,13 @@ impl Lowerer<'_> {
                 value,
                 starred: None,
             } if self.gather_of(&value).is_some_and(|args| {
-                args.len() == targets.len() && !args.iter().any(is_starred)
+                matches!(split_return_exceptions(args.to_vec()), Ok((args, false))
+                    if args.len() == targets.len() && !args.iter().any(is_starred))
             }) =>
             {
                 let args = self.gather_of(&value).expect("checked").to_vec();
-                let tasks = self.gather_tasks(args, &mut pre, env, scope)?;
+                let (args, _) = split_return_exceptions(args)?;
+                let tasks = self.gather_tasks(args, false, &mut pre, env, scope)?;
                 for (target, task) in targets.iter().zip(&tasks) {
                     pre.extend(self.read_result(target, v(task), env));
                 }
@@ -1224,6 +1226,7 @@ impl Lowerer<'_> {
     fn gather_tasks(
         &mut self,
         args: Vec<IRExpr>,
+        return_exceptions: bool,
         pre: &mut Vec<IRStatement>,
         env: &mut HashMap<String, IRType>,
         scope: &Scope,
@@ -1266,6 +1269,9 @@ impl Lowerer<'_> {
         for task in &tasks {
             pre.push(expr_stmt(mcall(v(&outer), "_add", vec![v(task)])));
         }
+        if return_exceptions {
+            pre.push(set_attr(v(&outer), "_return_exceptions", boolean(true)));
+        }
         pre.push(expr_stmt(mcall(v(&outer), "_start", vec![])));
         let done = self.fresh("aw_r");
         pre.push(assign(&done, call(AWAIT_FN, vec![v(&outer)])));
@@ -1282,6 +1288,18 @@ impl Lowerer<'_> {
         result: &IRType,
     ) -> Result<Vec<IRStatement>> {
         let mut pre = Vec::new();
+        let (args, return_exceptions) = split_return_exceptions(args)?;
+        // With `return_exceptions=True` each element is a result or an
+        // exception, which one type holds only when every result is None.
+        let refuse_results = || {
+            refuse(
+                "asyncio.gather(..., return_exceptions=True) is supported where every awaitable \
+                 resolves to None, since its list holds a result or an exception, which no one \
+                 type here holds otherwise. Hint: catch the exception in the coroutine and \
+                 return a value for it",
+            )
+        };
+        let exception = || IRType::Optional(Box::new(IRType::Class("BaseException".to_string())));
         if let [IRExpr::Keyword { name, value }] = args.as_slice() {
             if name == crate::ir::STARRED_ARG {
                 // `gather(*xs)`: a task for each element, in order.
@@ -1317,14 +1335,24 @@ impl Lowerer<'_> {
                     v(&list),
                     vec![expr_stmt(mcall(v(&outer), "_add", vec![v(&t)]))],
                 ));
+                if return_exceptions {
+                    pre.push(set_attr(v(&outer), "_return_exceptions", boolean(true)));
+                }
                 pre.push(expr_stmt(mcall(v(&outer), "_start", vec![])));
                 let done = self.fresh("aw_r");
                 pre.push(assign(&done, call(AWAIT_FN, vec![v(&outer)])));
                 let c = self.fresh("gc");
                 let mut inner = env.clone();
                 inner.insert(c.clone(), task_ty);
-                let r = mcall(v(&c), "result", vec![]);
-                let rty = self.ty(&r, &inner);
+                let mut r = mcall(v(&c), "result", vec![]);
+                let mut rty = self.ty(&r, &inner);
+                if return_exceptions {
+                    if rty != IRType::None {
+                        return Err(refuse_results());
+                    }
+                    r = mcall(v(&c), "_exc_or_none", vec![]);
+                    rty = exception();
+                }
                 let results = IRExpr::Comprehension {
                     kind: crate::ir::IRComprehensionKind::List,
                     element: Box::new(r),
@@ -1345,7 +1373,25 @@ impl Lowerer<'_> {
                  list a type",
             ));
         }
-        let tasks = self.gather_tasks(args, &mut pre, env, scope)?;
+        let tasks = self.gather_tasks(args, return_exceptions, &mut pre, env, scope)?;
+        if return_exceptions {
+            if tasks
+                .iter()
+                .any(|t| self.ty(&mcall(v(t), "result", vec![]), env) != IRType::None)
+            {
+                return Err(refuse_results());
+            }
+            let results = tasks
+                .iter()
+                .map(|t| mcall(v(t), "_exc_or_none", vec![]))
+                .collect();
+            pre.push(assign_typed(
+                target,
+                IRExpr::ListLiteral(results),
+                &IRType::List(Box::new(exception())),
+            ));
+            return self.expand(pre, env, scope, result);
+        }
         let results: Vec<IRExpr> = tasks
             .iter()
             .map(|t| {
@@ -1676,6 +1722,28 @@ fn awaited(value: &IRExpr) -> Option<&IRExpr> {
         } if function_name == AWAIT_FN => arguments.first(),
         _ => None,
     }
+}
+
+/// `gather()`'s arguments without its `return_exceptions=` keyword, and
+/// what that says (a constant, since it decides the result's type).
+fn split_return_exceptions(args: Vec<IRExpr>) -> Result<(Vec<IRExpr>, bool)> {
+    let mut flag = false;
+    let mut rest = Vec::new();
+    for a in args {
+        match a {
+            IRExpr::Keyword { name, value } if name == "return_exceptions" => {
+                match *value {
+                    IRExpr::Const(IRConstant::Bool(b)) => flag = b,
+                    _ => return Err(refuse(
+                        "asyncio.gather()'s return_exceptions must be True or False written out, \
+                         since it decides what the list holds",
+                    )),
+                }
+            }
+            other => rest.push(other),
+        }
+    }
+    Ok((rest, flag))
 }
 
 fn is_starred(e: &IRExpr) -> bool {

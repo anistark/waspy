@@ -128,6 +128,32 @@ fn emit_isinstance(
             func.instruction(&Instruction::Drop);
         }
     };
+    // An optional instance is its pointer or 0: None is no instance of a
+    // class, and anything else is checked by its class.
+    if let IRType::Optional(inner) = obj_type {
+        if matches!(**inner, IRType::Class(_))
+            && targets.iter().all(|t| ctx.get_class_info(t).is_some())
+        {
+            let Some(slot) = ctx.hold() else {
+                ctx.report("isinstance() nests more deeply than the compiler reserves room for");
+                drop_obj(func);
+                func.instruction(&Instruction::I32Const(0));
+                return IRType::Bool;
+            };
+            func.instruction(&Instruction::LocalTee(slot));
+            func.instruction(&Instruction::I32Eqz);
+            func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(
+                wasm_encoder::ValType::I32,
+            )));
+            func.instruction(&Instruction::I32Const(0));
+            func.instruction(&Instruction::Else);
+            func.instruction(&Instruction::LocalGet(slot));
+            emit_isinstance(func, ctx, inner, targets);
+            func.instruction(&Instruction::End);
+            ctx.release_held();
+            return IRType::Bool;
+        }
+    }
     if matches!(
         obj_type,
         IRType::Unknown | IRType::Any | IRType::Union(_) | IRType::Optional(_)
