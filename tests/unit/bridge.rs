@@ -10,7 +10,7 @@
 #[path = "../utils/harness.rs"]
 mod harness;
 
-use harness::{compile, dedent, link_host, run_main, run_main_on, try_compile, Host};
+use harness::{call_i32, compile, dedent, link_host, run_main, run_main_on, try_compile, Host};
 use wasmi::{Engine, Linker, Module, Store, Value};
 
 fn prints(source: &str, want: &str) {
@@ -204,6 +204,7 @@ fn bridge_gives_handles_back() {
         .expect("instantiate")
         .start(&mut store)
         .expect("start");
+    harness::start_bridge(&mut store, &instance);
     let churn = instance
         .get_typed_func::<i32, i32>(&store, "churn")
         .expect("churn");
@@ -252,6 +253,7 @@ fn bridge_exports_take_and_answer_js_values() {
         .expect("instantiate")
         .start(&mut store)
         .expect("start");
+    harness::start_bridge(&mut store, &instance);
     let mut call = |name: &str, args: Vec<Js>| -> Result<Js, String> {
         let handles: Vec<Value> = args
             .into_iter()
@@ -391,6 +393,244 @@ fn keyword_arguments_and_property_augmented_assignment() {
             main()
         "#,
         "[1,{\"once\":true,\"name\":\"x\"}]\n{\"n\":30,\"s\":\"ab\",\"f\":2}\n",
+    );
+}
+
+/// A JavaScript string is the str Pyodide makes of it: its length and items
+/// count code points, and an item past its end is `string index out of
+/// range`. An array's missing item is the index, and an object that only has
+/// a `length` is not subscriptable.
+#[test]
+fn js_strings_are_indexed_by_code_points() {
+    prints(
+        r#"
+        from js import JSON
+
+
+        def main() -> None:
+            s = JSON.parse('"hé\U0001F600lo"')
+            print(len(s), s[2] == "\U0001F600", s[3], s[-1], s[-4])
+            for k in [10, -10]:
+                try:
+                    print(s[k])
+                except IndexError as e:
+                    print("str", k, e)
+            a = JSON.parse("[1, 2]")
+            try:
+                print(a[5])
+            except IndexError as e:
+                print("arr", e)
+            o = JSON.parse('{"length": 2, "0": "x"}')
+            try:
+                print(o[0])
+            except TypeError as e:
+                print(e)
+
+
+        if __name__ == "__main__":
+            main()
+        "#,
+        "5 True l o \u{e9}\nstr 10 string index out of range\nstr -10 string index out of range\n\
+         arr 5\n'pyodide.ffi.JsProxy' object is not subscriptable\n",
+    );
+}
+
+/// A module using the bridge runs its top level on first use, so a module
+/// definition may reach JavaScript: the `__main__` block runs it first (and
+/// reports an exception it raises as any other), and an export called from
+/// the host finds it run.
+#[test]
+fn a_bridge_module_starts_on_first_use() {
+    let source = r#"
+        from js import JSON, document
+
+        heading = document.createElement("h1")
+        items = JSON.parse("[3, 4]")
+        count = len(items)
+
+
+        def total() -> int:
+            t = 0
+            for x in items:
+                n: int = x
+                t += n
+            return t
+
+
+        if __name__ == "__main__":
+            print(count, total(), heading.tagName)
+        "#;
+    prints(source, "2 7 H1\n");
+    assert_eq!(call_i32(&dedent(source), "total"), 7);
+    let run = run_main(
+        &dedent(
+            r#"
+            from js import JSON
+
+            config = JSON.parse("[1, 2")
+
+
+            def main() -> None:
+                print("never")
+
+
+            if __name__ == "__main__":
+                main()
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!((run.stdout.as_str(), run.exit), ("", 1));
+    assert!(
+        run.stderr
+            .starts_with("pyodide.ffi.JsException: SyntaxError"),
+        "{}",
+        run.stderr
+    );
+}
+
+/// `requestAnimationFrame` with a Python callback: each frame's callbacks
+/// run with the frame's time, those they ask for at the next frame, one
+/// cancelled never runs, and `asyncio.run()` waits for them (the loop
+/// suspends until JavaScript calls back), as Pyodide's does.
+#[test]
+fn animation_frames_wake_asyncio_run() {
+    prints(
+        r#"
+        import asyncio
+
+        from js import cancelAnimationFrame, document, performance, requestAnimationFrame
+        from pyodide.ffi import create_once_callable, create_proxy
+
+        box = document.createElement("div")
+        seen: list[float] = []
+        done = asyncio.Event()
+
+
+        def step(t) -> None:
+            seen.append(float(t))
+            box.textContent = str(len(seen))
+            if len(seen) == 3:
+                done.set()
+            else:
+                requestAnimationFrame(stepper)
+
+
+        stepper = create_proxy(step)
+
+
+        def skipped(t) -> None:
+            print("skipped frame ran")
+
+
+        async def main() -> None:
+            begin = float(performance.now())
+            requestAnimationFrame(stepper)
+            cancelAnimationFrame(requestAnimationFrame(create_once_callable(skipped)))
+            await done.wait()
+            stepper.destroy()
+            print(len(seen), box.textContent, seen[0] < seen[1] and seen[1] < seen[2], seen[0] > begin - 1000)
+            await asyncio.sleep(0.01)
+            print("after a sleep", len(seen))
+
+
+        if __name__ == "__main__":
+            asyncio.run(main())
+        "#,
+        "3 3 True True\nafter a sleep 3\n",
+    );
+}
+
+/// `x[i] = v` of a JavaScript array or typed array, as Pyodide stores it:
+/// past the end an array grows and a typed array ignores it, an index before
+/// the start sets nothing an item reads, and a string or a plain object
+/// refuses it with `TypeError`. A typed array's bytes come out with
+/// `to_bytes()`; bytes go in with `to_js()`.
+#[test]
+fn item_assignment_and_buffers() {
+    prints(
+        r#"
+        from js import JSON, Uint8Array
+        from pyodide.ffi import to_js
+
+
+        def main() -> None:
+            a = JSON.parse("[1, 2, 3]")
+            a[0] = "x"
+            a[-1] = 9
+            a[4] = 5
+            a[-9] = 0
+            print(JSON.stringify(a), len(a))
+            o = JSON.parse('{"k": 1}')
+            try:
+                o[0] = 1
+            except TypeError as e:
+                print("TypeError", e)
+            s = JSON.parse('"ab"')
+            try:
+                s[0] = "x"
+            except TypeError as e:
+                print("TypeError", e)
+            t = Uint8Array.new(2)
+            t[5] = 1
+            t[-1] = 258
+            t[0] += 7
+            print(list(t.to_bytes()), to_js(b"hi").length)
+
+
+        if __name__ == "__main__":
+            main()
+        "#,
+        "[\"x\",2,9,null,5] 5\nTypeError 'pyodide.ffi.JsProxy' object does not support item assignment\n\
+         TypeError 'str' object does not support item assignment\n[7, 2] 2\n",
+    );
+    refused(
+        r#"
+        from js import Uint8Array
+
+
+        def main() -> None:
+            out = bytearray(2)
+            Uint8Array.new(2).assign_to(out)
+        "#,
+        "assign_to() hands over a writable buffer",
+    );
+}
+
+/// A JavaScript value tested for truth is as true as the value Pyodide hands
+/// over, in an `if`, a `while`, a conditional expression, `not`, `and`, `or`,
+/// and a comprehension's filter: `null` and an empty array are false. Each
+/// raised `TypeError` (the value converted to a bool, as a store into a
+/// `bool` place converts it).
+#[test]
+fn js_values_tested_for_truth() {
+    prints(
+        r#"
+        from js import JSON, document
+
+
+        def main() -> None:
+            host = document.getElementById("nothing")
+            if host:
+                print("statement: found")
+            else:
+                print("statement: none")
+            print("expression:", "found" if host else "none")
+            xs = JSON.parse("[]")
+            ys = JSON.parse("[0, 1]")
+            print("empty array:", "yes" if xs else "no", not xs, bool(ys))
+            n = 0
+            while not host and n < 2:
+                n += 1
+            print("loops", n, host is None, "both" if xs or ys else "neither")
+            print([k for k in range(3) if ys and not xs])
+
+
+        if __name__ == "__main__":
+            main()
+        "#,
+        "statement: none\nexpression: none\nempty array: no True True\nloops 2 False both\n[0, 1, 2]\n",
     );
 }
 

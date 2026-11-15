@@ -23,6 +23,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+#[path = "graphics.rs"]
+pub mod graphics;
+
 use wasmi::{Caller, Engine, Extern, Instance, Linker, Store, Value};
 use waspy::{
     compile_multiple_python_files_with_options, compile_python_file_with_options,
@@ -81,11 +84,23 @@ pub fn try_instantiate(wasm: &[u8]) -> Result<(), String> {
     let mut store = Store::new(&engine, Host::default());
     let mut linker = Linker::<Host>::new(&engine);
     link_host(&mut linker);
-    linker
+    let instance = linker
         .instantiate(&mut store, &module)
         .map_err(|e| format!("instantiate: {e}"))?
         .start(&mut store)
         .map_err(|e| format!("start: {e}"))?;
+    if let Ok(init) = instance.get_typed_func::<(), i32>(&store, "__waspy_init") {
+        match init.call(&mut store, ()) {
+            Ok(-2) => {
+                return Err(format!(
+                    "start: {}",
+                    store.data().js.failure.clone().unwrap_or_default()
+                ))
+            }
+            Ok(_) => {}
+            Err(e) => return Err(format!("start: {e}")),
+        }
+    }
     Ok(())
 }
 
@@ -117,6 +132,14 @@ pub fn instantiate_wasm(wasm: &[u8]) -> (Instance, Store<Host>) {
 /// `instantiate_wasm` with a host of the test's choosing (its standard
 /// input, its arguments, files already in place).
 pub fn instantiate_wasm_with(wasm: &[u8], host: Host) -> (Instance, Store<Host>) {
+    let (instance, mut store) = instantiate_unstarted(wasm, host);
+    start_bridge(&mut store, &instance);
+    (instance, store)
+}
+
+/// Instantiate, leaving a module using the bridge's top level to its first
+/// use (the `__main__` block runs it).
+fn instantiate_unstarted(wasm: &[u8], host: Host) -> (Instance, Store<Host>) {
     let engine = Engine::default();
     let module = wasmi::Module::new(&engine, wasm).expect("valid wasm module");
     let mut store = Store::new(&engine, host);
@@ -416,6 +439,20 @@ fn word(data: &[u8], at: usize) -> u32 {
 
 fn put_word(data: &mut [u8], at: usize, value: u32) {
     data[at..at + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+/// Run the top level of a module using the JavaScript bridge, as the
+/// loader does before its first call into it (such a module has no start
+/// section). Nothing for any other module.
+pub fn start_bridge(store: &mut Store<Host>, instance: &Instance) {
+    if let Ok(init) = instance.get_typed_func::<(), i32>(&*store, "__waspy_init") {
+        let r = init.call(&mut *store, ()).expect("the top level runs");
+        assert!(
+            r != -2,
+            "the top level raised: {}",
+            store.data().js.failure.clone().unwrap_or_default()
+        );
+    }
 }
 
 /// Define the host's imports, `wasi_snapshot_preview1` and the JavaScript
@@ -913,7 +950,7 @@ pub struct Run {
 /// block, as `wasmtime run` would.
 pub fn run_main(source: &str, stdin: &str, args: &[&str]) -> Run {
     let wasm = compile(source);
-    let (instance, mut store) = instantiate_wasm_with(&wasm, Host::with_input(stdin, args));
+    let (instance, mut store) = instantiate_unstarted(&wasm, Host::with_input(stdin, args));
     let start = instance
         .get_typed_func::<(), ()>(&store, "_start")
         .expect("an exported _start");
@@ -936,7 +973,7 @@ pub fn run_main(source: &str, stdin: &str, args: &[&str]) -> Run {
 /// program left it.
 pub fn run_main_on(source: &str, host: Host) -> (Run, Host) {
     let wasm = compile(source);
-    let (instance, mut store) = instantiate_wasm_with(&wasm, host);
+    let (instance, mut store) = instantiate_unstarted(&wasm, host);
     let start = instance
         .get_typed_func::<(), ()>(&store, "_start")
         .expect("an exported _start");
@@ -1019,6 +1056,9 @@ pub enum Js {
     ClassList(Rc<RefCell<Node>>),
     /// A Python function JavaScript can call (`create_proxy`).
     PyFunc(Rc<PyFn>),
+    /// An object implemented in Rust: a typed array, a canvas's context
+    /// (`graphics`).
+    Host(Rc<dyn graphics::HostObject>),
 }
 
 /// What the loader's `function` import makes of a Python function: its
@@ -1247,6 +1287,7 @@ fn element_class(tag: &str) -> &'static str {
         "BUTTON" => "HTMLButtonElement",
         "INPUT" => "HTMLInputElement",
         "BODY" => "HTMLBodyElement",
+        "CANVAS" => "HTMLCanvasElement",
         _ => "HTMLElement",
     }
 }
@@ -1285,6 +1326,7 @@ impl Js {
                 .contains(&name)
                 .then(|| Js::function(|_, _, _| Ok(Js::Undefined))),
             Js::Node(n) => node_get(n, name),
+            Js::Host(o) => o.get(name),
             _ => None,
         }
     }
@@ -1294,6 +1336,7 @@ impl Js {
                 node_set(n, name, value);
                 Ok(())
             }
+            Js::Host(o) => o.set(name, &value),
             Js::Obj(props, _) => {
                 let mut props = props.borrow_mut();
                 match props.iter_mut().find(|(k, _)| k == name) {
@@ -1352,6 +1395,7 @@ impl Js {
             }
             Js::ClassList(n) => n.borrow().classes().join(" "),
             Js::PyFunc(_) => "function () { [python code] }".to_string(),
+            Js::Host(o) => o.text(),
         }
     }
     fn same(&self, other: &Js) -> bool {
@@ -1365,6 +1409,9 @@ impl Js {
             (Js::Module(a), Js::Module(b)) => a == b,
             (Js::Node(a), Js::Node(b)) | (Js::ClassList(a), Js::ClassList(b)) => Rc::ptr_eq(a, b),
             (Js::PyFunc(a), Js::PyFunc(b)) => Rc::ptr_eq(a, b),
+            (Js::Host(a), Js::Host(b)) => {
+                std::ptr::eq(Rc::as_ptr(a) as *const u8, Rc::as_ptr(b) as *const u8)
+            }
             _ => false,
         }
     }
@@ -1473,7 +1520,7 @@ impl Js {
 }
 
 /// The methods a DOM node or a `classList` answers (through `call_method`).
-const DOM_METHODS: [&str; 26] = [
+const DOM_METHODS: [&str; 27] = [
     "createElement",
     "createTextNode",
     "getElementById",
@@ -1500,6 +1547,7 @@ const DOM_METHODS: [&str; 26] = [
     "closest",
     "hasChildNodes",
     "cloneNode",
+    "getContext",
 ];
 
 fn node_or_null(n: Option<Rc<RefCell<Node>>>) -> Js {
@@ -1608,10 +1656,22 @@ fn node_set(node: &Rc<RefCell<Node>>, name: &str, value: Js) {
         }
         "data" | "nodeValue" => node.borrow_mut().data = value.text(),
         other => {
-            let mut n = node.borrow_mut();
-            match n.props.iter_mut().find(|(k, _)| k == other) {
-                Some(slot) => slot.1 = value,
-                None => n.props.push((other.to_string(), value)),
+            let canvas_size = matches!(other, "width" | "height") && node.borrow().name == "CANVAS";
+            // A canvas's size is a whole number of pixels.
+            let value = if canvas_size {
+                Js::Num(value.number().trunc())
+            } else {
+                value
+            };
+            {
+                let mut n = node.borrow_mut();
+                match n.props.iter_mut().find(|(k, _)| k == other) {
+                    Some(slot) => slot.1 = value,
+                    None => n.props.push((other.to_string(), value)),
+                }
+            }
+            if canvas_size {
+                graphics::Ctx2D::resized(node);
             }
         }
     }
@@ -1684,7 +1744,27 @@ fn dom_method(
     };
     let node = node.clone();
     Some(match name {
-        "createElement" => Ok(Js::Node(Node::new(&text(0).to_uppercase()))),
+        "createElement" => {
+            let el = Node::new(&text(0).to_uppercase());
+            if el.borrow().name == "CANVAS" {
+                el.borrow_mut().props.extend([
+                    ("width".to_string(), Js::Num(300.0)),
+                    ("height".to_string(), Js::Num(150.0)),
+                ]);
+            }
+            Ok(Js::Node(el))
+        }
+        "getContext" => {
+            let Js::Node(node) = target else {
+                return None;
+            };
+            let canvas = node.borrow().name == "CANVAS";
+            Ok(match text(0).as_str() {
+                "2d" if canvas && !graphics::WebGl::on(node) => graphics::Ctx2D::of(node),
+                "webgl" | "experimental-webgl" if canvas => graphics::WebGl::of(node),
+                _ => Js::Null,
+            })
+        }
         "createTextNode" => Ok(Js::Node(Node::text_node(&text(0)))),
         "getElementById" => {
             let id = text(0);
@@ -1931,6 +2011,12 @@ pub struct JsWorld {
     pub jspi: bool,
     /// The settled promise `next_settled` handed over last.
     taken: Option<(bool, Js)>,
+    /// The callbacks `requestAnimationFrame` asked to run at the next
+    /// frame, by id, and the last id given.
+    pub frames: Vec<(i32, Js)>,
+    pub frame_ids: i32,
+    /// What a callback JavaScript ran threw, as a browser reports it.
+    pub uncaught: Vec<String>,
 }
 
 impl Default for JsWorld {
@@ -1947,6 +2033,9 @@ impl Default for JsWorld {
             resolved: HashMap::new(),
             jspi: true,
             taken: None,
+            frames: Vec::new(),
+            frame_ids: 0,
+            uncaught: Vec::new(),
         }
     }
 }
@@ -2169,6 +2258,9 @@ fn js_globals() -> Js {
         ("Number", number),
         ("undefined", Js::Undefined),
     ]);
+    for (name, value) in graphics::globals() {
+        globals.set(name, value).unwrap();
+    }
     globals.set("globalThis", globals.clone()).unwrap();
     globals
 }
@@ -2289,6 +2381,13 @@ fn call_method(
         (Js::Node(_) | Js::ClassList(_), _) if DOM_METHODS.contains(&name) => {
             dom_method(caller, target, name, &args)
                 .unwrap_or_else(|| Err(js_error("TypeError", format!("{name} is not a function"))))
+        }
+        (Js::Host(o), _) => {
+            let o = o.clone();
+            match o.call(target, caller.data_mut(), name, &args) {
+                Some(answer) => answer,
+                None => Err(js_error("TypeError", format!("{name} is not a function"))),
+            }
         }
         _ => match target.get(name) {
             Some(f @ Js::Obj(_, Some(_))) => call_value(caller, &f, target, &args),
@@ -2501,7 +2600,11 @@ pub fn link_js(linker: &mut Linker<Host>) {
                     || (matches!(target, Js::Node(_) | Js::ClassList(_))
                         && DOM_METHODS.contains(&name.as_str()))
                     || (matches!(target, Js::PyFunc(_)) && name == "destroy");
-                if !builtin {
+                if let Js::Host(o) = &target {
+                    if !o.has_method(&name) {
+                        return if o.get(&name).is_some() { -3 } else { -1 };
+                    }
+                } else if !builtin {
                     match target.get(&name) {
                         None => return -1,
                         Some(Js::Obj(_, Some(_))) => {}
@@ -2599,7 +2702,8 @@ pub fn link_js(linker: &mut Linker<Host>) {
                 | Js::Iter(_)
                 | Js::Promise(_)
                 | Js::Node(_)
-                | Js::ClassList(_) => 9,
+                | Js::ClassList(_)
+                | Js::Host(_) => 9,
             }
         })
         .unwrap();
@@ -2643,7 +2747,8 @@ pub fn link_js(linker: &mut Linker<Host>) {
         .func_wrap(m, "length", |c: Caller<'_, Host>, h: i32| -> i32 {
             match c.data().js.value(h) {
                 Js::Arr(items) => items.borrow().len() as i32,
-                Js::Str(s) => s.encode_utf16().count() as i32,
+                Js::Str(s) => s.chars().count() as i32,
+                Js::Host(o) => o.length().map_or(-1, |n| n as i32),
                 v @ (Js::Obj(..) | Js::ClassList(_)) => match v.get("length") {
                     Some(Js::Num(n)) => n as i32,
                     _ => -1,
@@ -2658,13 +2763,19 @@ pub fn link_js(linker: &mut Linker<Host>) {
             "item",
             |mut c: Caller<'_, Host>, h: i32, i: i32| -> i32 {
                 let w = &mut c.data_mut().js;
-                let Js::Arr(items) = w.value(h) else {
-                    return -3;
+                // A string is indexed by code points, as Pyodide's str is.
+                let (items, missing) = match w.value(h) {
+                    Js::Arr(items) => (items.borrow().clone(), -1),
+                    Js::Str(s) => (s.chars().map(|ch| Js::Str(ch.to_string())).collect(), -4),
+                    Js::Host(o) => match o.length() {
+                        Some(n) => ((0..n).map(|k| o.item(k)).collect(), -1),
+                        None => return -3,
+                    },
+                    _ => return -3,
                 };
-                let items = items.borrow().clone();
                 let at = if i < 0 { i + items.len() as i32 } else { i };
                 if at < 0 || at as usize >= items.len() {
-                    return -1;
+                    return missing;
                 }
                 w.add(items[at as usize].clone())
             },
@@ -2686,6 +2797,13 @@ pub fn link_js(linker: &mut Linker<Host>) {
                     let classes = n.borrow().classes().into_iter().map(Js::Str).collect();
                     w.add(Js::Iter(Rc::new(RefCell::new((classes, 0)))))
                 }
+                Js::Host(o) => match o.length() {
+                    Some(n) => {
+                        let items = (0..n).map(|k| o.item(k)).collect();
+                        w.add(Js::Iter(Rc::new(RefCell::new((items, 0)))))
+                    }
+                    None => -3,
+                },
                 _ => -3,
             }
         })
@@ -2816,15 +2934,33 @@ pub fn link_js(linker: &mut Linker<Host>) {
             "suspend",
             |mut c: Caller<'_, Host>, ms: wasmi::core::F64| -> i32 {
                 let ms = f64::from(ms);
-                let host = c.data_mut();
-                if !host.js.settled.is_empty() {
+                if !c.data().js.settled.is_empty() {
                     return 0;
+                }
+                // The next animation frame, when one is asked for and falls
+                // before the program's next timer: its callbacks run with
+                // the frame's time, those they ask for at the frame after.
+                if !c.data().js.frames.is_empty() {
+                    let now = c.data().monotonic_ns;
+                    let at = (now / graphics::FRAME_NS + 1) * graphics::FRAME_NS;
+                    if ms < 0.0 || at as f64 <= now as f64 + ms * 1e6 {
+                        c.data_mut().monotonic_ns = at;
+                        let due = std::mem::take(&mut c.data_mut().js.frames);
+                        for (_, callback) in due {
+                            let time = Js::Num(at as f64 / 1e6);
+                            if let Err(e) = call_value(&mut c, &callback, &Js::Undefined, &[time]) {
+                                c.data_mut().js.uncaught.push(e.text());
+                            }
+                        }
+                        return 0;
+                    }
                 }
                 assert!(
                     ms >= 0.0,
-                    "the program waits on a promise that never settles"
+                    "the program waits for what nothing will bring: no promise is pending \
+                     and no animation frame asked for"
                 );
-                host.monotonic_ns += (ms * 1e6).ceil() as u64;
+                c.data_mut().monotonic_ns += (ms * 1e6).ceil() as u64;
                 0
             },
         )
@@ -2852,6 +2988,107 @@ pub fn link_js(linker: &mut Linker<Host>) {
             let value = w.taken.as_ref().map_or(Js::Undefined, |t| t.1.clone());
             w.add(value)
         })
+        .unwrap();
+    linker
+        .func_wrap(
+            m,
+            "set_item",
+            |mut c: Caller<'_, Host>, h: i32, i: i32, v: i32| -> i32 {
+                let w = &mut c.data_mut().js;
+                let value = w.value(v);
+                match w.value(h) {
+                    Js::Str(_) => -4,
+                    Js::Arr(items) => {
+                        let mut items = items.borrow_mut();
+                        let at = if i < 0 { i + items.len() as i32 } else { i };
+                        // Before the start, a stray property no item reads.
+                        if at < 0 {
+                            return 0;
+                        }
+                        let at = at as usize;
+                        if at >= items.len() {
+                            items.resize(at + 1, Js::Undefined);
+                        }
+                        items[at] = value;
+                        0
+                    }
+                    Js::Host(o) => match o.length() {
+                        Some(n) => {
+                            let at = if i < 0 { i + n as i32 } else { i };
+                            // Outside it, a typed array ignores the store.
+                            if at >= 0 && (at as usize) < n {
+                                o.set_item(at as usize, &value);
+                            }
+                            0
+                        }
+                        None => -3,
+                    },
+                    _ => -3,
+                }
+            },
+        )
+        .unwrap();
+    linker
+        .func_wrap(
+            m,
+            "buffer_bytes",
+            |mut c: Caller<'_, Host>, h: i32| -> i32 {
+                let w = &mut c.data_mut().js;
+                let value = w.value(h);
+                match graphics::host::<graphics::TypedArray>(&value) {
+                    Some(t) => {
+                        w.bytes = t.bytes();
+                        w.bytes.len() as i32
+                    }
+                    None => -1,
+                }
+            },
+        )
+        .unwrap();
+    linker
+        .func_wrap(
+            m,
+            "assign",
+            |mut c: Caller<'_, Host>, h: i32, at: i32, n: i32| -> i32 {
+                let memory = memory_of(&mut c);
+                let bytes = memory.data(&c)[at as usize..(at + n) as usize].to_vec();
+                let w = &mut c.data_mut().js;
+                let value = w.value(h);
+                let Some(t) = graphics::host::<graphics::TypedArray>(&value) else {
+                    return -1;
+                };
+                if !matches!(t.kind, graphics::Kind::U8 | graphics::Kind::U8Clamped) {
+                    w.last_error = Js::Str(
+                        "TypedArray and memorybuffer have incompatible formats".to_string(),
+                    );
+                    return -7;
+                }
+                let len = t.data.borrow().len();
+                if len != n as usize {
+                    w.last_error = Js::Str(format!(
+                        "cannot assign to TypedArray of length {n} from buffer of length {len}"
+                    ));
+                    return -7;
+                }
+                *t.data.borrow_mut() = bytes.into_iter().map(f64::from).collect();
+                0
+            },
+        )
+        .unwrap();
+    linker
+        .func_wrap(
+            m,
+            "bytes",
+            |mut c: Caller<'_, Host>, at: i32, n: i32| -> i32 {
+                let memory = memory_of(&mut c);
+                let bytes = memory.data(&c)[at as usize..(at + n) as usize].to_vec();
+                let array = graphics::TypedArray::make(
+                    graphics::Kind::U8,
+                    bytes.into_iter().map(f64::from),
+                );
+                c.data_mut().js.add(array)
+            },
+        )
         .unwrap();
     linker
         .func_wrap(

@@ -139,12 +139,75 @@ const WEB_COMMANDS: &[(&str, &str)] = &[
     ("dom_demo", "examples/dom_demo.py"),
     ("events_demo", "examples/events_demo.py"),
     ("fetch_demo", "examples/fetch_demo.py"),
+    ("canvas_demo", "examples/canvas_demo.py"),
+    ("animation_demo", "examples/animation_demo.py"),
+    ("image_demo", "examples/image_demo.py"),
+    ("webgl_demo", "examples/webgl_demo.py"),
 ];
 
-/// Build each web command at both optimization levels.
+/// The playground's examples that import `js` (marked `web: true` in
+/// `docs/src/playground/examples.js`), each its id and its code: the browser
+/// gate checks them against Pyodide as it checks the web commands, since
+/// `just playground-verify` can only compile them (they need a page). The
+/// code is a template literal, read back as JavaScript reads it.
+fn playground_web_examples(root: &Path) -> Result<Vec<(String, String)>> {
+    let text = read(&root.join(PLAYGROUND_EXAMPLES))?;
+    let mut examples = Vec::new();
+    for entry in text.split("\n    {\n").skip(1) {
+        if !entry.contains("\n        web: true,") {
+            continue;
+        }
+        let id = entry
+            .split_once("id: '")
+            .and_then(|(_, rest)| rest.split_once('\''))
+            .map(|(id, _)| id.to_string())
+            .context("a playground example without an id")?;
+        let (_, literal) = entry
+            .split_once("code: `")
+            .with_context(|| format!("the playground example {id} has no code"))?;
+        let mut code = String::new();
+        let mut chars = literal.chars();
+        loop {
+            match chars.next() {
+                Some('`') => break,
+                Some('\\') => match chars.next() {
+                    Some('n') => code.push('\n'),
+                    Some('t') => code.push('\t'),
+                    Some(other) => code.push(other),
+                    None => anyhow::bail!("the playground example {id}'s code is unterminated"),
+                },
+                Some(c) => code.push(c),
+                None => anyhow::bail!("the playground example {id}'s code is unterminated"),
+            }
+        }
+        examples.push((id, code));
+    }
+    anyhow::ensure!(
+        !examples.is_empty(),
+        "no web examples found in {PLAYGROUND_EXAMPLES}"
+    );
+    Ok(examples)
+}
+
+/// Where the playground's examples are.
+const PLAYGROUND_EXAMPLES: &str = "docs/src/playground/examples.js";
+
+/// Build each web command, and each of the playground's web examples (its
+/// source written beside the binaries, for Pyodide to run), at both
+/// optimization levels.
 fn build_web(root: &Path, out_dir: &Path) -> Result<Vec<serde_json::Value>> {
     let mut entries = Vec::new();
-    for (name, source_path) in WEB_COMMANDS {
+    let mut sources: Vec<(String, String)> = WEB_COMMANDS
+        .iter()
+        .map(|(name, path)| (name.to_string(), path.to_string()))
+        .collect();
+    for (id, code) in playground_web_examples(root)? {
+        let name = format!("playground_{id}");
+        let path = format!("{OUT_DIR}/{name}.py");
+        fs::write(root.join(&path), code).with_context(|| format!("write {path}"))?;
+        sources.push((name, path));
+    }
+    for (name, source_path) in &sources {
         let source = read(&root.join(source_path))?;
         for optimize in [false, true] {
             let options = CompilerOptions {

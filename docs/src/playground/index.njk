@@ -32,7 +32,8 @@ scripts: ["/playground/playground.js"]
     #output:not(.ready) .pg-view { visibility: hidden; }
     #output.stale .pg-view { opacity: 0.4; filter: saturate(0.6); }
     .pg-view { transition: opacity 0.25s ease, filter 0.25s ease; }
-    .pg-view[hidden], .pg-state[hidden], #errorPanel[hidden] { display: none; }
+    .pg-view[hidden], .pg-state[hidden], #errorPanel[hidden], .pg-stage[hidden] { display: none; }
+    .pg-stage canvas { max-width: 100%; height: auto; border-radius: 0.5rem; }
 
     .pg-hive span {
         width: 22px;
@@ -249,13 +250,14 @@ scripts: ["/playground/playground.js"]
 
                 <div id="viewRun" class="pg-view flex min-h-0 flex-1 flex-col" data-view="run" role="tabpanel" aria-labelledby="tab-run" hidden>
                     <div id="runList" class="grid min-h-0 flex-1 content-start gap-2.5 overflow-auto p-3 scrollbar-thin"></div>
+                    <div id="stage" class="pg-stage mx-3 mb-3 flex shrink-0 flex-wrap items-center justify-center gap-3 overflow-auto rounded-xl border border-line bg-surface p-3" aria-label="What the program draws" hidden></div>
                     <div class="flex h-[38%] min-h-36 shrink-0 flex-col border-t border-line bg-code/40">
                         <div class="flex items-center justify-between px-4 py-1.5">
                             <span class="font-mono text-[0.68rem] font-semibold tracking-[0.12em] text-ink-2 uppercase">Console</span>
                             <button type="button" id="clearConsole" class="rounded-md px-2 py-0.5 text-xs text-ink-2 transition hover:bg-amber/10 hover:text-amber">Clear</button>
                         </div>
                         <div id="console" class="min-h-0 flex-1 overflow-auto px-4 pb-3 font-mono text-[0.8rem] leading-[1.7] scrollbar-thin" aria-live="polite">
-                            <p id="consoleEmpty" class="font-sans text-sm text-ink-2">Call an exported function to see what it returns.</p>
+                            <p id="consoleEmpty" class="font-sans text-sm text-ink-2">Run the program, or call an exported function, to see what it does.</p>
                         </div>
                     </div>
                 </div>

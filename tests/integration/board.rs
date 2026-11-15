@@ -3116,11 +3116,13 @@ mod runtime_features {
         link_host(&mut linker);
         let instantiate = |store: &mut wasmi::Store<Host>, wasm: &[u8]| {
             let module = wasmi::Module::new(&engine, wasm).expect("valid module");
-            linker
+            let instance = linker
                 .instantiate(&mut *store, &module)
                 .expect("instantiate")
                 .start(&mut *store)
-                .expect("start")
+                .expect("start");
+            harness::start_bridge(store, &instance);
+            instance
         };
         let plugin = instantiate(&mut store, &plugin);
         store
@@ -6732,6 +6734,7 @@ mod async_await {
             .expect("instantiate")
             .start(&mut store)
             .expect("start");
+        harness::start_bridge(&mut store, &instance);
         let start = |store: &mut wasmi::Store<Host>, name: &str, args: Vec<Js>| -> i32 {
             let handles: Vec<wasmi::Value> = args
                 .into_iter()
@@ -7039,5 +7042,362 @@ mod web_interop {
         );
         assert_eq!(run.stderr, "");
         assert_eq!(run.stdout, "200 True OK https://api.test/scores application/json\n[('ada', 7), ('bo', 12)]\nPOST text/plain hello\n404 404 Client Error: Not Found for url: https://api.test/missing\n'nothing here' True\nBodyUsedError Response body is already used\naborted: Failed to fetch\n");
+    }
+}
+
+mod graphics {
+    use super::*;
+
+    /// Canvas API (2D drawing)
+    ///
+    /// A canvas's 2D context through Pyodide's `js`: its size, styles as the
+    /// context answers them (an unparsable color ignored), rectangles filled
+    /// and cleared, a transform inside `save()` and `restore()`, and pixels
+    /// read back with `getImageData()` and written with `putImageData()`.
+    /// Resizing the canvas clears it. Pyodide's output in Chromium; the
+    /// harness's canvas rasterizes exactly these operations, and the browser
+    /// gate checks `examples/canvas_demo.py`'s strokes, paths, and gradients.
+    #[test]
+    fn canvas_2d() {
+        let run = run_main(
+            &dedent(
+                r##"
+                from js import ImageData, document
+                from pyodide.ffi import JsProxy
+
+
+                def at(ctx: JsProxy, x: int, y: int) -> str:
+                    px = ctx.getImageData(x, y, 1, 1).data
+                    return ",".join([str(px[k]) for k in range(4)])
+
+
+                def main() -> None:
+                    canvas = document.createElement("canvas")
+                    print(canvas.width, canvas.height)
+                    canvas.width = 20
+                    canvas.height = 10
+                    ctx = canvas.getContext("2d")
+                    print(ctx.fillStyle, ctx.strokeStyle, ctx.lineWidth, ctx.canvas == canvas)
+                    ctx.fillStyle = "red"
+                    print(ctx.fillStyle)
+                    ctx.fillRect(0, 0, 10, 10)
+                    ctx.fillStyle = "rgb(0, 0, 255)"
+                    ctx.fillRect(10, 0, 10, 10)
+                    ctx.fillStyle = "not a color"
+                    print(ctx.fillStyle, at(ctx, 5, 5), at(ctx, 15, 5))
+                    ctx.strokeStyle = "#0F0"
+                    ctx.lineWidth = 3
+                    ctx.lineWidth = -1
+                    print(ctx.strokeStyle, ctx.lineWidth)
+                    ctx.save()
+                    ctx.translate(4, 2)
+                    ctx.scale(2, 2)
+                    ctx.fillStyle = "#123456"
+                    ctx.fillRect(0, 0, 1, 1)
+                    t = ctx.getTransform()
+                    print(t.a, t.d, t.e, t.f)
+                    ctx.restore()
+                    print(ctx.fillStyle, at(ctx, 5, 3), at(ctx, 6, 3))
+                    ctx.clearRect(0, 0, 2, 2)
+                    print(at(ctx, 1, 1))
+                    img = ctx.createImageData(2, 1)
+                    print(img.width, img.height, len(img.data), img.data[0])
+                    blank = ImageData.new(1, 1)
+                    print(blank.data[3], len(blank.data))
+                    part = ctx.getImageData(10, 0, 2, 2)
+                    ctx.putImageData(part, 0, 8)
+                    print(at(ctx, 0, 9), at(ctx, 2, 9), at(ctx, 1, 10))
+                    canvas.width = 20
+                    print(at(ctx, 15, 5), ctx.fillStyle)
+
+
+                if __name__ == "__main__":
+                    main()
+                "##,
+            ),
+            "",
+            &[],
+        );
+        assert_eq!(run.stderr, "");
+        assert_eq!(
+            run.stdout,
+            "300 150\n#000000 #000000 1 True\n#ff0000\n#0000ff 255,0,0,255 0,0,255,255\n\
+             #00ff00 3\n2 2 4 2\n#0000ff 18,52,86,255 255,0,0,255\n0,0,0,0\n2 1 8 0\n0 4\n\
+             0,0,255,255 255,0,0,255 0,0,0,0\n0,0,0,0 #000000\n"
+        );
+    }
+
+    /// Animation & rendering loops
+    ///
+    /// `requestAnimationFrame` with a Python callback that draws a box a step
+    /// on per frame and asks for the next, the frame times it is passed,
+    /// `cancelAnimationFrame`, and `asyncio.run()` waiting for the loop to
+    /// finish (it suspends until JavaScript calls back). Pyodide's output,
+    /// which the browser gate checks `examples/animation_demo.py` against in
+    /// Chromium; the harness runs a frame every 1/60 s of its clock.
+    #[test]
+    fn animation_loop() {
+        let run = run_main(
+            &dedent(
+                r##"
+                """An animation loop from Python, as Pyodide runs one: requestAnimationFrame
+                with a Python callback that moves a box across a canvas a step per frame,
+                the frame times the browser passes it, cancelAnimationFrame, and asyncio
+                waiting until the loop is done. The browser gate runs it against Pyodide in
+                Chromium."""
+
+                import asyncio
+
+                from js import cancelAnimationFrame, document, performance, requestAnimationFrame
+                from pyodide.ffi import create_once_callable, create_proxy
+
+                STEPS = 6
+                WIDTH = 10
+
+                canvas = document.createElement("canvas")
+                ctx = canvas.getContext("2d")
+                times: list[float] = []
+                xs: list[int] = []
+                done = asyncio.Event()
+
+
+                def frame(t) -> None:
+                    """Draw the box one step on, and ask for the next frame until done."""
+                    times.append(float(t))
+                    x = len(xs) * WIDTH
+                    ctx.clearRect(0, 0, canvas.width, canvas.height)
+                    ctx.fillRect(x, 0, WIDTH, WIDTH)
+                    xs.append(x)
+                    if len(xs) < STEPS:
+                        requestAnimationFrame(ticker)
+                    else:
+                        done.set()
+
+
+                ticker = create_proxy(frame)
+
+
+                def cancelled(t) -> None:
+                    print("a cancelled frame ran")
+
+
+                def filled(x: int) -> bool:
+                    alpha: int = ctx.getImageData(x, 5, 1, 1).data[3]
+                    return alpha == 255
+
+
+                async def main() -> None:
+                    canvas.width = STEPS * WIDTH
+                    canvas.height = WIDTH
+                    start = float(performance.now())
+                    requestAnimationFrame(ticker)
+                    pending = requestAnimationFrame(create_once_callable(cancelled))
+                    cancelAnimationFrame(pending)
+                    await done.wait()
+                    ticker.destroy()
+                    print("frames", len(times), "at", xs)
+                    gaps: list[float] = [times[k + 1] - times[k] for k in range(len(times) - 1)]
+                    print("each frame later than the last", all(g > 0 for g in gaps))
+                    print("frames after the start", times[0] > start - 1000)
+                    print("box at the end", filled(STEPS * WIDTH - 5), "and not at the start", filled(5))
+                    await asyncio.sleep(0.05)
+                    print("done")
+
+
+                if __name__ == "__main__":
+                    asyncio.run(main())
+                "##,
+            ),
+            "",
+            &[],
+        );
+        assert_eq!(run.stderr, "");
+        assert_eq!(
+            run.stdout,
+            "frames 6 at [0, 10, 20, 30, 40, 50]\neach frame later than the last True\n\
+             frames after the start True\nbox at the end True and not at the start False\ndone\n"
+        );
+    }
+
+    /// Image manipulation & processing
+    ///
+    /// A canvas's pixels through Pyodide's buffer API: an `ImageData`'s bytes
+    /// read in one copy with `to_bytes()`, new pixels computed in Python
+    /// (inverted, then grayscale), written back in one copy with `assign()`
+    /// and `putImageData()`, single pixels set by item (clamped as a
+    /// `Uint8ClampedArray` stores them), `to_js()` of bytes, and `assign()`'s
+    /// errors. Pyodide's output, which the browser gate checks
+    /// `examples/image_demo.py` against in Chromium.
+    #[test]
+    fn image_processing() {
+        let run = run_main(
+            &dedent(
+                r##"
+                """Image processing from Python on a canvas's pixels, as Pyodide does it:
+                read an ImageData's bytes in one copy with to_bytes(), compute new pixels in
+                Python (an inverted copy, then a grayscale one), write them back in one copy
+                with assign() and putImageData(), and set single pixels by item. The
+                browser gate runs it against Pyodide in Chromium."""
+
+                from js import Float32Array, ImageData, Uint8ClampedArray, document
+                from pyodide.ffi import JsProxy, to_js
+
+                W = 4
+                H = 2
+
+
+                def checker(ctx: JsProxy) -> None:
+                    """Orange and blue squares, a pixel each."""
+                    for y in range(H):
+                        for x in range(W):
+                            ctx.fillStyle = "#ff8000" if (x + y) % 2 == 0 else "#0040c0"
+                            ctx.fillRect(x, y, 1, 1)
+
+
+                def invert(src: bytes) -> bytes:
+                    out: list[int] = []
+                    for k in range(0, len(src), 4):
+                        out += [255 - src[k], 255 - src[k + 1], 255 - src[k + 2], src[k + 3]]
+                    return bytes(out)
+
+
+                def grayscale(src: bytes) -> bytes:
+                    """Each pixel's luma, by ITU-R 601's weights in whole numbers."""
+                    out: list[int] = []
+                    for k in range(0, len(src), 4):
+                        g = (src[k] * 299 + src[k + 1] * 587 + src[k + 2] * 114) // 1000
+                        out += [g, g, g, src[k + 3]]
+                    return bytes(out)
+
+
+                def first(ctx: JsProxy, n: int) -> list[int]:
+                    data = ctx.getImageData(0, 0, W, H).data.to_bytes()
+                    return [data[k] for k in range(n)]
+
+
+                def main() -> None:
+                    canvas = document.createElement("canvas")
+                    canvas.width = W
+                    canvas.height = H
+                    ctx = canvas.getContext("2d")
+                    checker(ctx)
+                    pixels = ctx.getImageData(0, 0, W, H).data.to_bytes()
+                    print("read", len(pixels), "bytes:", [pixels[k] for k in range(8)])
+
+                    inverted = ctx.createImageData(W, H)
+                    inverted.data.assign(invert(pixels))
+                    ctx.putImageData(inverted, 0, 0)
+                    print("inverted:", first(ctx, 8))
+
+                    gray = ImageData.new(W, H)
+                    gray.data.assign(grayscale(ctx.getImageData(0, 0, W, H).data.to_bytes()))
+                    ctx.putImageData(gray, 0, 0)
+                    print("grayscale:", first(ctx, 8))
+
+                    one = ctx.getImageData(0, 0, 1, 1)
+                    one.data[0] = 300
+                    one.data[1] += 10
+                    one.data[2] = -4
+                    one.data[3] = 127.5
+                    ctx.putImageData(one, 2, 1)
+                    print("one pixel:", one.data.to_bytes()[0], one.data[1], one.data[2], one.data[3])
+
+                    copy = Uint8ClampedArray.new(to_js(bytes([1, 2, 3, 4])))
+                    print("from bytes:", len(copy), copy[3])
+                    try:
+                        gray.data.assign(bytes([1, 2, 3]))
+                    except ValueError as e:
+                        print("ValueError:", e)
+                    try:
+                        Float32Array.new(1).assign(bytes([0, 0, 128, 63]))
+                    except ValueError as e:
+                        print("ValueError:", e)
+
+
+                if __name__ == "__main__":
+                    main()
+                "##,
+            ),
+            "",
+            &[],
+        );
+        assert_eq!(run.stderr, "");
+        assert_eq!(
+            run.stdout,
+            "read 32 bytes: [255, 128, 0, 255, 0, 64, 192, 255]\n\
+             inverted: [0, 127, 255, 255, 255, 191, 63, 255]\n\
+             grayscale: [103, 103, 103, 255, 195, 195, 195, 255]\n\
+             one pixel: 255 113 0 128\nfrom bytes: 4 4\n\
+             ValueError: cannot assign to TypedArray of length 3 from buffer of length 32\n\
+             ValueError: TypedArray and memorybuffer have incompatible formats\n"
+        );
+    }
+
+    /// WebGL support (3D graphics)
+    ///
+    /// A canvas's `webgl` context through Pyodide's `js`: its constants and
+    /// drawing buffer, shaders and buffers made and bound, a `Float32Array`
+    /// and a `Uint16Array` made from lists through `to_js()` and uploaded,
+    /// their sizes read back, and the framebuffer cleared and read with
+    /// `readPixels()` into a typed array. Pyodide's output in Chromium; the
+    /// browser gate checks `examples/webgl_demo.py`, which draws, there.
+    #[test]
+    fn webgl() {
+        let run = run_main(
+            &dedent(
+                r##"
+                from js import Float32Array, Uint8Array, Uint16Array, document
+                from pyodide.ffi import JsProxy, to_js
+
+
+                def pixel(gl: JsProxy, x: int, y: int) -> list[int]:
+                    out = Uint8Array.new(4)
+                    gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, out)
+                    return list(out.to_bytes())
+
+
+                def main() -> None:
+                    canvas = document.createElement("canvas")
+                    canvas.width = 16
+                    canvas.height = 8
+                    gl = canvas.getContext("webgl", preserveDrawingBuffer=True)
+                    print(gl.drawingBufferWidth, gl.drawingBufferHeight, gl.VERTEX_SHADER, gl.TRIANGLES)
+                    print(canvas.getContext("2d"), gl.canvas == canvas)
+                    shader = gl.createShader(gl.VERTEX_SHADER)
+                    gl.shaderSource(shader, "void main() { gl_Position = vec4(0.0); }")
+                    gl.compileShader(shader)
+                    compiled: bool = gl.getShaderParameter(shader, gl.COMPILE_STATUS)
+                    log: str = gl.getShaderInfoLog(shader)
+                    print("compiled", compiled, repr(log))
+                    corners = Float32Array.new(to_js([0.1, -0.5, 2.5]))
+                    print(corners[0], corners[1], len(corners), corners.byteLength)
+                    buffer = gl.createBuffer()
+                    gl.bindBuffer(gl.ARRAY_BUFFER, buffer)
+                    gl.bufferData(gl.ARRAY_BUFFER, corners, gl.STATIC_DRAW)
+                    indices = gl.createBuffer()
+                    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indices)
+                    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, Uint16Array.new(to_js([0, 1, 2])), gl.STATIC_DRAW)
+                    a: int = gl.getBufferParameter(gl.ARRAY_BUFFER, gl.BUFFER_SIZE)
+                    b: int = gl.getBufferParameter(gl.ELEMENT_ARRAY_BUFFER, gl.BUFFER_SIZE)
+                    print("buffers", a, b)
+                    gl.viewport(0, 0, 16, 8)
+                    gl.clearColor(0.2, 0.4, 0.6, 1.0)
+                    gl.clear(gl.COLOR_BUFFER_BIT)
+                    print("cleared", pixel(gl, 0, 0), pixel(gl, 15, 7), gl.getError() == gl.NO_ERROR)
+
+
+                if __name__ == "__main__":
+                    main()
+                "##,
+            ),
+            "",
+            &[],
+        );
+        assert_eq!(run.stderr, "");
+        assert_eq!(
+            run.stdout,
+            "16 8 35633 4\njsnull True\ncompiled True ''\n0.10000000149011612 -0.5 3 12\n\
+             buffers 12 6\ncleared [51, 102, 153, 255] [51, 102, 153, 255] True\n"
+        );
     }
 }

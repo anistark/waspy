@@ -197,6 +197,268 @@ def sum_evens(limit: int) -> int:
 `,
     },
     {
+        id: 'canvas',
+        name: 'Canvas: a bar chart',
+        // Imports `js`: runs with the page through the loader, and is
+        // checked against Pyodide by the browser gate.
+        web: true,
+        code: `import math
+
+from js import document
+from pyodide.ffi import JsProxy
+
+SCORES = [("ada", 7), ("grace", 12), ("alan", 9), ("edsger", 5)]
+COLORS = ["#e4572e", "#29335c", "#f3a712", "#669bbc"]
+
+
+def stage() -> JsProxy:
+    """The playground's stage, or the page's body anywhere else."""
+    host = document.getElementById("stage")
+    return host if host else document.body
+
+
+def main() -> None:
+    canvas = document.createElement("canvas")
+    canvas.width = 320
+    canvas.height = 160
+    stage().appendChild(canvas)
+    ctx = canvas.getContext("2d")
+    ctx.fillStyle = "#fdf6e3"
+    ctx.fillRect(0, 0, 320, 160)
+    ctx.font = "12px sans-serif"
+    for i in range(len(SCORES)):
+        name, score = SCORES[i]
+        x = 20 + i * 75
+        ctx.fillStyle = COLORS[i]
+        ctx.fillRect(x, 140 - score * 10, 50, score * 10)
+        ctx.fillText(name, x, 155)
+    ctx.beginPath()
+    ctx.arc(290, 30, 18, 0, 2 * math.pi)
+    ctx.fillStyle = "rgba(220, 50, 47, 0.8)"
+    ctx.fill()
+    px = ctx.getImageData(45, 130, 1, 1).data
+    r: int = px[0]
+    g: int = px[1]
+    b: int = px[2]
+    print(f"drew {len(SCORES)} bars; the first is #{r:02x}{g:02x}{b:02x}")
+    print("the circle's style:", ctx.fillStyle)
+
+
+if __name__ == "__main__":
+    main()
+`,
+    },
+    {
+        id: 'animation',
+        name: 'Animation frames',
+        // Imports `js`: runs with the page through the loader, and is
+        // checked against Pyodide by the browser gate.
+        web: true,
+        code: `import asyncio
+
+from js import document, requestAnimationFrame
+from pyodide.ffi import JsProxy, create_proxy
+
+FRAMES = 90
+SIZE = 16
+WIDTH = 320
+HEIGHT = 80
+
+
+def stage() -> JsProxy:
+    """The playground's stage, or the page's body anywhere else."""
+    host = document.getElementById("stage")
+    return host if host else document.body
+
+
+canvas = document.createElement("canvas")
+ctx = canvas.getContext("2d")
+times: list[float] = []
+bounces: list[int] = []
+done = asyncio.Event()
+
+
+def frame(t) -> None:
+    """Move the ball one step, bouncing off the walls, and ask for more."""
+    times.append(float(t))
+    n = len(times)
+    span = WIDTH - SIZE
+    lap = (n * 4) % (2 * span)
+    x = lap if lap <= span else 2 * span - lap
+    if lap == span or lap == 0:
+        bounces.append(n)
+    ctx.fillStyle = "#fdf6e3"
+    ctx.fillRect(0, 0, WIDTH, HEIGHT)
+    ctx.fillStyle = "#cb4b16"
+    ctx.fillRect(x, 32, SIZE, SIZE)
+    if n < FRAMES:
+        requestAnimationFrame(ticker)
+    else:
+        done.set()
+
+
+ticker = create_proxy(frame)
+
+
+async def main() -> None:
+    canvas.width = WIDTH
+    canvas.height = HEIGHT
+    stage().appendChild(canvas)
+    requestAnimationFrame(ticker)
+    await done.wait()
+    ticker.destroy()
+    steady = all(times[k] < times[k + 1] for k in range(len(times) - 1))
+    print(f"{len(times)} frames, each later than the last: {steady}")
+    print("bounced at frames", bounces)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+`,
+    },
+    {
+        id: 'pixels',
+        name: 'Image pixels',
+        // Imports `js`: runs with the page through the loader, and is
+        // checked against Pyodide by the browser gate.
+        web: true,
+        code: `from js import document
+from pyodide.ffi import JsProxy
+
+W = 160
+H = 80
+
+
+def stage() -> JsProxy:
+    """The playground's stage, or the page's body anywhere else."""
+    host = document.getElementById("stage")
+    return host if host else document.body
+
+
+def grayscale_right_half(src: bytes) -> bytes:
+    """Each pixel of the right half as its luma, by ITU-R 601's weights."""
+    out: list[int] = []
+    for k in range(0, len(src), 4):
+        r, g, b, a = src[k], src[k + 1], src[k + 2], src[k + 3]
+        if (k // 4) % W >= W // 2:
+            y = (r * 299 + g * 587 + b * 114) // 1000
+            r, g, b = y, y, y
+        out += [r, g, b, a]
+    return bytes(out)
+
+
+def main() -> None:
+    canvas = document.createElement("canvas")
+    canvas.width = W
+    canvas.height = H
+    stage().appendChild(canvas)
+    ctx = canvas.getContext("2d")
+    gradient = ctx.createLinearGradient(0, 0, W, H)
+    gradient.addColorStop(0, "#d33682")
+    gradient.addColorStop(1, "#2aa198")
+    ctx.fillStyle = gradient
+    ctx.fillRect(0, 0, W, H)
+    ctx.fillStyle = "#b58900"
+    ctx.fillRect(30, 20, 100, 40)
+    image = ctx.getImageData(0, 0, W, H)
+    pixels = image.data.to_bytes()
+    image.data.assign(grayscale_right_half(pixels))
+    ctx.putImageData(image, 0, 0)
+    after = ctx.getImageData(0, 0, W, H).data.to_bytes()
+    left = (40 * W + 40) * 4
+    right = (40 * W + 120) * 4
+    print("read", len(pixels), "bytes in one copy")
+    print("left half kept:", [after[left + k] for k in range(3)])
+    print("right half gray:", [after[right + k] for k in range(3)])
+
+
+if __name__ == "__main__":
+    main()
+`,
+    },
+    {
+        id: 'webgl',
+        name: 'WebGL: a triangle',
+        // Imports `js`: runs with the page through the loader, and is
+        // checked against Pyodide by the browser gate.
+        web: true,
+        code: `from js import Float32Array, Uint8Array, document
+from pyodide.ffi import JsProxy, to_js
+
+VERTEX = """
+attribute vec2 position;
+attribute vec3 color;
+varying vec3 shade;
+void main() {
+    shade = color;
+    gl_Position = vec4(position, 0.0, 1.0);
+}
+"""
+
+FRAGMENT = """
+precision mediump float;
+varying vec3 shade;
+void main() {
+    gl_FragColor = vec4(shade, 1.0);
+}
+"""
+
+# x, y, r, g, b for each corner of the triangle.
+CORNERS = [0.0, 0.8, 1.0, 0.2, 0.2, -0.8, -0.8, 0.2, 1.0, 0.2, 0.8, -0.8, 0.2, 0.4, 1.0]
+
+
+def stage() -> JsProxy:
+    """The playground's stage, or the page's body anywhere else."""
+    host = document.getElementById("stage")
+    return host if host else document.body
+
+
+def shader(gl: JsProxy, kind: int, source: str) -> JsProxy:
+    s = gl.createShader(kind)
+    gl.shaderSource(s, source)
+    gl.compileShader(s)
+    ok: bool = gl.getShaderParameter(s, gl.COMPILE_STATUS)
+    if not ok:
+        log: str = gl.getShaderInfoLog(s)
+        raise RuntimeError(log)
+    return s
+
+
+def main() -> None:
+    canvas = document.createElement("canvas")
+    canvas.width = 240
+    canvas.height = 160
+    stage().appendChild(canvas)
+    gl = canvas.getContext("webgl", preserveDrawingBuffer=True)
+    program = gl.createProgram()
+    gl.attachShader(program, shader(gl, gl.VERTEX_SHADER, VERTEX))
+    gl.attachShader(program, shader(gl, gl.FRAGMENT_SHADER, FRAGMENT))
+    gl.linkProgram(program)
+    gl.useProgram(program)
+    gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer())
+    gl.bufferData(gl.ARRAY_BUFFER, Float32Array.new(to_js(CORNERS)), gl.STATIC_DRAW)
+    for name, size, offset in [("position", 2, 0), ("color", 3, 2)]:
+        where: int = gl.getAttribLocation(program, name)
+        gl.enableVertexAttribArray(where)
+        gl.vertexAttribPointer(where, size, gl.FLOAT, False, 20, offset * 4)
+    gl.clearColor(0.99, 0.96, 0.89, 1.0)
+    gl.clear(gl.COLOR_BUFFER_BIT)
+    gl.drawArrays(gl.TRIANGLES, 0, 3)
+    out = Uint8Array.new(4)
+    gl.readPixels(120, 80, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, out)
+    center: list[int] = list(out.to_bytes())
+    gl.readPixels(2, 2, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, out)
+    corner: list[int] = list(out.to_bytes())
+    print("a triangle in", gl.drawingBufferWidth, "by", gl.drawingBufferHeight)
+    print("the background is cleared:", corner)
+    print("the center is drawn:", center != corner, "no errors:", gl.getError() == 0)
+
+
+if __name__ == "__main__":
+    main()
+`,
+    },
+    {
         id: 'refused',
         name: 'A refused construct',
         code: `# Waspy gives Python's answer or refuses to compile.

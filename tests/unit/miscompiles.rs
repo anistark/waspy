@@ -6910,3 +6910,37 @@ fn finally_runs_when_a_handler_raises() {
     assert_eq!(run.stderr, "");
     assert_eq!(run.stdout, "finally 3\n6\nconverting negative\nfinally -1\ncaught 'bad -1'\nhandler,finally,outer inner\ninner handler\ninner finally\nouter finally\nnested caught b\ncaught wrapped 20\n32\ngot 1\ngen handler\ngen finally\ngen caught in gen\ncoro handler\ncoro finally\nmain caught in coro\n");
 }
+
+/// A walk over bytes yields its ints, as CPython's does: `list(b)`,
+/// `tuple(b)`, a comprehension over bytes, `sum()`, and `max()` read the
+/// bytes' (offset, length) pair as a list header and walked whatever memory
+/// followed, so `list(b"hi!")` printed thousands of stray words.
+#[test]
+fn walking_bytes_yields_its_ints() {
+    let run = run_main(
+        &dedent(
+            r#"
+            def total(b: bytes) -> int:
+                return sum([x for x in b])
+
+
+            def main() -> None:
+                b = b"hi!"
+                print(list(b), tuple(b), [x * 2 for x in b if x > 100])
+                xs: list[int] = list(bytes([1, 2]))
+                print(xs, total(b), max(b), sum(b), list(b""), {x: x % 7 for x in b})
+
+
+            if __name__ == "__main__":
+                main()
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(run.stderr, "");
+    assert_eq!(
+        run.stdout,
+        "[104, 105, 33] (104, 105, 33) [208, 210]\n[1, 2] 242 105 242 [] {104: 6, 105: 0, 33: 5}\n"
+    );
+}

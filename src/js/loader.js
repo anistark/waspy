@@ -48,6 +48,16 @@ export class PythonError extends Error {
 /// A value JSON would not carry over as it is.
 class Unsupported extends Error {}
 
+/// A string's code points, each a string.
+const codePoints = (s) => Array.from(s);
+
+/// The bytes of a typed array or an ArrayBuffer, as a view, or null.
+const bytesOf = (v) => {
+    if (ArrayBuffer.isView(v)) return new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+    if (v instanceof ArrayBuffer) return new Uint8Array(v);
+    return null;
+};
+
 export class Bridge {
     constructor({ globals = globalThis, modules = {} } = {}) {
         this.globals = globals;
@@ -71,6 +81,29 @@ export class Bridge {
         this.wake = null;
         this.taken = null;
         this.depth = 0;
+        this.started = false;
+    }
+
+    /// Run the module's top level, once, before the first call into it: a
+    /// module using the bridge has no start section, since its top level may
+    /// reach JavaScript, which needs the instance (`_start` runs it itself).
+    init() {
+        if (this.started) return;
+        this.started = true;
+        const init = this.instance.exports.__waspy_init;
+        if (typeof init !== 'function') return;
+        this.depth += 1;
+        let r;
+        try {
+            r = init();
+        } finally {
+            this.depth -= 1;
+        }
+        if (r === -2) {
+            const message = this.failure;
+            this.failure = null;
+            throw new PythonError(message);
+        }
     }
 
     /// A promise Python awaits settled: queued for the program `start()`
@@ -83,6 +116,13 @@ export class Bridge {
         } else {
             this.settle(token, failed, value);
         }
+    }
+
+    /// JavaScript called into the program while `start()` waits in its
+    /// event loop: what the call did (an event handled, an animation frame
+    /// drawn) may have made a task ready, so the loop looks again.
+    rouse() {
+        if (this.depth === 0 && this.wake) this.wake();
     }
 
     /// Run the module's event loop again in `delay` milliseconds (none when
@@ -228,9 +268,12 @@ export class Bridge {
                 this.memory().set(this.bytes, at);
             },
             equal: (a, b) => (this.get(a) === this.get(b) ? 1 : 0),
+            // A string's length and items count code points, as the str
+            // Pyodide makes of it does.
             length: (h) => {
                 const v = this.get(h);
-                if (typeof v === 'string' || Array.isArray(v)) return v.length;
+                if (typeof v === 'string') return codePoints(v).length;
+                if (Array.isArray(v)) return v.length;
                 if (v !== null && typeof v === 'object') {
                     if (typeof v.length === 'number') return v.length;
                     if (typeof v.size === 'number') return v.size;
@@ -239,10 +282,21 @@ export class Bridge {
             },
             item: (h, i) => {
                 const v = this.get(h);
+                if (typeof v === 'string') {
+                    const chars = codePoints(v);
+                    const at = i < 0 ? i + chars.length : i;
+                    return at < 0 || at >= chars.length ? -4 : this.add(chars[at]);
+                }
+                // What Pyodide indexes: an array, a typed array, and the DOM's
+                // iterable collections (a NodeList, an HTMLCollection), not
+                // any object with a length.
                 const arrayLike =
                     Array.isArray(v) ||
                     ArrayBuffer.isView(v) ||
-                    (v !== null && typeof v === 'object' && typeof v.length === 'number');
+                    (v !== null &&
+                        typeof v === 'object' &&
+                        typeof v.length === 'number' &&
+                        typeof v[Symbol.iterator] === 'function');
                 if (!arrayLike) return -3;
                 const at = i < 0 ? i + v.length : i;
                 return at < 0 || at >= v.length ? -1 : this.add(v[at]);
@@ -352,6 +406,7 @@ export class Bridge {
                         r = this.instance.exports[`__waspy_call_${arity}`](env, ...handles);
                     } finally {
                         this.depth -= 1;
+                        this.rouse();
                     }
                     if (once) fn.destroy();
                     if (r === -2) {
@@ -371,6 +426,52 @@ export class Bridge {
                 };
                 return this.add(fn);
             },
+            // `x[i] = v` of an array or a typed array (a string is Pyodide's
+            // str, which takes no item assignment).
+            set_item: (h, i, v) =>
+                this.guard(() => {
+                    const target = this.get(h);
+                    if (typeof target === 'string') return -4;
+                    const arrayLike =
+                        Array.isArray(target) ||
+                        ArrayBuffer.isView(target) ||
+                        (target !== null &&
+                            typeof target === 'object' &&
+                            typeof target.length === 'number' &&
+                            typeof target[Symbol.iterator] === 'function');
+                    if (!arrayLike) return -3;
+                    // An index before the start sets a stray property, as
+                    // Pyodide's does, which no item reads.
+                    target[i < 0 ? i + target.length : i] = this.get(v);
+                    return 0;
+                }),
+            // A typed array's (or a buffer's) bytes, for `utf8_copy`, as
+            // `JsBuffer.to_bytes()` copies them.
+            buffer_bytes: (h) => {
+                const view = bytesOf(this.get(h));
+                if (!view) return -1;
+                this.bytes = view.slice();
+                return this.bytes.length;
+            },
+            // `JsBuffer.assign(b)`: `n` bytes of memory copied into a typed
+            // array of bytes of that length, with Pyodide's errors.
+            assign: (h, at, n) => {
+                const target = this.get(h);
+                const view = bytesOf(target);
+                if (!view) return -1;
+                if (ArrayBuffer.isView(target) && !(target instanceof Uint8Array || target instanceof Uint8ClampedArray)) {
+                    this.lastError = 'TypedArray and memorybuffer have incompatible formats';
+                    return -7;
+                }
+                if (view.length !== n) {
+                    this.lastError = `cannot assign to TypedArray of length ${n} from buffer of length ${view.length}`;
+                    return -7;
+                }
+                view.set(this.memory().subarray(at, at + n));
+                return 0;
+            },
+            // `to_js(b)` of bytes: a `Uint8Array` of them.
+            bytes: (at, n) => this.add(this.memory().slice(at, at + n)),
             resolve: (token, failed, h) => {
                 let value = this.get(h);
                 this.drop(h);
@@ -390,8 +491,18 @@ export class Bridge {
     wrap(signature) {
         const exports = this.instance.exports;
         const wrapper = exports[`__jsx_${signature.name}`];
-        if (!wrapper) return exports[signature.name];
+        if (!wrapper) {
+            const raw = exports[signature.name];
+            return (
+                raw &&
+                ((...args) => {
+                    this.init();
+                    return raw(...args);
+                })
+            );
+        }
         return (...args) => {
+            this.init();
             const handles = signature.params.map((_, k) => this.add(args[k]));
             this.depth += 1;
             let r;
@@ -399,6 +510,7 @@ export class Bridge {
                 r = wrapper(...handles);
             } finally {
                 this.depth -= 1;
+                this.rouse();
             }
             if (r === -2) {
                 const message = this.failure;
@@ -455,6 +567,8 @@ export async function instantiate(source, { wasi = undefined, globals, modules }
     const start = async () => {
         const main = instance.exports._start;
         if (typeof main !== 'function') throw new Error('this module has no __main__ block (_start)');
+        // The `__main__` block runs the top level first.
+        bridge.started = true;
         if (!SUSPENDING || !wanted.has('waspy_js')) {
             main();
             return;

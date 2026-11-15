@@ -458,6 +458,12 @@ pub struct CompilationContext {
     /// expected with the answer CPython gives. The next `emit_expr` takes it,
     /// so the expressions inside the operand are checked as usual.
     pub numeric_operand: Cell<bool>,
+    /// Set just before emitting an expression tested for truth (an `if`'s or
+    /// a `while`'s condition, a filter, an operand of `and` / `or`), where a
+    /// JavaScript value is as true as the value Pyodide hands over, rather
+    /// than converted to a bool as a store into a `bool` place does (which
+    /// `null` or an array is not). The next `emit_expr` takes it.
+    pub truth_test: Cell<bool>,
     /// WASM function index of the runtime bump allocator `__alloc(size) -> ptr`.
     /// Emitted after all user functions/methods, so callers (e.g. string/bytes
     /// concatenation) reference it by this index. Set during module assembly.
@@ -648,6 +654,7 @@ impl CompilationContext {
             comp_depth: Cell::new(0),
             expr_block_depth: Cell::new(0),
             numeric_operand: Cell::new(false),
+            truth_test: Cell::new(false),
             alloc_func_index: 0,
             alloc_used: Cell::new(false),
             rs_frame_local: 0,

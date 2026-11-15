@@ -115,6 +115,8 @@ pub enum Helper {
     /// `(list) -> b | 0`: the bytes of a list of ints, 0 when one is not in
     /// range(0, 256).
     BytesOf,
+    /// `(b) -> list`: the ints of a bytes value, as a walk yields them.
+    BytesInts,
     /// `(n) -> b`: `n` zero bytes.
     BytesZero,
     /// `(fd, s) -> ()`: write a string to a file descriptor.
@@ -232,6 +234,7 @@ pub fn signature(helper: &Helper) -> (Vec<ValType>, Vec<ValType>) {
         | Helper::FirstCodePoint
         | Helper::FromCodePoint
         | Helper::BytesOf
+        | Helper::BytesInts
         | Helper::BytesZero => (vec![I32], vec![I32]),
         Helper::WriteFd => (vec![I32, I32], vec![]),
         Helper::Start => (vec![], vec![]),
@@ -329,6 +332,7 @@ pub fn build(helper: &Helper, ctx: &CompilationContext) -> Function {
         Helper::CharOffset => crate::compiler::unicode::build_char_offset(ctx),
         Helper::CharIndex => crate::compiler::unicode::build_char_index(ctx),
         Helper::StrChars => crate::compiler::unicode::build_str_chars(ctx),
+        Helper::BytesInts => crate::compiler::unicode::build_bytes_ints(ctx),
         Helper::BytesOf => crate::compiler::unicode::build_bytes_of(ctx),
         Helper::BytesZero => crate::compiler::unicode::build_bytes_zero(ctx),
         Helper::WriteFd => crate::compiler::host::build_write_fd(ctx),

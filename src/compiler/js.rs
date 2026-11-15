@@ -130,6 +130,19 @@ pub enum JsImport {
     /// Python function `env` through the export `__waspy_call_<arity>`
     /// (`create_proxy`), whose `destroy()` calls `__waspy_forget(id)`.
     Function,
+    /// `(h, i, v) -> status`: `h[i] = v` of an array or a typed array (-3:
+    /// not one, -4: a string).
+    SetItem,
+    /// `(h) -> n`: a typed array's (or buffer's) bytes, kept for `utf8_copy`
+    /// (-1: not a buffer).
+    BufferBytes,
+    /// `(h, at, n) -> status`: copy `n` bytes from memory into a typed
+    /// array of bytes (`JsBuffer.assign`; -1: not a buffer, -7: a
+    /// `ValueError` whose message `error` holds).
+    Assign,
+    /// `(at, n) -> h`: a `Uint8Array` of `n` bytes copied from memory
+    /// (`to_js(b)` of bytes).
+    Bytes,
 }
 
 impl JsImport {
@@ -173,6 +186,10 @@ impl JsImport {
             JsImport::SettledFailed => "settled_failed",
             JsImport::SettledValue => "settled_value",
             JsImport::Function => "function",
+            JsImport::SetItem => "set_item",
+            JsImport::BufferBytes => "buffer_bytes",
+            JsImport::Assign => "assign",
+            JsImport::Bytes => "bytes",
         }
     }
 
@@ -191,7 +208,8 @@ impl JsImport {
             | JsImport::SettledFailed
             | JsImport::SettledValue => (vec![], vec![I32]),
             JsImport::Suspend => (vec![F64], vec![I32]),
-            JsImport::Get => (vec![I32; 3], vec![I32]),
+            JsImport::Get | JsImport::SetItem | JsImport::Assign => (vec![I32; 3], vec![I32]),
+            JsImport::Bytes => (vec![I32; 2], vec![I32]),
             JsImport::Set | JsImport::CallMethod | JsImport::Function => (vec![I32; 4], vec![I32]),
             JsImport::Call | JsImport::Construct | JsImport::Equal | JsImport::Item => {
                 (vec![I32; 2], vec![I32])
@@ -206,6 +224,7 @@ impl JsImport {
             | JsImport::Iterate
             | JsImport::Next
             | JsImport::Keep
+            | JsImport::BufferBytes
             | JsImport::Stringify => (vec![I32], vec![I32]),
             JsImport::ToNumber => (vec![I32], vec![F64]),
             JsImport::Utf8Copy | JsImport::Release => (vec![I32], vec![]),
@@ -214,7 +233,7 @@ impl JsImport {
         }
     }
 
-    pub const ALL: [JsImport; 38] = [
+    pub const ALL: [JsImport; 42] = [
         JsImport::Global,
         JsImport::GlobalThis,
         JsImport::Get,
@@ -253,6 +272,10 @@ impl JsImport {
         JsImport::SettledFailed,
         JsImport::SettledValue,
         JsImport::Function,
+        JsImport::SetItem,
+        JsImport::BufferBytes,
+        JsImport::Assign,
+        JsImport::Bytes,
     ];
 }
 
@@ -305,6 +328,9 @@ pub enum JsFn {
     /// `(h, x: f64) -> bool`: the value equals the number, as Python's
     /// would (a bool as 0 or 1).
     EqNumber,
+    /// `(proxy) -> bytes`: `x.to_bytes()` of a typed array or buffer, its
+    /// bytes copied into a fresh `bytes` (AttributeError for another value).
+    ToBytes,
 }
 
 /// What a failed bridge operation was, for its error.
@@ -320,6 +346,10 @@ pub enum JsOp {
     Construct,
     /// An item (-1 IndexError, -3 not subscriptable).
     Item,
+    /// An item assigned (-3 and -4 TypeError).
+    SetItem,
+    /// A buffer's method, `name` (-1 AttributeError, -7 ValueError).
+    Buffer,
     /// Iteration (-3 not iterable).
     Iterate,
     /// `to_py()` (-3: what JSON would not carry).
@@ -342,7 +372,8 @@ impl JsFn {
             | JsFn::Int
             | JsFn::Truth
             | JsFn::Len
-            | JsFn::KindName => (vec![I32], vec![I32]),
+            | JsFn::KindName
+            | JsFn::ToBytes => (vec![I32], vec![I32]),
             JsFn::Check(_) => (vec![I32, I32], vec![]),
             JsFn::EqNumber => (vec![I32, F64], vec![I32]),
             JsFn::Float => (vec![I32], vec![F64]),
@@ -403,6 +434,7 @@ pub(crate) fn build(f: &JsFn, ctx: &CompilationContext) -> Function {
         JsFn::ToJs(ty) => build_to_js(ctx, ty),
         JsFn::KindName => build_kind_name(ctx),
         JsFn::EqNumber => build_eq_number(ctx),
+        JsFn::ToBytes => build_to_bytes(ctx),
     }
 }
 
@@ -470,6 +502,43 @@ fn build_check(ctx: &CompilationContext, op: JsOp) -> Function {
                     text(ctx, "'pyodide.ffi.JsProxy' object is not subscriptable"),
                 )
             });
+            // A string is the str Pyodide makes of it.
+            a.if_(status.eq(-4), |a| {
+                raise_text(a, ctx, "IndexError", text(ctx, "string index out of range"))
+            });
+        }
+        JsOp::SetItem => {
+            a.if_(status.eq(-3), |a| {
+                raise_text(
+                    a,
+                    ctx,
+                    "TypeError",
+                    text(ctx, "'pyodide.ffi.JsProxy' object does not support item assignment"),
+                )
+            });
+            a.if_(status.eq(-4), |a| {
+                raise_text(
+                    a,
+                    ctx,
+                    "TypeError",
+                    text(ctx, "'str' object does not support item assignment"),
+                )
+            });
+        }
+        JsOp::Buffer => {
+            a.if_(status.eq(-1), |a| raise_text(a, ctx, "AttributeError", name));
+            a.if_(status.eq(-7), |a| {
+                let e = a.let_(call(imp(ctx, JsImport::Error), vec![], Some(Ty::I32)));
+                let t = a.let_(call(
+                    imp(ctx, JsImport::Text),
+                    vec![e.into()],
+                    Some(Ty::I32),
+                ));
+                let message = a.let_(call(helper(ctx, JsFn::Text), vec![t.into()], Some(Ty::I32)));
+                a.run(call(imp(ctx, JsImport::Release), vec![t.into()], None));
+                a.run(call(imp(ctx, JsImport::Release), vec![e.into()], None));
+                raise_text(a, ctx, "ValueError", message);
+            });
         }
         JsOp::Call => a.if_(status.eq(-3), |a| {
             raise_text(
@@ -530,6 +599,29 @@ fn build_text(ctx: &CompilationContext) -> Function {
     ));
     // A fresh string of `n` bytes: `[len][bytes][nul]`, text the collector
     // does not read.
+    let block = a.let_(call(ctx.alloc_fn(), vec![n + 5], Some(Ty::I32)));
+    a.store(Ty::I32, block - 4, 0, crate::compiler::gc::NOSCAN);
+    a.store(Ty::I32, block, 0, n);
+    let at = a.let_(block + 4);
+    a.run(call(imp(ctx, JsImport::Utf8Copy), vec![at.into()], None));
+    a.store8(at + n, 0, 0);
+    a.ret(at);
+    a.finish()
+}
+
+fn build_to_bytes(ctx: &CompilationContext) -> Function {
+    let mut a = Asm::new(&[Ty::I32]);
+    let proxy = a.param(0);
+    let n = a.let_(call(
+        imp(ctx, JsImport::BufferBytes),
+        vec![handle(proxy)],
+        Some(Ty::I32),
+    ));
+    a.if_(n.lt(0), |a| {
+        raise_text(a, ctx, "AttributeError", text(ctx, "to_bytes"));
+        a.ret(text(ctx, ""));
+    });
+    // A fresh `bytes` of `n` bytes, laid out as a string is.
     let block = a.let_(call(ctx.alloc_fn(), vec![n + 5], Some(Ty::I32)));
     a.store(Ty::I32, block - 4, 0, crate::compiler::gc::NOSCAN);
     a.store(Ty::I32, block, 0, n);
@@ -1023,6 +1115,18 @@ pub(crate) fn rewrite(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr>
                     Some(js_call("new", args))
                 }
                 "to_py" if arguments.is_empty() => Some(js_call("to_py", args)),
+                // A typed array's buffer methods, as Pyodide's `JsBuffer`
+                // has them: its bytes copied out, or bytes copied in.
+                "to_bytes" if arguments.is_empty() => Some(js_call("to_bytes", args)),
+                "assign"
+                    if arguments.len() == 1
+                        && crate::compiler::function::infer_value_type(&arguments[0], ctx)
+                            == IRType::Bytes =>
+                {
+                    args.extend(arguments.iter().cloned());
+                    Some(js_call("assign", args))
+                }
+                "assign_to" | "to_memoryview" => Some(js_call(method_name, args)),
                 _ => {
                     args.push(lit(method_name));
                     args.extend(arguments.iter().cloned());
@@ -1115,6 +1219,8 @@ fn ffi(f: &str, args: &[IRExpr], ctx: &CompilationContext) -> Option<IRExpr> {
                 IRType::List(_) | IRType::Tuple(_) | IRType::VarTuple(_) | IRType::Dict(..) => {
                     Some(js_call("to_js", vec![x.clone()]))
                 }
+                // Bytes are a `Uint8Array` of them, as Pyodide's are.
+                IRType::Bytes => Some(js_call("to_js_bytes", vec![x.clone()])),
                 // A primitive (or a proxy) is itself, as Pyodide's `to_js`
                 // answers it.
                 _ => Some(x.clone()),
@@ -1133,7 +1239,8 @@ pub(crate) fn intrinsic_type(name: &str) -> Option<IRType> {
         "str" | "repr" => IRType::String,
         "float" => IRType::Float,
         "bool" | "eq" | "is_none" | "same" => IRType::Bool,
-        "set" | "then" | "resolve" => IRType::None,
+        "set" | "then" | "resolve" | "set_item" | "assign" => IRType::None,
+        "to_bytes" => IRType::Bytes,
         "export" | "fail" | "next_settled" | "settled_failed" | "suspend" => IRType::Int,
         "can_suspend" => IRType::Bool,
         "to_py" => IRType::Unknown,
@@ -1187,6 +1294,70 @@ fn scalar(ty: &IRType) -> bool {
     )
 }
 
+/// The flag a module using the bridge sets as its top level starts.
+pub const STARTED_FLAG: &str = "__waspy_started";
+/// `__waspy_init() -> int`: run the top level of a module using the bridge
+/// if it has not run, answering 0, or -2 with the exception's last line
+/// handed over (`fail`) for the loader to throw. The loader calls it before
+/// its first call into the module.
+pub const INIT_FN: &str = "__waspy_init";
+
+/// A module using the bridge, made to run its top level (`__module_init`)
+/// on first use: through `__waspy_init`, which the loader calls, and at the
+/// start of the `__main__` block, so `_start` reports an exception there as
+/// it reports one the block raises.
+pub(crate) fn start_on_first_use(module: &mut IRModule) {
+    use crate::ir::build::*;
+    use crate::ir::{IRCompareOp, IRExceptHandler, IRFunction, IRStatement};
+    let not_started = || cmp(v(STARTED_FLAG), IRCompareOp::Eq, int(0));
+    let run = || expr_stmt(call(crate::compiler::context::MODULE_INIT_FN, vec![]));
+    let entry = if module
+        .functions
+        .iter()
+        .any(|f| f.name == crate::ir::MAIN_BLOCK_FN)
+    {
+        crate::ir::MAIN_BLOCK_FN
+    } else {
+        "main"
+    };
+    if let Some(f) = module.functions.iter_mut().find(|f| f.name == entry) {
+        f.body.statements.insert(0, if_(not_started(), vec![run()]));
+    }
+    let line_fn = format!("{BRIDGE_FN_PREFIX}init_line");
+    module.functions.push(IRFunction {
+        name: INIT_FN.to_string(),
+        params: Vec::new(),
+        body: crate::ir::IRBody {
+            statements: vec![
+                if_(
+                    not_started(),
+                    vec![IRStatement::TryExcept {
+                        try_body: body(vec![run()]),
+                        except_handlers: vec![IRExceptHandler {
+                            exception_types: vec!["BaseException".to_string()],
+                            name: Some("__e".to_string()),
+                            body: crate::ir::IRBody {
+                                statements: vec![ret_val(call(
+                                    "__js_fail",
+                                    vec![call(&line_fn, vec![v("__e")])],
+                                ))],
+                            },
+                        }],
+                        finally_body: None,
+                    }],
+                ),
+                ret_val(int(0)),
+            ],
+        },
+        return_type: IRType::Int,
+        decorators: Vec::new(),
+    });
+    module.functions.push(exception_line(&line_fn));
+    for t in [": ", "__main__."] {
+        module.memory_layout.add_string(t);
+    }
+}
+
 /// The module with what the bridge needs: the names its operations carry,
 /// placed in memory, and a JavaScript-facing wrapper for each export whose
 /// signature crosses, with the list of exports the loader reads. None for a
@@ -1206,6 +1377,17 @@ pub(crate) fn with_bridge(module: &IRModule) -> Option<IRModule> {
             .iter()
             .flat_map(|c| c.methods.iter().map(|f| f.body.clone())),
     );
+    // Module and class definitions run in the module's start, so the names
+    // their values use (`canvas = document.createElement("canvas")`) count.
+    let definitions = m
+        .variables
+        .iter()
+        .chain(m.classes.iter().flat_map(|c| c.class_vars.iter()));
+    bodies.push(crate::ir::IRBody {
+        statements: definitions
+            .map(|var| IRStatement::Expression(var.value.clone()))
+            .collect(),
+    });
     fn targets(body: &crate::ir::IRBody, names: &mut std::collections::BTreeSet<String>) {
         for stmt in &body.statements {
             if let crate::ir::IRStatement::AttributeAssign { attribute, .. }
@@ -1638,6 +1820,85 @@ pub(crate) fn emit_intrinsic(
             func.instruction(&I::LocalSet(ctx.temp_local));
             ctx.release_held();
             finish(func, ctx, JsOp::Attribute, off);
+            IRType::JsProxy
+        }
+        // `x[i] = v`.
+        "set_item" => {
+            let o = emit_handle(&args[0], func, ctx, ml);
+            let ty = emit_expr(&args[1], func, ctx, ml, Some(&IRType::Int));
+            if ty != IRType::Int {
+                ctx.report(format!(
+                    "an item of a JavaScript value assigned by a {} is not supported; index an \
+                     array by an int",
+                    crate::type_to_string(&ty)
+                ));
+            }
+            let i = hold(ctx);
+            func.instruction(&I::LocalSet(i));
+            let v = hold(ctx);
+            let temp = emit_value(&args[2], func, ctx, ml);
+            func.instruction(&I::LocalSet(v));
+            func.instruction(&I::LocalGet(o));
+            func.instruction(&I::LocalGet(i));
+            func.instruction(&I::LocalGet(v));
+            call_import(func, JsImport::SetItem);
+            func.instruction(&I::LocalSet(ctx.temp_local));
+            if temp {
+                func.instruction(&I::LocalGet(v));
+                call_import(func, JsImport::Release);
+            }
+            func.instruction(&I::LocalGet(ctx.temp_local));
+            func.instruction(&I::LocalGet(i));
+            func.instruction(&I::Call(helper(ctx, JsFn::Check(JsOp::SetItem))));
+            emit_post_call_check(func, ctx);
+            ctx.release_held();
+            ctx.release_held();
+            ctx.release_held();
+            IRType::None
+        }
+        "to_bytes" => {
+            emit_expr(&args[0], func, ctx, ml, None);
+            func.instruction(&I::Call(helper(ctx, JsFn::ToBytes)));
+            emit_post_call_check(func, ctx);
+            recover_str_pair(func, ctx);
+            IRType::Bytes
+        }
+        // `x.assign(b)`: the bytes copied into a typed array of bytes.
+        "assign" => {
+            let o = emit_handle(&args[0], func, ctx, ml);
+            emit_expr(&args[1], func, ctx, ml, Some(&IRType::Bytes));
+            let n = hold(ctx);
+            func.instruction(&I::LocalSet(n));
+            let at = hold(ctx);
+            func.instruction(&I::LocalSet(at));
+            func.instruction(&I::LocalGet(o));
+            func.instruction(&I::LocalGet(at));
+            func.instruction(&I::LocalGet(n));
+            call_import(func, JsImport::Assign);
+            func.instruction(&I::LocalSet(ctx.temp_local));
+            func.instruction(&I::LocalGet(ctx.temp_local));
+            let (off, _) = name_of(Some(&lit("assign")), ml, ctx);
+            func.instruction(&I::I32Const(off));
+            func.instruction(&I::Call(helper(ctx, JsFn::Check(JsOp::Buffer))));
+            emit_post_call_check(func, ctx);
+            ctx.release_held();
+            ctx.release_held();
+            ctx.release_held();
+            IRType::None
+        }
+        "assign_to" | "to_memoryview" => {
+            ctx.report(format!(
+                "{op}() hands over a writable buffer (a bytearray or memoryview), which is not \
+                 supported. Hint: read the bytes with to_bytes(), and write them back with \
+                 assign(b)"
+            ));
+            IRType::None
+        }
+        // `to_js(b)` of bytes: a `Uint8Array` copy.
+        "to_js_bytes" => {
+            emit_expr(&args[0], func, ctx, ml, Some(&IRType::Bytes));
+            call_import(func, JsImport::Bytes);
+            func.instruction(&I::Call(helper(ctx, JsFn::Wrap)));
             IRType::JsProxy
         }
         "set" => {
