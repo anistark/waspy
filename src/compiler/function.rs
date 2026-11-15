@@ -1639,8 +1639,10 @@ fn method_return_type(
                 Some(IRType::String)
             }
             "find" | "rfind" | "index" | "rindex" | "count" => Some(IRType::Int),
+            "encode" => Some(IRType::Bytes),
             "startswith" | "endswith" | "isdigit" | "isalpha" | "isalnum" | "isspace"
-            | "isupper" | "islower" | "isnumeric" | "isdecimal" | "istitle" => Some(IRType::Bool),
+            | "isupper" | "islower" | "isnumeric" | "isdecimal" | "istitle" | "isascii"
+            | "isprintable" | "isidentifier" => Some(IRType::Bool),
             "split" | "rsplit" | "splitlines" => Some(IRType::List(Box::new(IRType::String))),
             _ => None,
         };

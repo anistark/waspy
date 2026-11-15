@@ -126,9 +126,15 @@ def main():
     emit_ranges("NAMED", ranges(
         lambda c: unicodedata.name(c, None) is not None
         or unicodedata.category(c) == "Cc"))
+    # isprintable(), and isidentifier()'s two classes: what may start an
+    # identifier (the underscore included) and what may continue one.
+    emit_ranges("PRINTABLE", ranges(str.isprintable))
+    emit_ranges("XID_START", ranges(str.isidentifier))
+    emit_ranges("XID_CONTINUE", ranges(lambda c: ("a" + c).isidentifier()))
     emit_map("TO_UPPER", str.upper)
     emit_map("TO_LOWER", str.lower)
     emit_map("TO_TITLE", title_char)
+    emit_map("TO_FOLD", str.casefold)
 
 
 main()

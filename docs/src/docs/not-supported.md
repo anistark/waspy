@@ -9,6 +9,8 @@ The compiler validates syntax up front and rejects these with a located error an
 - Asynchronous generators (an `async def` that yields, and so an `async for` over one), asynchronous comprehensions, and an `async def` inside a function (`async def`, `await`, `async with`, and `async for` over a class with `__aiter__` and `__anext__` are supported: see [JavaScript and async](/docs/javascript/))
 - `match` statements, `type` aliases, `except*`, and `del` of an attribute or a stepped slice
 - `from module import *`
+- A generator expression kept in a variable, returned, stored, or passed to the program's own functions, and `print()`, `len()`, or `bool()` of one: it goes where a builtin, a standard-library call, a `for` statement, or a comprehension walks it once (see [Limitations](/docs/limitations/#generators))
+- A class whose base is a builtin value type (`class Stack(list)`), an undefined name, or an expression computed when the class statement runs
 - `*args`, `**kwargs`, and keyword-only parameters on methods other than `__init__`, `**` unpacking in a call, and positional-only parameters (`/`)
 - Class keywords other than `metaclass=` (`__init_subclass__` arguments)
 - Decorators CPython does not define (`@memoize`, `@timer`, `@debug`, `@pure`, `@type_check`, `@default_value`, `@wasm_export`), which CPython rejects with `NameError`

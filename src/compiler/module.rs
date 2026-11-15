@@ -1105,6 +1105,36 @@ fn nested_bodies(stmt: &IRStatement) -> Vec<&IRBody> {
     }
 }
 
+/// Bases that are not classes of the module and add nothing an instance has:
+/// the implicit root, and the markers the type checker and `abc` read.
+const MARKER_BASES: [&str; 7] = [
+    "object",
+    "ABC",
+    "abc.ABC",
+    "Generic",
+    "typing.Generic",
+    "Protocol",
+    "typing.Protocol",
+];
+
+/// The builtin types a class statement can name as a base. Subclassing one
+/// is refused: an instance would have to be that builtin's value too.
+const BUILTIN_TYPE_NAMES: [&str; 13] = [
+    "int",
+    "float",
+    "bool",
+    "str",
+    "bytes",
+    "bytearray",
+    "list",
+    "dict",
+    "set",
+    "frozenset",
+    "tuple",
+    "complex",
+    "range",
+];
+
 /// The prefix of the entries giving field inference the fields of the
 /// classes laid out before the one being laid out (`#Class.field`).
 const FIELD_OF: &str = "#";
@@ -1625,7 +1655,9 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, WaspyError> {
     let ir_module = &staged.module;
     // The `str` methods written in IR that the program calls (`ir::str_methods`).
     let with_strs;
-    let ir_module = match crate::ir::with_str_helpers(ir_module) {
+    let helped = crate::ir::with_str_helpers(ir_module)
+        .map_err(|e| crate::core::errors::other_error(format!("{e:#}")))?;
+    let ir_module = match helped {
         Some(module) => {
             with_strs = module;
             &with_strs
@@ -2155,6 +2187,30 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
     let mut group_slots: HashMap<String, (HashMap<String, u64>, u64)> = HashMap::new();
 
     for (class_id, cls) in (1i32..).zip(ir_module.classes.iter()) {
+        // A base that is no class of the module would be left out of the
+        // class, which then lacks everything the base gives (`class
+        // Stack(list)` answered False to `isinstance(s, list)`), so it is
+        // refused. The markers below add nothing an instance has.
+        for base in &cls.bases {
+            if ctx.get_class_info(base).is_some() || MARKER_BASES.contains(&base.as_str()) {
+                continue;
+            }
+            let bare = base.rsplit('.').next().unwrap_or(base);
+            if BUILTIN_TYPE_NAMES.contains(&bare) {
+                ctx.report(format!(
+                    "class {} subclasses the builtin '{base}', which is not supported. Hint: \
+                     hold the value in a field, or subclass collections.UserDict, UserList, or \
+                     UserString",
+                    cls.name
+                ));
+            } else {
+                ctx.report(format!(
+                    "class {} names the base '{base}', which is not a class this program \
+                     defines or one the compiler implements",
+                    cls.name
+                ));
+            }
+        }
         // The bases, then the method resolution order (C3, as CPython's).
         // `object` is the implicit root, not a base.
         let bases: Vec<String> = cls

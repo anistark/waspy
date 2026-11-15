@@ -1087,31 +1087,65 @@ fn process_class_definition(stmt: &Stmt, memory_layout: &mut MemoryLayout) -> Re
                 _ => None,
             }
         }
-        let bases: Vec<String> = classdef
-            .bases
-            .iter()
-            .filter_map(|base| match base {
-                Expr::Name(name) => Some(name.id.to_string()),
-                Expr::Attribute(_) => dotted(base),
-                // `UserDict[str, int]` is a class of its own, made for those
-                // types. Other subscripted bases (`Generic[T]`) say nothing
-                // of what the class does.
+        // A base the class statement cannot name statically would be a class
+        // chosen when the statement runs (`class C(make_base()):`). Dropping
+        // it made a class with none of what its base gives, so it is refused.
+        let computed_base = || {
+            crate::core::errors::unsupported_feature(
+                format!(
+                    "class '{name}' has a base that is not a class name: a base computed when \
+                     the class statement runs is not supported. Hint: name the base class \
+                     directly"
+                ),
+                None,
+            )
+        };
+        let mut bases: Vec<String> = Vec::new();
+        for base in &classdef.bases {
+            match base {
+                Expr::Name(name) => bases.push(name.id.to_string()),
+                Expr::Attribute(_) => bases.push(dotted(base).ok_or_else(computed_base)?),
                 Expr::Subscript(subscript) => {
                     let generic = match &*subscript.value {
                         Expr::Name(n) => n.id.as_str(),
                         Expr::Attribute(a) => a.attr.as_str(),
-                        _ => return None,
+                        _ => return Err(computed_base().into()),
                     };
-                    crate::ir::collections::spec::Kind::named(generic)
-                        .filter(|kind| kind.is_user())?;
-                    match type_annotation_to_ir_type(base) {
-                        Ok(IRType::Class(specialized)) => Some(specialized),
-                        _ => None,
+                    // `Generic[T]` and `Protocol[T]` say nothing of what the
+                    // class does at run time.
+                    if matches!(generic, "Generic" | "Protocol") {
+                        continue;
+                    }
+                    // `UserDict[str, int]` is a class of its own, made for
+                    // those types.
+                    let specialized = crate::ir::collections::spec::Kind::named(generic)
+                        .filter(|kind| kind.is_user())
+                        .and_then(|_| match type_annotation_to_ir_type(base) {
+                            Ok(IRType::Class(specialized)) => Some(specialized),
+                            _ => None,
+                        });
+                    match specialized {
+                        Some(specialized) => bases.push(specialized),
+                        // Any other subscripted base (`List[int]`,
+                        // `Box[int]`) is a class the subclass would inherit
+                        // from, so leaving it out is a wrong answer.
+                        None => {
+                            return Err(crate::core::errors::unsupported_feature(
+                                format!(
+                                    "class '{name}' has the subscripted base '{generic}[...]', \
+                                     which is not supported. Hint: subclass collections.UserDict, \
+                                     UserList, or UserString with their types, or name a class of \
+                                     this program without a subscript"
+                                ),
+                                None,
+                            )
+                            .into());
+                        }
                     }
                 }
-                _ => None,
-            })
-            .collect();
+                _ => return Err(computed_base().into()),
+            }
+        }
 
         // Class decorators: `@dataclass`, `@dataclasses.dataclass`, and the
         // bare call form `@dataclass()`. The argument form (`frozen=True`,
@@ -5290,7 +5324,7 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                                 // `capitalize()` uppercased where CPython
                                 // titlecases, and `strip()` missed CPython's
                                 // whitespace beyond Rust's.
-                                "upper" | "lower" | "capitalize" | "title"
+                                "upper" | "lower" | "capitalize" | "title" | "casefold"
                                     if arguments.is_empty() =>
                                 {
                                     use crate::core::unicode;
@@ -5298,6 +5332,7 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                                         "upper" => unicode::upper(s),
                                         "lower" => unicode::lower(s),
                                         "capitalize" => unicode::capitalize(s),
+                                        "casefold" => unicode::casefold(s),
                                         _ => unicode::title(s),
                                     };
                                     memory_layout.add_string(&result);
@@ -5328,11 +5363,14 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                                 }
                                 // Non-transforming (test) methods - return boolean as constant
                                 "isdigit" | "isalpha" | "isalnum" | "isspace" | "isupper"
-                                | "islower" | "isdecimal" | "isnumeric"
+                                | "islower" | "isdecimal" | "isnumeric" | "isprintable"
+                                | "isidentifier"
                                     if arguments.is_empty() =>
                                 {
                                     use crate::core::unicode::Predicate;
                                     let predicate = match method_name.as_str() {
+                                        "isprintable" => Predicate::Printable,
+                                        "isidentifier" => Predicate::Identifier,
                                         "isdigit" => Predicate::Digit,
                                         "isalpha" => Predicate::Alpha,
                                         "isalnum" => Predicate::Alnum,

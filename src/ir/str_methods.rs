@@ -10,6 +10,10 @@
 //! generation sends a call on a str receiver to it
 //! (`compiler::dunders::rewrite_str_method`), with the method's defaults
 //! filled in.
+//!
+//! `translate`, `str.maketrans`, and `encode` to a one-byte encoding are
+//! written in Python instead (`PYTHON_HELPERS`, lowered by `ir::embedded`),
+//! and reached the same way.
 
 use crate::ir::build::*;
 use crate::ir::{IRCompareOp, IRExpr, IRFunction, IRModule, IROp, IRStatement, IRType};
@@ -33,14 +37,106 @@ pub const STR_METHODS: [&str; 11] = [
     "replace",
 ];
 
+/// The methods written in Python, with the source that defines each one's
+/// helpers. `translate` has a helper per kind of table (`dict[int, int]`
+/// and `dict[int, str]`), which code generation picks by the table's type.
+const PYTHON_HELPERS: [(&str, &str); 3] = [
+    ("translate", TRANSLATE_SOURCE),
+    ("maketrans", MAKETRANS_SOURCE),
+    ("encode", ENCODE_SOURCE),
+];
+
+/// `str.translate(table)`: each character whose code point is a key of the
+/// table replaced by what it maps to (a code point, or a string, the empty
+/// one deleting it), every other character kept.
+const TRANSLATE_SOURCE: &str = r#"
+def __str_translate_int(s: str, table: dict[int, int]) -> str:
+    parts: list[str] = []
+    for ch in s:
+        k = ord(ch)
+        if k in table:
+            parts.append(chr(table[k]))
+        else:
+            parts.append(ch)
+    return "".join(parts)
+
+
+def __str_translate_str(s: str, table: dict[int, str]) -> str:
+    parts: list[str] = []
+    for ch in s:
+        k = ord(ch)
+        if k in table:
+            parts.append(table[k])
+        else:
+            parts.append(ch)
+    return "".join(parts)
+"#;
+
+/// `str.maketrans(x, y)`: the table mapping each character of `x` to the
+/// one at its position in `y`.
+const MAKETRANS_SOURCE: &str = r#"
+def __str_maketrans(x: str, y: str) -> dict[int, int]:
+    if len(x) != len(y):
+        raise ValueError("the first two maketrans arguments must have equal length")
+    table: dict[int, int] = {}
+    i = 0
+    while i < len(x):
+        table[ord(x[i])] = ord(y[i])
+        i += 1
+    return table
+"#;
+
+/// `str.encode()` to an encoding of one byte a character (`ascii`,
+/// `latin-1`): `limit` is the first code point it cannot hold, `mode` what
+/// to do with one (0 `strict`, 1 `ignore`, 2 `replace`). The error is
+/// CPython's, naming the run of characters that could not be encoded.
+const ENCODE_SOURCE: &str = r#"
+def __str_encode(s: str, limit: int, name: str, mode: int) -> bytes:
+    out: list[int] = []
+    n = len(s)
+    i = 0
+    while i < n:
+        c = ord(s[i])
+        if c < limit:
+            out.append(c)
+            i += 1
+        elif mode == 1:
+            i += 1
+        elif mode == 2:
+            out.append(63)
+            i += 1
+        else:
+            j = i + 1
+            while j < n and ord(s[j]) >= limit:
+                j += 1
+            reason = "ordinal not in range(" + str(limit) + ")"
+            if j - i == 1:
+                if c < 256:
+                    shown = "\\x" + format(c, "02x")
+                elif c < 65536:
+                    shown = "\\u" + format(c, "04x")
+                else:
+                    shown = "\\U" + format(c, "08x")
+                raise UnicodeEncodeError(
+                    "'" + name + "' codec can't encode character '" + shown + "' in position "
+                    + str(i) + ": " + reason
+                )
+            raise UnicodeEncodeError(
+                "'" + name + "' codec can't encode characters in position " + str(i) + "-"
+                + str(j - 1) + ": " + reason
+            )
+    return bytes(out)
+"#;
+
 /// CPython's line boundaries, which `splitlines` splits at.
 const LINE_BREAKS: &str = "\n\r\u{b}\u{c}\u{1c}\u{1d}\u{1e}\u{85}\u{2028}\u{2029}";
 
 /// The module with the helpers for the `str` methods it calls, or `None`
 /// when it calls none of them. `replace` takes a helper only for a call with
 /// a count; the two-argument form is code generation's.
-pub fn with_str_helpers(module: &IRModule) -> Option<IRModule> {
+pub fn with_str_helpers(module: &IRModule) -> anyhow::Result<Option<IRModule>> {
     let mut wanted: BTreeSet<&'static str> = BTreeSet::new();
+    let mut in_python: BTreeSet<&'static str> = BTreeSet::new();
     let mut probe: Vec<crate::ir::IRBody> = module
         .functions
         .iter()
@@ -65,6 +161,12 @@ pub fn with_str_helpers(module: &IRModule) -> Option<IRModule> {
                         wanted.insert(m);
                     }
                 }
+                if let Some((m, _)) = PYTHON_HELPERS
+                    .iter()
+                    .find(|(m, _)| *m == method_name.as_str())
+                {
+                    in_python.insert(m);
+                }
             }
             Ok(())
         });
@@ -73,10 +175,15 @@ pub fn with_str_helpers(module: &IRModule) -> Option<IRModule> {
     if wanted.contains("rindex") || wanted.contains("rpartition") {
         wanted.insert("rfind");
     }
-    if wanted.is_empty() {
-        return None;
+    if wanted.is_empty() && in_python.is_empty() {
+        return Ok(None);
     }
     let mut module = module.clone();
+    for (method, source) in PYTHON_HELPERS {
+        if in_python.contains(method) {
+            crate::ir::embedded::graft(&mut module, source)?;
+        }
+    }
     for text in [
         "",
         "0",
@@ -98,7 +205,7 @@ pub fn with_str_helpers(module: &IRModule) -> Option<IRModule> {
         }
         module.functions.push(helper(name));
     }
-    Some(module)
+    Ok(Some(module))
 }
 
 /// The helper's function name for `method`.

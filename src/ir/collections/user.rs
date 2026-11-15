@@ -839,7 +839,14 @@ pub(crate) fn user_list(name: &str, t: &IRType) -> Vec<IRClass> {
 // ---------------------------------------------------------------------------
 
 /// The string methods that take nothing and answer a string.
-const STRING_PLAIN: &[&str] = &["capitalize", "lower", "title", "upper"];
+const STRING_PLAIN: &[&str] = &[
+    "capitalize",
+    "casefold",
+    "lower",
+    "swapcase",
+    "title",
+    "upper",
+];
 
 /// The string methods that take nothing or the characters to strip.
 const STRING_STRIPS: &[&str] = &["strip", "lstrip", "rstrip"];

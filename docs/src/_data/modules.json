@@ -512,6 +512,18 @@
         "test": "strings::more_methods"
       },
       {
+        "name": "casefold(), isprintable(), and isidentifier() over the whole of Unicode, as CPython folds and classifies it, on literals and runtime strings alike",
+        "status": "done",
+        "version": "upcoming",
+        "test": "strings::casefold_and_unicode_predicates"
+      },
+      {
+        "name": "translate() with a dict[int, int] or dict[int, str] table, str.maketrans(x, y), and encode() to UTF-8, ASCII, or Latin-1 (errors strict, ignore, or replace), with CPython's UnicodeEncodeError",
+        "status": "done",
+        "version": "upcoming",
+        "test": "strings::translate_and_encode"
+      },
+      {
         "name": "% formatting - compile-time for constants: %s %r %d %i %x %X %o %f with flags, width, and precision (rendered as written, or in decimal for %x, before; anything else is refused)",
         "status": "done",
         "version": "0.18.0",
@@ -691,6 +703,12 @@
         "status": "done",
         "version": "0.16.0",
         "test": "collections::sort_and_reverse"
+      },
+      {
+        "name": "list.sort() of strs, bytes, and tuples of them and numbers, in place and stable, in CPython's order",
+        "status": "done",
+        "version": "upcoming",
+        "test": "collections::sort_strs_and_tuples"
       },
       {
         "name": "List slicing xs[a:b] returns a fresh list, negative indices and clamping included (a step other than 1 is rejected)",
@@ -902,6 +920,12 @@
         "status": "done",
         "version": "0.18.0",
         "test": "classes::sibling_instances"
+      },
+      {
+        "name": "A base that is not a class (a builtin such as list, an undefined name, a call) is refused instead of left out of the class",
+        "status": "done",
+        "version": "upcoming",
+        "test": "classes::bases_must_be_classes"
       }
     ]
   },
@@ -1339,10 +1363,16 @@
         "test": "comprehensions::nested_comprehension"
       },
       {
-        "name": "Generator expressions (x for x in list), materialized eagerly as lists",
+        "name": "Generator expressions (x for x in list) as the argument of a call that walks them, built as a list",
         "status": "done",
         "version": "0.14.0",
         "test": "comprehensions::generator_expressions"
+      },
+      {
+        "name": "A generator expression kept in a variable, returned, or passed to the program's own code is refused, since the list it is built as could be told from CPython's generator",
+        "status": "done",
+        "version": "upcoming",
+        "test": "comprehensions::kept_generator_expressions_refused"
       },
       {
         "name": "Comprehensions over generators and iterator classes (in the first for clause)",
