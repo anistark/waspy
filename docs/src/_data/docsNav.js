@@ -21,6 +21,7 @@ export default [
         items: [
             { label: "Running compiled modules", href: "/docs/running/" },
             { label: "JavaScript and async", href: "/docs/javascript/" },
+            { label: "Graphics and the canvas", href: "/docs/graphics/" },
             { label: "What a program looks like", href: "/docs/programs/" },
         ],
     },

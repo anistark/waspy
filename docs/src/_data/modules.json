@@ -1892,11 +1892,13 @@
   },
   "graphics": {
     "title": "GRAPHICS & CANVAS",
-    "status": "todo",
+    "status": "progress",
     "features": [
       {
         "name": "Canvas API (2D drawing)",
-        "status": "todo"
+        "status": "done",
+        "version": "upcoming",
+        "test": "graphics::canvas_2d"
       },
       {
         "name": "WebGL support (3D graphics)",

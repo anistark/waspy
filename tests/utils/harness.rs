@@ -23,6 +23,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+#[path = "graphics.rs"]
+pub mod graphics;
+
 use wasmi::{Caller, Engine, Extern, Instance, Linker, Store, Value};
 use waspy::{
     compile_multiple_python_files_with_options, compile_python_file_with_options,
@@ -1019,6 +1022,9 @@ pub enum Js {
     ClassList(Rc<RefCell<Node>>),
     /// A Python function JavaScript can call (`create_proxy`).
     PyFunc(Rc<PyFn>),
+    /// An object implemented in Rust: a typed array, a canvas's context
+    /// (`graphics`).
+    Host(Rc<dyn graphics::HostObject>),
 }
 
 /// What the loader's `function` import makes of a Python function: its
@@ -1247,6 +1253,7 @@ fn element_class(tag: &str) -> &'static str {
         "BUTTON" => "HTMLButtonElement",
         "INPUT" => "HTMLInputElement",
         "BODY" => "HTMLBodyElement",
+        "CANVAS" => "HTMLCanvasElement",
         _ => "HTMLElement",
     }
 }
@@ -1285,6 +1292,7 @@ impl Js {
                 .contains(&name)
                 .then(|| Js::function(|_, _, _| Ok(Js::Undefined))),
             Js::Node(n) => node_get(n, name),
+            Js::Host(o) => o.get(name),
             _ => None,
         }
     }
@@ -1294,6 +1302,7 @@ impl Js {
                 node_set(n, name, value);
                 Ok(())
             }
+            Js::Host(o) => o.set(name, &value),
             Js::Obj(props, _) => {
                 let mut props = props.borrow_mut();
                 match props.iter_mut().find(|(k, _)| k == name) {
@@ -1352,6 +1361,7 @@ impl Js {
             }
             Js::ClassList(n) => n.borrow().classes().join(" "),
             Js::PyFunc(_) => "function () { [python code] }".to_string(),
+            Js::Host(o) => o.text(),
         }
     }
     fn same(&self, other: &Js) -> bool {
@@ -1365,6 +1375,9 @@ impl Js {
             (Js::Module(a), Js::Module(b)) => a == b,
             (Js::Node(a), Js::Node(b)) | (Js::ClassList(a), Js::ClassList(b)) => Rc::ptr_eq(a, b),
             (Js::PyFunc(a), Js::PyFunc(b)) => Rc::ptr_eq(a, b),
+            (Js::Host(a), Js::Host(b)) => {
+                std::ptr::eq(Rc::as_ptr(a) as *const u8, Rc::as_ptr(b) as *const u8)
+            }
             _ => false,
         }
     }
@@ -1473,7 +1486,7 @@ impl Js {
 }
 
 /// The methods a DOM node or a `classList` answers (through `call_method`).
-const DOM_METHODS: [&str; 26] = [
+const DOM_METHODS: [&str; 27] = [
     "createElement",
     "createTextNode",
     "getElementById",
@@ -1500,6 +1513,7 @@ const DOM_METHODS: [&str; 26] = [
     "closest",
     "hasChildNodes",
     "cloneNode",
+    "getContext",
 ];
 
 fn node_or_null(n: Option<Rc<RefCell<Node>>>) -> Js {
@@ -1608,10 +1622,22 @@ fn node_set(node: &Rc<RefCell<Node>>, name: &str, value: Js) {
         }
         "data" | "nodeValue" => node.borrow_mut().data = value.text(),
         other => {
-            let mut n = node.borrow_mut();
-            match n.props.iter_mut().find(|(k, _)| k == other) {
-                Some(slot) => slot.1 = value,
-                None => n.props.push((other.to_string(), value)),
+            let canvas_size = matches!(other, "width" | "height") && node.borrow().name == "CANVAS";
+            // A canvas's size is a whole number of pixels.
+            let value = if canvas_size {
+                Js::Num(value.number().trunc())
+            } else {
+                value
+            };
+            {
+                let mut n = node.borrow_mut();
+                match n.props.iter_mut().find(|(k, _)| k == other) {
+                    Some(slot) => slot.1 = value,
+                    None => n.props.push((other.to_string(), value)),
+                }
+            }
+            if canvas_size {
+                graphics::Ctx2D::resized(node);
             }
         }
     }
@@ -1684,7 +1710,25 @@ fn dom_method(
     };
     let node = node.clone();
     Some(match name {
-        "createElement" => Ok(Js::Node(Node::new(&text(0).to_uppercase()))),
+        "createElement" => {
+            let el = Node::new(&text(0).to_uppercase());
+            if el.borrow().name == "CANVAS" {
+                el.borrow_mut().props.extend([
+                    ("width".to_string(), Js::Num(300.0)),
+                    ("height".to_string(), Js::Num(150.0)),
+                ]);
+            }
+            Ok(Js::Node(el))
+        }
+        "getContext" => {
+            let Js::Node(node) = target else {
+                return None;
+            };
+            Ok(match text(0).as_str() {
+                "2d" if node.borrow().name == "CANVAS" => graphics::Ctx2D::of(node),
+                _ => Js::Null,
+            })
+        }
         "createTextNode" => Ok(Js::Node(Node::text_node(&text(0)))),
         "getElementById" => {
             let id = text(0);
@@ -2169,6 +2213,9 @@ fn js_globals() -> Js {
         ("Number", number),
         ("undefined", Js::Undefined),
     ]);
+    for (name, value) in graphics::globals() {
+        globals.set(name, value).unwrap();
+    }
     globals.set("globalThis", globals.clone()).unwrap();
     globals
 }
@@ -2289,6 +2336,13 @@ fn call_method(
         (Js::Node(_) | Js::ClassList(_), _) if DOM_METHODS.contains(&name) => {
             dom_method(caller, target, name, &args)
                 .unwrap_or_else(|| Err(js_error("TypeError", format!("{name} is not a function"))))
+        }
+        (Js::Host(o), _) => {
+            let o = o.clone();
+            match o.call(target, caller.data_mut(), name, &args) {
+                Some(answer) => answer,
+                None => Err(js_error("TypeError", format!("{name} is not a function"))),
+            }
         }
         _ => match target.get(name) {
             Some(f @ Js::Obj(_, Some(_))) => call_value(caller, &f, target, &args),
@@ -2501,7 +2555,11 @@ pub fn link_js(linker: &mut Linker<Host>) {
                     || (matches!(target, Js::Node(_) | Js::ClassList(_))
                         && DOM_METHODS.contains(&name.as_str()))
                     || (matches!(target, Js::PyFunc(_)) && name == "destroy");
-                if !builtin {
+                if let Js::Host(o) = &target {
+                    if !o.has_method(&name) {
+                        return if o.get(&name).is_some() { -3 } else { -1 };
+                    }
+                } else if !builtin {
                     match target.get(&name) {
                         None => return -1,
                         Some(Js::Obj(_, Some(_))) => {}
@@ -2599,7 +2657,8 @@ pub fn link_js(linker: &mut Linker<Host>) {
                 | Js::Iter(_)
                 | Js::Promise(_)
                 | Js::Node(_)
-                | Js::ClassList(_) => 9,
+                | Js::ClassList(_)
+                | Js::Host(_) => 9,
             }
         })
         .unwrap();
@@ -2644,6 +2703,7 @@ pub fn link_js(linker: &mut Linker<Host>) {
             match c.data().js.value(h) {
                 Js::Arr(items) => items.borrow().len() as i32,
                 Js::Str(s) => s.chars().count() as i32,
+                Js::Host(o) => o.length().map_or(-1, |n| n as i32),
                 v @ (Js::Obj(..) | Js::ClassList(_)) => match v.get("length") {
                     Some(Js::Num(n)) => n as i32,
                     _ => -1,
@@ -2662,6 +2722,10 @@ pub fn link_js(linker: &mut Linker<Host>) {
                 let (items, missing) = match w.value(h) {
                     Js::Arr(items) => (items.borrow().clone(), -1),
                     Js::Str(s) => (s.chars().map(|ch| Js::Str(ch.to_string())).collect(), -4),
+                    Js::Host(o) => match o.length() {
+                        Some(n) => ((0..n).map(|k| o.item(k)).collect(), -1),
+                        None => return -3,
+                    },
                     _ => return -3,
                 };
                 let at = if i < 0 { i + items.len() as i32 } else { i };
@@ -2688,6 +2752,13 @@ pub fn link_js(linker: &mut Linker<Host>) {
                     let classes = n.borrow().classes().into_iter().map(Js::Str).collect();
                     w.add(Js::Iter(Rc::new(RefCell::new((classes, 0)))))
                 }
+                Js::Host(o) => match o.length() {
+                    Some(n) => {
+                        let items = (0..n).map(|k| o.item(k)).collect();
+                        w.add(Js::Iter(Rc::new(RefCell::new((items, 0)))))
+                    }
+                    None => -3,
+                },
                 _ => -3,
             }
         })

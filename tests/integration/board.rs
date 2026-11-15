@@ -7041,3 +7041,86 @@ mod web_interop {
         assert_eq!(run.stdout, "200 True OK https://api.test/scores application/json\n[('ada', 7), ('bo', 12)]\nPOST text/plain hello\n404 404 Client Error: Not Found for url: https://api.test/missing\n'nothing here' True\nBodyUsedError Response body is already used\naborted: Failed to fetch\n");
     }
 }
+
+mod graphics {
+    use super::*;
+
+    /// Canvas API (2D drawing)
+    ///
+    /// A canvas's 2D context through Pyodide's `js`: its size, styles as the
+    /// context answers them (an unparsable color ignored), rectangles filled
+    /// and cleared, a transform inside `save()` and `restore()`, and pixels
+    /// read back with `getImageData()` and written with `putImageData()`.
+    /// Resizing the canvas clears it. Pyodide's output in Chromium; the
+    /// harness's canvas rasterizes exactly these operations, and the browser
+    /// gate checks `examples/canvas_demo.py`'s strokes, paths, and gradients.
+    #[test]
+    fn canvas_2d() {
+        let run = run_main(
+            &dedent(
+                r##"
+                from js import ImageData, document
+                from pyodide.ffi import JsProxy
+
+
+                def at(ctx: JsProxy, x: int, y: int) -> str:
+                    px = ctx.getImageData(x, y, 1, 1).data
+                    return ",".join([str(px[k]) for k in range(4)])
+
+
+                def main() -> None:
+                    canvas = document.createElement("canvas")
+                    print(canvas.width, canvas.height)
+                    canvas.width = 20
+                    canvas.height = 10
+                    ctx = canvas.getContext("2d")
+                    print(ctx.fillStyle, ctx.strokeStyle, ctx.lineWidth, ctx.canvas == canvas)
+                    ctx.fillStyle = "red"
+                    print(ctx.fillStyle)
+                    ctx.fillRect(0, 0, 10, 10)
+                    ctx.fillStyle = "rgb(0, 0, 255)"
+                    ctx.fillRect(10, 0, 10, 10)
+                    ctx.fillStyle = "not a color"
+                    print(ctx.fillStyle, at(ctx, 5, 5), at(ctx, 15, 5))
+                    ctx.strokeStyle = "#0F0"
+                    ctx.lineWidth = 3
+                    ctx.lineWidth = -1
+                    print(ctx.strokeStyle, ctx.lineWidth)
+                    ctx.save()
+                    ctx.translate(4, 2)
+                    ctx.scale(2, 2)
+                    ctx.fillStyle = "#123456"
+                    ctx.fillRect(0, 0, 1, 1)
+                    t = ctx.getTransform()
+                    print(t.a, t.d, t.e, t.f)
+                    ctx.restore()
+                    print(ctx.fillStyle, at(ctx, 5, 3), at(ctx, 6, 3))
+                    ctx.clearRect(0, 0, 2, 2)
+                    print(at(ctx, 1, 1))
+                    img = ctx.createImageData(2, 1)
+                    print(img.width, img.height, len(img.data), img.data[0])
+                    blank = ImageData.new(1, 1)
+                    print(blank.data[3], len(blank.data))
+                    part = ctx.getImageData(10, 0, 2, 2)
+                    ctx.putImageData(part, 0, 8)
+                    print(at(ctx, 0, 9), at(ctx, 2, 9), at(ctx, 1, 10))
+                    canvas.width = 20
+                    print(at(ctx, 15, 5), ctx.fillStyle)
+
+
+                if __name__ == "__main__":
+                    main()
+                "##,
+            ),
+            "",
+            &[],
+        );
+        assert_eq!(run.stderr, "");
+        assert_eq!(
+            run.stdout,
+            "300 150\n#000000 #000000 1 True\n#ff0000\n#0000ff 255,0,0,255 0,0,255,255\n\
+             #00ff00 3\n2 2 4 2\n#0000ff 18,52,86,255 255,0,0,255\n0,0,0,0\n2 1 8 0\n0 4\n\
+             0,0,255,255 255,0,0,255 0,0,0,0\n0,0,0,0 #000000\n"
+        );
+    }
+}
