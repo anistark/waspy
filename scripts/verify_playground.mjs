@@ -4,7 +4,9 @@
 // Loads the wasm-bindgen bundle from docs/src/playground/compiler/ under Node,
 // compiles every example the page ships (docs/src/playground/examples.js), calls
 // the functions listed below, and requires the answer CPython gives for the
-// same source. The refused example must fail to compile.
+// same source. The refused example must fail to compile. An example marked
+// `web` imports `js`, so it needs a page: here it must compile, and the
+// browser gate (`just browser-verify`) runs it against Pyodide.
 //
 // Run it through `just playground-verify`.
 
@@ -50,6 +52,16 @@ const failures = [];
 let passed = 0;
 
 for (const example of EXAMPLES) {
+  if (example.web) {
+    try {
+      compiler.compile(example.code);
+      passed += 1;
+      console.log(`  ${example.id}: compiles (the browser gate runs it against Pyodide)`);
+    } catch (error) {
+      failures.push(`${example.id}: ${error.message}`);
+    }
+    continue;
+  }
   if (example.id in REFUSED) {
     try {
       compiler.compile(example.code);

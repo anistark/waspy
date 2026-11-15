@@ -4,7 +4,7 @@ eyebrow: Running
 description: "Drawing from Python on a canvas through its 2D context and WebGL, animation loops through requestAnimationFrame, and image pixels through Pyodide's buffer methods."
 ---
 
-Graphics go through the [JavaScript bridge](/docs/javascript/): a canvas, its context, and what they answer are JavaScript values, with Pyodide's names and conversions, so drawing code written for Pyodide or PyScript compiles where it can. A program that draws runs in a page through the [loader](/docs/javascript/#the-loader).
+Graphics go through the [JavaScript bridge](/docs/javascript/): a canvas, its context, and what they answer are JavaScript values, with Pyodide's names and conversions, so drawing code written for Pyodide or PyScript compiles where it can. A program that draws runs in a page through the [loader](/docs/javascript/#the-loader). The [playground](/playground/) runs one too: its Canvas, Animation frames, Image pixels, and WebGL examples draw in the Run tab's stage, and each is checked against Pyodide by the browser gate.
 
 ## The 2D canvas
 

@@ -1,9 +1,12 @@
 // The in-browser playground: Waspy (built to WebAssembly) compiles the
 // editor's Python, and the page shows the module as text, as bytes, and
-// runs its exported functions under a small WASI shim.
+// runs its exported functions (or its `__main__` block) under a small WASI
+// shim. A program that imports `js` runs through the loader
+// (`waspy::js_loader()`), with the page's JavaScript, and draws in the stage.
 
 import { EXAMPLES } from './examples.js';
 import { createWasi, WasiExit } from './wasi.js';
+import { instantiate as instantiateWithLoader } from '../../../src/js/loader.js';
 import { createPythonEditor, createWatViewer } from './editor.js';
 
 const COMPILER_JS = new URL('./compiler/waspy.js', import.meta.url).href;
@@ -57,6 +60,9 @@ const state = {
     wat: '',
     sigs: [],
     instance: null,
+    // The loader's answer (`start`, `bridge`) for a module that uses the
+    // JavaScript bridge, else null.
+    loaded: null,
     view: 'wat',
     timer: null,
 };
@@ -251,14 +257,7 @@ async function compile() {
     clearError();
     state.bytes = bytes;
     $('output').classList.add('ready');
-    try {
-        const host = hostImports();
-        state.instance = (await WebAssembly.instantiate(bytes, host.imports)).instance;
-        host.wasi.bind(state.instance);
-    } catch (err) {
-        state.instance = null;
-        console.error(err);
-    }
+    await freshInstance();
 
     const sections = parseSections(bytes);
     const code = sections.find((s) => s.name === 'code');
@@ -273,6 +272,56 @@ async function compile() {
     renderBinary(bytes, sections);
     renderRun(exportsList);
     renderWat(bytes);
+}
+
+// A new instance of the compiled module: through the loader when it uses the
+// JavaScript bridge, so `js` reaches the page, else under the WASI shim alone.
+async function freshInstance() {
+    try {
+        const host = hostImports();
+        const module = await WebAssembly.compile(state.bytes);
+        const bridge = WebAssembly.Module.imports(module).some((i) => i.module === 'waspy_js');
+        if (bridge) {
+            state.loaded = await instantiateWithLoader(module, { wasi: host.imports.wasi_snapshot_preview1 });
+            state.instance = state.loaded.instance;
+        } else {
+            state.loaded = null;
+            state.instance = await WebAssembly.instantiate(module, host.imports);
+        }
+        host.wasi.bind(state.instance);
+    } catch (err) {
+        state.instance = null;
+        state.loaded = null;
+        console.error(err);
+    }
+}
+
+// Run the `__main__` block on a fresh instance, so a program's state starts
+// over each time, with the stage cleared for what it draws.
+async function runProgram(btn) {
+    btn.disabled = true;
+    await freshInstance();
+    const stage = $('stage');
+    stage.replaceChildren();
+    stage.hidden = !state.loaded;
+    printed.text = '';
+    const started = performance.now();
+    let result = 'Finished';
+    let isError = false;
+    try {
+        if (state.loaded) await state.loaded.start();
+        else state.instance.exports._start();
+    } catch (err) {
+        if (err instanceof WasiExit) {
+            result = `Exited with status ${err.code}`;
+            isError = err.code !== 0;
+        } else {
+            isError = true;
+            result = err instanceof WebAssembly.RuntimeError ? `Trapped: ${err.message}` : String(err.message || err);
+        }
+    }
+    log('python main.py', result, isError, performance.now() - started, printed.text);
+    btn.disabled = false;
 }
 
 // A panic inside the compiler traps, and the instance can't be trusted after
@@ -506,8 +555,30 @@ function parseParam(p) {
 function renderRun(exportsList) {
     const list = $('runList');
     list.innerHTML = '';
+    $('stage').replaceChildren();
+    $('stage').hidden = true;
     const exported = new Set(exportsList.filter((e) => e.kind === 'function').map((e) => e.name));
     const fns = state.sigs.filter((s) => exported.has(s.name));
+
+    // A program with a `__main__` block runs as a whole.
+    if (exported.has('_start')) {
+        const card = document.createElement('div');
+        card.className = 'flex flex-wrap items-center gap-3 rounded-xl border border-line bg-surface py-2.5 pr-2.5 pl-4';
+        const label = document.createElement('div');
+        label.className = 'min-w-0 flex-[1_1_12rem] font-mono text-[0.82rem] text-ink-1';
+        label.innerHTML = `<span class="text-ember">if</span> __name__ == <span class="text-green">"__main__"</span>: <span class="text-ink-2">${state.loaded ? 'runs with the page, and draws below' : 'runs the program'}</span>`;
+        card.appendChild(label);
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'inline-flex items-center gap-1.5 rounded-lg border border-green/40 bg-green/12 px-3 py-1.5 text-xs font-semibold text-green transition hover:bg-green/22 disabled:cursor-not-allowed disabled:opacity-40';
+        btn.innerHTML = '<svg class="size-2.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 4.5v15a1 1 0 0 0 1.5.86l12.5-7.5a1 1 0 0 0 0-1.72L7.5 3.64A1 1 0 0 0 6 4.5z"/></svg>Run program';
+        btn.setAttribute('aria-label', 'Run the program');
+        btn.disabled = !state.bytes;
+        btn.addEventListener('click', () => runProgram(btn));
+        card.appendChild(btn);
+        list.appendChild(card);
+        if (!fns.length) return;
+    }
 
     if (!fns.length) {
         list.innerHTML = '<p class="px-4 py-6 text-center text-sm text-ink-2">This module exports no top-level functions to call.</p>';
@@ -634,6 +705,8 @@ function call(sig, params, inputs) {
     let isError = false;
     printed.text = '';
     try {
+        // A module using the bridge runs its top level before the first call.
+        if (state.loaded) state.loaded.bridge.init();
         result = formatResult(state.instance.exports[sig.name](...args), sig.returns);
     } catch (err) {
         isError = true;
