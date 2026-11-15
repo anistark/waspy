@@ -846,6 +846,322 @@ impl HostObject for Ctx2D {
     }
 }
 
+// ---- WebGL -----------------------------------------------------------------
+
+/// The WebGL constants the tests use, as the specification numbers them.
+const GL_CONSTANTS: [(&str, f64); 26] = [
+    ("DEPTH_BUFFER_BIT", 256.0),
+    ("COLOR_BUFFER_BIT", 16384.0),
+    ("POINTS", 0.0),
+    ("LINES", 1.0),
+    ("TRIANGLES", 4.0),
+    ("NO_ERROR", 0.0),
+    ("INVALID_ENUM", 1280.0),
+    ("ARRAY_BUFFER", 34962.0),
+    ("ELEMENT_ARRAY_BUFFER", 34963.0),
+    ("STATIC_DRAW", 35044.0),
+    ("DYNAMIC_DRAW", 35048.0),
+    ("BUFFER_SIZE", 34660.0),
+    ("FLOAT", 5126.0),
+    ("UNSIGNED_BYTE", 5121.0),
+    ("UNSIGNED_SHORT", 5123.0),
+    ("RGBA", 6408.0),
+    ("FRAGMENT_SHADER", 35632.0),
+    ("VERTEX_SHADER", 35633.0),
+    ("COMPILE_STATUS", 35713.0),
+    ("LINK_STATUS", 35714.0),
+    ("DEPTH_TEST", 2929.0),
+    ("BLEND", 3042.0),
+    ("TEXTURE_2D", 3553.0),
+    ("TEXTURE0", 33984.0),
+    ("CULL_FACE", 2884.0),
+    ("VIEWPORT", 2978.0),
+];
+
+/// A WebGL object (a shader, a program, a buffer, a uniform's location),
+/// which only names itself.
+pub struct GlObject {
+    class: &'static str,
+    id: usize,
+}
+
+impl HostObject for GlObject {
+    fn class(&self) -> &'static str {
+        self.class
+    }
+    fn get(&self, _: &str) -> Option<Js> {
+        None
+    }
+    fn has_method(&self, _: &str) -> bool {
+        false
+    }
+    fn call(&self, _: &Js, _: &mut Host, _: &str, _: &[Js]) -> Option<Result<Js, Js>> {
+        None
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+struct GlState {
+    width: usize,
+    height: usize,
+    /// The framebuffer, RGBA, its first row the bottom one.
+    pixels: Vec<u8>,
+    clear: [f64; 4],
+    /// Each buffer's size in bytes, by id, and the ids bound to
+    /// `ARRAY_BUFFER` and `ELEMENT_ARRAY_BUFFER`.
+    buffers: Vec<usize>,
+    bound: [Option<usize>; 2],
+    objects: usize,
+    /// The first drawing call the harness did not rasterize.
+    unmodeled: Option<String>,
+}
+
+/// A canvas's `webgl` context. It takes every shader as compiling and every
+/// program as linking (it reads no GLSL), keeps each buffer's size, and
+/// rasterizes only `clear()`: reading pixels back after a draw call panics,
+/// since what a GPU draws is checked in Chromium by the browser gate.
+pub struct WebGl {
+    canvas: Weak<RefCell<Node>>,
+    state: RefCell<GlState>,
+}
+
+/// The property a canvas keeps its WebGL context in.
+const WEBGL_PROP: &str = "__harness_context_webgl";
+
+/// The WebGL methods that change nothing the harness keeps.
+const GL_NO_OPS: [&str; 20] = [
+    "shaderSource",
+    "compileShader",
+    "attachShader",
+    "linkProgram",
+    "useProgram",
+    "deleteShader",
+    "deleteProgram",
+    "deleteBuffer",
+    "enableVertexAttribArray",
+    "disableVertexAttribArray",
+    "vertexAttribPointer",
+    "uniform1f",
+    "uniform1i",
+    "uniform2f",
+    "uniform3f",
+    "uniform4f",
+    "uniformMatrix4fv",
+    "viewport",
+    "enable",
+    "disable",
+];
+
+/// The WebGL methods that draw what the harness does not rasterize.
+const GL_DRAWING: [&str; 2] = ["drawArrays", "drawElements"];
+
+/// The WebGL methods the harness answers.
+const GL_METHODS: [&str; 14] = [
+    "createShader",
+    "createProgram",
+    "createBuffer",
+    "getShaderParameter",
+    "getProgramParameter",
+    "getShaderInfoLog",
+    "getProgramInfoLog",
+    "bindBuffer",
+    "bufferData",
+    "getBufferParameter",
+    "getAttribLocation",
+    "getUniformLocation",
+    "clearColor",
+    "clear",
+];
+
+impl WebGl {
+    /// A canvas's WebGL context, made on first use, or null when it already
+    /// has a 2D one (and the reverse, in `Ctx2D::of`'s caller).
+    pub fn of(canvas: &Rc<RefCell<Node>>) -> Js {
+        let has = |key: &str| {
+            canvas
+                .borrow()
+                .props
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.clone())
+        };
+        if let Some(gl) = has(WEBGL_PROP) {
+            return gl;
+        }
+        if has(CONTEXT_PROP).is_some() {
+            return Js::Null;
+        }
+        let (width, height) = canvas_size(&canvas.borrow());
+        let gl = Js::Host(Rc::new(WebGl {
+            canvas: Rc::downgrade(canvas),
+            state: RefCell::new(GlState {
+                width,
+                height,
+                pixels: vec![0; width * height * 4],
+                clear: [0.0; 4],
+                buffers: Vec::new(),
+                bound: [None, None],
+                objects: 0,
+                unmodeled: None,
+            }),
+        }));
+        canvas
+            .borrow_mut()
+            .props
+            .push((WEBGL_PROP.to_string(), gl.clone()));
+        gl
+    }
+
+    /// Whether a canvas has a WebGL context, so `getContext("2d")` answers
+    /// null.
+    pub fn on(canvas: &Rc<RefCell<Node>>) -> bool {
+        canvas.borrow().props.iter().any(|(k, _)| k == WEBGL_PROP)
+    }
+
+    fn object(&self, class: &'static str) -> Js {
+        let mut s = self.state.borrow_mut();
+        s.objects += 1;
+        Js::Host(Rc::new(GlObject {
+            class,
+            id: s.objects,
+        }))
+    }
+
+    /// The index of the binding point a target names.
+    fn target(args: &[Js]) -> usize {
+        match num(args, 0) as i64 {
+            34962 => 0,
+            34963 => 1,
+            other => panic!(
+                "the harness WebGL binds ARRAY_BUFFER and ELEMENT_ARRAY_BUFFER only, not {other}"
+            ),
+        }
+    }
+
+    fn read_pixels(&self, args: &[Js]) {
+        let s = self.state.borrow();
+        if let Some(what) = &s.unmodeled {
+            panic!(
+                "the harness WebGL did not rasterize {what}, so it cannot read pixels back (the \
+                 browser gate checks those in Chromium)"
+            );
+        }
+        let (x, y) = (num(args, 0) as usize, num(args, 1) as usize);
+        let (w, h) = (num(args, 2) as usize, num(args, 3) as usize);
+        let out = arg(args, 6);
+        let t = host::<TypedArray>(&out).expect("readPixels into a typed array");
+        for row in 0..h {
+            for col in 0..w {
+                let from = ((y + row) * s.width + x + col) * 4;
+                for k in 0..4 {
+                    let value = Js::Num(f64::from(s.pixels[from + k]));
+                    t.set_item((row * w + col) * 4 + k, &value);
+                }
+            }
+        }
+    }
+}
+
+impl HostObject for WebGl {
+    fn class(&self) -> &'static str {
+        "WebGLRenderingContext"
+    }
+    fn get(&self, name: &str) -> Option<Js> {
+        let s = self.state.borrow();
+        match name {
+            "canvas" => Some(Js::Node(self.canvas.upgrade().expect("the canvas"))),
+            "drawingBufferWidth" => Some(Js::Num(s.width as f64)),
+            "drawingBufferHeight" => Some(Js::Num(s.height as f64)),
+            _ => GL_CONSTANTS
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| Js::Num(*v)),
+        }
+    }
+    fn has_method(&self, name: &str) -> bool {
+        GL_METHODS.contains(&name)
+            || GL_NO_OPS.contains(&name)
+            || GL_DRAWING.contains(&name)
+            || matches!(name, "readPixels" | "getError")
+    }
+    fn call(&self, _: &Js, _: &mut Host, name: &str, args: &[Js]) -> Option<Result<Js, Js>> {
+        Some(Ok(match name {
+            "createShader" => self.object("WebGLShader"),
+            "createProgram" => self.object("WebGLProgram"),
+            "getUniformLocation" => self.object("WebGLUniformLocation"),
+            "createBuffer" => {
+                let mut s = self.state.borrow_mut();
+                s.buffers.push(0);
+                let id = s.buffers.len() - 1;
+                drop(s);
+                Js::Host(Rc::new(GlObject {
+                    class: "WebGLBuffer",
+                    id,
+                }))
+            }
+            "getShaderParameter" | "getProgramParameter" => Js::Bool(true),
+            "getShaderInfoLog" | "getProgramInfoLog" => Js::Str(String::new()),
+            "getAttribLocation" => Js::Num(0.0),
+            "bindBuffer" => {
+                let buffer = host::<GlObject>(&arg(args, 1)).map(|b| b.id);
+                self.state.borrow_mut().bound[WebGl::target(args)] = buffer;
+                Js::Undefined
+            }
+            "bufferData" => {
+                let size = match arg(args, 1) {
+                    Js::Num(n) => n as usize,
+                    data => {
+                        let t = host::<TypedArray>(&data).expect("bufferData of a typed array");
+                        t.data.borrow().len() * t.kind.bytes()
+                    }
+                };
+                let mut s = self.state.borrow_mut();
+                let bound = s.bound[WebGl::target(args)].expect("a bound buffer");
+                s.buffers[bound] = size;
+                Js::Undefined
+            }
+            "getBufferParameter" => {
+                let s = self.state.borrow();
+                let bound = s.bound[WebGl::target(args)].expect("a bound buffer");
+                Js::Num(s.buffers[bound] as f64)
+            }
+            "clearColor" => {
+                self.state.borrow_mut().clear = [0, 1, 2, 3].map(|k| num(args, k));
+                Js::Undefined
+            }
+            "clear" => {
+                if num(args, 0) as i64 & 16384 != 0 {
+                    let mut s = self.state.borrow_mut();
+                    let rgba = s.clear.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
+                    for px in s.pixels.chunks_mut(4) {
+                        px.copy_from_slice(&rgba);
+                    }
+                }
+                Js::Undefined
+            }
+            "readPixels" => {
+                self.read_pixels(args);
+                Js::Undefined
+            }
+            "getError" => Js::Num(0.0),
+            n if GL_NO_OPS.contains(&n) => Js::Undefined,
+            d if GL_DRAWING.contains(&d) => {
+                let mut s = self.state.borrow_mut();
+                if s.unmodeled.is_none() {
+                    s.unmodeled = Some(d.to_string());
+                }
+                Js::Undefined
+            }
+            _ => return None,
+        }))
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 // ---- animation frames ------------------------------------------------------
 
 /// How far apart animation frames fall: 60 a second.

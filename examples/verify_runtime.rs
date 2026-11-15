@@ -142,6 +142,7 @@ const WEB_COMMANDS: &[(&str, &str)] = &[
     ("canvas_demo", "examples/canvas_demo.py"),
     ("animation_demo", "examples/animation_demo.py"),
     ("image_demo", "examples/image_demo.py"),
+    ("webgl_demo", "examples/webgl_demo.py"),
 ];
 
 /// Build each web command at both optimization levels.

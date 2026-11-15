@@ -7332,4 +7332,72 @@ mod graphics {
              ValueError: TypedArray and memorybuffer have incompatible formats\n"
         );
     }
+
+    /// WebGL support (3D graphics)
+    ///
+    /// A canvas's `webgl` context through Pyodide's `js`: its constants and
+    /// drawing buffer, shaders and buffers made and bound, a `Float32Array`
+    /// and a `Uint16Array` made from lists through `to_js()` and uploaded,
+    /// their sizes read back, and the framebuffer cleared and read with
+    /// `readPixels()` into a typed array. Pyodide's output in Chromium; the
+    /// browser gate checks `examples/webgl_demo.py`, which draws, there.
+    #[test]
+    fn webgl() {
+        let run = run_main(
+            &dedent(
+                r##"
+                from js import Float32Array, Uint8Array, Uint16Array, document
+                from pyodide.ffi import JsProxy, to_js
+
+
+                def pixel(gl: JsProxy, x: int, y: int) -> list[int]:
+                    out = Uint8Array.new(4)
+                    gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, out)
+                    return list(out.to_bytes())
+
+
+                def main() -> None:
+                    canvas = document.createElement("canvas")
+                    canvas.width = 16
+                    canvas.height = 8
+                    gl = canvas.getContext("webgl", preserveDrawingBuffer=True)
+                    print(gl.drawingBufferWidth, gl.drawingBufferHeight, gl.VERTEX_SHADER, gl.TRIANGLES)
+                    print(canvas.getContext("2d"), gl.canvas == canvas)
+                    shader = gl.createShader(gl.VERTEX_SHADER)
+                    gl.shaderSource(shader, "void main() { gl_Position = vec4(0.0); }")
+                    gl.compileShader(shader)
+                    compiled: bool = gl.getShaderParameter(shader, gl.COMPILE_STATUS)
+                    log: str = gl.getShaderInfoLog(shader)
+                    print("compiled", compiled, repr(log))
+                    corners = Float32Array.new(to_js([0.1, -0.5, 2.5]))
+                    print(corners[0], corners[1], len(corners), corners.byteLength)
+                    buffer = gl.createBuffer()
+                    gl.bindBuffer(gl.ARRAY_BUFFER, buffer)
+                    gl.bufferData(gl.ARRAY_BUFFER, corners, gl.STATIC_DRAW)
+                    indices = gl.createBuffer()
+                    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indices)
+                    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, Uint16Array.new(to_js([0, 1, 2])), gl.STATIC_DRAW)
+                    a: int = gl.getBufferParameter(gl.ARRAY_BUFFER, gl.BUFFER_SIZE)
+                    b: int = gl.getBufferParameter(gl.ELEMENT_ARRAY_BUFFER, gl.BUFFER_SIZE)
+                    print("buffers", a, b)
+                    gl.viewport(0, 0, 16, 8)
+                    gl.clearColor(0.2, 0.4, 0.6, 1.0)
+                    gl.clear(gl.COLOR_BUFFER_BIT)
+                    print("cleared", pixel(gl, 0, 0), pixel(gl, 15, 7), gl.getError() == gl.NO_ERROR)
+
+
+                if __name__ == "__main__":
+                    main()
+                "##,
+            ),
+            "",
+            &[],
+        );
+        assert_eq!(run.stderr, "");
+        assert_eq!(
+            run.stdout,
+            "16 8 35633 4\njsnull True\ncompiled True ''\n0.10000000149011612 -0.5 3 12\n\
+             buffers 12 6\ncleared [51, 102, 153, 255] [51, 102, 153, 255] True\n"
+        );
+    }
 }

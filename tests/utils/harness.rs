@@ -1758,8 +1758,10 @@ fn dom_method(
             let Js::Node(node) = target else {
                 return None;
             };
+            let canvas = node.borrow().name == "CANVAS";
             Ok(match text(0).as_str() {
-                "2d" if node.borrow().name == "CANVAS" => graphics::Ctx2D::of(node),
+                "2d" if canvas && !graphics::WebGl::on(node) => graphics::Ctx2D::of(node),
+                "webgl" | "experimental-webgl" if canvas => graphics::WebGl::of(node),
                 _ => Js::Null,
             })
         }

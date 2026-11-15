@@ -1,7 +1,7 @@
 ---
 title: Graphics and the canvas
 eyebrow: Running
-description: "Drawing from Python on a canvas through its 2D context, animation loops through requestAnimationFrame, and image pixels through Pyodide's buffer methods."
+description: "Drawing from Python on a canvas through its 2D context and WebGL, animation loops through requestAnimationFrame, and image pixels through Pyodide's buffer methods."
 ---
 
 Graphics go through the [JavaScript bridge](/docs/javascript/): a canvas, its context, and what they answer are JavaScript values, with Pyodide's names and conversions, so drawing code written for Pyodide or PyScript compiles where it can. A program that draws runs in a page through the [loader](/docs/javascript/#the-loader).
@@ -92,3 +92,26 @@ print(list(ctx.getImageData(0, 0, 1, 1).data.to_bytes()))   # [0, 127, 255, 255]
 ```
 
 A single pixel is an item: `img.data[k] = v` stores as the typed array does (a `Uint8ClampedArray` clamps 300 to 255 and rounds 127.5 to 128), and `img.data[k]` reads one back, each a crossing of the bridge, so a whole image goes through `to_bytes()` and `assign()`. `assign()` raises Pyodide's `ValueError` for bytes of another length, or for a typed array that does not hold bytes. `to_js(b)` makes a `Uint8Array` of bytes, which `Uint8ClampedArray.new(...)` or `ImageData.new(...)` take. `assign_to()` and `to_memoryview()` hand over a writable buffer, which needs a `bytearray` or `memoryview`, and are refused. `examples/image_demo.py` (an inverted copy, a grayscale one, single pixels, and the errors) is checked against Pyodide in Chromium by the browser gate.
+
+## WebGL
+
+A canvas's `webgl` context is a JavaScript value too, so a WebGL program reads as it does in Pyodide: compile and link shaders, upload vertex and index data through typed arrays, set uniforms, and draw. A list of numbers becomes a typed array through `to_js()`, as in Pyodide (`Float32Array.new(to_js(corners))`), and pixels come back with `readPixels()` into a `Uint8Array`, whose `to_bytes()` hands them over in one copy.
+
+```python
+from js import Float32Array, Uint8Array, document
+from pyodide.ffi import to_js
+
+canvas = document.createElement("canvas")
+gl = canvas.getContext("webgl", preserveDrawingBuffer=True)
+buffer = gl.createBuffer()
+gl.bindBuffer(gl.ARRAY_BUFFER, buffer)
+gl.bufferData(gl.ARRAY_BUFFER, Float32Array.new(to_js([-1.0, -1.0, 1.0, -1.0, 0.0, 1.0])), gl.STATIC_DRAW)
+size: int = gl.getBufferParameter(gl.ARRAY_BUFFER, gl.BUFFER_SIZE)
+gl.clearColor(0.2, 0.4, 0.6, 1.0)
+gl.clear(gl.COLOR_BUFFER_BIT)
+out = Uint8Array.new(4)
+gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, out)
+print(size, list(out.to_bytes()))     # 24 [51, 102, 153, 255]
+```
+
+What a query answers is converted where it is stored, so give a status or a size its type (`ok: bool = gl.getShaderParameter(shader, gl.COMPILE_STATUS)`, `where: int = gl.getAttribLocation(program, "position")`). Keyword arguments to `getContext()` are its options object, as Pyodide passes them. `examples/webgl_demo.py` (shaders with a varying and a uniform, a square of two triangles drawn through an index buffer, and the colors read back at its corners) is checked against Pyodide in Chromium by the browser gate.
