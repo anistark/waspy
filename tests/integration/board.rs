@@ -1794,7 +1794,7 @@ mod collections {
         );
     }
 
-    /// .pop(i) removes the element at i and .index(v) answers its position; a missing value or position traps, as Python raises
+    /// .pop(i) removes the element at i and .index(v) answers its position; a missing value or position raises, as in Python (see EXCEPTION HANDLING)
     #[test]
     fn pop_index_and_index_of() {
         check(
@@ -5606,7 +5606,7 @@ mod advanced_types {
         );
     }
 
-    /// Tuple .index() (a missing value traps where CPython raises ValueError)
+    /// Tuple .index() (a missing value raises ValueError, as in CPython)
     #[test]
     fn tuple_index() {
         check(
