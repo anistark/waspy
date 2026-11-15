@@ -639,7 +639,7 @@
         "test": "collections::list_remove"
       },
       {
-        "name": ".pop(i) removes the element at i and .index(v) answers its position; a missing value or position traps, as Python raises",
+        "name": ".pop(i) removes the element at i and .index(v) answers its position; a missing value or position raises, as in Python (see EXCEPTION HANDLING)",
         "status": "done",
         "version": "0.16.0",
         "test": "collections::pop_index_and_index_of"
@@ -1798,7 +1798,7 @@
         "test": "advanced_types::tuple_count"
       },
       {
-        "name": "Tuple .index() (a missing value traps where CPython raises ValueError)",
+        "name": "Tuple .index() (a missing value raises ValueError, as in CPython)",
         "status": "done",
         "version": "0.18.0",
         "test": "advanced_types::tuple_index"

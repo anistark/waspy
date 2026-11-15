@@ -25,10 +25,10 @@ scripts: ["/assets/js/home.js"]
     { title: "CPython's answer, or an error", text: "A construct either gives the answer CPython gives or is refused at compile time with a located error. Nothing unsupported is silently accepted.", tag: "correctness first", accent: "--c-green" },
     { title: "Binaryen optimization", text: "The binary can run through Binaryen passes: dead-code elimination, inlining, constant folding. The unoptimized module is already valid and correct.", tag: "optimizer", accent: "--c-ember" },
     { title: "Standard WASM output", text: "Emits plain .wasm modules that load in browsers, Node.js, wasmtime, and edge runtimes. A program with a __main__ block is a WASI command.", tag: ".wasm", accent: "--c-honey" },
-    { title: "Language coverage", text: "Classes with multiple inheritance, closures, lambdas, generators, comprehensions, exceptions, f-strings, and decorators.", tag: "python 3 syntax", accent: "--c-teal" },
+    { title: "Language coverage", text: "Classes with multiple inheritance, closures, lambdas, generators, coroutines, comprehensions, exceptions, f-strings, and decorators.", tag: "python 3 syntax", accent: "--c-teal" },
     { title: "Small Rust API", text: "compile_python_to_wasm() for one source, compile_python_file() for an entry file and its imports, compile_python_project() for a directory.", tag: "rust crate", accent: "--c-green" },
     { title: "Project compilation", text: "Multi-file input with import resolution, __main__.py entry detection, and pyproject.toml config, linked into one .wasm. User modules resolve from disk, each compiled once.", tag: "one .wasm out", accent: "--c-amber" },
-    { title: "Standard library", text: "math, random, sys, os, json, re, datetime, logging, collections, itertools, and functools run on runtime values, checked against CPython 3.13. What is not implemented is refused at compile time, by name.", tag: "stdlib subset", accent: "--c-red" }
+    { title: "Standard library", text: "math, random, sys, os, json, re, datetime, logging, collections, itertools, functools, and asyncio run on runtime values, checked against CPython 3.13. What is not implemented is refused at compile time, by name.", tag: "stdlib subset", accent: "--c-red" }
 ] %}
 
 {% set implementations = ["Waspy", "CPython", "MicroPython", "PyPy", "HPy"] %}

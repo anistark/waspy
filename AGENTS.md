@@ -127,7 +127,7 @@ Do not consider a change complete until these pass cleanly.
 
 - **Update `CHANGELOG.md`** for any user-facing change (new feature, fix, breaking change).
 - **Keep `README.md` short**: installation, a quick start, and links to the docs site and `CONTRIBUTING.md`. Update it only when installation or the quick-start API changes. Supported features, limitations, the library API in detail, and the host interface live in the website's documentation (`docs/src/docs/`).
-- **Update the website on every major change or feature update.** `docs/` is the user-facing website, an Eleventy + Tailwind CSS project (see "The website" below). Whenever you add or change a feature, supported type, stdlib module, or any user-visible behaviour, reflect it in the relevant documentation page under `docs/src/docs/` (`python-subset.md`, `numbers.md`, `limitations.md`, `not-supported.md`, `library.md`, `running.md`), and keep the modules board (`docs/src/_data/modules.json`) in sync with what the compiler actually supports. The changelog page renders `CHANGELOG.md` at build time. Don't let the published docs drift behind the code.
+- **Update the website on every major change or feature update.** `docs/` is the user-facing website, an Eleventy + Tailwind CSS project (see "The website" below). Whenever you add or change a feature, supported type, stdlib module, or any user-visible behaviour, reflect it in the relevant documentation page under `docs/src/docs/` (`python-subset.md`, `numbers.md`, `limitations.md`, `not-supported.md`, `library.md`, `running.md`, `javascript.md`, `graphics.md`, and the shapes listed in `programs.njk`), and keep the modules board (`docs/src/_data/modules.json`) in sync with what the compiler actually supports. The changelog page renders `CHANGELOG.md` at build time. Don't let the published docs drift behind the code.
 - **Version tags on the modules board name published releases only.** On the modules board (`docs/src/_data/modules.json`), a feature's `version` field is the release that shipped it. Work that is merged but not yet released is tagged `"upcoming"`, never a future or internal/planned version number. When a release ships, replace the `upcoming` tags of the features it contains with the actual release version.
 - **Prefer `just` commands** over raw `cargo` commands. The justfile handles sequencing, examples, and release steps correctly.
 - **Prompt the user if `AGENTS.md` needs updating.** If your changes alter the pipeline, module layout, public API, supported types/stdlib modules, or conventions, tell the user: *"This change may require an update to AGENTS.md — would you like me to update it?"*
@@ -268,7 +268,7 @@ docs/
     ├── _includes/                    # layouts/base.njk, layouts/docs.njk, partials (header, footer, icons)
     ├── assets/css/main.css           # the design system: theme tokens, components, utilities
     ├── assets/js/                    # main.js (every page), home.js
-    ├── docs/                         # /docs/: getting started, library, subset, numbers, limitations, not supported, running, programs, changelog
+    ├── docs/                         # /docs/: getting started, library, subset, numbers, limitations, not supported, running, javascript, graphics, programs, changelog
     ├── modules/                      # the development board page and its script
     ├── playground/                   # the playground page, playground.js (CodeMirror 6), examples.js, wasi.js, compiler/ (built)
     ├── paper/                        # the paper and waspy.pdf

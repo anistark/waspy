@@ -32,7 +32,7 @@ permalink: /docs/programs/
             <span class="hex grid size-8 shrink-0 place-items-center bg-green/15 text-green" aria-hidden="true">{{ icon("check", "size-4") }}</span>
             <h3 class="font-display text-base font-semibold">Compiles and runs</h3>
         </div>
-        <p class="mt-3 text-sm leading-relaxed text-ink-1">Classes holding collections of instances, inheritance with virtual dispatch, methods calling methods, string and dict work, comprehensions, f-strings, exceptions as objects, generators, closures, printing and file I/O through WASI, and imports across your own files.</p>
+        <p class="mt-3 text-sm leading-relaxed text-ink-1">Classes holding collections of instances, inheritance with virtual dispatch, methods calling methods, string and dict work, comprehensions, f-strings, exceptions as objects, generators, closures, coroutines, printing and file I/O through WASI, and imports across your own files.</p>
     </div>
     <div class="glass p-5">
         <div class="flex items-center gap-3">
@@ -185,16 +185,16 @@ def empty_cart_total() -> float:
 A loop, <code>if</code>, <code>try</code>, bare call, augmented assignment, tuple unpacking, or write through a subscript or attribute at module level. Only definitions run when a module starts, so the statement would be compiled away. <code>X = 1</code>, <code>X = helper()</code>, <code>X = ClassName()</code>, <code>def</code>, <code>class</code>, and imports (a <code>try</code>/<code>except ImportError</code> guarded import included) do work, and a definition that is not a plain constant is evaluated once, at instantiation, in source order, so every function shares the same list or instance. Move the rest into a function, or under <code>if __name__ == "__main__":</code>.
 {% endcall %}
 
-{% call shape("<code>async def</code>, <code>await</code>, <code>async for</code>, <code>async with</code>", ["refused"]) %}
-There is no event loop in the output.
+{% call shape("Asynchronous generators and comprehensions", ["refused"]) %}
+<code>async def</code>, <code>await</code>, <code>async with</code>, and <code>async for</code> over a class with <code>__aiter__</code> and <code>__anext__</code> work, on <code>asyncio</code>'s event loop compiled with the program (see <a class="link" href="/docs/javascript/#coroutines-and-asyncio">Coroutines and asyncio</a>). An <code>async def</code> that yields, and so an <code>async for</code> over one, an asynchronous comprehension, and an <code>async def</code> inside a function are refused.
 {% endcall %}
 
 {% call shape("Starred parameters on methods, <code>**</code> unpacking in a call, positional-only parameters", ["refused"]) %}
 Functions and <code>__init__</code> take <code>*args: T</code> (a tuple of <code>T</code>), <code>**kwargs: T</code> (a <code>dict[str, T]</code>), and keyword-only parameters, <code>f(*xs)</code> passes a list or tuple on as <code>*args</code>, and keyword arguments work in every call. Other methods take neither starred nor keyword-only parameters, a call cannot unpack a dict with <code>**</code>, and <code>/</code> is refused. Every call to one of the module's own functions is checked against its signature, so a surplus or missing argument is a compile-time <code>TypeError</code>.
 {% endcall %}
 
-{% call shape("<code>match</code>, <code>del name</code>, <code>except*</code>, <code>type</code> aliases, <code>from x import *</code>", ["refused"]) %}
-Not implemented. Each is reported by name with its location, and so is <code>del</code> of an attribute or a stepped slice. <code>global</code>, <code>nonlocal</code>, nested <code>def</code>, <code>assert</code>, conditional expressions, and <code>del</code> of a list index, list slice, or dict key do work.
+{% call shape("<code>match</code>, <code>except*</code>, <code>type</code> aliases, <code>from x import *</code>", ["refused"]) %}
+Not implemented. Each is reported by name with its location, and so is <code>del</code> of an attribute or a stepped slice. <code>global</code>, <code>nonlocal</code>, nested <code>def</code>, <code>assert</code>, conditional expressions, and <code>del</code> of a name, a list index, a list slice, or a dict key do work.
 {% endcall %}
 
 {% call shape("Metaclass shapes beyond <code>__new__</code>, <code>__init__</code>, and <code>__call__</code>", ["refused"]) %}
@@ -210,11 +210,11 @@ A lambda's parameters, and a nested function's unannotated ones, take their type
 {% endcall %}
 
 {% call shape("A decorator the compiler cannot apply", ["refused", "workaround"]) %}
-The method kinds, <code>@dataclass</code>, <code>@abstractmethod</code>, <code>@functools.total_ordering</code>, <code>@functools.singledispatch</code> with <code>@f.register</code>, the caching decorators (accepted, no effect), and decorators the program writes itself all work on module functions: a user decorator is applied at compile time and specialized for each function it wraps, factories and stacks included. A user decorator on a method or a class, a wrapper that uses <code>*args</code> other than to pass it on, <code>@cached_property</code>, <code>@singledispatchmethod</code>, and a decorator name the program never defines are refused, and so are calls to <code>functools.partial</code>, <code>reduce</code>, and <code>cmp_to_key</code>. Write the wrapper's work inline, or use <code>@property</code>.
+The method kinds, <code>@dataclass</code>, <code>@abstractmethod</code>, <code>@functools.total_ordering</code>, <code>@functools.singledispatch</code> with <code>@f.register</code>, the caching decorators (accepted, no effect), and decorators the program writes itself all work on module functions: a user decorator is applied at compile time and specialized for each function it wraps, factories and stacks included. <code>functools</code>'s <code>@cached_property</code> and <code>@singledispatchmethod</code> work on methods. A user decorator on a method or a class, a wrapper that uses <code>*args</code> other than to pass it on, and a decorator name the program never defines are refused. Write the wrapper's work inline, or use <code>@property</code>.
 {% endcall %}
 
 {% call shape("Comparing collections whose element types differ or are unknown", ["refused", "workaround"]) %}
-Tuples and lists compare by value, and a tuple works as a set member or a dict key. Comparing two with different element types (<code>(1, 2) == (1.0, 2)</code>, True in CPython) or with element types the compiler cannot see is refused rather than read at the wrong width, and so are equality between dicts and a list, dict, or set used as a set member or dict key (unhashable in CPython). Annotate the collections (<code>List[Tuple[int, int]]</code>) so both sides are known.
+Tuples, lists, and dicts compare by value, and a tuple works as a set member or a dict key. Comparing two with different element types (<code>(1, 2) == (1.0, 2)</code>, True in CPython) or with element types the compiler cannot see is refused rather than read at the wrong width, and so is a list, dict, or set used as a set member or dict key (unhashable in CPython). Annotate the collections (<code>List[Tuple[int, int]]</code>) so both sides are known.
 {% endcall %}
 
 {% call shape("Mixing types in one collection", ["refused", "workaround"]) %}
@@ -257,16 +257,12 @@ With <code>x = float("nan")</code>, <code>(x,) == (x,)</code> and <code>[x] == [
 No traceback is kept. An exception a <code>__main__</code> block does not catch writes only the last line of CPython's report (<code>ValueError: boom</code>) to standard error and exits with status 1.
 {% endcall %}
 
-{% call shape("A generator expression with side effects", ["differs"]) %}
-A generator expression is built as a list before anything reads it, so in <code>for x in (f(y) for y in g()):</code> every side effect of <code>f</code> and <code>g</code> comes before the loop's body, where CPython interleaves them. A list comprehension is the same in both, so write one if the order matters.
-{% endcall %}
-
-{% call shape("An integer read into a float by <code>json.loads()</code>", ["differs"]) %}
-<code>x: float = json.loads("1")</code> holds <code>1.0</code>, where CPython keeps the int <code>1</code>.
+{% call shape("A generator expression kept or passed on, with side effects", ["differs"]) %}
+A generator expression is built as a list where it is made, unless a <code>for</code> statement walks it or it is the argument of <code>any()</code> or <code>all()</code>, which pull it as CPython does. So in <code>g = (f(y) for y in ys)</code> every call of <code>f</code> comes before anything reads <code>g</code>, where CPython makes each one as it is read. A list comprehension is the same in both, so write one if the order matters.
 {% endcall %}
 
 {% call shape("Third-party packages, and what the standard library does not implement", ["refused"]) %}
-No PyPI. <code>sys</code>, <code>os</code>, <code>os.path</code>, <code>math</code>, <code>random</code>, <code>json</code>, <code>re</code>, <code>datetime</code>, <code>logging</code>, <code>collections</code>, <code>itertools</code>, and <code>functools</code> run on runtime values, checked against CPython 3.13. What is not implemented is refused at compile time, by name: the <a href="/modules/">modules board</a> tracks each feature, and <a href="/docs/limitations/#the-standard-library">Limitations</a> has the rules these modules follow.
+No PyPI. <code>sys</code>, <code>os</code>, <code>os.path</code>, <code>math</code>, <code>random</code>, <code>json</code>, <code>re</code>, <code>datetime</code>, <code>logging</code>, <code>collections</code>, <code>itertools</code>, <code>functools</code>, and <code>asyncio</code> run on runtime values, checked against CPython 3.13. What is not implemented is refused at compile time, by name: the <a href="/modules/">modules board</a> tracks each feature, and <a href="/docs/limitations/#the-standard-library">Limitations</a> has the rules these modules follow.
 {% endcall %}
 
 </ul>
