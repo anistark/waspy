@@ -598,6 +598,42 @@ fn item_assignment_and_buffers() {
     );
 }
 
+/// A JavaScript value tested for truth is as true as the value Pyodide hands
+/// over, in an `if`, a `while`, a conditional expression, `not`, `and`, `or`,
+/// and a comprehension's filter: `null` and an empty array are false. Each
+/// raised `TypeError` (the value converted to a bool, as a store into a
+/// `bool` place converts it).
+#[test]
+fn js_values_tested_for_truth() {
+    prints(
+        r#"
+        from js import JSON, document
+
+
+        def main() -> None:
+            host = document.getElementById("nothing")
+            if host:
+                print("statement: found")
+            else:
+                print("statement: none")
+            print("expression:", "found" if host else "none")
+            xs = JSON.parse("[]")
+            ys = JSON.parse("[0, 1]")
+            print("empty array:", "yes" if xs else "no", not xs, bool(ys))
+            n = 0
+            while not host and n < 2:
+                n += 1
+            print("loops", n, host is None, "both" if xs or ys else "neither")
+            print([k for k in range(3) if ys and not xs])
+
+
+        if __name__ == "__main__":
+            main()
+        "#,
+        "statement: none\nexpression: none\nempty array: no True True\nloops 2 False both\n[0, 1, 2]\n",
+    );
+}
+
 /// A Python function JavaScript calls through `create_proxy`: its
 /// unannotated parameters take JavaScript values, what it answers goes back
 /// converted, a lambda works the same, a function called for its effect

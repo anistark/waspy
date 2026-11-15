@@ -3284,7 +3284,12 @@ fn compile_statement(
                 // Emit the condition and reduce it to Python's truth value:
                 // a str is an (offset, length) pair and a collection is a
                 // pointer, neither of which is a bool on its own.
-                let cond_ty = emit_expr(condition, func, ctx, memory_layout, Some(&IRType::Bool));
+                let cond_ty = crate::compiler::expression::emit_condition(
+                    condition,
+                    func,
+                    ctx,
+                    memory_layout,
+                );
                 crate::compiler::expression::emit_truthiness(func, ctx, &cond_ty);
 
                 // If-else block with no result value
@@ -3446,7 +3451,12 @@ fn compile_statement(
                 // Emitted before the inner continue block so this `BrIf(1)` still
                 // targets the outer break block from inside the loop.
                 let calls = func.runtime_calls();
-                let cond_ty = emit_expr(condition, func, ctx, memory_layout, Some(&IRType::Bool));
+                let cond_ty = crate::compiler::expression::emit_condition(
+                    condition,
+                    func,
+                    ctx,
+                    memory_layout,
+                );
                 crate::compiler::expression::emit_truthiness(func, ctx, &cond_ty);
                 func.instruction(&Instruction::I32Eqz);
                 func.instruction(&Instruction::BrIf(1));

@@ -1969,7 +1969,7 @@ fn emit_conditional(
         None
     };
 
-    let cond_ty = emit_expr(condition, func, ctx, memory_layout, Some(&IRType::Bool));
+    let cond_ty = emit_condition(condition, func, ctx, memory_layout);
     emit_truthiness(func, ctx, &cond_ty);
     func.instruction(&Instruction::If(match ty {
         IRType::Float => BlockType::Result(ValType::F64),
@@ -5049,6 +5049,77 @@ fn emit_string_pad(func: &mut Function, ctx: &CompilationContext, mode: PadMode,
 /// stack and the module failed to validate; a collection is a pointer, which
 /// is never null, so an empty list tested as True where Python says False.
 /// Int, bool, and an instance pointer are already their own truth value.
+/// `a and b`, `a or b`, short-circuiting, as a bool. Its operands are
+/// emitted as bools; where the whole expression is tested for truth
+/// (`condition`), each is tested for truth too, so a JavaScript value is as
+/// true as Pyodide's. Elsewhere a JavaScript operand is converted to a bool,
+/// which raises for one that is not, since `xs or ys` answers an operand
+/// there, which this bool would not be.
+fn emit_bool_op(
+    left: &IRExpr,
+    right: &IRExpr,
+    op: &IRBoolOp,
+    condition: bool,
+    func: &mut Function,
+    ctx: &CompilationContext,
+    memory_layout: &MemoryLayout,
+) -> IRType {
+    let operand = |e: &IRExpr, func: &mut Function| {
+        if condition {
+            emit_condition(e, func, ctx, memory_layout);
+        } else {
+            emit_expr(e, func, ctx, memory_layout, Some(&IRType::Bool));
+        }
+    };
+    match op {
+        IRBoolOp::And => {
+            // Short-circuit AND operation
+            operand(left, func);
+            func.instruction(&Instruction::LocalSet(ctx.temp_local));
+            func.instruction(&Instruction::LocalGet(ctx.temp_local));
+
+            // If-else pattern for short-circuit evaluation. Both arms
+            // leave the boolean result, so the if yields an i32.
+            func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+            ctx.enter_expr_blocks(1);
+            operand(right, func);
+            ctx.exit_expr_blocks(1);
+            func.instruction(&Instruction::Else);
+            func.instruction(&Instruction::I32Const(0)); // False
+            func.instruction(&Instruction::End);
+        }
+        IRBoolOp::Or => {
+            // Short-circuit OR operation
+            operand(left, func);
+            func.instruction(&Instruction::LocalSet(ctx.temp_local));
+            func.instruction(&Instruction::LocalGet(ctx.temp_local));
+
+            // If-else pattern for short-circuit evaluation. Both arms
+            // leave the boolean result, so the if yields an i32.
+            func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+            func.instruction(&Instruction::I32Const(1)); // True
+            func.instruction(&Instruction::Else);
+            ctx.enter_expr_blocks(1);
+            operand(right, func);
+            ctx.exit_expr_blocks(1);
+            func.instruction(&Instruction::End);
+        }
+    }
+    IRType::Bool
+}
+
+/// Emit an expression tested for truth (`ctx.truth_test`), expecting a
+/// bool as conditions do.
+pub(crate) fn emit_condition(
+    expr: &IRExpr,
+    func: &mut Function,
+    ctx: &CompilationContext,
+    memory_layout: &MemoryLayout,
+) -> IRType {
+    ctx.truth_test.set(true);
+    emit_expr(expr, func, ctx, memory_layout, Some(&IRType::Bool))
+}
+
 pub(crate) fn emit_truthiness(func: &mut Function, ctx: &CompilationContext, ty: &IRType) {
     match ty {
         IRType::String | IRType::Bytes => {
@@ -5917,7 +5988,7 @@ fn emit_comp_loops(
         // Filters guard everything inside this iteration.
         if with_conditions {
             for condition in &generator.conditions {
-                emit_expr(condition, func, ctx, memory_layout, Some(&IRType::Bool));
+                emit_condition(condition, func, ctx, memory_layout);
                 func.instruction(&Instruction::If(BlockType::Empty));
                 ctx.enter_expr_blocks(1);
             }
@@ -6114,7 +6185,7 @@ fn emit_comp_loops(
 
         if with_conditions {
             for condition in &generator.conditions {
-                emit_expr(condition, func, ctx, memory_layout, Some(&IRType::Bool));
+                emit_condition(condition, func, ctx, memory_layout);
                 func.instruction(&Instruction::If(BlockType::Empty));
                 ctx.enter_expr_blocks(1);
             }
@@ -7339,7 +7410,7 @@ fn emit_decided_comprehension(
     func.instruction(&Instruction::LocalSet(res));
     // The element decides when it is true for any(), false for all().
     let decide = |func: &mut Function, outer: u32| {
-        emit_expr(element, func, ctx, memory_layout, Some(&IRType::Bool));
+        emit_condition(element, func, ctx, memory_layout);
         if !any {
             func.instruction(&Instruction::I32Eqz);
         }
@@ -7812,15 +7883,27 @@ pub fn emit_expr(
     expected_type: Option<&IRType>,
 ) -> IRType {
     let numeric = ctx.numeric_operand.replace(false);
+    let truth = ctx.truth_test.replace(false);
     // The expression as it is compiled, when that is another one. Boxed, so
     // the recursion through here keeps one pointer per frame (a debug build
     // runs deep expressions on a test thread's stack).
     if let Some(rewritten) = rewritten_expr(expr, ctx, expected_type) {
         ctx.numeric_operand.set(numeric);
+        ctx.truth_test.set(truth);
         return emit_expr(&rewritten, func, ctx, memory_layout, expected_type);
+    }
+    if truth {
+        if let IRExpr::BoolOp { left, right, op } = expr {
+            return emit_bool_op(left, right, op, true, func, ctx, memory_layout);
+        }
     }
     let ty = emit_expr_inner(expr, func, ctx, memory_layout, expected_type);
     root_value(expr, &ty, func, ctx);
+    // A JavaScript value tested for truth is as true as Pyodide's value.
+    if ty == IRType::JsProxy && truth && expected_type == Some(&IRType::Bool) {
+        emit_truthiness(func, ctx, &ty);
+        return IRType::Bool;
+    }
     // A JavaScript value stored where a type is declared is converted to it.
     if ty == IRType::JsProxy {
         if let Some(converted) = crate::compiler::js::convert_at_store(func, ctx, expected_type) {
@@ -8827,42 +8910,7 @@ fn emit_expr_inner(
             expected_type,
         ),
         IRExpr::BoolOp { left, right, op } => {
-            match op {
-                IRBoolOp::And => {
-                    // Short-circuit AND operation
-                    emit_expr(left, func, ctx, memory_layout, Some(&IRType::Bool));
-                    func.instruction(&Instruction::LocalSet(ctx.temp_local));
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
-
-                    // If-else pattern for short-circuit evaluation. Both arms
-                    // leave the boolean result, so the if yields an i32.
-                    func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
-                    ctx.enter_expr_blocks(1);
-                    emit_expr(right, func, ctx, memory_layout, Some(&IRType::Bool));
-                    ctx.exit_expr_blocks(1);
-                    func.instruction(&Instruction::Else);
-                    func.instruction(&Instruction::I32Const(0)); // False
-                    func.instruction(&Instruction::End);
-                }
-                IRBoolOp::Or => {
-                    // Short-circuit OR operation
-                    emit_expr(left, func, ctx, memory_layout, Some(&IRType::Bool));
-                    func.instruction(&Instruction::LocalSet(ctx.temp_local));
-                    func.instruction(&Instruction::LocalGet(ctx.temp_local));
-
-                    // If-else pattern for short-circuit evaluation. Both arms
-                    // leave the boolean result, so the if yields an i32.
-                    func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
-                    func.instruction(&Instruction::I32Const(1)); // True
-                    func.instruction(&Instruction::Else);
-                    ctx.enter_expr_blocks(1);
-                    emit_expr(right, func, ctx, memory_layout, Some(&IRType::Bool));
-                    ctx.exit_expr_blocks(1);
-                    func.instruction(&Instruction::End);
-                }
-            }
-
-            IRType::Bool
+            emit_bool_op(left, right, op, false, func, ctx, memory_layout)
         }
         IRExpr::Conditional {
             condition,
