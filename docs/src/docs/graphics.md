@@ -1,7 +1,7 @@
 ---
 title: Graphics and the canvas
 eyebrow: Running
-description: "Drawing from Python on a canvas through its 2D context and WebGL, animation loops through requestAnimationFrame, and image pixels through Pyodide's buffer methods."
+description: "Drawing from Python on a canvas through its 2D context and WebGL, animation loops through requestAnimationFrame, and image pixels through Pyodide's buffer methods and a bytearray."
 ---
 
 Graphics go through the [JavaScript bridge](/docs/javascript/): a canvas, its context, and what they answer are JavaScript values, with Pyodide's names and conversions, so drawing code written for Pyodide or PyScript compiles where it can. A program that draws runs in a page through the [loader](/docs/javascript/#the-loader). The [playground](/playground/) runs one too: its Canvas, Animation frames, Image pixels, and WebGL examples draw in the Run tab's stage, and each is checked against Pyodide by the browser gate.
@@ -91,7 +91,20 @@ ctx.putImageData(img, 0, 0)
 print(list(ctx.getImageData(0, 0, 1, 1).data.to_bytes()))   # [0, 127, 255, 255]
 ```
 
-A single pixel is an item: `img.data[k] = v` stores as the typed array does (a `Uint8ClampedArray` clamps 300 to 255 and rounds 127.5 to 128), and `img.data[k]` reads one back, each a crossing of the bridge, so a whole image goes through `to_bytes()` and `assign()`. `assign()` raises Pyodide's `ValueError` for bytes of another length, or for a typed array that does not hold bytes. `to_js(b)` makes a `Uint8Array` of bytes, which `Uint8ClampedArray.new(...)` or `ImageData.new(...)` take. `assign_to()` and `to_memoryview()` hand over a writable buffer, which needs a `bytearray` or `memoryview`, and are refused. `examples/image_demo.py` (an inverted copy, a grayscale one, single pixels, and the errors) is checked against Pyodide in Chromium by the browser gate.
+A single pixel is an item: `img.data[k] = v` stores as the typed array does (a `Uint8ClampedArray` clamps 300 to 255 and rounds 127.5 to 128), and `img.data[k]` reads one back, each a crossing of the bridge, so a whole image goes through `to_bytes()` and `assign()`. `assign()` raises Pyodide's `ValueError` for bytes of another length, or for a typed array that does not hold bytes. `to_js(b)` makes a `Uint8Array` of bytes, which `Uint8ClampedArray.new(...)` or `ImageData.new(...)` take.
+
+To change pixels in place, copy them into a `bytearray` with `data.assign_to(b)`, change it there, and write it back with `data.assign(b)`:
+
+```python
+px = bytearray(len(img.data))
+img.data.assign_to(px)
+for k in range(0, len(px), 4):
+    px[k + 3] = 128                  # half transparent
+img.data.assign(px)
+ctx.putImageData(img, 0, 0)
+```
+
+`assign_to()` raises Pyodide's `ValueError` for a bytearray of another length, or for a typed array that does not hold bytes. `to_memoryview()` answers a memoryview, which is not supported, and is refused. `examples/image_demo.py` (an inverted copy, a grayscale one, single pixels, an in-place pass through a bytearray, and the errors) is checked against Pyodide in Chromium by the browser gate.
 
 ## WebGL
 

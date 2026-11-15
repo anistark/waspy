@@ -70,6 +70,14 @@ fn infer_field_value_type(
         IRExpr::FunctionCall { function_name, .. } if classes.contains(function_name) => {
             IRType::Class(function_name.clone())
         }
+        // `C().<from>(src)` is the `C` it fills (`self.buf = bytearray(n)`).
+        IRExpr::MethodCall {
+            object,
+            method_name,
+            ..
+        } if method_name == crate::ir::FROM_METHOD => {
+            infer_field_value_type(object, params, classes)
+        }
         // A `next()` answers what its pull does.
         IRExpr::FunctionCall {
             function_name,
@@ -194,6 +202,11 @@ fn infer_field_value_type(
             }
         }
         IRExpr::UnaryOp { operand, .. } => infer_field_value_type(operand, params, classes),
+        IRExpr::BoolOp { left, right, op } => crate::compiler::expression::bool_op_type(
+            infer_field_value_type(left, params, classes),
+            infer_field_value_type(right, params, classes),
+            op,
+        ),
         IRExpr::Conditional { body, orelse, .. } => match (
             infer_field_value_type(body, params, classes),
             infer_field_value_type(orelse, params, classes),

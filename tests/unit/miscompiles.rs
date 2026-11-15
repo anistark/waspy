@@ -6944,3 +6944,208 @@ fn walking_bytes_yields_its_ints() {
         "[104, 105, 33] (104, 105, 33) [208, 210]\n[1, 2] 242 105 242 [] {104: 6, 105: 0, 33: 5}\n"
     );
 }
+
+/// `a or b` and `a and b` answer one of their operands, as CPython's do: `0 or
+/// 7` is 7, `xs or ys` a list, `name or "anon"` a str when `name` is an
+/// `Optional[str]`, and `c and x or y` the older spelling of `x if c else y`.
+/// Each answered its operands' truth, so `0 or 7` printed True and
+/// `xs or [1, 2]` printed True, and a str or float operand failed validation.
+#[test]
+fn and_or_answer_an_operand() {
+    let run = run_main(
+        &dedent(
+            r#"
+            from typing import Optional
+
+
+            class Shape:
+                def area(self) -> int:
+                    return 0
+
+                def __bool__(self) -> bool:
+                    return self.area() > 0
+
+
+            class Square(Shape):
+                def __init__(self, n: int) -> None:
+                    self.n = n
+
+                def area(self) -> int:
+                    return self.n * self.n
+
+
+            def greet(name: Optional[str]) -> str:
+                return "hi " + (name or "anon")
+
+
+            def first(xs: list[int], ys: list[int]) -> list[int]:
+                return xs or ys
+
+
+            def count(d: dict[str, int], k: str) -> int:
+                return d.get(k) or 0
+
+
+            def pick(a: Shape, b: Shape) -> Shape:
+                return a or b
+
+
+            def fact(n: int) -> int:
+                return n <= 1 and 1 or n * fact(n - 1)
+
+
+            def chain(a: str, b: str, c: str) -> str:
+                return a or b or c
+
+
+            def both(a: str, b: str) -> str:
+                return a and b
+
+
+            def scale(x: float, y: float) -> float:
+                return x or y
+
+
+            def maybe(n: int) -> Optional[int]:
+                return n or None
+
+
+            def main() -> None:
+                print(greet(None), greet(""), greet("bob"))
+                print(first([], [1, 2]), first([3], [4]))
+                d = {"a": 2, "z": 0}
+                print(count(d, "a"), count(d, "b"), count(d, "z"))
+                print(pick(Square(0), Square(3)).area(), pick(Square(2), Square(5)).area())
+                print(fact(5), fact(1))
+                print(chain("", "", "c"), chain("", "b", "c"), chain("a", "b", "c"))
+                print(repr(both("", "x")), both("y", "x"))
+                print(scale(0.0, 2.5), scale(1.5, 2.5))
+                print(maybe(0), maybe(4))
+                print(not ("" or 0), not ("a" or 0), bool("" or ""), bool([] or [1]))
+                words = ["", "a", "", "b"]
+                print([w or "-" for w in words])
+                total = 0
+                for i in range(5):
+                    total += i and 10 or 1
+                print(total)
+                s = ""
+                n = 0
+                while (s or "x") != "done" and n < 3:
+                    n += 1
+                    s = n == 3 and "done" or ""
+                print(n, s)
+                print(f"{'' or 'empty'} {3 and 4}")
+                x = 0
+                y = x or 5 if True else 9
+                print(y)
+
+
+            if __name__ == "__main__":
+                main()
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(run.stderr, "");
+    assert_eq!(run.stdout, "hi anon hi anon hi bob\n[1, 2] [3]\n2 0 0\n9 4\n120 1\nc b a\n'' x\n2.5 1.5\nNone 4\nTrue False False True\n['-', 'a', '-', 'b']\n41\n3 done\nempty 4\n5\n");
+}
+
+/// In a condition, `and` and `or` test each operand for truth. A str operand
+/// left its offset on the stack, so `if s and t:` failed validation, and a list
+/// operand was its pointer, so `[] or []` was true.
+#[test]
+fn and_or_test_str_and_list_operands_for_truth() {
+    let run = run_main(
+        &dedent(
+            r#"
+            def check(s: str, t: str) -> str:
+                if s and t:
+                    return "both"
+                if s or t:
+                    return "one"
+                return "none"
+
+
+            def main() -> None:
+                print(check("", ""), check("a", ""), check("", "b"), check("a", "b"))
+                a: list[int] = []
+                b: list[int] = []
+                print("t" if a or b else "f", "t" if a or [1] else "f")
+                print(not ("" or 0), not ("a" or 0), bool("" or ""), bool([] or [1]))
+                n = 3
+                name = ""
+                if n > 0 or name:
+                    print("mixed operands only need their truth")
+                while name or n:
+                    n -= 1
+                print(n)
+
+
+            if __name__ == "__main__":
+                main()
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(run.stderr, "");
+    assert_eq!(
+        run.stdout,
+        "none one one both\nf t\nTrue False False True\nmixed operands only need their truth\n0\n"
+    );
+}
+
+/// `and` / `or` whose operands share no type are refused where the answer is
+/// used as a value: it is one of the operands, and one place cannot hold both
+/// (`n or "none"` is an int or a str, `n > 1 and n` a bool or an int). Where
+/// only its truth is used they need none.
+#[test]
+fn and_or_of_operands_with_no_shared_type_are_refused() {
+    for (body, op, types) in [
+        ("n = 3\n    print(n or \"none\")", "or", "(int and str)"),
+        ("s = \"a\"\n    print(s and 5)", "and", "(str and int)"),
+        ("n = 0\n    print(n > 1 and n)", "and", "(bool and int)"),
+    ] {
+        let src = format!("def main() -> None:\n    {body}\n");
+        let err = try_compile(&src).expect_err("operands with no shared type must be refused");
+        assert!(
+            err.contains(&format!(
+                "operands of this `{op}` have different types {types}"
+            )),
+            "{err}"
+        );
+    }
+    let truth = "def main() -> None:\n    n = 3\n    if n > 1 and \"a\":\n        print(n)\n";
+    assert!(try_compile(truth).is_ok());
+}
+
+/// What a bytearray does not implement is refused, never answered wrong: it
+/// is unhashable as in CPython (a set member or a dict key), `decode()` is
+/// not supported (as it is not for bytes), and `bytearray(s, encoding)` needs
+/// `str.encode()`.
+#[test]
+fn bytearray_refuses_what_it_does_not_implement() {
+    for (body, needle) in [
+        (
+            "s = {bytearray(b\"a\")}\n    print(s)",
+            "unhashable type: 'bytearray' cannot be a set member",
+        ),
+        (
+            "d = {bytearray(b\"a\"): 1}\n    print(d)",
+            "unhashable type: 'bytearray' cannot be a dict key",
+        ),
+        (
+            "print(bytearray(b\"a\").decode())",
+            "'bytearray' object has no attribute 'decode'",
+        ),
+        (
+            "print(bytearray(\"abc\", \"utf-8\"))",
+            "bytearray() of a str and its encoding is not supported",
+        ),
+    ] {
+        let src = format!("def main() -> None:\n    {body}\n");
+        let err = try_compile(&src).expect_err("this must be refused");
+        assert!(err.contains(needle), "expected `{needle}` in: {err}");
+    }
+}

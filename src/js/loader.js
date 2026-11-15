@@ -472,6 +472,13 @@ export class Bridge {
             },
             // `to_js(b)` of bytes: a `Uint8Array` of them.
             bytes: (at, n) => this.add(this.memory().slice(at, at + n)),
+            // What kind of buffer `h` is, for `assign_to()` into a bytearray:
+            // bytes (1), a typed array of another format (0), or neither (-1).
+            byte_format: (h) => {
+                const v = this.get(h);
+                if (v instanceof Uint8Array || v instanceof Uint8ClampedArray || v instanceof ArrayBuffer) return 1;
+                return ArrayBuffer.isView(v) ? 0 : -1;
+            },
             resolve: (token, failed, h) => {
                 let value = this.get(h);
                 this.drop(h);

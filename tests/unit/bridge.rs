@@ -585,16 +585,27 @@ fn item_assignment_and_buffers() {
         "[\"x\",2,9,null,5] 5\nTypeError 'pyodide.ffi.JsProxy' object does not support item assignment\n\
          TypeError 'str' object does not support item assignment\n[7, 2] 2\n",
     );
+    // `assign_to()` writes into a bytearray, which bytes are not, and a
+    // memoryview is not supported.
     refused(
         r#"
         from js import Uint8Array
 
 
         def main() -> None:
-            out = bytearray(2)
-            Uint8Array.new(2).assign_to(out)
+            Uint8Array.new(2).assign_to(b"xy")
         "#,
-        "assign_to() hands over a writable buffer",
+        "assign_to() copies a buffer into a bytearray, and its argument is not one",
+    );
+    refused(
+        r#"
+        from js import Uint8Array
+
+
+        def main() -> None:
+            print(Uint8Array.new(2).to_memoryview())
+        "#,
+        "to_memoryview() answers a memoryview, which is not supported",
     );
 }
 
@@ -631,6 +642,39 @@ fn js_values_tested_for_truth() {
             main()
         "#,
         "statement: none\nexpression: none\nempty array: no True True\nloops 2 False both\n[0, 1, 2]\n",
+    );
+}
+
+/// `and` / `or` over JavaScript values answer an operand, tested as Pyodide
+/// tests it: `host or fallback` is the element, and a JavaScript value beside
+/// a str or an int is converted to it where it is the answer (`obj.n or 5`
+/// is 5 for a JavaScript 0). The answer was a bool, which raised for an
+/// operand that was not one.
+#[test]
+fn js_values_answered_by_and_or() {
+    prints(
+        r#"
+        from js import JSON, document
+
+
+        def main() -> None:
+            xs = JSON.parse("[]")
+            ys = JSON.parse("[0, 1]")
+            pick = xs or ys
+            print(pick.length, (ys and xs).length)
+            host = document.getElementById("nothing")
+            fallback = document.createElement("div")
+            el = host or fallback
+            print(el.tagName)
+            obj = JSON.parse('{"name": "", "n": 0, "label": "box"}')
+            name: str = obj.name or "anon"
+            print(name, obj.n or 5, obj.label or "none", "x" and obj.label)
+
+
+        if __name__ == "__main__":
+            main()
+        "#,
+        "2 0\nDIV\nanon 5 box box\n",
     );
 }
 

@@ -600,7 +600,8 @@ fn lower_module(ast: &Suite, hoisted: usize) -> Result<IRModule> {
     // functions, `functools.partial` over them, `datetime`'s classes, keyword
     // placement, the context-manager protocol (so a `with` in a generator is
     // a `try` the generator pass can flatten), `itertools` and `collections`
-    // (they synthesize generators and classes), dict-view loops (once every
+    // (they synthesize generators and classes), `bytearray` (a class like
+    // theirs, made when the program uses it), dict-view loops (once every
     // class with an `items()` exists, and before a generator method's loop is
     // consumed), generator lowering (it
     // synthesizes classes and constructor bodies the later passes must still
@@ -622,6 +623,7 @@ fn lower_module(ast: &Suite, hoisted: usize) -> Result<IRModule> {
     crate::ir::context_managers::desugar_with_statements(&mut module)?;
     crate::ir::lower_itertools(&mut module)?;
     crate::ir::lower_collections(&mut module)?;
+    crate::ir::lower_bytearray(&mut module)?;
     crate::ir::lower_dict_views(&mut module);
     crate::ir::generators::transform_generators(&mut module)?;
     crate::ir::pyodide_http::lower_pyodide_http(&mut module)?;

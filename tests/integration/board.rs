@@ -5246,6 +5246,156 @@ mod advanced_types {
         );
     }
 
+    /// bytearray: built from a size, bytes, a bytearray, or a list of ints; indexing, item assignment, slicing, len, iteration, in, ==, ordering, +, *, +=, *=, del, bytes(b), and append, extend, insert, pop, remove, clear, reverse, copy, count, find, index, startswith, endswith, with CPython's ValueError and IndexError
+    ///
+    /// Walking one reads it as it is at each step, a field and an alias are the
+    /// same object, and a recursion passes it along.
+    #[test]
+    fn bytearray_values() {
+        let run = run_main(
+            &dedent(
+                r#"
+                def checksum(buf: bytearray) -> int:
+                    total = 0
+                    for b in buf:
+                        total = (total + b) % 251
+                    return total
+
+
+                def fill(buf: bytearray, value: int) -> None:
+                    for i in range(len(buf)):
+                        buf[i] = value
+
+
+                def main() -> None:
+                    a = bytearray(b"hello")
+                    print(a, len(a), a[0], a[-1], a[1:3], bytes(a))
+                    a[0] = 72
+                    a.append(33)
+                    a.extend(b" ok")
+                    print(a, a == b"Hello! ok", b"Hello! ok" == a, a != bytearray(b"x"))
+                    z = bytearray(3)
+                    fill(z, 7)
+                    print(z, checksum(a), list(z), sum(a), max(a), sorted(bytearray(b"cab")))
+                    b = bytearray([1, 2, 3])
+                    b += b"\x04"
+                    b += bytearray([5])
+                    print(b, b + b"\x06", b"\x00" + b, b * 2, 2 * bytearray(b"ab"))
+                    print(b.pop(), b.pop(0), b, 3 in b, 9 in b, b.count(2), b.find(3), b.find(9), b.index(2))
+                    b.insert(0, 9)
+                    b.remove(3)
+                    b.reverse()
+                    print(b, b.copy(), bytearray(b), bytearray(), bool(bytearray()), bool(b))
+                    del b[0]
+                    print(b, b.startswith(b"\x02"), b.endswith(b"\x09"), b < bytearray(b"\x03"), str(b))
+                    c = b
+                    c.clear()
+                    print(b, len(c), [x * 2 for x in bytearray(b"AB")])
+                    d = bytearray(b"abcdef")
+                    del d[1:3]
+                    print(d, d[::-1], d[::2])
+                    d *= 2
+                    print(d, isinstance(d, bytearray), f"{d}")
+                    rows: list[bytearray] = [bytearray(2), bytearray(b"z")]
+                    rows[0][1] = 255
+                    print(rows)
+                    e = bytearray(b"ab")
+                    e[0] += 1
+                    print(e)
+
+
+                if __name__ == "__main__":
+                    main()
+                "#,
+            ),
+            "",
+            &[],
+        );
+        assert_eq!(run.stderr, "", "stderr");
+        assert_eq!(run.stdout, "bytearray(b'hello') 5 104 111 bytearray(b'el') b'hello'\nbytearray(b'Hello! ok') True True True\nbytearray(b'\\x07\\x07\\x07') 30 [7, 7, 7] 783 111 [97, 98, 99]\nbytearray(b'\\x01\\x02\\x03\\x04\\x05') bytearray(b'\\x01\\x02\\x03\\x04\\x05\\x06') b'\\x00\\x01\\x02\\x03\\x04\\x05' bytearray(b'\\x01\\x02\\x03\\x04\\x05\\x01\\x02\\x03\\x04\\x05') bytearray(b'abab')\n5 1 bytearray(b'\\x02\\x03\\x04') True False 1 1 -1 0\nbytearray(b'\\x04\\x02\\t') bytearray(b'\\x04\\x02\\t') bytearray(b'\\x04\\x02\\t') bytearray(b'') False True\nbytearray(b'\\x02\\t') True True True bytearray(b'\\x02\\t')\nbytearray(b'') 0 [130, 132]\nbytearray(b'adef') bytearray(b'feda') bytearray(b'ae')\nbytearray(b'adefadef') True bytearray(b'adefadef')\n[bytearray(b'\\x00\\xff'), bytearray(b'z')]\nbytearray(b'bb')\n");
+    }
+
+    /// A bytearray's errors are CPython's: a value that is not a byte, an index
+    /// out of range, a pop from an empty one, a missing value.
+    #[test]
+    fn bytearray_errors() {
+        let run = run_main(
+            &dedent(
+                r#"
+                class Packet:
+                    def __init__(self, size: int) -> None:
+                        self.payload = bytearray(size)
+                        self.tags: dict[str, bytearray] = {}
+
+                    def stamp(self, at: int, value: int) -> None:
+                        self.payload[at] = value
+
+
+                def grow(buf: bytearray, n: int) -> bytearray:
+                    if n == 0:
+                        return buf
+                    buf.append(n)
+                    return grow(buf, n - 1)
+
+
+                def main() -> None:
+                    for bad in [256, -1]:
+                        try:
+                            bytearray(2)[0] = bad
+                        except ValueError as e:
+                            print("ValueError", e)
+                    for op in range(9):
+                        b = bytearray(b"ab")
+                        try:
+                            if op == 0:
+                                print(b[5])
+                            elif op == 1:
+                                b[-3] = 1
+                            elif op == 2:
+                                bytearray().pop()
+                            elif op == 3:
+                                b.pop(7)
+                            elif op == 4:
+                                b.remove(120)
+                            elif op == 5:
+                                bytearray([1, 300])
+                            elif op == 6:
+                                bytearray(-1)
+                            elif op == 7:
+                                b.index(99)
+                            else:
+                                del b[2]
+                        except IndexError as e:
+                            print("IndexError", e)
+                        except ValueError as e:
+                            print("ValueError", e)
+                    p = Packet(3)
+                    p.stamp(1, 9)
+                    p.tags["x"] = bytearray(b"t")
+                    alias = p.payload
+                    alias.extend(b"\x01")
+                    print(p.payload, p.tags, len(alias))
+                    print(grow(bytearray(), 4), grow(bytearray(b"!"), 2))
+                    walked = bytearray(b"ab")
+                    out: list[int] = []
+                    for x in walked:
+                        out.append(x)
+                        if len(walked) < 4:
+                            walked.append(x + 1)
+                    print(out, walked, type(walked))
+
+
+                if __name__ == "__main__":
+                    main()
+                "#,
+            ),
+            "",
+            &[],
+        );
+        assert_eq!(run.stderr, "", "stderr");
+        assert_eq!(run.stdout, "ValueError byte must be in range(0, 256)\nValueError byte must be in range(0, 256)\nIndexError bytearray index out of range\nIndexError bytearray index out of range\nIndexError pop from empty bytearray\nIndexError pop index out of range\nValueError value not found in bytearray\nValueError byte must be in range(0, 256)\nValueError negative count\nValueError subsection not found\nIndexError bytearray index out of range\nbytearray(b'\\x00\\t\\x00\\x01') {'x': bytearray(b't')} 4\nbytearray(b'\\x04\\x03\\x02\\x01') bytearray(b'!\\x02\\x01')\n[97, 98, 98, 99] bytearray(b'abbc') <class 'bytearray'>\n");
+    }
+
     /// Set type ({1, 2, 3}) & literals
     #[test]
     fn set_literals() {
@@ -7047,6 +7197,67 @@ mod web_interop {
 
 mod graphics {
     use super::*;
+
+    /// A typed array's pixels changed in place in a bytearray: `assign_to(b)`
+    /// copies its bytes into one, with Pyodide's errors (another length,
+    /// another format), and `assign(b)` and `to_js(b)` take one as they take
+    /// bytes. Pyodide's output in Chromium; the browser gate checks
+    /// `examples/image_demo.py`'s in-place pass.
+    #[test]
+    fn bytearray_pixels() {
+        let run = run_main(
+            &dedent(
+                r##"
+                from js import Float32Array, Uint8Array, Uint8ClampedArray, document
+                from pyodide.ffi import to_js
+
+
+                def main() -> None:
+                    a = Uint8Array.new(to_js([1, 2, 3]))
+                    ba = bytearray(3)
+                    a.assign_to(ba)
+                    print(ba)
+                    for target in [bytearray(2), bytearray(4)]:
+                        try:
+                            a.assign_to(target)
+                        except ValueError as e:
+                            print("ValueError:", e)
+                    try:
+                        Float32Array.new(1).assign_to(bytearray(4))
+                    except ValueError as e:
+                        print("ValueError:", e)
+                    t = to_js(bytearray(b"ab"))
+                    print(t.length, t[1])
+                    x = Uint8Array.new(2)
+                    x.assign(bytearray(b"hi"))
+                    print(x.to_bytes())
+                    ctx = document.createElement("canvas").getContext("2d")
+                    ctx.fillStyle = "#ff8000"
+                    ctx.fillRect(0, 0, 2, 1)
+                    img = ctx.getImageData(0, 0, 2, 1)
+                    px = bytearray(len(img.data))
+                    img.data.assign_to(px)
+                    for k in range(0, len(px), 4):
+                        px[k] = 255 - px[k]
+                        px[k + 1] = 255 - px[k + 1]
+                        px[k + 2] = 255 - px[k + 2]
+                    img.data.assign(px)
+                    ctx.putImageData(img, 0, 0)
+                    print(list(ctx.getImageData(0, 0, 2, 1).data.to_bytes()))
+                    Uint8ClampedArray.new(2).assign_to(ba[:2])
+                    print(ba, ba[:2])
+
+
+                if __name__ == "__main__":
+                    main()
+                "##,
+            ),
+            "",
+            &[],
+        );
+        assert_eq!(run.stderr, "", "stderr");
+        assert_eq!(run.stdout, "bytearray(b'\\x01\\x02\\x03')\nValueError: cannot assign from TypedArray of length 3 to buffer of length 2\nValueError: cannot assign from TypedArray of length 3 to buffer of length 4\nValueError: TypedArray and memorybuffer have incompatible formats\n2 98\nb'hi'\n[0, 127, 255, 255, 0, 127, 255, 255]\nbytearray(b'\\x01\\x02\\x03') bytearray(b'\\x01\\x02')\n");
+    }
 
     /// Canvas API (2D drawing)
     ///

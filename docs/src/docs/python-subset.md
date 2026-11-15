@@ -22,8 +22,8 @@ Waspy compiles a typed subset of Python ahead of time. The rule it holds to: a c
 
 ## Numbers and operators
 
-- Types: integers (32-bit, see [Numbers](/docs/numbers/)), floats, booleans, strings, bytes, and the collections below. `bytes()`, `bytes(n)`, and `bytes(ints)` make bytes (a value out of range(0, 256) raises `ValueError`), and `sep.join(parts)` joins bytes
-- Arithmetic (`+`, `-`, `*`, `/`, `%`, `//`, `**`), comparisons (`==`, `!=`, `<`, `<=`, `>`, `>=`, chained as in `0 <= x <= 100`), boolean operators (`and`, `or`, short-circuiting), and bitwise operators (`&`, `|`, `^`, `<<`, `>>`)
+- Types: integers (32-bit, see [Numbers](/docs/numbers/)), floats, booleans, strings, bytes, `bytearray`, and the collections below. `bytes()`, `bytes(n)`, and `bytes(ints)` make bytes (a value out of range(0, 256) raises `ValueError`), and `sep.join(parts)` joins bytes
+- Arithmetic (`+`, `-`, `*`, `/`, `%`, `//`, `**`), comparisons (`==`, `!=`, `<`, `<=`, `>`, `>=`, chained as in `0 <= x <= 100`), boolean operators (`and`, `or`, short-circuiting and answering the operand that decides, as CPython's do: `0 or 7` is 7, `name or "anon"` a str), and bitwise operators (`&`, `|`, `^`, `<<`, `>>`)
 
 ## Strings and formatting
 
@@ -40,6 +40,7 @@ Waspy compiles a typed subset of Python ahead of time. The rule it holds to: a c
 ## Collections
 
 - Collections: lists, dicts, sets, tuples, and ranges: literals, indexing, slicing, methods, and membership (`in`/`not in`), with full-precision f64 elements and hash-table sets; lists, dicts, and sets grow at run time. A collection's elements live in a block its header points at, so growing one never moves the collection: a list grown inside a function it was passed to is grown for every other name for it too. An empty collection is falsy as in Python
+- `bytearray`, a mutable sequence of bytes: `bytearray(n)`, `bytearray(b)` of bytes or a bytearray, and `bytearray(ints)`; indexing and item assignment, slicing (a new bytearray), `len()`, iteration, `in`, `==` and ordering against bytes or a bytearray, `+`, `*`, `+=`, `*=`, `del`, `bytes(b)`, and `append`, `extend`, `insert`, `pop`, `remove`, `clear`, `reverse`, `copy`, `count`, `find`, `index`, `startswith`, and `endswith`, with CPython's `ValueError` for a value outside range(0, 256) and `IndexError` for an index out of range
 - List and tuple methods: `sort`, `reverse`, `pop(i)`, `index`, `count`, `append`, `extend`, `insert`, `remove`. Lists and tuples concatenate (`xs + ys`) and repeat (`[0] * n`, `(a, b) * 3`)
 - Sets take `|`, `&`, `^`, and `-` (and their in-place forms) and the full method set (`union`, `intersection`, `difference`, `symmetric_difference`, the `_update` forms, `issubset`, `issuperset`, `isdisjoint`, taking a set, list, or tuple; `copy`, `pop`, `clear`; `set(iterable)`). A set iterates in CPython's order: its hashes for ints, bools, floats, and tuples of them, and its table algorithm, are CPython's, so a loop over a set, `pop()`, and the order a set prints in agree with CPython 3.13 for those members. A set of strings has no reproducible order in CPython, whose string hash is keyed per process; here the order is fixed but unspecified
 - Dicts merge with `d1 | d2` and `|=` in CPython's order and have `get(key, default)`, `keys`, `values`, `items`, `update`, `pop`, `popitem`, `setdefault`, `copy`, `clear`, and `dict.fromkeys`. `dict.get(key)` without a default needs number or instance values (see [Limitations](/docs/limitations/))

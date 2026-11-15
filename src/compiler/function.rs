@@ -1211,6 +1211,11 @@ pub(crate) fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRTy
         {
             IRType::ClassRef(name.clone())
         }
+        IRExpr::BoolOp { left, right, op } => crate::compiler::expression::bool_op_type(
+            infer_value_type(left, ctx),
+            infer_value_type(right, ctx),
+            op,
+        ),
         IRExpr::Conditional { body, orelse, .. } => {
             match (infer_value_type(body, ctx), infer_value_type(orelse, ctx)) {
                 (a, b) if a == b => a,

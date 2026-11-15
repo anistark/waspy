@@ -143,6 +143,10 @@ pub enum JsImport {
     /// `(at, n) -> h`: a `Uint8Array` of `n` bytes copied from memory
     /// (`to_js(b)` of bytes).
     Bytes,
+    /// `(h) -> format`: 1 for a buffer of bytes (a `Uint8Array`,
+    /// `Uint8ClampedArray`, or `ArrayBuffer`), 0 for a typed array of
+    /// another format, -1 for anything else (`assign_to()` into a bytearray).
+    ByteFormat,
 }
 
 impl JsImport {
@@ -190,6 +194,7 @@ impl JsImport {
             JsImport::BufferBytes => "buffer_bytes",
             JsImport::Assign => "assign",
             JsImport::Bytes => "bytes",
+            JsImport::ByteFormat => "byte_format",
         }
     }
 
@@ -225,6 +230,7 @@ impl JsImport {
             | JsImport::Next
             | JsImport::Keep
             | JsImport::BufferBytes
+            | JsImport::ByteFormat
             | JsImport::Stringify => (vec![I32], vec![I32]),
             JsImport::ToNumber => (vec![I32], vec![F64]),
             JsImport::Utf8Copy | JsImport::Release => (vec![I32], vec![]),
@@ -233,7 +239,7 @@ impl JsImport {
         }
     }
 
-    pub const ALL: [JsImport; 42] = [
+    pub const ALL: [JsImport; 43] = [
         JsImport::Global,
         JsImport::GlobalThis,
         JsImport::Get,
@@ -276,6 +282,7 @@ impl JsImport {
         JsImport::BufferBytes,
         JsImport::Assign,
         JsImport::Bytes,
+        JsImport::ByteFormat,
     ];
 }
 
@@ -1126,6 +1133,32 @@ pub(crate) fn rewrite(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr>
                     args.extend(arguments.iter().cloned());
                     Some(js_call("assign", args))
                 }
+                // A bytearray is copied in as the bytes it holds.
+                "assign"
+                    if arguments.len() == 1
+                        && is_bytearray(&crate::compiler::function::infer_value_type(
+                            &arguments[0],
+                            ctx,
+                        )) =>
+                {
+                    args.push(view_bytes(&arguments[0]));
+                    Some(js_call("assign", args))
+                }
+                // The buffer's bytes copied into a bytearray, with Pyodide's
+                // errors.
+                "assign_to"
+                    if arguments.len() == 1
+                        && is_bytearray(&crate::compiler::function::infer_value_type(
+                            &arguments[0],
+                            ctx,
+                        )) =>
+                {
+                    Some(IRExpr::MethodCall {
+                        object: Box::new(arguments[0].clone()),
+                        method_name: crate::ir::ASSIGN_JS_METHOD.to_string(),
+                        arguments: args,
+                    })
+                }
                 "assign_to" | "to_memoryview" => Some(js_call(method_name, args)),
                 _ => {
                     args.push(lit(method_name));
@@ -1219,8 +1252,10 @@ fn ffi(f: &str, args: &[IRExpr], ctx: &CompilationContext) -> Option<IRExpr> {
                 IRType::List(_) | IRType::Tuple(_) | IRType::VarTuple(_) | IRType::Dict(..) => {
                     Some(js_call("to_js", vec![x.clone()]))
                 }
-                // Bytes are a `Uint8Array` of them, as Pyodide's are.
+                // Bytes are a `Uint8Array` of them, as Pyodide's are, and so
+                // is a bytearray.
                 IRType::Bytes => Some(js_call("to_js_bytes", vec![x.clone()])),
+                _ if is_bytearray(&ty) => Some(js_call("to_js_bytes", vec![view_bytes(x)])),
                 // A primitive (or a proxy) is itself, as Pyodide's `to_js`
                 // answers it.
                 _ => Some(x.clone()),
@@ -1231,6 +1266,20 @@ fn ffi(f: &str, args: &[IRExpr], ctx: &CompilationContext) -> Option<IRExpr> {
 }
 
 /// The type an intrinsic call answers.
+/// Whether a value of `ty` is a bytearray.
+fn is_bytearray(ty: &IRType) -> bool {
+    matches!(ty, IRType::Class(c) if c == crate::ir::BYTEARRAY)
+}
+
+/// The bytes a bytearray holds.
+fn view_bytes(x: &IRExpr) -> IRExpr {
+    IRExpr::MethodCall {
+        object: Box::new(x.clone()),
+        method_name: crate::ir::VIEW_METHOD.to_string(),
+        arguments: Vec::new(),
+    }
+}
+
 pub(crate) fn intrinsic_type(name: &str) -> Option<IRType> {
     let op = name.strip_prefix(JS_PREFIX)?;
     Some(match op {
@@ -1243,6 +1292,7 @@ pub(crate) fn intrinsic_type(name: &str) -> Option<IRType> {
         "to_bytes" => IRType::Bytes,
         "export" | "fail" | "next_settled" | "settled_failed" | "suspend" => IRType::Int,
         "can_suspend" => IRType::Bool,
+        "byte_format" => IRType::Int,
         "to_py" => IRType::Unknown,
         _ => IRType::JsProxy,
     })
@@ -1886,12 +1936,19 @@ pub(crate) fn emit_intrinsic(
             ctx.release_held();
             IRType::None
         }
-        "assign_to" | "to_memoryview" => {
-            ctx.report(format!(
-                "{op}() hands over a writable buffer (a bytearray or memoryview), which is not \
-                 supported. Hint: read the bytes with to_bytes(), and write them back with \
-                 assign(b)"
-            ));
+        "assign_to" => {
+            ctx.report(
+                "assign_to() copies a buffer into a bytearray, and its argument is not one \
+                 (bytes cannot change, and Pyodide raises BufferError for them). Hint: pass a \
+                 bytearray of the buffer's length, or read the bytes with to_bytes()",
+            );
+            IRType::None
+        }
+        "to_memoryview" => {
+            ctx.report(
+                "to_memoryview() answers a memoryview, which is not supported. Hint: read the \
+                 bytes with to_bytes(), or copy them into a bytearray with assign_to(b)",
+            );
             IRType::None
         }
         // `to_js(b)` of bytes: a `Uint8Array` copy.
@@ -2022,6 +2079,13 @@ pub(crate) fn emit_intrinsic(
                 recover_str_pair(func, ctx);
             }
             ty
+        }
+        // What kind of buffer a value is, for `assign_to()` into a bytearray.
+        "byte_format" => {
+            emit_expr(&args[0], func, ctx, ml, None);
+            func.instruction(&I::I32Load(crate::compiler::runtime::w32(0)));
+            call_import(func, JsImport::ByteFormat);
+            IRType::Int
         }
         "is_none" => {
             emit_expr(&args[0], func, ctx, ml, None);

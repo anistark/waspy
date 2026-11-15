@@ -1708,6 +1708,18 @@
         "test": "advanced_types::bytes_operations"
       },
       {
+        "name": "bytearray, a mutable sequence of bytes: built from a size, bytes, another bytearray, or a list of ints; indexing and item assignment, slicing, len, iteration, in, ==, ordering, +, *, +=, *=, del, bytes(b), and append, extend, insert, pop, remove, clear, reverse, copy, count, find, index, startswith, endswith",
+        "status": "done",
+        "version": "upcoming",
+        "test": "advanced_types::bytearray_values"
+      },
+      {
+        "name": "bytearray's ValueError for a value that is not a byte and IndexError for an index out of range, as CPython raises them",
+        "status": "done",
+        "version": "upcoming",
+        "test": "advanced_types::bytearray_errors"
+      },
+      {
         "name": "Set type ({1, 2, 3}) & literals",
         "status": "done",
         "version": "0.7.0",
@@ -1917,6 +1929,12 @@
         "status": "done",
         "version": "upcoming",
         "test": "graphics::image_processing"
+      },
+      {
+        "name": "Pixels changed in place in a bytearray: a typed array's assign_to(b) copies into one, with Pyodide's errors, and assign(b) and to_js(b) take one",
+        "status": "done",
+        "version": "upcoming",
+        "test": "graphics::bytearray_pixels"
       }
     ]
   }
