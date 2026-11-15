@@ -1780,7 +1780,156 @@ fn rewrite_walk(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
 /// call of its helper with every argument placed: positional, by keyword, or
 /// its default. A call the helper cannot take is left to code generation,
 /// which implements `replace(old, new)` and refuses the rest.
+/// How `str.encode(encoding, errors)` encodes, from its constant arguments.
+pub(crate) enum Encoding {
+    /// UTF-8, which is how a str is held: its bytes, as they are.
+    Utf8,
+    /// An encoding of one byte a character: the first code point it cannot
+    /// hold, its name in CPython's error, and what `errors` does with such a
+    /// character (0 `strict`, 1 `ignore`, 2 `replace`).
+    Narrow {
+        limit: i32,
+        name: &'static str,
+        mode: i32,
+    },
+}
+
+/// The encoding a call of `str.encode()` names, or why it is refused. Both
+/// arguments are constants, by position or by name.
+pub(crate) fn encoding_of(arguments: &[IRExpr]) -> Result<Encoding, String> {
+    let mut slots: [Option<&IRExpr>; 2] = [None, None];
+    let mut next = 0;
+    for argument in arguments {
+        let (at, value) = match argument {
+            IRExpr::Keyword { name, value } => {
+                let at = ["encoding", "errors"]
+                    .iter()
+                    .position(|n| n == name)
+                    .ok_or_else(|| {
+                        format!("str.encode() got an unexpected keyword argument '{name}'")
+                    })?;
+                (at, &**value)
+            }
+            positional => {
+                next += 1;
+                (next - 1, positional)
+            }
+        };
+        if at >= 2 || slots[at].is_some() {
+            return Err("str.encode() takes at most 2 arguments".to_string());
+        }
+        slots[at] = Some(value);
+    }
+    let constant = |slot: Option<&IRExpr>, what: &str, default: &str| match slot {
+        None => Ok(default.to_string()),
+        Some(IRExpr::Const(crate::ir::IRConstant::String(s))) => Ok(s.clone()),
+        Some(_) => Err(format!(
+            "str.encode()'s {what} is written as a string literal here, since the encoder is \
+             chosen when the program is compiled"
+        )),
+    };
+    let encoding = constant(slots[0], "encoding", "utf-8")?;
+    let errors = constant(slots[1], "errors", "strict")?;
+    // CPython's codec lookup lowers the name and reads `_` as `-`.
+    let normal = encoding.to_ascii_lowercase().replace('_', "-");
+    let narrow = |limit: i32, name: &'static str| {
+        let mode = match errors.as_str() {
+            "strict" => 0,
+            "ignore" => 1,
+            "replace" => 2,
+            other => {
+                return Err(format!(
+                    "str.encode() with errors='{other}' is not supported. Hint: 'strict', \
+                     'ignore', and 'replace' are"
+                ))
+            }
+        };
+        Ok(Encoding::Narrow { limit, name, mode })
+    };
+    match normal.as_str() {
+        "utf-8" | "utf8" | "u8" | "utf" => Ok(Encoding::Utf8),
+        "ascii" | "us-ascii" | "646" => narrow(128, "ascii"),
+        "latin-1" | "latin1" | "iso-8859-1" | "iso8859-1" | "l1" | "8859" | "cp819" => {
+            narrow(256, "latin-1")
+        }
+        _ => Err(format!(
+            "str.encode() to '{encoding}' is not supported. Hint: 'utf-8', 'ascii', and \
+             'latin-1' are"
+        )),
+    }
+}
+
+/// `s.translate(table)`, `str.maketrans(x, y)`, and `s.encode()` to a
+/// one-byte encoding, as calls of the helpers `ir::str_methods` writes in
+/// Python.
+fn rewrite_python_str_method(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
+    let IRExpr::MethodCall {
+        object,
+        method_name,
+        arguments,
+    } = expr
+    else {
+        return None;
+    };
+    let helper = |name: &str, arguments: Vec<IRExpr>| {
+        let function_name = format!("{}{name}", crate::ir::STR_FN_PREFIX);
+        ctx.get_function_info(&function_name)?;
+        Some(IRExpr::FunctionCall {
+            function_name,
+            arguments,
+        })
+    };
+    // `str.maketrans(x, y)`, on the builtin itself.
+    if method_name == "maketrans" {
+        let on_str = matches!(&**object, IRExpr::Variable(name) if name == "str")
+            && ctx.get_local_info("str").is_none()
+            && ctx.get_class_info("str").is_none();
+        if !on_str || arguments.len() != 2 {
+            return None;
+        }
+        return helper("maketrans", arguments.clone());
+    }
+    if !matches!(infer_value_type(object, ctx), IRType::String) {
+        return None;
+    }
+    match method_name.as_str() {
+        "translate" => {
+            let [table] = arguments.as_slice() else {
+                return None;
+            };
+            let kind = match infer_value_type(table, ctx) {
+                IRType::Dict(key, value) if matches!(*key, IRType::Int) => match *value {
+                    IRType::Int => "translate_int",
+                    IRType::String => "translate_str",
+                    _ => return None,
+                },
+                _ => return None,
+            };
+            helper(kind, vec![(**object).clone(), table.clone()])
+        }
+        "encode" => match encoding_of(arguments) {
+            Ok(Encoding::Narrow { limit, name, mode }) => {
+                let int = |i: i32| IRExpr::Const(crate::ir::IRConstant::Int(i));
+                helper(
+                    "encode",
+                    vec![
+                        (**object).clone(),
+                        int(limit),
+                        IRExpr::Const(crate::ir::IRConstant::String(name.to_string())),
+                        int(mode),
+                    ],
+                )
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn rewrite_str_method(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
+    if let Some(helped) = rewrite_python_str_method(expr, ctx) {
+        return Some(helped);
+    }
     let IRExpr::MethodCall {
         object,
         method_name,

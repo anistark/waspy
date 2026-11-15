@@ -24,10 +24,16 @@ pub enum Class {
     Title,
     Cased,
     CaseIgnorable,
+    /// `isprintable`.
+    Printable,
+    /// What may start an identifier, the underscore included.
+    XidStart,
+    /// What may continue an identifier.
+    XidContinue,
 }
 
 impl Class {
-    pub const ALL: [Class; 10] = [
+    pub const ALL: [Class; 13] = [
         Class::Alpha,
         Class::Decimal,
         Class::Digit,
@@ -38,6 +44,9 @@ impl Class {
         Class::Title,
         Class::Cased,
         Class::CaseIgnorable,
+        Class::Printable,
+        Class::XidStart,
+        Class::XidContinue,
     ];
 
     pub fn ranges(self) -> &'static [(u32, u32)] {
@@ -52,6 +61,9 @@ impl Class {
             Class::Title => t::TITLE,
             Class::Cased => t::CASED,
             Class::CaseIgnorable => t::CASE_IGNORABLE,
+            Class::Printable => t::PRINTABLE,
+            Class::XidStart => t::XID_START,
+            Class::XidContinue => t::XID_CONTINUE,
         }
     }
 
@@ -69,16 +81,24 @@ pub enum CaseMap {
     Upper,
     Lower,
     Title,
+    /// `casefold`: each character's full case folding.
+    Fold,
 }
 
 impl CaseMap {
-    pub const ALL: [CaseMap; 3] = [CaseMap::Upper, CaseMap::Lower, CaseMap::Title];
+    pub const ALL: [CaseMap; 4] = [
+        CaseMap::Upper,
+        CaseMap::Lower,
+        CaseMap::Title,
+        CaseMap::Fold,
+    ];
 
     pub fn runs(self) -> &'static [(u32, u32, u32, i32)] {
         match self {
             CaseMap::Upper => t::TO_UPPER_RUNS,
             CaseMap::Lower => t::TO_LOWER_RUNS,
             CaseMap::Title => t::TO_TITLE_RUNS,
+            CaseMap::Fold => t::TO_FOLD_RUNS,
         }
     }
 
@@ -87,6 +107,7 @@ impl CaseMap {
             CaseMap::Upper => t::TO_UPPER_MULTI,
             CaseMap::Lower => t::TO_LOWER_MULTI,
             CaseMap::Title => t::TO_TITLE_MULTI,
+            CaseMap::Fold => t::TO_FOLD_MULTI,
         }
     }
 
@@ -162,6 +183,16 @@ pub fn lower(s: &str) -> String {
     out
 }
 
+/// CPython's `do_casefold`: each character's full case folding, with no rule
+/// of context (a capital sigma folds to the plain small one).
+pub fn casefold(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        CaseMap::Fold.push(c, &mut out);
+    }
+    out
+}
+
 /// The first character titlecased, the rest lowercased.
 pub fn capitalize(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
@@ -207,6 +238,11 @@ pub enum Predicate {
     Title,
     /// `isascii`, true of an empty string too.
     Ascii,
+    /// `isprintable`, true of an empty string too.
+    Printable,
+    /// `isidentifier`: a character that may start an identifier, then ones
+    /// that may continue it.
+    Identifier,
 }
 
 impl Predicate {
@@ -222,6 +258,12 @@ impl Predicate {
             Predicate::Upper => cased_test(s, Class::Upper, Class::Lower),
             Predicate::Lower => cased_test(s, Class::Lower, Class::Upper),
             Predicate::Ascii => s.is_ascii(),
+            Predicate::Printable => s.chars().all(|c| Class::Printable.has(c)),
+            Predicate::Identifier => {
+                let mut chars = s.chars();
+                chars.next().is_some_and(|c| Class::XidStart.has(c))
+                    && chars.all(|c| Class::XidContinue.has(c))
+            }
             Predicate::Title => {
                 let (mut cased, mut previous) = (false, false);
                 for c in s.chars() {

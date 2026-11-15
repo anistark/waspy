@@ -197,6 +197,10 @@ Functions and <code>__init__</code> take <code>*args: T</code> (a tuple of <code
 Not implemented. Each is reported by name with its location, and so is <code>del</code> of an attribute or a stepped slice. <code>global</code>, <code>nonlocal</code>, nested <code>def</code>, <code>assert</code>, conditional expressions, and <code>del</code> of a name, a list index, a list slice, or a dict key do work.
 {% endcall %}
 
+{% call shape("Subclassing a builtin, or a base that is not a class name", ["refused", "workaround"]) %}
+<code>class Stack(list)</code>, <code>class Config(dict)</code>, and a base computed by a call are refused: an instance would have to be the builtin's value too, and leaving the base out is a wrong answer. Subclass <code>collections.UserList</code>, <code>UserDict</code>, or <code>UserString</code>, which are ordinary classes here, or hold the value in a field.
+{% endcall %}
+
 {% call shape("Metaclass shapes beyond <code>__new__</code>, <code>__init__</code>, and <code>__call__</code>", ["refused"]) %}
 Multiple inheritance works, along CPython's C3 method resolution order with cooperative <code>super()</code>, and so do metaclasses: a metaclass's <code>__new__</code> and <code>__init__</code> run once for each class it makes, specialized at compile time, and its <code>__call__</code> replaces instantiation. The class <code>namespace</code> argument, <code>__prepare__</code>, creating a class by calling the metaclass, and class keywords other than <code>metaclass=</code> are refused.
 {% endcall %}
@@ -257,8 +261,12 @@ With <code>x = float("nan")</code>, <code>(x,) == (x,)</code> and <code>[x] == [
 No traceback is kept. An exception a <code>__main__</code> block does not catch writes only the last line of CPython's report (<code>ValueError: boom</code>) to standard error and exits with status 1.
 {% endcall %}
 
-{% call shape("A generator expression kept or passed on, with side effects", ["differs"]) %}
-A generator expression is built as a list where it is made, unless a <code>for</code> statement walks it or it is the argument of <code>any()</code> or <code>all()</code>, which pull it as CPython does. So in <code>g = (f(y) for y in ys)</code> every call of <code>f</code> comes before anything reads <code>g</code>, where CPython makes each one as it is read. A list comprehension is the same in both, so write one if the order matters.
+{% call shape("A generator expression kept in a variable or passed to your own code", ["refused", "workaround"]) %}
+A generator expression goes where something walks it once: an argument of a builtin or standard-library call (<code>sum(x * x for x in xs)</code>), a <code>for</code> statement, or a comprehension. <code>g = (f(y) for y in ys)</code>, returning one, and passing one to a function of your own are refused, because it is built as a list, which can be walked twice and measured where CPython's generator cannot. Write a list comprehension for a list, or a generator function for a lazy sequence.
+{% endcall %}
+
+{% call shape("A generator expression's side effects, inside a builtin call", ["differs"]) %}
+<code>sum(f(y) for y in ys)</code> calls <code>f</code> for every element before <code>sum()</code> reads the first, where CPython interleaves them. The answer is the same; only the order of what <code>f</code> prints or changes can differ. A <code>for</code> statement over one, and <code>any()</code> and <code>all()</code>, pull it as CPython does.
 {% endcall %}
 
 {% call shape("Third-party packages, and what the standard library does not implement", ["refused"]) %}

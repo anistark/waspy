@@ -7149,3 +7149,167 @@ fn bytearray_refuses_what_it_does_not_implement() {
         assert!(err.contains(needle), "expected `{needle}` in: {err}");
     }
 }
+
+/// A base that is no class was left out of the class, which then had nothing
+/// its base gives: `class Stack(list)` answered False to
+/// `isinstance(s, list)`, `class C(Unknown)` compiled where CPython raises
+/// `NameError`, and `class C(make_base())` lost the class the call answers.
+/// Each is refused.
+#[test]
+fn a_base_that_is_not_a_class_is_refused() {
+    for (source, needle) in [
+        (
+            "class Stack(list):\n    pass\n\ndef main() -> None:\n    print(isinstance(Stack(), list))\n",
+            "subclasses the builtin 'list'",
+        ),
+        (
+            "class D(dict):\n    pass\n\ndef main() -> None:\n    print(isinstance(D(), dict))\n",
+            "subclasses the builtin 'dict'",
+        ),
+        (
+            "class C(Unknown):\n    pass\n\ndef main() -> None:\n    print(C())\n",
+            "names the base 'Unknown', which is not a class",
+        ),
+        (
+            "class A:\n    pass\n\ndef make_base() -> type[A]:\n    return A\n\n\
+             class C(make_base()):\n    pass\n\ndef main() -> None:\n    print(isinstance(C(), A))\n",
+            "has a base that is not a class name",
+        ),
+        (
+            "from typing import List\n\nclass Stack(List[int]):\n    pass\n\n\
+             def main() -> None:\n    print(isinstance(Stack(), list))\n",
+            "has the subscripted base 'List[...]'",
+        ),
+    ] {
+        let err = try_compile(source).expect_err("a base that is not a class must be refused");
+        assert!(err.contains(needle), "expected `{needle}` in: {err}");
+    }
+}
+
+/// The bases that are classes, and the markers that add nothing an instance
+/// has, still compile: a class of the program, `object`, `abc.ABC`, a builtin
+/// exception, and a standard-library class.
+#[test]
+fn bases_that_are_classes_still_compile() {
+    let run = run_main(
+        &dedent(
+            r#"
+            import abc
+            import logging
+            from abc import ABC
+
+
+            class Base(object):
+                def name(self) -> str:
+                    return "base"
+
+
+            class Shape(ABC):
+                def sides(self) -> int:
+                    return 0
+
+
+            class Square(Shape, Base):
+                def sides(self) -> int:
+                    return 4
+
+
+            class Marked(abc.ABC):
+                pass
+
+
+            class Broken(ValueError):
+                pass
+
+
+            class Quiet(logging.Handler):
+                def emit(self, record: logging.LogRecord) -> None:
+                    pass
+
+
+            if __name__ == "__main__":
+                s = Square()
+                print(s.sides(), s.name(), isinstance(s, Base), isinstance(Marked(), Marked))
+                try:
+                    raise Broken("bad")
+                except ValueError as e:
+                    print(type(e).__name__, e)
+                print(isinstance(Quiet(), logging.Handler))
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(run.stderr, "");
+    assert_eq!(run.stdout, "4 base True True\nBroken bad\nTrue\n");
+}
+
+/// `list.sort()` of strs, bytes, and tuples of them and numbers sorts in
+/// place, in CPython's order (strs by code point, tuples member by member),
+/// through every name for the list. It was refused, where `sorted()` took
+/// the same list.
+#[test]
+fn list_sort_orders_strs_bytes_and_tuples_in_place() {
+    let run = run_main(
+        &dedent(
+            r#"
+            from typing import List, Tuple
+
+
+            def main() -> None:
+                words = ["pear", "Apple", "fig", "apple", "", "éclair", "fig"]
+                words.sort()
+                print(words)
+                words.sort(reverse=True)
+                print(words)
+                pairs: List[Tuple[int, str]] = [(2, "b"), (1, "z"), (2, "a"), (1, "a")]
+                pairs.sort()
+                print(pairs)
+                pairs.sort(reverse=True)
+                print(pairs)
+                chunks = [b"b", b"abc", b"", b"ab"]
+                chunks.sort()
+                print(chunks)
+                alias = words
+                alias.sort()
+                print(words is alias, words[0] == "", len(words))
+                empty: List[str] = []
+                empty.sort()
+                one = ["x"]
+                one.sort()
+                print(empty, one)
+
+
+            if __name__ == "__main__":
+                main()
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(run.stderr, "");
+    assert_eq!(
+        run.stdout,
+        "['', 'Apple', 'apple', 'fig', 'fig', 'pear', 'éclair']\n\
+         ['éclair', 'pear', 'fig', 'fig', 'apple', 'Apple', '']\n\
+         [(1, 'a'), (1, 'z'), (2, 'a'), (2, 'b')]\n\
+         [(2, 'b'), (2, 'a'), (1, 'z'), (1, 'a')]\n\
+         [b'', b'ab', b'abc', b'b']\n\
+         True True 7\n\
+         [] ['x']\n"
+    );
+}
+
+/// `list.sort()` of instances stays refused: ordering them calls the
+/// program's `__lt__`, which `sorted()` does and the in-place sort does not.
+#[test]
+fn list_sort_of_instances_is_still_refused() {
+    let source = "class P:\n    def __init__(self, n: int) -> None:\n        self.n = n\n\n    \
+                  def __lt__(self, other: \"P\") -> bool:\n        return self.n < other.n\n\n\
+                  def main() -> None:\n    ps = [P(2), P(1)]\n    ps.sort()\n    print(ps[0].n)\n";
+    let err = try_compile(source).expect_err("sorting instances in place must be refused");
+    assert!(
+        err.contains("list.sort() does not support elements of type"),
+        "{err}"
+    );
+}

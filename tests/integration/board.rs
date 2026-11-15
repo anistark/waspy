@@ -1686,6 +1686,100 @@ mod strings {
             &[("f", Want::Str("cba"))],
         );
     }
+
+    /// casefold(), isprintable(), and isidentifier() over the whole of Unicode, as CPython folds and classifies it, on literals and runtime strings alike
+    #[test]
+    fn casefold_and_unicode_predicates() {
+        check(
+            r#"
+            def g() -> str:
+                s = str(len("x"))[0:0] + "Straße ΣΊΣΥΦΟΣ ﬁne"
+                folds = s.casefold() + "|" + "Maße".casefold() + "|" + str("MASSE".casefold() == "Maße".casefold())
+                tests = str(s.isprintable()) + str("a\tb".isprintable()) + str("".isprintable()) + str("naïve_1".isidentifier()) + str("1x".isidentifier()) + str("".isidentifier()) + str(s[0:6].isidentifier())
+                return folds + "|" + tests
+        "#,
+            &[("g", Want::Str("strasse \u{3c3}\u{3af}\u{3c3}\u{3c5}\u{3c6}\u{3bf}\u{3c3} fine|masse|True|TrueFalseTrueTrueFalseFalseTrue"))],
+        );
+        // Every code point of the basic plane and every thirteenth above
+        // it: how many are printable, start an identifier, and continue one,
+        // and a checksum of their foldings, as CPython 3.13 counts them (all
+        // of Unicode gives 149625 136945 140089 769808 in both). A collection
+        // at every statement makes this one slow.
+        if std::env::var_os("WASPY_GC_STRESS").is_some() {
+            return;
+        }
+        check(
+            r#"
+            def census() -> str:
+                printable = 0
+                starts = 0
+                continues = 0
+                folded = 0
+                cp = 0
+                while cp < 0x110000:
+                    if cp < 0xD800 or cp > 0xDFFF:
+                        ch = chr(cp)
+                        if ch.isprintable():
+                            printable += 1
+                        if ch.isidentifier():
+                            starts += 1
+                        if ("a" + ch).isidentifier():
+                            continues += 1
+                        for f in ch.casefold():
+                            folded = (folded * 31 + ord(f)) % 1000003
+                    if cp < 0x10000:
+                        cp += 1
+                    else:
+                        cp += 13
+                return str(printable) + " " + str(starts) + " " + str(continues) + " " + str(folded)
+        "#,
+            &[("census", Want::Str("62755 55769 57607 404393"))],
+        );
+    }
+
+    /// translate() with a dict[int, int] or dict[int, str] table, str.maketrans(x, y), and encode() to UTF-8, ASCII, or Latin-1 (errors strict, ignore, or replace), with CPython's UnicodeEncodeError
+    #[test]
+    fn translate_and_encode() {
+        check(
+            r#"
+            def t() -> str:
+                s = str(len("x"))[0:0] + "hello wörld"
+                table = str.maketrans("lo", "01")
+                return s.translate({104: 72, 108: 76}) + "|" + s.translate({111: "0", 108: "", 246: "oe"}) + "|" + s.translate(table) + "|" + str(table)
+
+            def e() -> str:
+                s = str(len("x"))[0:0] + "café €"
+                b = s.encode()
+                return str(len(b)) + str(b) + str("abc".encode("ascii")) + str(s.encode("latin-1", "replace")) + str(s.encode("ascii", errors="ignore")) + str(b == b"caf\xc3\xa9 \xe2\x82\xac")
+
+            def bad() -> str:
+                try:
+                    ("a€😀b" + str(len("x"))[0:0]).encode("ascii")
+                except UnicodeEncodeError as err:
+                    return str(err)
+                return ""
+        "#,
+            &[
+                ("t", Want::Str("HeLLo w\u{f6}rLd|he0 woerd|he001 w\u{f6}r0d|{108: 48, 111: 49}")),
+                ("e", Want::Str("9b'caf\\xc3\\xa9 \\xe2\\x82\\xac'b'abc'b'caf\\xe9 ?'b'caf 'True")),
+                ("bad", Want::Str("'ascii' codec can't encode characters in position 1-2: ordinal not in range(128)")),
+            ],
+        );
+        refused(
+            r#"
+            def f() -> bytes:
+                return "a".encode("utf-16")
+        "#,
+            "str.encode() to 'utf-16' is not supported",
+        );
+        refused(
+            r#"
+            def f(table) -> str:
+                return "a".translate(table)
+        "#,
+            "str.translate() takes a table whose type is known",
+        );
+    }
 }
 
 mod collections {
@@ -1949,6 +2043,26 @@ mod collections {
         );
     }
 
+    /// list.sort() of strs, bytes, and tuples of them and numbers, in place and stable, in CPython's order
+    #[test]
+    fn sort_strs_and_tuples() {
+        check(
+            r#"
+            from typing import List, Tuple
+
+            def f() -> str:
+                words = ["pear", "Apple", "fig", "apple", "", "éclair"]
+                words.sort()
+                pairs: List[Tuple[int, str]] = [(2, "b"), (1, "z"), (2, "a")]
+                pairs.sort(reverse=True)
+                chunks = [b"b", b"abc", b""]
+                chunks.sort()
+                return str(words) + str(pairs) + str(chunks)
+        "#,
+            &[("f", Want::Str("['', 'Apple', 'apple', 'fig', 'pear', '\u{e9}clair'][(2, 'b'), (2, 'a'), (1, 'z')][b'', b'abc', b'b']"))],
+        );
+    }
+
     /// List slicing xs[a:b] returns a fresh list, negative indices and clamping included (a step other than 1 is rejected)
     #[test]
     fn list_slicing() {
@@ -2195,6 +2309,47 @@ mod collections {
 
 mod classes {
     use super::*;
+
+    /// A base that is not a class (a builtin such as list, an undefined name, a call) is refused instead of left out of the class
+    #[test]
+    fn bases_must_be_classes() {
+        refused(
+            r#"
+            class Stack(list):
+                pass
+
+            def f() -> bool:
+                return isinstance(Stack(), list)
+        "#,
+            "subclasses the builtin 'list'",
+        );
+        refused(
+            r#"
+            class C(Unknown):
+                pass
+
+            def f() -> int:
+                return 1
+        "#,
+            "names the base 'Unknown', which is not a class",
+        );
+        refused(
+            r#"
+            class A:
+                pass
+
+            def make_base() -> type[A]:
+                return A
+
+            class C(make_base()):
+                pass
+
+            def f() -> bool:
+                return isinstance(C(), A)
+        "#,
+            "has a base that is not a class name",
+        );
+    }
 
     /// Class definitions with full WASM compilation
     #[test]
@@ -4053,15 +4208,56 @@ mod comprehensions {
         );
     }
 
-    /// Generator expressions (x for x in list), materialized eagerly as lists
+    /// Generator expressions (x for x in list) as the argument of a call that walks them, built as a list
     #[test]
     fn generator_expressions() {
         check(
             r#"
             def f() -> int:
                 return sum(x * x for x in [1, 2, 3])
+
+            def g() -> str:
+                xs = [3, 1, 2]
+                out = [0]
+                out.extend(x * 10 for x in xs)
+                return ",".join(str(x) for x in sorted(-x for x in xs)) + str(out) + str(max(x for x in xs)) + str(tuple(x for x in xs if x > 1))
         "#,
-            &[("f", Want::Int(14))],
+            &[
+                ("f", Want::Int(14)),
+                ("g", Want::Str("-3,-2,-1[0, 30, 10, 20]3(3, 2)")),
+            ],
+        );
+    }
+
+    /// A generator expression kept in a variable, returned, or passed to the program's own code is refused, since the list it is built as could be told from CPython's generator
+    #[test]
+    fn kept_generator_expressions_refused() {
+        refused(
+            r#"
+            def f() -> int:
+                g = (x * x for x in [1, 2, 3])
+                return sum(g) + sum(g)
+        "#,
+            "a generator expression kept in a variable, returned, or stored is not supported",
+        );
+        refused(
+            r#"
+            from typing import List
+
+            def total(xs: List[int]) -> int:
+                return len(xs)
+
+            def f() -> int:
+                return total(x for x in [1, 2, 3])
+        "#,
+            "a generator expression passed to the program's own code is not supported",
+        );
+        refused(
+            r#"
+            def f() -> int:
+                return len(x for x in [1, 2, 3])
+        "#,
+            "len() of a generator expression is not supported",
         );
     }
 

@@ -145,6 +145,9 @@ pub enum Case {
     /// `swapcase()`: an uppercase character lowered (a capital sigma by its
     /// context), a lowercase one uppered, anything else as it is.
     Swap,
+    /// `casefold()`: each character's full case folding, with no rule of
+    /// context.
+    Fold,
 }
 
 fn incr(f: &mut Function, local: u32, by: i32) {
@@ -406,12 +409,11 @@ pub(crate) fn build_map(map: CaseMap) -> Function {
     let multi = Table::Multi(map);
     let mut f = function(&[ValType::I32; 6]);
     let (cp, out, lo, hi, mid, n, k, total) = (0, 1, 2, 3, 4, 5, 6, 7);
-    // ASCII: the letters of the other case, everything else itself.
-    let (from, to) = match map {
-        CaseMap::Lower => (b'A', b'Z'),
-        _ => (b'a', b'z'),
-    };
-    let delta = if map == CaseMap::Lower { 32 } else { -32 };
+    // ASCII: the letters of the other case, everything else itself. Folding
+    // lowers.
+    let lowers = matches!(map, CaseMap::Lower | CaseMap::Fold);
+    let (from, to) = if lowers { (b'A', b'Z') } else { (b'a', b'z') };
+    let delta = if lowers { 32 } else { -32 };
     emit!(
         f,
         I::LocalGet(cp),
@@ -720,6 +722,12 @@ pub(crate) fn build_case_run(ctx: &CompilationContext, case: Case) -> Function {
             I::LocalGet(dst),
             I::Call(map(CaseMap::Upper))
         ),
+        Case::Fold => emit!(
+            f,
+            I::LocalGet(cp),
+            I::LocalGet(dst),
+            I::Call(map(CaseMap::Fold))
+        ),
         Case::Lower => lower_here(&mut f),
         Case::Capitalize => {
             emit!(
@@ -882,6 +890,7 @@ pub(crate) fn build_str_is(ctx: &CompilationContext, predicate: Predicate) -> Fu
         );
         return f;
     }
+    // An empty string answers False, except to `isprintable`.
     emit!(
         f,
         I::LocalGet(s),
@@ -891,7 +900,7 @@ pub(crate) fn build_str_is(ctx: &CompilationContext, predicate: Predicate) -> Fu
         I::LocalTee(n),
         I::I32Eqz,
         I::If(BlockType::Empty),
-        I::I32Const(0),
+        I::I32Const((predicate == Predicate::Printable) as i32),
         I::Return,
         I::End
     );
@@ -1005,6 +1014,33 @@ pub(crate) fn build_str_is(ctx: &CompilationContext, predicate: Predicate) -> Fu
         emit!(f, I::LocalGet(cased), I::End);
         return f;
     }
+    if predicate == Predicate::Identifier {
+        // The first character may start an identifier, the rest continue it.
+        let (start, cont) = (has(Class::XidStart), has(Class::XidContinue));
+        open_loop(&mut f);
+        step(&mut f);
+        emit!(
+            f,
+            I::LocalGet(prev),
+            I::If(BlockType::Result(ValType::I32)),
+            I::LocalGet(cp),
+            I::Call(cont),
+            I::Else,
+            I::LocalGet(cp),
+            I::Call(start),
+            I::End,
+            I::I32Eqz,
+            I::If(BlockType::Empty),
+            I::I32Const(0),
+            I::Return,
+            I::End,
+            I::I32Const(1),
+            I::LocalSet(prev)
+        );
+        close_loop(&mut f);
+        emit!(f, I::I32Const(1), I::End);
+        return f;
+    }
     // Every character in the class.
     open_loop(&mut f);
     step(&mut f);
@@ -1021,6 +1057,7 @@ pub(crate) fn build_str_is(ctx: &CompilationContext, predicate: Predicate) -> Fu
                 Predicate::Decimal => Class::Decimal,
                 Predicate::Digit => Class::Digit,
                 Predicate::Numeric => Class::Numeric,
+                Predicate::Printable => Class::Printable,
                 _ => Class::Space,
             };
             emit!(f, I::LocalGet(cp), I::Call(has(class)));

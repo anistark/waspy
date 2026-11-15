@@ -1444,6 +1444,7 @@ enum CaseMode {
     Capitalize,
     Title,
     Swap,
+    Fold,
 }
 
 /// Which ends a strip-family method trims.
@@ -1469,6 +1470,7 @@ fn emit_string_case(func: &mut Function, ctx: &CompilationContext, mode: CaseMod
         CaseMode::Capitalize => Case::Capitalize,
         CaseMode::Title => Case::Title,
         CaseMode::Swap => Case::Swap,
+        CaseMode::Fold => Case::Fold,
     };
     func.instruction(&Instruction::Drop);
     func.instruction(&Instruction::Call(
@@ -13975,6 +13977,46 @@ fn emit_method_call_expr(
                     IRType::String
                 }
 
+                "encode" => {
+                    // encode() to UTF-8 is the str's own bytes: both are
+                    // immutable, so the bytes are the same block. A one-byte
+                    // encoding went to its helper (`dunders::rewrite`);
+                    // anything else is refused.
+                    match crate::compiler::dunders::encoding_of(arguments) {
+                        Ok(crate::compiler::dunders::Encoding::Utf8) => {}
+                        Ok(_) => ctx.report(
+                            "str.encode() to a one-byte encoding needs its helper, which this \
+                             module does not carry; this is a code generation bug",
+                        ),
+                        Err(why) => ctx.report(why),
+                    }
+                    IRType::Bytes
+                }
+
+                "translate" => {
+                    ctx.report(
+                        "str.translate() takes a table whose type is known: a dict[int, int] \
+                         (code points) or a dict[int, str], or what str.maketrans(x, y) \
+                         answers. Hint: annotate the table, and map a character to \"\" to \
+                         delete it",
+                    );
+                    func.instruction(&Instruction::Unreachable);
+                    IRType::String
+                }
+
+                "casefold" => {
+                    // casefold(): each character's full case folding.
+                    if !arguments.is_empty() {
+                        ctx.report(format!("str.{method_name}() takes no arguments"));
+                        func.instruction(&Instruction::Unreachable);
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::I32Const(0));
+                        return IRType::String;
+                    }
+                    emit_string_case(func, ctx, CaseMode::Fold);
+                    IRType::String
+                }
+
                 "title" => {
                     // title(): uppercase each letter that starts a word.
                     // The receiver's (offset, length) is on the stack;
@@ -14175,7 +14217,8 @@ fn emit_method_call_expr(
                 }
 
                 "isdigit" | "isalpha" | "isalnum" | "isspace" | "isupper" | "islower"
-                | "isdecimal" | "isnumeric" | "istitle" | "isascii" => {
+                | "isdecimal" | "isnumeric" | "istitle" | "isascii" | "isprintable"
+                | "isidentifier" => {
                     // The predicates over every character, as CPython
                     // classifies it (`core::unicode`). Constant
                     // receivers are folded during lowering. These
@@ -14198,6 +14241,8 @@ fn emit_method_call_expr(
                         "isdecimal" => Predicate::Decimal,
                         "istitle" => Predicate::Title,
                         "isascii" => Predicate::Ascii,
+                        "isprintable" => Predicate::Printable,
+                        "isidentifier" => Predicate::Identifier,
                         _ => Predicate::Numeric,
                     };
                     func.instruction(&Instruction::Drop);
@@ -14325,14 +14370,14 @@ fn emit_method_call_expr(
                     ctx.report(format!(
                         "'{method_name}' is not supported on a str yet. \
                                  Hint: the supported string methods are capitalize, \
-                                 center, count, endswith, expandtabs, find, format, \
-                                 index, isalnum, isalpha, isascii, isdecimal, \
-                                 isdigit, islower, isnumeric, isspace, istitle, \
-                                 isupper, join, ljust, lower, lstrip, partition, \
-                                 removeprefix, removesuffix, replace, rfind, rindex, \
-                                 rjust, rpartition, rsplit, rstrip, split, \
-                                 splitlines, startswith, strip, swapcase, title, \
-                                 upper, and zfill"
+                                 casefold, center, count, encode, endswith, expandtabs, \
+                                 find, format, index, isalnum, isalpha, isascii, \
+                                 isdecimal, isdigit, isidentifier, islower, isnumeric, \
+                                 isprintable, isspace, istitle, isupper, join, ljust, \
+                                 lower, lstrip, partition, removeprefix, removesuffix, \
+                                 replace, rfind, rindex, rjust, rpartition, rsplit, \
+                                 rstrip, split, splitlines, startswith, strip, swapcase, \
+                                 title, translate, upper, and zfill"
                     ));
                     func.instruction(&Instruction::Drop); // length
                     func.instruction(&Instruction::Drop); // offset
@@ -16179,10 +16224,19 @@ pub fn emit_list_method_call(
                 Some(_) => None,
             };
             let float_elems = matches!(elem_type, IRType::Float);
-            let sortable = matches!(
+            let numeric = matches!(
                 elem_type,
                 IRType::Int | IRType::Bool | IRType::Float | IRType::Unknown
             );
+            // Strs, bytes, and tuples of them and numbers are ordered by the
+            // comparison `sorted()` uses, which calls nothing of the program's.
+            let compared = !numeric && orders_without_calls(&elem_type);
+            let sortable = numeric || compared;
+
+            if let (Some(descending), true) = (descending, compared) {
+                emit_list_sort_by_cmp(func, ctx, &elem_type, descending);
+                return IRType::None;
+            }
 
             if descending.is_none() || !sortable {
                 if descending.is_none() {
@@ -16193,7 +16247,8 @@ pub fn emit_list_method_call(
                 } else {
                     ctx.report(format!(
                         "list.sort() does not support elements of type {} yet. \
-                         Hint: sort a list of ints, floats, or bools",
+                         Hint: sort a list of numbers, strs, bytes, or tuples of them, or \
+                         assign sorted(xs) back",
                         crate::type_to_string(&elem_type)
                     ));
                 }
@@ -16345,6 +16400,137 @@ pub fn emit_list_method_call(
             IRType::Unknown
         }
     }
+}
+
+/// Whether values of `ty` are ordered by comparing what they hold, with no
+/// call into the program: numbers, strs, bytes, and tuples of those.
+fn orders_without_calls(ty: &IRType) -> bool {
+    match ty {
+        IRType::Int | IRType::Bool | IRType::Float | IRType::String | IRType::Bytes => true,
+        IRType::Tuple(members) => !members.is_empty() && members.iter().all(orders_without_calls),
+        _ => false,
+    }
+}
+
+/// `list.sort()` of elements `emit_key_cmp` orders (see
+/// `orders_without_calls`): a stable insertion sort in place, as the numeric
+/// path is, comparing each element with the one being placed. The list
+/// pointer is on the stack.
+///
+/// The element being placed is kept in a block of its own while the others
+/// shift over its slot, so it has an address to compare against and stays
+/// reachable.
+fn emit_list_sort_by_cmp(
+    func: &mut Function,
+    ctx: &CompilationContext,
+    elem_ty: &IRType,
+    descending: bool,
+) {
+    // The high range `sorted()` uses, clear of what `emit_key_cmp` claims.
+    let list = ctx.temp_local + 32;
+    let n = ctx.temp_local + 33;
+    let i = ctx.temp_local + 37;
+    let j = ctx.temp_local + 38;
+    let addr = ctx.temp_local + 39;
+    let saved = ctx.temp_local + 45;
+    let slot = COLLECTION_SLOT as i32;
+
+    func.instruction(&Instruction::LocalSet(list));
+    func.instruction(&Instruction::LocalGet(list));
+    func.instruction(&Instruction::I32Load(slot_arg()));
+    func.instruction(&Instruction::LocalSet(n));
+    func.instruction(&Instruction::I32Const(slot));
+    func.instruction(&Instruction::Call(ctx.alloc_fn()));
+    func.instruction(&Instruction::LocalSet(saved));
+    func.instruction(&Instruction::I32Const(1));
+    func.instruction(&Instruction::LocalSet(i));
+
+    // for i in 1..n
+    func.instruction(&Instruction::Block(BlockType::Empty));
+    func.instruction(&Instruction::Loop(BlockType::Empty));
+    func.instruction(&Instruction::LocalGet(i));
+    func.instruction(&Instruction::LocalGet(n));
+    func.instruction(&Instruction::I32GeS);
+    func.instruction(&Instruction::BrIf(1));
+
+    // saved = elems[i]
+    func.instruction(&Instruction::LocalGet(saved));
+    func.instruction(&Instruction::LocalGet(list));
+    emit_data_base(func);
+    func.instruction(&Instruction::LocalGet(i));
+    func.instruction(&Instruction::I32Const(slot));
+    func.instruction(&Instruction::I32Mul);
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::I64Load(slot_arg()));
+    func.instruction(&Instruction::I64Store(slot_arg()));
+
+    func.instruction(&Instruction::LocalGet(i));
+    func.instruction(&Instruction::I32Const(1));
+    func.instruction(&Instruction::I32Sub);
+    func.instruction(&Instruction::LocalSet(j));
+
+    // while j >= 0 and elems[j] is out of order against the saved element
+    func.instruction(&Instruction::Block(BlockType::Empty));
+    func.instruction(&Instruction::Loop(BlockType::Empty));
+    func.instruction(&Instruction::LocalGet(j));
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::I32LtS);
+    func.instruction(&Instruction::BrIf(1));
+    func.instruction(&Instruction::LocalGet(list));
+    emit_data_base(func);
+    func.instruction(&Instruction::LocalGet(j));
+    func.instruction(&Instruction::I32Const(slot));
+    func.instruction(&Instruction::I32Mul);
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::LocalSet(addr));
+    ctx.enter_expr_blocks(4);
+    emit_key_cmp(func, ctx, elem_ty, addr, saved);
+    ctx.exit_expr_blocks(4);
+    func.instruction(&Instruction::I32Const(0));
+    if descending {
+        func.instruction(&Instruction::I32LtS);
+    } else {
+        func.instruction(&Instruction::I32GtS);
+    }
+    func.instruction(&Instruction::I32Eqz);
+    func.instruction(&Instruction::BrIf(1));
+
+    // elems[j + 1] = elems[j]
+    func.instruction(&Instruction::LocalGet(addr));
+    func.instruction(&Instruction::I32Const(slot));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::LocalGet(addr));
+    func.instruction(&Instruction::I64Load(slot_arg()));
+    func.instruction(&Instruction::I64Store(slot_arg()));
+
+    func.instruction(&Instruction::LocalGet(j));
+    func.instruction(&Instruction::I32Const(1));
+    func.instruction(&Instruction::I32Sub);
+    func.instruction(&Instruction::LocalSet(j));
+    func.instruction(&Instruction::Br(0));
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::End);
+
+    // elems[j + 1] = saved
+    func.instruction(&Instruction::LocalGet(list));
+    emit_data_base(func);
+    func.instruction(&Instruction::LocalGet(j));
+    func.instruction(&Instruction::I32Const(1));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::I32Const(slot));
+    func.instruction(&Instruction::I32Mul);
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::LocalGet(saved));
+    func.instruction(&Instruction::I64Load(slot_arg()));
+    func.instruction(&Instruction::I64Store(slot_arg()));
+
+    func.instruction(&Instruction::LocalGet(i));
+    func.instruction(&Instruction::I32Const(1));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::LocalSet(i));
+    func.instruction(&Instruction::Br(0));
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::End);
 }
 
 /// Compute the address of collection slot `index_local` in the data block based

@@ -46,6 +46,16 @@ pub fn parse_python(source: &str) -> Result<Suite> {
     Ok(ast)
 }
 
+/// Parse standard-library code written in the supported subset
+/// (`ir::embedded`), leaving the line table of the program being compiled as
+/// it was.
+pub(crate) fn parse_embedded(source: &str) -> Result<Suite> {
+    let saved = LINE_STARTS.with(|starts| starts.borrow().clone());
+    let ast = parse_python(source);
+    LINE_STARTS.with(|starts| *starts.borrow_mut() = saved);
+    ast
+}
+
 thread_local! {
     /// Where each line of the source most recently parsed on this thread
     /// starts, so the converter can give a node its line (`logging` records
@@ -101,7 +111,313 @@ fn line_col(source: &str, offset: usize) -> (usize, usize) {
 /// front door, with an actionable message.
 pub fn validate_supported(ast: &Suite, source: &str) -> Result<()> {
     validate_body(ast, source, None)?;
+    validate_generator_expressions(ast, source)?;
     validate_module_level(ast, source)
+}
+
+/// The builtins that would show a generator expression for what it is: its
+/// repr names a generator object, it has no length, it is always true, and
+/// its type is not a list's.
+const GENERATOR_OBSERVERS: [&str; 13] = [
+    "print",
+    "str",
+    "repr",
+    "ascii",
+    "format",
+    "len",
+    "bool",
+    "type",
+    "isinstance",
+    "reversed",
+    "iter",
+    "id",
+    "hash",
+];
+
+/// The builtins that walk an iterable argument once, so a list of what a
+/// generator expression yields is the same to them.
+const GENERATOR_CONSUMERS: [&str; 17] = [
+    "sum",
+    "min",
+    "max",
+    "sorted",
+    "list",
+    "tuple",
+    "set",
+    "frozenset",
+    "dict",
+    "any",
+    "all",
+    "enumerate",
+    "zip",
+    "map",
+    "filter",
+    "bytes",
+    "bytearray",
+];
+
+/// The methods of the builtin collections and of str that walk an iterable
+/// argument once.
+const GENERATOR_CONSUMING_METHODS: [&str; 16] = [
+    "join",
+    "extend",
+    "extendleft",
+    "update",
+    "union",
+    "intersection",
+    "difference",
+    "symmetric_difference",
+    "intersection_update",
+    "difference_update",
+    "symmetric_difference_update",
+    "issubset",
+    "issuperset",
+    "isdisjoint",
+    "fromkeys",
+    "subtract",
+];
+
+/// A generator expression is accepted where something that walks it once
+/// consumes it as it is written: a builtin or a standard-library function
+/// taking an iterable, a collection's method, a `for` statement, or a
+/// comprehension.
+///
+/// It is built as a list (a `for` statement and `any()` / `all()` aside,
+/// which pull it), and a list is not CPython's generator: kept in a variable
+/// or handed to the program's own code it can be walked twice where a
+/// generator is exhausted, it has a length and a truth value, it prints as a
+/// list, and it read the variables it uses when it was made, not when it is
+/// walked. Those were answered, silently. Anywhere a generator expression
+/// could be told from the list, it is refused.
+fn validate_generator_expressions(ast: &Suite, source: &str) -> Result<()> {
+    use rustpython_parser::ast::{self, fold::Fold, text_size::TextRange, Ranged};
+    use std::collections::HashSet;
+
+    /// The names the program's own code defines, and the ones its imports
+    /// bind to the standard library.
+    #[derive(Default)]
+    struct Names {
+        defined: HashSet<String>,
+        library_modules: HashSet<String>,
+        library_names: HashSet<String>,
+    }
+    impl Fold<TextRange> for Names {
+        type TargetU = TextRange;
+        type Error = std::convert::Infallible;
+        type UserContext = ();
+        fn will_map_user(&mut self, _user: &TextRange) -> Self::UserContext {}
+        fn map_user(
+            &mut self,
+            user: TextRange,
+            _context: (),
+        ) -> std::result::Result<TextRange, Self::Error> {
+            Ok(user)
+        }
+        fn fold_stmt(&mut self, stmt: Stmt) -> std::result::Result<Stmt, Self::Error> {
+            match &stmt {
+                Stmt::FunctionDef(def) => {
+                    self.defined.insert(def.name.to_string());
+                }
+                Stmt::AsyncFunctionDef(def) => {
+                    self.defined.insert(def.name.to_string());
+                }
+                Stmt::ClassDef(def) => {
+                    self.defined.insert(def.name.to_string());
+                }
+                Stmt::Import(import) => {
+                    for alias in &import.names {
+                        let module = alias.name.as_str();
+                        let root = module.split('.').next().unwrap_or(module);
+                        if crate::stdlib::is_stdlib_module(root) {
+                            // `import a.b` binds `a`; `import a.b as c` binds
+                            // the submodule.
+                            let bound = alias.asname.as_ref().map_or(root, |n| n.as_str());
+                            self.library_modules.insert(bound.to_string());
+                        }
+                    }
+                }
+                Stmt::ImportFrom(import) => {
+                    let module = import.module.as_ref().map_or("", |m| m.as_str());
+                    let root = module.split('.').next().unwrap_or(module);
+                    if import.level.as_ref().map_or(0, |l| l.to_usize()) == 0
+                        && crate::stdlib::is_stdlib_module(root)
+                    {
+                        for alias in &import.names {
+                            let bound = alias.asname.as_ref().unwrap_or(&alias.name);
+                            self.library_names.insert(bound.to_string());
+                        }
+                    }
+                }
+                _ => {}
+            }
+            ast::fold::fold_stmt(self, stmt)
+        }
+    }
+
+    struct Check<'a> {
+        source: &'a str,
+        names: Names,
+        /// Where each accepted generator expression starts.
+        consumed: HashSet<usize>,
+        functions: Vec<String>,
+    }
+    impl Check<'_> {
+        fn consume(&mut self, expr: &Expr) {
+            if let Expr::GeneratorExp(g) = expr {
+                self.consumed.insert(g.range.start().into());
+            }
+        }
+
+        /// Whether a call of `func` walks an iterable argument once: a
+        /// builtin that does, something of the standard library, or a
+        /// collection's method.
+        fn walks_once(&self, func: &Expr) -> bool {
+            match func {
+                Expr::Name(name) => {
+                    let name = name.id.as_str();
+                    !self.names.defined.contains(name)
+                        && (GENERATOR_CONSUMERS.contains(&name)
+                            || self.names.library_names.contains(name))
+                }
+                Expr::Attribute(attribute) => {
+                    let mut root = &*attribute.value;
+                    while let Expr::Attribute(inner) = root {
+                        root = &inner.value;
+                    }
+                    let library = matches!(root, Expr::Name(name)
+                        if self.names.library_modules.contains(name.id.as_str())
+                            || self.names.library_names.contains(name.id.as_str()));
+                    library || GENERATOR_CONSUMING_METHODS.contains(&attribute.attr.as_str())
+                }
+                _ => false,
+            }
+        }
+    }
+    impl Fold<TextRange> for Check<'_> {
+        type TargetU = TextRange;
+        type Error = anyhow::Error;
+        type UserContext = ();
+        fn will_map_user(&mut self, _user: &TextRange) -> Self::UserContext {}
+        fn map_user(&mut self, user: TextRange, _context: ()) -> Result<TextRange> {
+            Ok(user)
+        }
+        fn fold_stmt(&mut self, stmt: Stmt) -> Result<Stmt> {
+            let function = match &stmt {
+                Stmt::FunctionDef(def) => Some(def.name.to_string()),
+                Stmt::AsyncFunctionDef(def) => Some(def.name.to_string()),
+                _ => None,
+            };
+            if let Stmt::For(for_stmt) = &stmt {
+                self.consume(&for_stmt.iter);
+            }
+            if let Some(name) = &function {
+                self.functions.push(name.clone());
+            }
+            let folded = ast::fold::fold_stmt(self, stmt);
+            if function.is_some() {
+                self.functions.pop();
+            }
+            folded
+        }
+        fn fold_expr(&mut self, expr: Expr) -> Result<Expr> {
+            let function = self.functions.last().cloned();
+            let function = function.as_deref();
+            match &expr {
+                Expr::Call(call) => {
+                    let observer = match &*call.func {
+                        Expr::Name(name) if !self.names.defined.contains(name.id.as_str()) => {
+                            GENERATOR_OBSERVERS.iter().find(|o| **o == name.id.as_str())
+                        }
+                        _ => None,
+                    };
+                    let walks_once = self.walks_once(&call.func);
+                    let arguments = call
+                        .args
+                        .iter()
+                        .chain(call.keywords.iter().map(|k| &k.value));
+                    for argument in arguments {
+                        // `f(*(x for x in xs))` unpacks it into the call's
+                        // arguments, whatever is called.
+                        if let Expr::Starred(starred) = argument {
+                            self.consume(&starred.value);
+                            continue;
+                        }
+                        let inner = argument;
+                        let Expr::GeneratorExp(g) = inner else {
+                            continue;
+                        };
+                        if let Some(observer) = observer {
+                            return Err(unsupported(
+                                format!(
+                                    "{observer}() of a generator expression is not supported: it \
+                                     is built as a list here, which {observer}() would answer \
+                                     for, where CPython answers for a generator object. Hint: \
+                                     write a list comprehension, [...]"
+                                ),
+                                self.source,
+                                g.range.start().into(),
+                                function,
+                            ));
+                        }
+                        if !walks_once {
+                            return Err(unsupported(
+                                "a generator expression passed to the program's own code is not \
+                                 supported: it is built as a list here, and what receives it \
+                                 could tell (a list can be walked twice and measured, where \
+                                 CPython's generator cannot). Hint: pass a list comprehension, \
+                                 [...], or give it straight to a builtin that walks it \
+                                 (sum(), sorted(), \", \".join())",
+                                self.source,
+                                g.range.start().into(),
+                                function,
+                            ));
+                        }
+                        self.consume(inner);
+                    }
+                }
+                Expr::ListComp(ast::ExprListComp { generators, .. })
+                | Expr::SetComp(ast::ExprSetComp { generators, .. })
+                | Expr::DictComp(ast::ExprDictComp { generators, .. })
+                | Expr::GeneratorExp(ast::ExprGeneratorExp { generators, .. }) => {
+                    for generator in generators {
+                        self.consume(&generator.iter);
+                    }
+                }
+                _ => {}
+            }
+            if let Expr::GeneratorExp(g) = &expr {
+                let start: usize = g.range().start().into();
+                if !self.consumed.contains(&start) {
+                    return Err(unsupported(
+                        "a generator expression kept in a variable, returned, or stored is not \
+                         supported: it is built as a list here, which can be walked twice, \
+                         measured, and printed where CPython's generator cannot. Hint: pass it \
+                         straight to what consumes it (sum(x for x in xs)), write a list \
+                         comprehension, [...], for a list, or a generator function for a lazy \
+                         sequence",
+                        self.source,
+                        start,
+                        function,
+                    ));
+                }
+            }
+            ast::fold::fold_expr(self, expr)
+        }
+    }
+    let mut names = Names::default();
+    for stmt in ast.iter().cloned() {
+        let _ = names.fold_stmt(stmt);
+    }
+    let mut check = Check {
+        source,
+        names,
+        consumed: HashSet::new(),
+        functions: Vec::new(),
+    };
+    for stmt in ast.iter().cloned() {
+        check.fold_stmt(stmt)?;
+    }
+    Ok(())
 }
 
 /// Reject module-level statements whose effects the compiler silently drops.
