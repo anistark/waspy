@@ -8212,6 +8212,32 @@ fn rewritten_expr(
         .map(Box::new)
 }
 
+/// Refuse a read of a logger's `propagate` or `disabled` in a program that
+/// calls `logging.config.fileConfig()`. CPython's `fileConfig()` stores the
+/// ints its file gives (`propagate = 1`, `disabled = 0`), and a logger's flags
+/// are bools here, so the read would print `True` where CPython prints `1`.
+fn check_logger_flag(ctx: &CompilationContext, class_name: &str, attribute: &str) {
+    if !matches!(attribute, "propagate" | "disabled")
+        || ctx
+            .get_function_info(crate::ir::FILE_CONFIG_CHECK_FN)
+            .is_none()
+        || !ctx.is_class_or_subclass(class_name, "logging.Logger")
+    {
+        return;
+    }
+    // The module's own code only tests them.
+    let own = |name: &Option<String>| name.as_deref().is_some_and(|n| is_stdlib_code(n, ctx));
+    if own(&ctx.current_class) || own(&ctx.current_function) {
+        return;
+    }
+    ctx.report(format!(
+        "reading a logger's '{attribute}' in a program that calls logging.config.fileConfig() \
+         is not supported: fileConfig() stores the int its file gives (1 or 0), and the flag is \
+         a bool here, so it would print as True or False. Hint: set the flag, or configure \
+         with dictConfig(), whose flags are bools"
+    ));
+}
+
 /// Whether `name` is a class or function a standard-library module pass wrote
 /// (`datetime.timedelta`, `__datetime_ord`), whose numbers follow CPython's
 /// code, which takes an int wherever it takes a float.
@@ -13427,6 +13453,7 @@ fn emit_attribute_expr(
             emit_class_object_attribute(func, ctx, memory_layout, class_name, attribute)
         }
         IRType::Class(class_name) => {
+            check_logger_flag(ctx, class_name, attribute);
             // A `@property` read compiles to its getter: `obj.attr`
             // becomes `Class::attr(self)`, with the instance pointer
             // already on the stack as the only argument.

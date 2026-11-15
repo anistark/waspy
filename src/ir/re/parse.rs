@@ -3,8 +3,6 @@
 //! compiler reports where CPython would raise them. A bytes pattern is read
 //! as its latin-1 decoding, as CPython's tokenizer reads it.
 
-use std::collections::HashMap;
-
 pub const FLAG_IGNORECASE: u32 = 2;
 pub const FLAG_LOCALE: u32 = 4;
 pub const FLAG_MULTILINE: u32 = 8;
@@ -255,13 +253,9 @@ impl<'a> Source<'a> {
     }
 }
 
+/// `str.isidentifier()`, as CPython's `checkgroupname` asks.
 fn is_identifier(s: &str) -> bool {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) if c == '_' || c.is_alphabetic() => {}
-        _ => return false,
-    }
-    chars.all(|c| c == '_' || c.is_alphanumeric())
+    crate::core::unicode::Predicate::Identifier.test(s)
 }
 
 /// Python's `repr()` of a short string, as error messages quote names.
@@ -298,7 +292,12 @@ struct State {
     groupdict: Vec<(String, usize)>,
     groupwidths: Vec<Option<(u64, u64)>>,
     lookbehindgroups: Option<usize>,
-    grouprefpos: HashMap<usize, usize>,
+    /// Where each group a conditional names by number was first named, in
+    /// the order they were (CPython reports the first that is not a group).
+    grouprefpos: Vec<(usize, usize)>,
+    /// A lookbehind whose width is not fixed: CPython's compiler raises for
+    /// it, so only once the whole pattern has parsed.
+    variable_lookbehind: bool,
 }
 
 impl State {
@@ -1024,9 +1023,8 @@ fn parse(
                         }
                         if dir_behind {
                             let (lo, hi) = getwidth(&p, state);
-                            // CPython's compiler raises this, without a position.
                             if lo != hi {
-                                return Err("look-behind requires fixed-width pattern".to_string());
+                                state.variable_lookbehind = true;
                             }
                         }
                         if kind == "=" {
@@ -1074,10 +1072,11 @@ fn parse(
                                     condname.chars().count() + 1,
                                 ));
                             }
-                            state
-                                .grouprefpos
-                                .entry(g)
-                                .or_insert(source.tell() - condname.chars().count() - 1);
+                            if !state.grouprefpos.iter().any(|(named, _)| *named == g) {
+                                state
+                                    .grouprefpos
+                                    .push((g, source.tell() - condname.chars().count() - 1));
+                            }
                             g
                         };
                         state.checklookbehindgroup(condgroup, source)?;
@@ -1198,7 +1197,8 @@ pub fn parse_pattern(pattern: &str, flags: u32, istext: bool) -> Result<Parsed, 
         groupdict: Vec::new(),
         groupwidths: vec![None],
         lookbehindgroups: None,
-        grouprefpos: HashMap::new(),
+        grouprefpos: Vec::new(),
+        variable_lookbehind: false,
     };
     let nodes = parse_sub(&mut source, &mut state, flags & FLAG_VERBOSE != 0, 0)?;
     // fix_flags.
@@ -1230,9 +1230,7 @@ pub fn parse_pattern(pattern: &str, flags: u32, istext: bool) -> Result<Parsed, 
     if source.next.is_some() {
         return Err(source.error("unbalanced parenthesis", 0));
     }
-    let mut refs: Vec<(&usize, &usize)> = state.grouprefpos.iter().collect();
-    refs.sort();
-    for (g, pos) in refs {
+    for (g, pos) in &state.grouprefpos {
         if *g >= state.groups() {
             return Err(error_message(
                 &format!("invalid group reference {g}"),
@@ -1243,6 +1241,11 @@ pub fn parse_pattern(pattern: &str, flags: u32, istext: bool) -> Result<Parsed, 
     }
     if flags & FLAG_DEBUG != 0 {
         return Err("re.DEBUG prints the parsed pattern, which is not supported".to_string());
+    }
+    // CPython's compiler raises this, without a position, once the pattern
+    // has parsed.
+    if state.variable_lookbehind {
+        return Err("look-behind requires fixed-width pattern".to_string());
     }
     Ok(Parsed {
         nodes,

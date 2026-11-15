@@ -1,0 +1,741 @@
+0 0 32 {} 13770 35539
+1 0 34 {} 13770 35539
+2 0 32 {} 53602 35898
+3 0 56 {} 53602 35898
+4 0 32 {} 56229 32547
+5 0 256 {} 56229 32547
+6 0 32 {} 22370 58157
+7 0 258 {} 22370 58157
+8 0 32 {} 61120 23034
+9 0 96 {} 61120 23034
+10 0 32 {} 56229 32547
+11 0 42 {} 56229 32547
+12 0 32 {} 22370 58157
+13 0 112 {} 22370 58157
+14 0 32 {} 61120 23034
+15 0 34 {} 61120 23034
+16 0 32 {} 9465 13725
+17 0 56 {} 9465 13725
+18 0 32 {} 61755 41480
+19 0 256 {} 61755 41480
+20 0 32 {} 14163 42648
+21 0 258 {} 14163 42648
+22 0 32 {} 61755 41480
+23 0 96 {} 61755 41480
+24 0 32 {} 9465 13725
+25 0 42 {} 9465 13725
+26 0 32 {} 61755 41480
+27 0 112 {} 61755 41480
+28 0 32 {} 56229 32547
+29 0 34 {} 56229 32547
+30 0 32 {} 22370 58157
+31 0 56 {} 22370 58157
+32 0 32 {} 61120 23034
+33 0 256 {} 61120 23034
+34 0 32 {} 22097 32024
+35 0 258 {} 22097 32024
+36 0 32 {} 22097 32024
+37 0 96 {} 22097 32024
+38 0 32 {} 22097 32024
+39 0 42 {} 22097 32024
+40 0 32 {} 22097 32024
+41 0 112 {} 22097 32024
+42 0 32 {} 22097 32024
+43 0 34 {} 22097 32024
+44 0 32 {} 22097 32024
+45 0 56 {} 22097 32024
+46 0 32 {} 14163 42648
+47 0 256 {} 14163 42648
+48 0 32 {} 22097 32024
+49 0 258 {} 22097 32024
+50 1 32 {} 27767 24688
+51 1 96 {} 27767 24688
+52 2 32 {} 27807 11326
+53 2 42 {} 27807 11326
+54 2 32 {} 13231 23673
+55 2 112 {} 13231 23673
+56 0 32 {} 13770 35539
+57 0 34 {} 13770 35539
+58 0 32 {} 55682 38429
+59 0 56 {} 55682 38429
+60 0 32 {} 48367 3693
+61 0 256 {} 48367 3693
+62 1 32 {} 38098 29364
+63 1 258 {} 13941 61566
+64 0 32 {} 55682 38429
+65 0 96 {} 55682 38429
+66 0 32 {} 13744 56493
+67 0 42 {} 24285 39629
+68 0 32 {} 2301 65295
+69 0 112 {} 2301 65295
+70 0 32 {} 2301 65295
+71 0 34 {} 2301 65295
+72 0 32 {} 59008 50482
+73 0 56 {} 59008 50482
+74 0 32 {} 13744 56493
+75 0 256 {} 13744 56493
+76 0 32 {} 24670 54557
+77 0 258 {} 51176 19580
+78 0 32 {} 42501 56096
+79 0 96 {} 42501 56096
+80 0 32 {} 63657 55802
+81 0 42 {} 63657 55802
+82 0 32 {} 9181 7187
+83 0 112 {} 9181 7187
+84 0 32 {} 13744 56493
+85 0 34 {} 24285 39629
+86 0 32 {} 13744 56493
+87 0 56 {} 13744 56493
+88 0 32 {} 2488 37884
+89 0 256 {} 2488 37884
+90 0 32 {} 2488 37884
+91 0 258 {} 29081 25337
+92 0 32 {} 13770 35539
+93 0 96 {} 13770 35539
+94 0 32 {} 59069 35405
+95 0 42 {} 59069 35405
+96 0 32 {} 13770 35539
+97 0 112 {} 13770 35539
+98 0 32 {} 13770 35539
+99 0 34 {} 13770 35539
+100 0 32 {} 23010 54704
+101 0 56 {} 23010 54704
+102 0 32 {} 13770 35539
+103 0 256 {} 13770 35539
+104 0 32 {} 59069 35405
+105 0 258 {} 59069 35405
+106 0 32 {} 22097 32024
+107 0 96 {} 22097 32024
+108 0 32 {} 45146 46840
+109 0 42 {} 45146 46840
+110 0 32 {} 20996 64387
+111 0 112 {} 20996 64387
+112 0 32 {} 36226 18874
+113 0 34 {} 36226 18874
+114 0 32 {} 48017 47202
+115 0 56 {} 48017 47202
+116 0 32 {} 44222 48857
+117 0 256 {} 44222 48857
+118 0 32 {} 44222 48857
+119 0 258 {} 52124 38413
+120 0 32 {} 44222 48857
+121 0 96 {} 44222 48857
+122 0 32 {} 44222 48857
+123 0 42 {} 35344 4012
+124 0 32 {} 31404 1039
+125 0 112 {} 31404 1039
+126 0 32 {} 22097 32024
+127 0 34 {} 22097 32024
+128 0 32 {} 55682 38429
+129 0 56 {} 55682 38429
+130 0 32 {} 22097 32024
+131 0 256 {} 22097 32024
+132 0 32 {} 22097 32024
+133 0 258 {} 22097 32024
+134 0 32 {} 13770 35539
+135 0 96 {} 13770 35539
+136 0 32 {} 13770 35539
+137 0 42 {} 13770 35539
+138 0 32 {} 52124 38413
+139 0 112 {} 52124 38413
+140 0 32 {} 45146 46840
+141 0 34 {} 45146 46840
+142 0 32 {} 20996 64387
+143 0 56 {} 20996 64387
+144 0 32 {} 10310 28349
+145 0 256 {} 10310 28349
+146 0 32 {} 37176 33801
+147 0 258 {} 37176 33801
+148 0 32 {} 36226 18874
+149 0 96 {} 36226 18874
+150 0 32 {} 47339 49386
+151 0 42 {} 47339 49386
+152 0 32 {} 742 53449
+153 0 112 {} 742 53449
+154 0 32 {} 32193 36212
+155 0 34 {} 32193 36212
+156 0 32 {} 31882 13975
+157 0 56 {} 31882 13975
+158 0 32 {} 14416 20375
+159 0 256 {} 23064 37365
+160 0 32 {} 22097 32024
+161 0 258 {} 22097 32024
+162 0 32 {} 22097 32024
+163 0 96 {} 22097 32024
+164 0 32 {} 22097 32024
+165 0 42 {} 22097 32024
+166 0 32 {} 47898 44942
+167 0 112 {} 47898 44942
+168 0 32 {} 8685 23346
+169 0 34 {} 8685 23346
+170 0 32 {} 15643 6557
+171 0 56 {} 32040 4938
+172 0 32 {} 56078 57132
+173 0 256 {} 56078 57132
+174 0 32 {} 43011 25855
+175 0 258 {} 43011 25855
+176 0 32 {} 53602 35898
+177 0 96 {} 53602 35898
+178 0 32 {} 22097 32024
+179 0 42 {} 22097 32024
+180 0 32 {} 22097 32024
+181 0 112 {} 22097 32024
+182 0 32 {} 31404 1039
+183 0 34 {} 31404 1039
+184 0 32 {} 22097 32024
+185 0 56 {} 22097 32024
+186 0 32 {} 22097 32024
+187 0 256 {} 22097 32024
+188 re.error incomplete escape \x4 at position 0
+189 re.error incomplete escape \x4 at position 0
+190 re.error incomplete escape \x at position 0
+191 re.error incomplete escape \x at position 0
+192 0 32 {} 22097 32024
+193 0 42 {} 13770 35539
+194 re.error incomplete escape \u004 at position 0
+195 re.error incomplete escape \u004 at position 0
+196 0 32 {} 22097 32024
+197 0 34 {} 13770 35539
+198 re.error incomplete escape \U0000004 at position 0
+199 re.error incomplete escape \U0000004 at position 0
+200 re.error bad escape \U00110000 at position 0
+201 re.error bad escape \U00110000 at position 0
+202 0 32 {} 22097 32024
+203 0 258 {} 22097 32024
+204 0 32 {} 22097 32024
+205 0 96 {} 22097 32024
+206 0 32 {} 22097 32024
+207 0 42 {} 22097 32024
+208 0 32 {} 31404 1039
+209 0 112 {} 31404 1039
+210 0 32 {} 22097 32024
+211 0 34 {} 13770 35539
+212 0 32 {} 22097 32024
+213 0 56 {} 22097 32024
+214 re.error octal escape value \400 outside of range 0-0o377 at position 0
+215 re.error octal escape value \400 outside of range 0-0o377 at position 0
+216 re.error invalid group reference 1 at position 1
+217 re.error invalid group reference 1 at position 1
+218 1 32 {} 26790 62249
+219 1 96 {} 26790 62249
+220 1 32 {} 32315 17776
+221 1 42 {} 32315 17776
+222 2 32 {} 22097 32024
+223 2 112 {} 22097 32024
+224 re.error invalid group reference 2 at position 4
+225 re.error invalid group reference 2 at position 4
+226 re.error invalid group reference 10 at position 4
+227 re.error invalid group reference 10 at position 4
+228 10 32 {} 22097 32024
+229 10 256 {} 22097 32024
+230 re.error invalid group reference 11 at position 4
+231 re.error invalid group reference 11 at position 4
+232 re.error invalid group reference 8 at position 1
+233 re.error invalid group reference 8 at position 1
+234 re.error invalid group reference 9 at position 1
+235 re.error invalid group reference 9 at position 1
+236 re.error bad escape \q at position 0
+237 re.error bad escape \q at position 0
+238 re.error bad escape \y at position 0
+239 re.error bad escape \y at position 0
+240 0 32 {} 22097 32024
+241 0 56 {} 22097 32024
+242 0 32 {} 22097 32024
+243 0 256 {} 22097 32024
+244 0 32 {} 959 37771
+245 0 258 {} 959 37771
+246 0 32 {} 22097 32024
+247 0 96 {} 22097 32024
+248 1 32 {'n': 1} 27658 15309
+249 1 34 {'n': 1} 27658 15309
+250 1 32 {'n': 1} 4178 10980
+251 1 56 {'n': 1} 4178 10980
+252 2 32 {'n': 1, 'm': 2} 22097 32024
+253 2 256 {'n': 1, 'm': 2} 22097 32024
+254 re.error redefinition of group name 'n' as group 2; was group 1 at position 12
+255 re.error redefinition of group name 'n' as group 2; was group 1 at position 12
+256 re.error bad character in group name '1n' at position 4
+257 re.error bad character in group name '1n' at position 4
+258 re.error missing >, unterminated name at position 4
+259 re.error missing >, unterminated name at position 4
+260 re.error missing group name at position 4
+261 re.error missing group name at position 4
+262 re.error unknown group name 'x' at position 12
+263 re.error unknown group name 'x' at position 12
+264 re.error unknown group name 'n' at position 4
+265 re.error unknown group name 'n' at position 4
+266 re.error cannot refer to an open group at position 11
+267 re.error cannot refer to an open group at position 11
+268 re.error unknown extension ?Px at position 1
+269 re.error unknown extension ?Px at position 1
+270 re.error unexpected end of pattern at position 3
+271 re.error unexpected end of pattern at position 3
+272 re.error unexpected end of pattern at position 2
+273 re.error unexpected end of pattern at position 2
+274 re.error missing -, : or ) at position 3
+275 re.error missing -, : or ) at position 3
+276 0 34 {} 53602 35898
+277 0 34 {} 53602 35898
+278 0 34 {} 53602 35898
+279 0 58 {} 53602 35898
+280 0 34 {} 53602 35898
+281 0 258 {} 53602 35898
+282 0 34 {} 24285 39629
+283 0 258 {} 24285 39629
+284 0 34 {} 24285 39629
+285 0 98 {} 24285 39629
+286 0 34 {} 29081 25337
+287 0 42 {} 29081 25337
+288 0 34 {} 36226 18874
+289 0 114 {} 36226 18874
+290 0 34 {} 18157 50841
+291 0 34 {} 18157 50841
+292 0 34 {} 18157 50841
+293 0 58 {} 18157 50841
+294 0 34 {} 61080 8876
+295 0 258 {} 25756 40587
+296 0 34 {} 5925 52010
+297 0 258 {} 45618 55874
+298 1 34 {} 26790 62249
+299 1 98 {} 26790 62249
+300 0 34 {} 20943 64383
+301 0 42 {} 20943 64383
+302 0 34 {} 20943 64383
+303 0 114 {} 20943 64383
+304 0 34 {} 20943 64383
+305 0 34 {} 20943 64383
+306 0 34 {} 22097 32024
+307 0 58 {} 22097 32024
+308 0 34 {} 61080 8876
+309 0 258 {} 12 2275
+310 0 34 {} 22097 32024
+311 0 258 {} 22097 32024
+312 0 34 {} 58060 64083
+313 0 98 {} 58060 64083
+314 0 34 {} 58060 64083
+315 0 42 {} 58060 64083
+316 0 34 {} 22097 32024
+317 0 114 {} 22097 32024
+318 0 34 {} 63998 28931
+319 0 34 {} 63998 28931
+320 0 34 {} 58101 16307
+321 0 58 {} 58101 16307
+322 0 34 {} 58101 16307
+323 0 258 {} 22097 32024
+324 0 34 {} 58101 16307
+325 0 258 {} 22097 32024
+326 0 34 {} 33175 16446
+327 0 98 {} 33175 16446
+328 0 34 {} 45146 46840
+329 0 42 {} 45146 46840
+330 0 34 {} 15643 6557
+331 0 114 {} 32040 4938
+332 0 256 {} 610 37230
+333 0 258 {} 610 37230
+334 0 256 {} 34250 54680
+335 0 280 {} 34250 54680
+336 0 258 {} 18157 50841
+337 0 258 {} 18157 50841
+338 0 258 {} 52124 38413
+339 0 258 {} 52124 38413
+340 0 258 {} 18157 50841
+341 0 322 {} 18157 50841
+342 0 258 {} 21713 37433
+343 0 266 {} 21713 37433
+344 1 258 {} 26790 62249
+345 1 338 {} 26790 62249
+346 0 40 {} 53147 32628
+347 0 42 {} 53147 32628
+348 0 48 {} 32040 4938
+349 0 56 {} 32040 4938
+350 0 96 {} 53602 35898
+351 0 320 {} 53602 35898
+352 0 96 {} 13770 35539
+353 0 322 {} 13770 35539
+354 0 96 {} 22097 32024
+355 0 96 {} 22097 32024
+356 0 96 {} 959 37771
+357 0 106 {} 959 37771
+358 0 96 {} 22097 32024
+359 0 112 {} 22097 32024
+360 0 96 {} 13770 35539
+361 0 98 {} 13770 35539
+362 0 58 {} 13770 35539
+363 0 58 {} 13770 35539
+364 0 32 {} 2301 65295
+365 0 256 {} 2301 65295
+366 0 32 {} 2301 65295
+367 0 258 {} 2301 65295
+368 0 34 {} 2301 65295
+369 0 98 {} 2301 65295
+370 0 32 {} 44968 27578
+371 0 42 {} 44968 27578
+372 0 32 {} 32040 4938
+373 0 112 {} 32040 4938
+374 0 32 {} 5871 32609
+375 0 34 {} 5871 32609
+376 0 32 {} 22097 32024
+377 0 56 {} 22097 32024
+378 0 32 {} 4540 17101
+379 0 256 {} 4540 17101
+380 0 32 {} 36226 18874
+381 0 32 {} 13770 35539
+382 0 96 {} 13770 35539
+383 re.error bad inline flags: flag turned on and off at position 5
+384 re.error bad inline flags: flag turned on and off at position 5
+385 re.error missing flag at position 3
+386 re.error missing flag at position 3
+387 re.error missing flag at position 4
+388 re.error missing flag at position 4
+389 re.error unknown flag at position 3
+390 re.error unknown flag at position 3
+391 re.error unknown flag at position 3
+392 re.error unknown flag at position 3
+393 re.error missing -, : or ) at position 3
+394 re.error missing -, : or ) at position 3
+395 re.error missing flag at position 4
+396 re.error missing flag at position 4
+397 re.error missing : at position 5
+398 re.error missing : at position 5
+399 re.error unknown extension ?z at position 1
+400 re.error unknown extension ?z at position 1
+401 re.error bad inline flags: cannot use 'L' flag with a str pattern at position 3
+402 re.error bad inline flags: cannot use 'L' flag with a str pattern at position 3
+403 0 32 {} 13770 35539
+404 0 56 {} 13770 35539
+405 re.error bad inline flags: flags 'a', 'u' and 'L' are incompatible at position 4
+406 re.error bad inline flags: flags 'a', 'u' and 'L' are incompatible at position 4
+407 re.error bad inline flags: cannot turn off flags 'a', 'u' and 'L' at position 5
+408 re.error bad inline flags: cannot turn off flags 'a', 'u' and 'L' at position 5
+409 re.error global flags not at the start of the expression at position 1
+410 re.error global flags not at the start of the expression at position 1
+411 re.error global flags not at the start of the expression at position 3
+412 re.error global flags not at the start of the expression at position 3
+413 0 34 {} 13770 35539
+414 0 114 {} 13770 35539
+415 0 32 {} 13770 35539
+416 0 34 {} 13770 35539
+417 re.error missing ), unterminated comment at position 0
+418 re.error missing ), unterminated comment at position 0
+419 0 32 {} 26527 28713
+420 0 256 {} 26527 28713
+421 0 32 {} 38004 61056
+422 0 258 {} 38004 61056
+423 0 32 {} 24957 12055
+424 0 96 {} 24957 12055
+425 0 32 {} 37030 63316
+426 0 42 {} 37030 63316
+427 0 32 {} 51521 51811
+428 0 112 {} 51521 51811
+429 0 32 {} 51521 51811
+430 0 34 {} 51521 51811
+431 0 32 {} 22097 32024
+432 0 56 {} 22097 32024
+433 re.error look-behind requires fixed-width pattern
+434 re.error look-behind requires fixed-width pattern
+435 re.error look-behind requires fixed-width pattern
+436 re.error look-behind requires fixed-width pattern
+437 re.error look-behind requires fixed-width pattern
+438 re.error look-behind requires fixed-width pattern
+439 0 32 {} 24314 63432
+440 0 42 {} 24314 63432
+441 re.error look-behind requires fixed-width pattern
+442 re.error look-behind requires fixed-width pattern
+443 1 32 {} 39417 29820
+444 1 34 {} 39417 29820
+445 1 32 {} 27955 56360
+446 1 56 {} 27955 56360
+447 0 32 {} 22097 32024
+448 0 258 {} 22097 32024
+449 0 32 {} 5871 32609
+450 0 96 {} 5871 32609
+451 0 32 {} 30674 11549
+452 0 42 {} 30674 11549
+453 0 32 {} 17180 21449
+454 0 112 {} 17180 21449
+455 0 32 {} 51521 51811
+456 0 34 {} 51521 51811
+457 0 32 {} 22097 32024
+458 0 56 {} 22097 32024
+459 0 32 {} 22097 32024
+460 0 256 {} 22097 32024
+461 0 32 {} 13770 35539
+462 0 258 {} 13770 35539
+463 0 32 {} 13770 35539
+464 0 96 {} 13770 35539
+465 re.error unknown extension ?<x at position 1
+466 re.error unknown extension ?<x at position 1
+467 re.error unexpected end of pattern at position 3
+468 re.error unexpected end of pattern at position 3
+469 re.error missing ), unterminated subpattern at position 0
+470 re.error missing ), unterminated subpattern at position 0
+471 re.error missing ), unterminated subpattern at position 0
+472 re.error missing ), unterminated subpattern at position 0
+473 0 32 {} 56229 32547
+474 0 256 {} 56229 32547
+475 0 32 {} 22097 32024
+476 0 258 {} 22097 32024
+477 0 32 {} 51249 15421
+478 0 96 {} 51249 15421
+479 re.error missing ), unterminated subpattern at position 0
+480 re.error missing ), unterminated subpattern at position 0
+481 1 32 {} 11663 46576
+482 1 112 {} 11663 46576
+483 1 32 {} 20129 25213
+484 1 34 {} 31021 32172
+485 1 32 {} 11362 29723
+486 1 56 {} 11362 29723
+487 1 32 {'n': 1} 38465 28076
+488 1 256 {'n': 1} 38465 28076
+489 re.error invalid group reference 2 at position 6
+490 re.error invalid group reference 2 at position 6
+491 re.error bad group number at position 6
+492 re.error bad group number at position 6
+493 re.error conditional backref with more than two branches at position 11
+494 re.error conditional backref with more than two branches at position 11
+495 re.error unknown group name 'x' at position 6
+496 re.error unknown group name 'x' at position 6
+497 re.error missing ), unterminated subpattern at position 3
+498 re.error missing ), unterminated subpattern at position 3
+499 re.error missing ), unterminated name at position 6
+500 re.error missing ), unterminated name at position 6
+501 1 32 {} 27823 55468
+502 1 256 {} 27823 55468
+503 re.error invalid group reference 5 at position 3
+504 re.error invalid group reference 5 at position 3
+505 1 32 {} 49302 2643
+506 1 96 {} 49302 2643
+507 1 32 {} 5121 31638
+508 1 42 {} 5121 31638
+509 1 32 {} 17328 60361
+510 1 112 {} 17328 60361
+511 0 32 {} 5203 48283
+512 0 34 {} 5203 48283
+513 0 32 {} 51249 15421
+514 0 56 {} 51249 15421
+515 0 32 {} 13235 60282
+516 0 256 {} 13235 60282
+517 0 32 {} 5014 57956
+518 0 258 {} 5014 57956
+519 0 32 {} 51249 15421
+520 0 96 {} 51249 15421
+521 0 32 {} 51249 15421
+522 0 42 {} 51249 15421
+523 0 32 {} 14163 42648
+524 0 112 {} 14163 42648
+525 0 32 {} 14163 42648
+526 0 34 {} 14163 42648
+527 1 32 {} 62671 38784
+528 1 56 {} 62671 38784
+529 1 32 {} 62671 38784
+530 1 256 {} 62671 38784
+531 1 32 {} 64507 13608
+532 1 258 {} 41795 41363
+533 re.error nothing to repeat at position 0
+534 re.error nothing to repeat at position 0
+535 re.error nothing to repeat at position 0
+536 re.error nothing to repeat at position 0
+537 re.error nothing to repeat at position 0
+538 re.error nothing to repeat at position 0
+539 re.error nothing to repeat at position 0
+540 re.error nothing to repeat at position 0
+541 re.error multiple repeat at position 2
+542 re.error multiple repeat at position 2
+543 re.error multiple repeat at position 2
+544 re.error multiple repeat at position 2
+545 re.error multiple repeat at position 2
+546 re.error multiple repeat at position 2
+547 re.error multiple repeat at position 4
+548 re.error multiple repeat at position 4
+549 re.error nothing to repeat at position 1
+550 re.error nothing to repeat at position 1
+551 re.error nothing to repeat at position 1
+552 re.error nothing to repeat at position 1
+553 re.error nothing to repeat at position 2
+554 re.error nothing to repeat at position 2
+555 0 32 {} 10394 33907
+556 0 56 {} 10394 33907
+557 0 32 {} 15069 34791
+558 0 256 {} 15069 34791
+559 0 32 {} 57078 56109
+560 0 258 {} 57078 56109
+561 1 32 {} 58417 5406
+562 1 96 {} 58417 5406
+563 3 32 {} 13860 20869
+564 3 42 {} 13860 20869
+565 2 32 {} 11585 12969
+566 2 112 {} 11585 12969
+567 2 32 {} 57179 14177
+568 2 34 {} 57179 14177
+569 re.error unbalanced parenthesis at position 0
+570 re.error unbalanced parenthesis at position 0
+571 re.error unbalanced parenthesis at position 1
+572 re.error unbalanced parenthesis at position 1
+573 re.error missing ), unterminated subpattern at position 0
+574 re.error missing ), unterminated subpattern at position 0
+575 re.error missing ), unterminated subpattern at position 0
+576 re.error missing ), unterminated subpattern at position 0
+577 re.error unbalanced parenthesis at position 3
+578 re.error unbalanced parenthesis at position 3
+579 re.error unterminated character set at position 0
+580 re.error unterminated character set at position 0
+581 re.error unterminated character set at position 0
+582 re.error unterminated character set at position 0
+583 re.error unterminated character set at position 0
+584 re.error unterminated character set at position 0
+585 re.error unterminated character set at position 0
+586 re.error unterminated character set at position 0
+587 re.error bad character range z-a at position 1
+588 re.error bad character range z-a at position 1
+589 re.error bad character range \d-z at position 1
+590 re.error bad character range \d-z at position 1
+591 re.error bad character range a-\d at position 1
+592 re.error bad character range a-\d at position 1
+593 re.error bad character range \w-\w at position 1
+594 re.error bad character range \w-\w at position 1
+595 0 32 {} 13770 35539
+596 0 256 {} 13770 35539
+597 0 32 {} 13744 56493
+598 0 34 {} 24285 39629
+599 re.error min repeat greater than max repeat at position 2
+600 re.error min repeat greater than max repeat at position 2
+601 OverflowError the repetition number is too large
+602 OverflowError the repetition number is too large
+603 0 32 {} 22097 32024
+604 0 258 {} 22097 32024
+605 OverflowError the repetition number is too large
+606 OverflowError the repetition number is too large
+607 0 32 {} 22097 32024
+608 0 42 {} 22097 32024
+609 0 32 {} 15069 34791
+610 0 112 {} 15069 34791
+611 0 32 {} 22097 32024
+612 0 34 {} 22097 32024
+613 0 32 {} 22097 32024
+614 0 56 {} 22097 32024
+615 re.error bad escape (end of pattern) at position 0
+616 re.error bad escape (end of pattern) at position 0
+617 re.error bad escape (end of pattern) at position 1
+618 re.error bad escape (end of pattern) at position 1
+619 0 32 {} 22097 32024
+620 0 96 {} 22097 32024
+621 re.error bad escape (end of pattern) at position 2
+622 re.error bad escape (end of pattern) at position 2
+623 re.error bad character in group name 'a\\b' at position 4
+624 re.error bad character in group name 'a\\b' at position 4
+625 0 32 {} 53602 35898
+626 0 34 {} 53602 35898
+627 0 32 {} 51337 26573
+628 0 56 {} 51337 26573
+629 1 32 {} 18696 53974
+630 1 256 {} 18696 53974
+631 2 32 {} 58824 508
+632 2 258 {} 58824 508
+633 0 32 {} 24396 19240
+634 0 96 {} 24396 19240
+635 0 32 {} 56229 32547
+636 0 42 {} 56229 32547
+637 0 32 {} 30121 14545
+638 0 112 {} 30121 14545
+639 0 32 {} 30121 14545
+640 0 34 {} 30121 14545
+641 0 32 {} 30121 14545
+642 0 56 {} 30121 14545
+643 0 32 {} 22097 32024
+644 0 256 {} 22097 32024
+645 2 32 {} 22097 32024
+646 2 258 {} 22097 32024
+647 2 32 {} 22097 32024
+648 2 96 {} 22097 32024
+649 0 32 {} 43778 3505
+650 0 42 {} 40152 5474
+651 2 32 {} 43991 13544
+652 2 112 {} 43991 13544
+653 3 32 {'year': 1, 'month': 2, 'day': 3} 22097 32024
+654 3 34 {'year': 1, 'month': 2, 'day': 3} 22097 32024
+655 0 34 {} 55416 26959
+656 0 58 {} 55416 26959
+657 0 32 {} 22097 32024
+658 0 256 {} 22097 32024
+659 3 32 {} 22097 32024
+660 3 258 {} 22097 32024
+661 0 32 {} 22097 32024
+662 0 96 {} 22097 32024
+663 0 32 {} 22097 32024
+664 0 42 {} 22097 32024
+665 0 32 {} 742 53449
+666 0 112 {} 742 53449
+667 1 32 {} 1831 23819
+668 1 34 {} 1831 23819
+669 0 32 {} 22097 32024
+670 0 56 {} 22097 32024
+671 0 32 {} 22097 32024
+672 0 256 {} 22097 32024
+673 0 32 {} 22097 32024
+674 0 258 {} 22097 32024
+675 0 32 {} 21713 37433
+676 0 96 {} 21713 37433
+677 0 32 {} 21713 37433
+678 0 42 {} 20943 64383
+679 0 32 {} 22097 32024
+680 0 112 {} 22097 32024
+681 0 32 {} 39726 25588
+682 0 34 {} 39726 25588
+683 0 32 {} 21713 37433
+684 0 56 {} 21713 37433
+685 0 32 {} 21713 37433
+686 0 256 {} 21713 37433
+687 0 32 {} 40352 8706
+688 0 258 {} 40352 8706
+689 0 32 {} 40352 8706
+690 0 96 {} 40352 8706
+691 0 32 {} 40352 8706
+692 0 42 {} 40352 8706
+693 0 34 {} 22097 32024
+694 0 114 {} 22097 32024
+695 0 34 {} 22097 32024
+696 0 34 {} 22097 32024
+697 0 34 {} 22097 32024
+698 0 58 {} 22097 32024
+699 0 34 {} 22097 32024
+700 0 258 {} 22097 32024
+701 re.error missing >, unterminated name at position 12
+702 re.error missing >, unterminated name at position 12
+703 1 32 {'é': 1} 10062 43585
+704 1 96 {'é': 1} 10062 43585
+705 re.error bad character in group name 'a b' at position 4
+706 re.error bad character in group name 'a b' at position 4
+707 re.error bad character in group name 'a b' at position 12
+708 re.error bad character in group name 'a b' at position 12
+709 re.error bad character in group name 'a b' at position 3
+710 re.error bad character in group name 'a b' at position 3
+711 re.error missing ), unterminated subpattern at position 3 (line 2, column 2)
+712 re.error missing ), unterminated subpattern at position 3 (line 2, column 2)
+713 re.error unterminated character set at position 4 (line 3, column 2)
+714 re.error unterminated character set at position 4 (line 3, column 2)
+715 re.error missing ), unterminated subpattern at position 9 (line 3, column 2)
+716 re.error missing ), unterminated subpattern at position 9 (line 3, column 2)
+717 re.error unknown group name 'm' at position 13
+718 re.error unknown group name 'm' at position 13
+719 re.error redefinition of group name 'n' as group 3; was group 1 at position 18
+720 re.error redefinition of group name 'n' as group 3; was group 1 at position 18
+721 re.error missing : at position 8
+722 re.error missing : at position 8
+723 re.error missing : at position 5
+724 re.error missing : at position 5
+725 re.error missing : at position 4
+726 re.error missing : at position 4
+727 re.error missing ), unterminated subpattern at position 0
+728 re.error missing ), unterminated subpattern at position 0
+729 re.error missing ), unterminated subpattern at position 0
+730 re.error missing ), unterminated subpattern at position 0
+731 re.error global flags not at the start of the expression at position 5
+732 re.error global flags not at the start of the expression at position 5
+733 1 32 {'n': 1} 31581 18913
+734 1 112 {'n': 1} 31581 18913
+735 re.error cannot refer to group defined in the same lookbehind subpattern at position 9
+736 re.error cannot refer to group defined in the same lookbehind subpattern at position 9
+737 0 32 {} 22097 32024
+738 0 56 {} 22097 32024
+739 re.error missing ), unterminated subpattern at position 14
+740 re.error missing ), unterminated subpattern at position 14

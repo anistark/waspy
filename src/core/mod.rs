@@ -2,6 +2,7 @@
 
 pub mod comments;
 pub mod config;
+pub(crate) mod data_files;
 pub mod errors;
 pub mod options;
 pub mod parser;

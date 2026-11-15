@@ -19,7 +19,11 @@
 
 mod classes;
 mod config;
+mod file_config;
 mod format;
+mod ini;
+
+pub(crate) use file_config::config_files;
 
 use crate::ir::build::*;
 use crate::ir::{
@@ -43,6 +47,12 @@ const DICT_CONFIG_MARK: &str = "__logging_dictConfig";
 const BASIC_FORMAT: &str = "%(levelname)s:%(name)s:%(message)s";
 /// `basicConfig(...)`, until the statement it is is written out.
 const BASIC_CONFIG_MARK: &str = "__logging_basicConfig";
+/// `fileConfig(...)`, until the statements it is are written out.
+const FILE_CONFIG_MARK: &str = "__logging_fileConfig";
+/// The function a `fileConfig()` call checks its file with when the program
+/// runs. A module has it only when it calls `fileConfig()`, which is how code
+/// generation knows a logger's flags may be the file's ints.
+pub const FILE_CONFIG_CHECK_FN: &str = "__logging_file_config_check";
 
 /// The classes, by their name in the module.
 const CLASSES: &[&str] = &[
@@ -654,10 +664,11 @@ fn module_call(name: &str, arguments: Vec<IRExpr>, formats: &mut Formats) -> Res
             }
             call(DICT_CONFIG_MARK, arguments)
         }
-        "fileConfig" | "listen" | "stopListening" => {
+        "fileConfig" => call(FILE_CONFIG_MARK, arguments),
+        "listen" | "stopListening" => {
             return Err(refused(format!(
                 "logging.config.{name}() is not supported: it reads its configuration at run \
-                 time, through configparser or a socket. Hint: use dictConfig()"
+                 time, through a socket. Hint: use dictConfig() or fileConfig()"
             )))
         }
         "LogRecord" => {
@@ -855,6 +866,7 @@ fn expand_basic_config(
     body: &mut IRBody,
     formats: &mut Formats,
     constants: &HashMap<String, IRExpr>,
+    program: &file_config::Program,
 ) -> Result<()> {
     for stmt in &mut body.statements {
         if let IRStatement::Expression(IRExpr::FunctionCall {
@@ -870,12 +882,27 @@ fn expand_basic_config(
                 *stmt = config::dict_config(&arguments[0], constants, formats)?;
                 continue;
             }
+            if function_name == FILE_CONFIG_MARK {
+                // Left as it is where nothing is being compiled.
+                if let Some(written) = file_config::file_config(arguments, program, formats)? {
+                    *stmt = written;
+                }
+                continue;
+            }
         }
         for nested in bodies_mut(stmt) {
-            expand_basic_config(nested, formats, constants)?;
+            expand_basic_config(nested, formats, constants, program)?;
         }
     }
     crate::ir::visit_body(body, &mut |e: &mut IRExpr| match e {
+        // One left where nothing is being compiled is a statement.
+        IRExpr::FunctionCall { function_name, .. }
+            if function_name == FILE_CONFIG_MARK && crate::core::data_files::compiling() =>
+        {
+            Err(refused(
+                "fileConfig() is supported as a statement".to_string(),
+            ))
+        }
         IRExpr::FunctionCall { function_name, .. } if function_name == BASIC_CONFIG_MARK => Err(
             refused("basicConfig() is supported as a statement".to_string()),
         ),
@@ -1242,6 +1269,64 @@ fn remove_read_configs(module: &mut IRModule, configs: Vec<String>) -> Result<()
     Ok(())
 }
 
+/// The module constants that are strs, which no function rebinds: a
+/// `fileConfig()` call can name its file by one.
+fn constant_strs(module: &IRModule) -> HashMap<String, String> {
+    fn globals(body: &IRBody, out: &mut BTreeSet<String>) {
+        for stmt in &body.statements {
+            match stmt {
+                IRStatement::Global(names) => out.extend(names.iter().cloned()),
+                // Nested functions are not lifted yet.
+                IRStatement::FunctionDef(def) => globals(&def.body, out),
+                _ => {}
+            }
+            for nested in crate::ir::infer::nested_bodies(stmt) {
+                globals(nested, out);
+            }
+        }
+    }
+    let mut rebound = BTreeSet::new();
+    for f in &module.functions {
+        globals(&f.body, &mut rebound);
+    }
+    for c in &module.classes {
+        for m in &c.methods {
+            globals(&m.body, &mut rebound);
+        }
+    }
+    module
+        .variables
+        .iter()
+        .filter(|var| !rebound.contains(&var.name))
+        .filter_map(|var| Some((var.name.clone(), const_str(&var.value)?.to_string())))
+        .collect()
+}
+
+/// Whether the module calls the function `name`.
+fn calls(module: &mut IRModule, name: &str) -> bool {
+    let mut found = false;
+    let mut note = |e: &mut IRExpr| -> Result<()> {
+        if matches!(e, IRExpr::FunctionCall { function_name, .. } if function_name == name) {
+            found = true;
+        }
+        Ok(())
+    };
+    for f in &mut module.functions {
+        let _ = crate::ir::visit_body(&mut f.body, &mut note);
+    }
+    for c in &mut module.classes {
+        for m in &mut c.methods {
+            let _ = crate::ir::visit_body(&mut m.body, &mut note);
+        }
+    }
+    for var in &mut module.variables {
+        expr_body(&mut var.value, |body| {
+            let _ = crate::ir::visit_body(body, &mut note);
+        });
+    }
+    found
+}
+
 /// `atexit` runs `logging.shutdown()`: the handlers are flushed and closed
 /// when the `__main__` block ends, however it ends.
 fn run_shutdown_at_exit(module: &mut IRModule) {
@@ -1368,14 +1453,19 @@ pub fn lower_logging(module: &mut IRModule) -> Result<()> {
             crate::ir::visit_body(&mut m.body, &mut note_config)?;
         }
     }
+    let program = file_config::Program {
+        paths: constant_strs(module),
+        names_levels: calls(module, &fname("add_level_name")),
+        configured: std::cell::Cell::new(false),
+    };
     for f in &mut module.functions {
-        expand_basic_config(&mut f.body, &mut formats, &constants)?;
+        expand_basic_config(&mut f.body, &mut formats, &constants, &program)?;
         rename_function(f, &b);
     }
     for c in &mut module.classes {
         rename_bases(c, &b);
         for m in &mut c.methods {
-            expand_basic_config(&mut m.body, &mut formats, &constants)?;
+            expand_basic_config(&mut m.body, &mut formats, &constants, &program)?;
             rename_function(m, &b);
         }
         // `super().__init__(sys.stdout)` in a StreamHandler of the program's.
@@ -1439,7 +1529,13 @@ pub fn lower_logging(module: &mut IRModule) -> Result<()> {
             .into_iter()
             .filter(|f| !defined.contains(&f.name)),
     );
-    module.functions.extend(classes::functions());
+    // The file check is in a module only when it calls `fileConfig()`.
+    let configured = program.configured.get();
+    module.functions.extend(
+        classes::functions()
+            .into_iter()
+            .filter(|f| configured || f.name != FILE_CONFIG_CHECK_FN),
+    );
     module
         .functions
         .extend(format_functions(&formats, &constants));

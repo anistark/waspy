@@ -834,10 +834,13 @@ impl CompilationContext {
                     | IRType::Range
             );
             if builtin {
-                self.report(format!(
-                    "an instance of {c} is used where {} is expected ({what})",
-                    crate::compiler::operators::python_type_name(slot)
-                ));
+                match crate::ir::re_pattern_argument_hint(what) {
+                    Some(hint) => self.report(hint.to_string()),
+                    None => self.report(format!(
+                        "an instance of {c} is used where {} is expected ({what})",
+                        crate::compiler::operators::python_type_name(slot)
+                    )),
+                }
                 return;
             }
         }

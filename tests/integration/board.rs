@@ -3877,6 +3877,50 @@ mod stdlib {
         );
     }
 
+    /// re module: patterns computed at run time (a str or bytes value given to compile, search, sub, and the rest, parsed and compiled as the program runs and cached, with CPython's re.error for one it rejects; such a pattern's findall and split answer strs)
+    #[test]
+    fn re_patterns_at_run_time() {
+        check(
+            r#"
+            import re
+
+
+            def find(pattern: str, text: str) -> str:
+                m = re.search(pattern, text)
+                if m is None:
+                    return "None"
+                return m.group(0) + str(m.groups()) + str(m.span())
+
+
+            def bad(pattern: str) -> str:
+                try:
+                    re.compile(pattern)
+                except re.error as e:
+                    return str(e)
+                return "ok"
+
+
+            def f() -> str:
+                word = "c.t"
+                exact = re.compile(r"\b" + re.escape(word) + r"\b", re.I)
+                parts = [find("(a+)(b)?", "xaab"), find("|".join(["cat", "d.g"]), "hot dog"), find("x" * 2, "x")]
+                parts.append(str(exact.findall("a c.t, a cat, C.T!")) + str(exact is re.compile(r"\b" + re.escape(word) + r"\b", re.I)))
+                sep = "[,;]" + r"\s*"
+                parts.append(str(re.split(sep, "x, y;z")) + re.sub("(?P<k>" + r"\w+)=", r"\g<k>: ", "a=1 b=2"))
+                parts.append(str([m.start() for m in re.finditer("an" + "?", "banana")]))
+                parts.append(str(exact) + str(exact.flags) + str(exact.groups))
+                parts.append(bad("a(b") + "; " + bad("(?P<n>a)(?P<n>b)") + "; " + bad("ok+"))
+                return " ".join(parts)
+        "#,
+            &[(
+                "f",
+                Want::Str(
+                    r#"aab('aa', 'b')(1, 4) dog()(4, 7) None ['c.t', 'C.T']True ['x', 'y', 'z']a: 1 b: 2 [1, 3, 5] re.compile('\\bc\\.t\\b', re.IGNORECASE)340 missing ), unterminated subpattern at position 1; redefinition of group name 'n' as group 2; was group 1 at position 12; ok"#,
+                ),
+            )],
+        );
+    }
+
     /// logging module: exception() and exc_info (the exception's last line standing in for its traceback), extra= written out in the call and fields a filter sets, addLevelName, logging.config.dictConfig, logging.handlers' RotatingFileHandler, WatchedFileHandler, BufferingHandler, and MemoryHandler, and shutdown at exit
     #[test]
     fn logging_handlers_and_config() {
@@ -4003,6 +4047,119 @@ mod stdlib {
             run.stdout,
             "D 172800 %Y-%m-%d 3\n172800\nInvalid day specified for weekly rollover: W9\n"
         );
+    }
+
+    /// logging module: logging.config.fileConfig, its file read when the program is compiled and checked when it runs: formatters, handlers of logging, logging.handlers, and the program with their args and kwargs, levels, the root and named loggers, qualname, propagate, disable_existing_loggers, defaults, and the file's DEFAULT section and interpolation
+    #[test]
+    fn logging_file_config() {
+        let conf = dedent(
+            r#"
+            [DEFAULT]
+            name = audit
+
+            [loggers]
+            keys = root, audit
+
+            [handlers]
+            keys = console, memory, file
+
+            [formatters]
+            keys = brief, full
+
+            [logger_root]
+            level = WARNING
+            handlers = console
+
+            [logger_audit]
+            level = INFO
+            handlers = memory
+            qualname = app.%(name)s
+            propagate = 0
+
+            [handler_console]
+            class = StreamHandler
+            args = (sys.stdout,)
+            formatter = brief
+
+            [handler_memory]
+            class = handlers.MemoryHandler
+            args = (3, ERROR)
+            target = file
+
+            [handler_file]
+            class = handlers.RotatingFileHandler
+            args = ('%(name)s.log', 'w')
+            kwargs = {'maxBytes': 0, 'backupCount': 1}
+            formatter = full
+
+            [formatter_brief]
+            format = %(levelname)s %(message)s
+
+            [formatter_full]
+            format = {name}|{levelname}|{message}
+            style = {
+            "#,
+        );
+        let source = dedent(
+            r#"
+            import logging
+            import logging.config
+
+            if __name__ == "__main__":
+                before = logging.getLogger("before")
+                logging.config.fileConfig("logging.conf", disable_existing_loggers=True)
+                audit = logging.getLogger("app.audit")
+                logging.getLogger("app").info("below the root's level")
+                logging.getLogger("app").warning("to the console")
+                before.critical("disabled")
+                audit.info("one")
+                audit.debug("below audit's level")
+                audit.info("two")
+                print(audit.level, len(audit.handlers), before.isEnabledFor(logging.CRITICAL))
+                audit.info("three fills the buffer")
+                audit.error("an error flushes")
+                logging.shutdown()
+                with open("audit.log") as f:
+                    print(f.read(), end="")
+            "#,
+        );
+        let host = |found: Option<&str>| {
+            let mut host = Host::with_input("", &[]);
+            if let Some(found) = found {
+                host.files
+                    .insert("logging.conf".to_string(), found.as_bytes().to_vec());
+            }
+            host
+        };
+        let files = [("logging.conf", conf.as_str())];
+        let (run, _) = run_main_with_files(&source, &files, host(Some(&conf)));
+        assert_eq!(run.stderr, "");
+        assert_eq!(
+            run.stdout,
+            r#"WARNING to the console
+20 1 False
+app.audit|INFO|one
+app.audit|INFO|two
+app.audit|INFO|three fills the buffer
+app.audit|ERROR|an error flushes
+"#
+        );
+        // The file is looked for when the program runs, as CPython looks.
+        let (run, _) = run_main_with_files(&source, &files, host(None));
+        assert_eq!(
+            run.stderr,
+            "FileNotFoundError: logging.conf doesn't exist\n"
+        );
+        // One that no longer says what was compiled cannot be followed.
+        let other = conf.replace("level = WARNING", "level = DEBUG");
+        let (run, _) = run_main_with_files(&source, &files, host(Some(&other)));
+        assert!(
+            run.stderr
+                .starts_with("RuntimeError: logging.conf changed since this program was compiled"),
+            "{}",
+            run.stderr
+        );
+        assert_eq!(run.stdout, "");
     }
 
     /// collections module: UserDict, UserList, UserString, ordinary classes whose subclasses reach their overrides, with the methods that make an instance answering the subclass

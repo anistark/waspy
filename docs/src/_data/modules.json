@@ -1152,7 +1152,7 @@
   },
   "stdlib": {
     "title": "STANDARD LIBRARY",
-    "status": "progress",
+    "status": "done",
     "version": "0.8.0",
     "features": [
       {
@@ -1240,8 +1240,10 @@
         "test": "stdlib::re_bytes_patterns"
       },
       {
-        "name": "re module: patterns computed at run time (refused today)",
-        "status": "todo"
+        "name": "re module: patterns computed at run time (a str or bytes value given to compile, search, sub, and the rest, parsed and compiled as the program runs and cached, with CPython's re.error for one it rejects; such a pattern's findall and split answer strs)",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::re_patterns_at_run_time"
       },
       {
         "name": "datetime: date / time / datetime / timedelta construction, each field checked as CPython checks it",
@@ -1322,8 +1324,10 @@
         "test": "stdlib::logging_timed_rotating_file_handler"
       },
       {
-        "name": "logging module: logging.config.fileConfig (refused today)",
-        "status": "todo"
+        "name": "logging module: logging.config.fileConfig, its file read when the program is compiled and checked when it runs: formatters, handlers of logging, logging.handlers, and the program with their args and kwargs, levels, the root and named loggers, qualname, propagate, disable_existing_loggers, defaults, and the file's DEFAULT section and interpolation",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::logging_file_config"
       }
     ]
   },

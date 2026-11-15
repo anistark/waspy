@@ -1539,9 +1539,16 @@ fn formatter() -> IRClass {
     };
     let mut format_time = time_fields;
     format_time.extend([
+        // An empty format is none, as CPython tests `if datefmt:`.
         if_(
             cmp(v("datefmt"), IRCompareOp::IsNot, none()),
-            vec![ret_val(strftime(v("datefmt")))],
+            vec![
+                assign_typed("given", v("datefmt"), &s()),
+                if_(
+                    cmp(len(v("given")), IRCompareOp::Gt, int(0)),
+                    vec![ret_val(strftime(v("given")))],
+                ),
+            ],
         ),
         assign_typed("t", strftime(my("default_time_format")), &s()),
         assign_typed("msec", my("default_msec_format"), &os()),
@@ -2425,7 +2432,42 @@ pub(super) fn functions() -> Vec<IRFunction> {
                 ),
             ],
         ),
-        // `dictConfig()`'s `_clearExistingHandlers()`.
+        // What `fileConfig()` does with its file before it reads it: a file
+        // that is not there is CPython's error. The file was read when the
+        // program was compiled, so one that says anything else now cannot be
+        // followed, and is refused.
+        function(
+            "file_config_check",
+            vec![param("fname", &s()), param("compiled", &s())],
+            IRType::None,
+            vec![
+                if_(
+                    not(mcall(attr(v("os"), "path"), "exists", vec![v("fname")])),
+                    vec![raise_expr(
+                        "FileNotFoundError",
+                        concat(vec![v("fname"), text(" doesn't exist")]),
+                    )],
+                ),
+                assign("fh", call("open", vec![v("fname"), text("r")])),
+                assign_typed("found", mcall(v("fh"), "read", Vec::new()), &s()),
+                expr_stmt(mcall(v("fh"), "close", Vec::new())),
+                if_(
+                    cmp(v("found"), IRCompareOp::NotEq, v("compiled")),
+                    vec![raise_expr(
+                        "RuntimeError",
+                        concat(vec![
+                            v("fname"),
+                            text(
+                                " changed since this program was compiled: fileConfig() reads \
+                                 its file when the program is compiled, so compile the program \
+                                 again",
+                            ),
+                        ]),
+                    )],
+                ),
+            ],
+        ),
+        // `dictConfig()`'s and `fileConfig()`'s `_clearExistingHandlers()`.
         function(
             "config_reset",
             Vec::new(),

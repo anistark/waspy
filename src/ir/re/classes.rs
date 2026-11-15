@@ -17,6 +17,12 @@ use crate::ir::{
 pub(super) const PATTERN0: &str = "_Pattern0";
 pub(super) const PATTERN1: &str = "_Pattern1";
 pub(super) const PATTERN_N: &str = "_PatternN";
+/// A pattern compiled when the program runs.
+pub(super) const PATTERN_R: &str = "_PatternR";
+/// The class the run-time compiler (`runtime.py`) answers with.
+const COMPILED: &str = "__re_rt_Compiled";
+/// How many run-time patterns are kept, as `re._MAXCACHE` is.
+const MAXCACHE: i32 = 512;
 /// `finditer`'s iterator, which CPython names `callable_iterator`.
 pub(crate) const FIND_ITER: &str = "_FindIter";
 /// `Pattern.groupindex`'s class, which CPython names `mappingproxy`.
@@ -72,6 +78,14 @@ impl Text {
     }
     fn fcall(self, name: &str, args: Vec<IRExpr>) -> IRExpr {
         call(&self.fname(name), args)
+    }
+    /// The function that compiles a pattern of this text at run time.
+    pub(super) fn compile_fn(self) -> String {
+        self.fname("compile")
+    }
+    /// `re.finditer()` of a pattern compiled at run time.
+    pub(super) fn finditer_fn(self) -> String {
+        self.fname("finditer")
     }
     /// The empty str or bytes.
     fn empty(self) -> IRExpr {
@@ -183,7 +197,14 @@ fn raise_error(message: IRExpr) -> IRStatement {
 /// `sys.maxsize`, as an `int` here holds it.
 const MAXSIZE: i32 = i32::MAX;
 
-pub(super) fn all(cache: Vec<IRVariable>, with_functions: bool, texts: &[Text]) -> Vec<IRClass> {
+/// `runtime`: the kinds of text whose patterns are also compiled when the
+/// program runs, each with a class for them and a cache of the ones compiled.
+pub(super) fn all(
+    mut cache: Vec<IRVariable>,
+    with_functions: bool,
+    texts: &[Text],
+    runtime: &[Text],
+) -> Vec<IRClass> {
     let mut out = Vec::new();
     for &t in texts {
         out.extend([
@@ -196,6 +217,17 @@ pub(super) fn all(cache: Vec<IRVariable>, with_functions: bool, texts: &[Text]) 
             matched(t),
             find_iter(t),
         ]);
+        if runtime.contains(&t) {
+            out.push(pattern_r(t));
+            cache.push(IRVariable {
+                name: runtime_cache(t).to_string(),
+                value: IRExpr::DictLiteral(Vec::new()),
+                var_type: Some(IRType::Dict(
+                    Box::new(IRType::String),
+                    Box::new(t.cty(PATTERN_R)),
+                )),
+            });
+        }
     }
     out.extend([
         group_index(),
@@ -1015,6 +1047,194 @@ fn pattern_n(t: Text) -> IRClass {
     class(&t.short(PATTERN_N), Some(&t.short("Pattern")), m)
 }
 
+/// The class variable of `re._Cache` holding the patterns compiled at run
+/// time, by their flags and text.
+fn runtime_cache(t: Text) -> &'static str {
+    match t {
+        Text::Str => "rt",
+        Text::Bytes => "brt",
+    }
+}
+
+/// A pattern compiled when the program runs. How many groups it has is not
+/// known when the program is compiled, so its `findall` and `split` answer a
+/// list of strs: CPython's answer for `findall` of a pattern with at most
+/// one group, and for `split` when every group took part in each match.
+/// Where CPython's answer is another type (a tuple per match, a None in the
+/// pieces), the call raises.
+fn pattern_r(t: Text) -> IRClass {
+    let subj_ty = t.cty("_Subject");
+    let mut findall = vec![assign_typed("subj", new_subject(t, v("string")), &subj_ty)];
+    findall.extend(clamp());
+    findall.extend([
+        assign_typed("out", IRExpr::ListLiteral(Vec::new()), &t.list()),
+        if_(lt(v("endpos"), v("pos")), vec![ret_val(v("out"))]),
+        for_(
+            "r",
+            mcall(
+                v("self"),
+                "_scan",
+                vec![v("subj"), v("pos"), v("endpos"), int(0)],
+            ),
+            vec![
+                if_(
+                    cmp(my("_ngroups"), IRCompareOp::Gt, int(2)),
+                    vec![raise(
+                        "NotImplementedError",
+                        "findall() of a pattern computed at run time answers strs, and this \
+                         pattern has several groups, for which CPython answers tuples. Hint: \
+                         use finditer() and Match.groups()",
+                    )],
+                ),
+                if_else(
+                    eq(my("_ngroups"), int(1)),
+                    vec![append(
+                        v("out"),
+                        slice(
+                            v("string"),
+                            Some(idx(v("r"), int(0))),
+                            Some(idx(v("r"), int(1))),
+                        ),
+                    )],
+                    vec![append(
+                        v("out"),
+                        t.fcall("group_or", vec![v("string"), v("r"), int(1), t.empty()]),
+                    )],
+                ),
+            ],
+        ),
+        ret_val(v("out")),
+    ]);
+    let split = vec![
+        // A negative maxsplit splits nothing.
+        if_(
+            lt(v("maxsplit"), int(0)),
+            vec![ret_val(IRExpr::ListLiteral(vec![v("string")]))],
+        ),
+        assign_typed("subj", new_subject(t, v("string")), &subj_ty),
+        assign_typed("out", IRExpr::ListLiteral(Vec::new()), &t.list()),
+        assign("last", int(0)),
+        for_(
+            "r",
+            mcall(
+                v("self"),
+                "_scan",
+                vec![v("subj"), int(0), attr(v("subj"), "n"), v("maxsplit")],
+            ),
+            vec![
+                append(
+                    v("out"),
+                    slice(v("string"), Some(v("last")), Some(idx(v("r"), int(0)))),
+                ),
+                for_(
+                    "g",
+                    range(sub(my("_ngroups"), int(1))),
+                    vec![
+                        assign_typed("got", group_of(t, v("r"), add(v("g"), int(1))), &t.opt()),
+                        if_(
+                            cmp(v("got"), IRCompareOp::Is, none()),
+                            vec![raise(
+                                "NotImplementedError",
+                                "split() of a pattern computed at run time answers strs, and \
+                                 a group of this pattern took no part in a match, for which \
+                                 CPython answers None. Hint: use finditer() and Match.span()",
+                            )],
+                        ),
+                        assign_typed("piece", v("got"), &t.ty()),
+                        append(v("out"), v("piece")),
+                    ],
+                ),
+                assign("last", idx(v("r"), int(1))),
+            ],
+        ),
+        append(v("out"), slice(v("string"), Some(v("last")), None)),
+        ret_val(v("out")),
+    ];
+    class(
+        &t.short(PATTERN_R),
+        Some(&t.short("Pattern")),
+        vec![
+            subclass_init(t, PATTERN_R),
+            method("findall", search_params(t, PATTERN_R), t.list(), findall),
+            method(
+                "split",
+                vec![
+                    t.me(PATTERN_R),
+                    param("string", &t.ty()),
+                    param_default("maxsplit", &i(), int(0)),
+                ],
+                t.list(),
+                split,
+            ),
+        ],
+    )
+}
+
+/// `re.compile()` of a pattern computed at run time: the pattern kept for
+/// its flags and text, or parsed and compiled by `runtime.py` and kept. The
+/// cache is emptied when it is full, where CPython drops its oldest entry.
+pub(super) fn runtime_compile(t: Text) -> IRFunction {
+    let class = t.cty(PATTERN_R);
+    let cache = || attr(v(&class_name("_Cache")), runtime_cache(t));
+    let pattern = || v("pattern");
+    // The parser reads a bytes pattern as its latin-1 decoding.
+    let decoded = match t {
+        Text::Str => pattern(),
+        Text::Bytes => fcall("latin1", vec![pattern()]),
+    };
+    let c = |field: &str| attr(v("c"), field);
+    tfunction(
+        t,
+        "compile",
+        vec![param("pattern", &t.ty()), param("flags", &i())],
+        class.clone(),
+        vec![
+            assign_typed("source", decoded, &s()),
+            assign(
+                "key",
+                concat(vec![call("str", vec![v("flags")]), text(" "), v("source")]),
+            ),
+            if_(
+                cmp(v("key"), IRCompareOp::In, cache()),
+                vec![ret_val(idx(cache(), v("key")))],
+            ),
+            assign_typed(
+                "c",
+                call(
+                    "__re_rt_compile",
+                    vec![v("source"), v("flags"), boolean(t == Text::Str)],
+                ),
+                &IRType::Class(COMPILED.to_string()),
+            ),
+            assign_typed(
+                "p",
+                call(
+                    &t.class(PATTERN_R),
+                    vec![
+                        pattern(),
+                        c("flags"),
+                        c("groups"),
+                        c("code"),
+                        c("repeats"),
+                        c("first"),
+                        c("lower"),
+                        c("upper"),
+                        c("names"),
+                        c("indices"),
+                    ],
+                ),
+                &class,
+            ),
+            if_(
+                ge(len(cache()), int(MAXCACHE)),
+                vec![expr_stmt(mcall(cache(), "clear", Vec::new()))],
+            ),
+            set_item(cache(), v("key"), v("p")),
+            ret_val(v("p")),
+        ],
+    )
+}
+
 fn matched(t: Text) -> IRClass {
     let me_m = || t.me("Match");
     let marks = || my("_marks");
@@ -1256,8 +1476,12 @@ fn matched(t: Text) -> IRClass {
 
 /// The module's functions behind the classes, for the kinds of text its
 /// patterns match.
-pub(super) fn functions(texts: &[Text]) -> Vec<IRFunction> {
-    let mut out = vec![
+pub(super) fn functions(texts: &[Text], runtime: &[Text]) -> Vec<IRFunction> {
+    let mut out: Vec<IRFunction> = runtime
+        .iter()
+        .flat_map(|&t| [runtime_compile(t), runtime_finditer(t)])
+        .collect();
+    out.extend([
         template_parser(),
         escape(),
         flag_names(),
@@ -1349,7 +1573,7 @@ pub(super) fn functions(texts: &[Text]) -> Vec<IRFunction> {
                 ret_val(boolean(true)),
             ],
         ),
-    ];
+    ]);
     for &t in texts {
         out.extend(text_functions(t));
         if t == Text::Bytes {
@@ -1357,6 +1581,26 @@ pub(super) fn functions(texts: &[Text]) -> Vec<IRFunction> {
         }
     }
     out
+}
+
+/// `re.finditer(pattern, string, flags)` of a pattern compiled at run time,
+/// as a function, so its result's class is declared.
+fn runtime_finditer(t: Text) -> IRFunction {
+    tfunction(
+        t,
+        "finditer",
+        vec![
+            param("pattern", &t.ty()),
+            param("flags", &i()),
+            param("string", &t.ty()),
+        ],
+        t.cty(FIND_ITER),
+        vec![ret_val(mcall(
+            call(&t.compile_fn(), vec![v("pattern"), v("flags")]),
+            "finditer",
+            vec![v("string")],
+        ))],
+    )
 }
 
 fn tfunction(
