@@ -2046,10 +2046,12 @@ fn idle() -> Vec<IRStatement> {
 }
 
 /// Nothing ready while a JavaScript promise is awaited inside
-/// `asyncio.run()`: suspend the program until one settles (or the next
-/// timer, `wait` nanoseconds off, falls due), as Pyodide's loop does through
-/// JavaScript Promise Integration, then settle the futures of those that did.
-/// Without JSPI (or inside a call JavaScript made), nothing can settle it.
+/// `asyncio.run()`, or while the program can suspend: suspend it until a
+/// promise settles, JavaScript calls into the program (which may have made
+/// something ready), or the next timer, `wait` nanoseconds off, falls due,
+/// as Pyodide's loop does through JavaScript Promise Integration, then
+/// settle the futures of the promises that did. Without JSPI (or inside a
+/// call JavaScript made), nothing can settle an awaited promise.
 fn promise_wait() -> Vec<IRStatement> {
     let timers = || len(loop_var("timers"));
     vec![
@@ -2297,9 +2299,17 @@ pub(crate) fn runtime_functions(bridge: bool, finalize: bool) -> Vec<IRFunction>
                                     ),
                                 )],
                             ),
+                            // With the bridge, JavaScript may call back into the
+                            // program (an event, an animation frame) and make
+                            // something ready, so where the program can suspend,
+                            // it waits for that as Pyodide's loop yields to the
+                            // page, rather than blocking it.
                             if bridge {
                                 if_else(
-                                    cmp(len(loop_var("awaiting")), IRCompareOp::Gt, int(0)),
+                                    or(
+                                        cmp(len(loop_var("awaiting")), IRCompareOp::Gt, int(0)),
+                                        js("can_suspend", vec![]),
+                                    ),
                                     promise_wait(),
                                     vec![timer_wait],
                                 )

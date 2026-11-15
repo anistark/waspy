@@ -1694,6 +1694,23 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, WaspyError> {
             names.push(name.clone());
         }
     }
+    // A module using the JavaScript bridge runs its top level on first use
+    // rather than from the start section, which runs inside instantiation,
+    // before the host has the instance's memory: a module definition that
+    // reaches JavaScript (`canvas = document.createElement("canvas")`) needs
+    // the loader. It runs once, behind a flag it sets first.
+    let bridge = crate::compiler::js::uses_bridge(ir_module);
+    if bridge {
+        statements.insert(
+            0,
+            IRStatement::Assign {
+                target: crate::compiler::js::STARTED_FLAG.to_string(),
+                value: IRExpr::Const(IRConstant::Int(1)),
+                var_type: Some(IRType::Int),
+            },
+        );
+        names.insert(0, crate::compiler::js::STARTED_FLAG.to_string());
+    }
     let mut with_init = ir_module.clone();
     with_init.functions.push(crate::ir::IRFunction {
         name: MODULE_INIT_FN.to_string(),
@@ -1702,6 +1719,9 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, WaspyError> {
         return_type: IRType::None,
         decorators: Vec::new(),
     });
+    if bridge {
+        crate::compiler::js::start_on_first_use(&mut with_init);
+    }
     compile_module(&with_init, &names)
 }
 
@@ -1998,7 +2018,14 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
 
     // The start function's `() -> ()` type, after every other type so the
     // existing "defined function i has type i" mapping is untouched.
-    let start_type_index = if module_globals.is_empty() {
+    // A module using the bridge has no start section: its top level runs on
+    // first use (`js::start_on_first_use`).
+    let start_type_index = if module_globals.is_empty()
+        || ir_module
+            .functions
+            .iter()
+            .any(|f| f.name == crate::compiler::js::INIT_FN)
+    {
         None
     } else {
         let index = types.len();

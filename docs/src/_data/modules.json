@@ -1906,7 +1906,9 @@
       },
       {
         "name": "Animation & rendering loops",
-        "status": "todo"
+        "status": "done",
+        "version": "upcoming",
+        "test": "graphics::animation_loop"
       },
       {
         "name": "Image manipulation & processing",

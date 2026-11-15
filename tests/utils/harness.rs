@@ -84,11 +84,23 @@ pub fn try_instantiate(wasm: &[u8]) -> Result<(), String> {
     let mut store = Store::new(&engine, Host::default());
     let mut linker = Linker::<Host>::new(&engine);
     link_host(&mut linker);
-    linker
+    let instance = linker
         .instantiate(&mut store, &module)
         .map_err(|e| format!("instantiate: {e}"))?
         .start(&mut store)
         .map_err(|e| format!("start: {e}"))?;
+    if let Ok(init) = instance.get_typed_func::<(), i32>(&store, "__waspy_init") {
+        match init.call(&mut store, ()) {
+            Ok(-2) => {
+                return Err(format!(
+                    "start: {}",
+                    store.data().js.failure.clone().unwrap_or_default()
+                ))
+            }
+            Ok(_) => {}
+            Err(e) => return Err(format!("start: {e}")),
+        }
+    }
     Ok(())
 }
 
@@ -120,6 +132,14 @@ pub fn instantiate_wasm(wasm: &[u8]) -> (Instance, Store<Host>) {
 /// `instantiate_wasm` with a host of the test's choosing (its standard
 /// input, its arguments, files already in place).
 pub fn instantiate_wasm_with(wasm: &[u8], host: Host) -> (Instance, Store<Host>) {
+    let (instance, mut store) = instantiate_unstarted(wasm, host);
+    start_bridge(&mut store, &instance);
+    (instance, store)
+}
+
+/// Instantiate, leaving a module using the bridge's top level to its first
+/// use (the `__main__` block runs it).
+fn instantiate_unstarted(wasm: &[u8], host: Host) -> (Instance, Store<Host>) {
     let engine = Engine::default();
     let module = wasmi::Module::new(&engine, wasm).expect("valid wasm module");
     let mut store = Store::new(&engine, host);
@@ -419,6 +439,20 @@ fn word(data: &[u8], at: usize) -> u32 {
 
 fn put_word(data: &mut [u8], at: usize, value: u32) {
     data[at..at + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+/// Run the top level of a module using the JavaScript bridge, as the
+/// loader does before its first call into it (such a module has no start
+/// section). Nothing for any other module.
+pub fn start_bridge(store: &mut Store<Host>, instance: &Instance) {
+    if let Ok(init) = instance.get_typed_func::<(), i32>(&*store, "__waspy_init") {
+        let r = init.call(&mut *store, ()).expect("the top level runs");
+        assert!(
+            r != -2,
+            "the top level raised: {}",
+            store.data().js.failure.clone().unwrap_or_default()
+        );
+    }
 }
 
 /// Define the host's imports, `wasi_snapshot_preview1` and the JavaScript
@@ -916,7 +950,7 @@ pub struct Run {
 /// block, as `wasmtime run` would.
 pub fn run_main(source: &str, stdin: &str, args: &[&str]) -> Run {
     let wasm = compile(source);
-    let (instance, mut store) = instantiate_wasm_with(&wasm, Host::with_input(stdin, args));
+    let (instance, mut store) = instantiate_unstarted(&wasm, Host::with_input(stdin, args));
     let start = instance
         .get_typed_func::<(), ()>(&store, "_start")
         .expect("an exported _start");
@@ -939,7 +973,7 @@ pub fn run_main(source: &str, stdin: &str, args: &[&str]) -> Run {
 /// program left it.
 pub fn run_main_on(source: &str, host: Host) -> (Run, Host) {
     let wasm = compile(source);
-    let (instance, mut store) = instantiate_wasm_with(&wasm, host);
+    let (instance, mut store) = instantiate_unstarted(&wasm, host);
     let start = instance
         .get_typed_func::<(), ()>(&store, "_start")
         .expect("an exported _start");
@@ -1975,6 +2009,12 @@ pub struct JsWorld {
     pub jspi: bool,
     /// The settled promise `next_settled` handed over last.
     taken: Option<(bool, Js)>,
+    /// The callbacks `requestAnimationFrame` asked to run at the next
+    /// frame, by id, and the last id given.
+    pub frames: Vec<(i32, Js)>,
+    pub frame_ids: i32,
+    /// What a callback JavaScript ran threw, as a browser reports it.
+    pub uncaught: Vec<String>,
 }
 
 impl Default for JsWorld {
@@ -1991,6 +2031,9 @@ impl Default for JsWorld {
             resolved: HashMap::new(),
             jspi: true,
             taken: None,
+            frames: Vec::new(),
+            frame_ids: 0,
+            uncaught: Vec::new(),
         }
     }
 }
@@ -2889,15 +2932,33 @@ pub fn link_js(linker: &mut Linker<Host>) {
             "suspend",
             |mut c: Caller<'_, Host>, ms: wasmi::core::F64| -> i32 {
                 let ms = f64::from(ms);
-                let host = c.data_mut();
-                if !host.js.settled.is_empty() {
+                if !c.data().js.settled.is_empty() {
                     return 0;
+                }
+                // The next animation frame, when one is asked for and falls
+                // before the program's next timer: its callbacks run with
+                // the frame's time, those they ask for at the frame after.
+                if !c.data().js.frames.is_empty() {
+                    let now = c.data().monotonic_ns;
+                    let at = (now / graphics::FRAME_NS + 1) * graphics::FRAME_NS;
+                    if ms < 0.0 || at as f64 <= now as f64 + ms * 1e6 {
+                        c.data_mut().monotonic_ns = at;
+                        let due = std::mem::take(&mut c.data_mut().js.frames);
+                        for (_, callback) in due {
+                            let time = Js::Num(at as f64 / 1e6);
+                            if let Err(e) = call_value(&mut c, &callback, &Js::Undefined, &[time]) {
+                                c.data_mut().js.uncaught.push(e.text());
+                            }
+                        }
+                        return 0;
+                    }
                 }
                 assert!(
                     ms >= 0.0,
-                    "the program waits on a promise that never settles"
+                    "the program waits for what nothing will bring: no promise is pending \
+                     and no animation frame asked for"
                 );
-                host.monotonic_ns += (ms * 1e6).ceil() as u64;
+                c.data_mut().monotonic_ns += (ms * 1e6).ceil() as u64;
                 0
             },
         )

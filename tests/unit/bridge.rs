@@ -10,7 +10,7 @@
 #[path = "../utils/harness.rs"]
 mod harness;
 
-use harness::{compile, dedent, link_host, run_main, run_main_on, try_compile, Host};
+use harness::{call_i32, compile, dedent, link_host, run_main, run_main_on, try_compile, Host};
 use wasmi::{Engine, Linker, Module, Store, Value};
 
 fn prints(source: &str, want: &str) {
@@ -204,6 +204,7 @@ fn bridge_gives_handles_back() {
         .expect("instantiate")
         .start(&mut store)
         .expect("start");
+    harness::start_bridge(&mut store, &instance);
     let churn = instance
         .get_typed_func::<i32, i32>(&store, "churn")
         .expect("churn");
@@ -252,6 +253,7 @@ fn bridge_exports_take_and_answer_js_values() {
         .expect("instantiate")
         .start(&mut store)
         .expect("start");
+    harness::start_bridge(&mut store, &instance);
     let mut call = |name: &str, args: Vec<Js>| -> Result<Js, String> {
         let handles: Vec<Value> = args
             .into_iter()
@@ -430,6 +432,113 @@ fn js_strings_are_indexed_by_code_points() {
         "#,
         "5 True l o \u{e9}\nstr 10 string index out of range\nstr -10 string index out of range\n\
          arr 5\n'pyodide.ffi.JsProxy' object is not subscriptable\n",
+    );
+}
+
+/// A module using the bridge runs its top level on first use, so a module
+/// definition may reach JavaScript: the `__main__` block runs it first (and
+/// reports an exception it raises as any other), and an export called from
+/// the host finds it run.
+#[test]
+fn a_bridge_module_starts_on_first_use() {
+    let source = r#"
+        from js import JSON, document
+
+        heading = document.createElement("h1")
+        items = JSON.parse("[3, 4]")
+        count = len(items)
+
+
+        def total() -> int:
+            t = 0
+            for x in items:
+                n: int = x
+                t += n
+            return t
+
+
+        if __name__ == "__main__":
+            print(count, total(), heading.tagName)
+        "#;
+    prints(source, "2 7 H1\n");
+    assert_eq!(call_i32(&dedent(source), "total"), 7);
+    let run = run_main(
+        &dedent(
+            r#"
+            from js import JSON
+
+            config = JSON.parse("[1, 2")
+
+
+            def main() -> None:
+                print("never")
+
+
+            if __name__ == "__main__":
+                main()
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!((run.stdout.as_str(), run.exit), ("", 1));
+    assert!(
+        run.stderr
+            .starts_with("pyodide.ffi.JsException: SyntaxError"),
+        "{}",
+        run.stderr
+    );
+}
+
+/// `requestAnimationFrame` with a Python callback: each frame's callbacks
+/// run with the frame's time, those they ask for at the next frame, one
+/// cancelled never runs, and `asyncio.run()` waits for them (the loop
+/// suspends until JavaScript calls back), as Pyodide's does.
+#[test]
+fn animation_frames_wake_asyncio_run() {
+    prints(
+        r#"
+        import asyncio
+
+        from js import cancelAnimationFrame, document, performance, requestAnimationFrame
+        from pyodide.ffi import create_once_callable, create_proxy
+
+        box = document.createElement("div")
+        seen: list[float] = []
+        done = asyncio.Event()
+
+
+        def step(t) -> None:
+            seen.append(float(t))
+            box.textContent = str(len(seen))
+            if len(seen) == 3:
+                done.set()
+            else:
+                requestAnimationFrame(stepper)
+
+
+        stepper = create_proxy(step)
+
+
+        def skipped(t) -> None:
+            print("skipped frame ran")
+
+
+        async def main() -> None:
+            begin = float(performance.now())
+            requestAnimationFrame(stepper)
+            cancelAnimationFrame(requestAnimationFrame(create_once_callable(skipped)))
+            await done.wait()
+            stepper.destroy()
+            print(len(seen), box.textContent, seen[0] < seen[1] and seen[1] < seen[2], seen[0] > begin - 1000)
+            await asyncio.sleep(0.01)
+            print("after a sleep", len(seen))
+
+
+        if __name__ == "__main__":
+            asyncio.run(main())
+        "#,
+        "3 3 True True\nafter a sleep 3\n",
     );
 }
 

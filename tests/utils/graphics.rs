@@ -846,8 +846,37 @@ impl HostObject for Ctx2D {
     }
 }
 
-/// The globals the graphics add: the typed array constructors and
-/// `ImageData`.
+// ---- animation frames ------------------------------------------------------
+
+/// How far apart animation frames fall: 60 a second.
+pub const FRAME_NS: u64 = 16_666_667;
+
+/// `performance`: `now()` reads the harness's monotonic clock, in
+/// milliseconds.
+pub struct Performance;
+
+impl HostObject for Performance {
+    fn class(&self) -> &'static str {
+        "Performance"
+    }
+    fn get(&self, _: &str) -> Option<Js> {
+        None
+    }
+    fn has_method(&self, name: &str) -> bool {
+        name == "now"
+    }
+    fn call(&self, _: &Js, host: &mut Host, name: &str, _: &[Js]) -> Option<Result<Js, Js>> {
+        (name == "now").then(|| Ok(Js::Num(host.monotonic_ns as f64 / 1e6)))
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// The globals the graphics add: the typed array constructors, `ImageData`,
+/// `performance`, and `requestAnimationFrame` / `cancelAnimationFrame`,
+/// whose callbacks run at the next frame, when the program waits
+/// (`suspend`).
 pub fn globals() -> Vec<(&'static str, Js)> {
     let mut out: Vec<(&'static str, Js)> = Kind::ALL
         .into_iter()
@@ -861,6 +890,24 @@ pub fn globals() -> Vec<(&'static str, Js)> {
     out.push((
         "ImageData",
         Js::function(|_, _, args| ImageData::construct(args)),
+    ));
+    out.push(("performance", Js::Host(Rc::new(Performance))));
+    out.push((
+        "requestAnimationFrame",
+        Js::function(|w, _, args| {
+            w.frame_ids += 1;
+            let id = w.frame_ids;
+            w.frames.push((id, arg(args, 0)));
+            Ok(Js::Num(f64::from(id)))
+        }),
+    ));
+    out.push((
+        "cancelAnimationFrame",
+        Js::function(|w, _, args| {
+            let id = num(args, 0);
+            w.frames.retain(|(k, _)| f64::from(*k) != id);
+            Ok(Js::Undefined)
+        }),
     ));
     out
 }

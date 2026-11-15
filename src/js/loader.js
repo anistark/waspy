@@ -74,6 +74,29 @@ export class Bridge {
         this.wake = null;
         this.taken = null;
         this.depth = 0;
+        this.started = false;
+    }
+
+    /// Run the module's top level, once, before the first call into it: a
+    /// module using the bridge has no start section, since its top level may
+    /// reach JavaScript, which needs the instance (`_start` runs it itself).
+    init() {
+        if (this.started) return;
+        this.started = true;
+        const init = this.instance.exports.__waspy_init;
+        if (typeof init !== 'function') return;
+        this.depth += 1;
+        let r;
+        try {
+            r = init();
+        } finally {
+            this.depth -= 1;
+        }
+        if (r === -2) {
+            const message = this.failure;
+            this.failure = null;
+            throw new PythonError(message);
+        }
     }
 
     /// A promise Python awaits settled: queued for the program `start()`
@@ -86,6 +109,13 @@ export class Bridge {
         } else {
             this.settle(token, failed, value);
         }
+    }
+
+    /// JavaScript called into the program while `start()` waits in its
+    /// event loop: what the call did (an event handled, an animation frame
+    /// drawn) may have made a task ready, so the loop looks again.
+    rouse() {
+        if (this.depth === 0 && this.wake) this.wake();
     }
 
     /// Run the module's event loop again in `delay` milliseconds (none when
@@ -369,6 +399,7 @@ export class Bridge {
                         r = this.instance.exports[`__waspy_call_${arity}`](env, ...handles);
                     } finally {
                         this.depth -= 1;
+                        this.rouse();
                     }
                     if (once) fn.destroy();
                     if (r === -2) {
@@ -407,8 +438,18 @@ export class Bridge {
     wrap(signature) {
         const exports = this.instance.exports;
         const wrapper = exports[`__jsx_${signature.name}`];
-        if (!wrapper) return exports[signature.name];
+        if (!wrapper) {
+            const raw = exports[signature.name];
+            return (
+                raw &&
+                ((...args) => {
+                    this.init();
+                    return raw(...args);
+                })
+            );
+        }
         return (...args) => {
+            this.init();
             const handles = signature.params.map((_, k) => this.add(args[k]));
             this.depth += 1;
             let r;
@@ -416,6 +457,7 @@ export class Bridge {
                 r = wrapper(...handles);
             } finally {
                 this.depth -= 1;
+                this.rouse();
             }
             if (r === -2) {
                 const message = this.failure;
@@ -472,6 +514,8 @@ export async function instantiate(source, { wasi = undefined, globals, modules }
     const start = async () => {
         const main = instance.exports._start;
         if (typeof main !== 'function') throw new Error('this module has no __main__ block (_start)');
+        // The `__main__` block runs the top level first.
+        bridge.started = true;
         if (!SUSPENDING || !wanted.has('waspy_js')) {
             main();
             return;

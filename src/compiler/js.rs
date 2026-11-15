@@ -1191,6 +1191,70 @@ fn scalar(ty: &IRType) -> bool {
     )
 }
 
+/// The flag a module using the bridge sets as its top level starts.
+pub const STARTED_FLAG: &str = "__waspy_started";
+/// `__waspy_init() -> int`: run the top level of a module using the bridge
+/// if it has not run, answering 0, or -2 with the exception's last line
+/// handed over (`fail`) for the loader to throw. The loader calls it before
+/// its first call into the module.
+pub const INIT_FN: &str = "__waspy_init";
+
+/// A module using the bridge, made to run its top level (`__module_init`)
+/// on first use: through `__waspy_init`, which the loader calls, and at the
+/// start of the `__main__` block, so `_start` reports an exception there as
+/// it reports one the block raises.
+pub(crate) fn start_on_first_use(module: &mut IRModule) {
+    use crate::ir::build::*;
+    use crate::ir::{IRCompareOp, IRExceptHandler, IRFunction, IRStatement};
+    let not_started = || cmp(v(STARTED_FLAG), IRCompareOp::Eq, int(0));
+    let run = || expr_stmt(call(crate::compiler::context::MODULE_INIT_FN, vec![]));
+    let entry = if module
+        .functions
+        .iter()
+        .any(|f| f.name == crate::ir::MAIN_BLOCK_FN)
+    {
+        crate::ir::MAIN_BLOCK_FN
+    } else {
+        "main"
+    };
+    if let Some(f) = module.functions.iter_mut().find(|f| f.name == entry) {
+        f.body.statements.insert(0, if_(not_started(), vec![run()]));
+    }
+    let line_fn = format!("{BRIDGE_FN_PREFIX}init_line");
+    module.functions.push(IRFunction {
+        name: INIT_FN.to_string(),
+        params: Vec::new(),
+        body: crate::ir::IRBody {
+            statements: vec![
+                if_(
+                    not_started(),
+                    vec![IRStatement::TryExcept {
+                        try_body: body(vec![run()]),
+                        except_handlers: vec![IRExceptHandler {
+                            exception_types: vec!["BaseException".to_string()],
+                            name: Some("__e".to_string()),
+                            body: crate::ir::IRBody {
+                                statements: vec![ret_val(call(
+                                    "__js_fail",
+                                    vec![call(&line_fn, vec![v("__e")])],
+                                ))],
+                            },
+                        }],
+                        finally_body: None,
+                    }],
+                ),
+                ret_val(int(0)),
+            ],
+        },
+        return_type: IRType::Int,
+        decorators: Vec::new(),
+    });
+    module.functions.push(exception_line(&line_fn));
+    for t in [": ", "__main__."] {
+        module.memory_layout.add_string(t);
+    }
+}
+
 /// The module with what the bridge needs: the names its operations carry,
 /// placed in memory, and a JavaScript-facing wrapper for each export whose
 /// signature crosses, with the list of exports the loader reads. None for a
@@ -1210,6 +1274,17 @@ pub(crate) fn with_bridge(module: &IRModule) -> Option<IRModule> {
             .iter()
             .flat_map(|c| c.methods.iter().map(|f| f.body.clone())),
     );
+    // Module and class definitions run in the module's start, so the names
+    // their values use (`canvas = document.createElement("canvas")`) count.
+    let definitions = m
+        .variables
+        .iter()
+        .chain(m.classes.iter().flat_map(|c| c.class_vars.iter()));
+    bodies.push(crate::ir::IRBody {
+        statements: definitions
+            .map(|var| IRStatement::Expression(var.value.clone()))
+            .collect(),
+    });
     fn targets(body: &crate::ir::IRBody, names: &mut std::collections::BTreeSet<String>) {
         for stmt in &body.statements {
             if let crate::ir::IRStatement::AttributeAssign { attribute, .. }

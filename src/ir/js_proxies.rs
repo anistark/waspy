@@ -17,19 +17,33 @@
 //! go of it through `__waspy_forget(id)`, as Pyodide's does.
 //!
 //! Runs before nested functions and lambdas are lifted, so the wrapper is
-//! lifted with the program's own.
+//! lifted with the program's own. The registries are class variables of
+//! `pyodide.ffi._Proxies`, put first among the classes, so they are made
+//! before any of the program's definitions: a proxy a module definition
+//! makes (`ticker = create_proxy(frame)`) finds them.
 
 use super::build::*;
-use crate::ir::{IRExpr, IRFunction, IRModule, IRParam, IRStatement, IRType, IRVariable};
+use crate::ir::{
+    IRBody, IRClass, IRConstant, IRExpr, IRFunction, IRModule, IRParam, IRStatement, IRType,
+    IRVariable,
+};
 use anyhow::Result;
 use std::collections::{BTreeSet, HashMap};
 
-/// The registry of the functions of `n` parameters JavaScript holds, by
-/// id, and the last id given.
-fn kept(n: usize) -> String {
-    format!("__jsbridge_kept_{n}")
+/// The class whose variables hold the registries.
+const PROXIES: &str = "pyodide.ffi._Proxies";
+/// The registry of the functions of `n` parameters JavaScript holds, by id.
+fn kept_var(n: usize) -> String {
+    format!("kept_{n}")
 }
-const COUNT: &str = "__jsbridge_count";
+fn kept(n: usize) -> IRExpr {
+    attr(v(PROXIES), &kept_var(n))
+}
+/// The last id given.
+const COUNT: &str = "count";
+fn count() -> IRExpr {
+    attr(v(PROXIES), COUNT)
+}
 /// The function that makes a proxy of `n` parameters.
 fn proxy_fn(n: usize) -> String {
     format!("__jsbridge_proxy_{n}")
@@ -221,6 +235,17 @@ pub fn lower_js_proxies(module: &mut IRModule) -> Result<()> {
             crate::ir::visit_body(&mut m.body, &mut rewrite)?;
         }
     }
+    // A module definition, walked as a statement of its own.
+    for var in &mut module.variables {
+        let value = std::mem::replace(&mut var.value, IRExpr::Const(IRConstant::None));
+        let mut walked = IRBody {
+            statements: vec![IRStatement::Expression(value)],
+        };
+        crate::ir::visit_body(&mut walked, &mut rewrite)?;
+        if let Some(IRStatement::Expression(value)) = walked.statements.pop() {
+            var.value = value;
+        }
+    }
     if let Some(e) = err {
         return Err(e);
     }
@@ -240,21 +265,34 @@ pub fn lower_js_proxies(module: &mut IRModule) -> Result<()> {
         }
     }
 
-    for n in &arities {
-        module.variables.push(IRVariable {
-            name: kept(*n),
+    let mut class_vars: Vec<IRVariable> = arities
+        .iter()
+        .map(|n| IRVariable {
+            name: kept_var(*n),
             value: IRExpr::DictLiteral(vec![]),
             var_type: Some(IRType::Dict(
                 Box::new(IRType::Int),
                 Box::new(wrapper_type(*n)),
             )),
-        });
-    }
-    module.variables.push(IRVariable {
+        })
+        .collect();
+    class_vars.push(IRVariable {
         name: COUNT.to_string(),
         value: int(0),
         var_type: Some(IRType::Int),
     });
+    module.classes.insert(
+        0,
+        IRClass {
+            name: PROXIES.to_string(),
+            bases: Vec::new(),
+            methods: Vec::new(),
+            class_vars,
+            metaclass: None,
+            position: 0,
+            deferred_vars: Vec::new(),
+        },
+    );
     for n in &arities {
         module.functions.push(make_proxy(*n));
         module.functions.push(dispatcher(*n));
@@ -287,12 +325,15 @@ fn make_proxy(n: usize) -> IRFunction {
         vec![param("fn", &wrapper_type(n)), param("once", &IRType::Bool)],
         IRType::JsProxy,
         vec![
-            IRStatement::Global(vec![COUNT.to_string()]),
-            assign(COUNT, bin(v(COUNT), crate::ir::IROp::Add, int(1))),
-            set_item(v(&kept(n)), v(COUNT), v("fn")),
+            set_attr(
+                v(PROXIES),
+                COUNT,
+                bin(count(), crate::ir::IROp::Add, int(1)),
+            ),
+            set_item(kept(n), count(), v("fn")),
             ret_val(call(
                 "__js_function",
-                vec![v("fn"), int(n as i32), v("once"), v(COUNT)],
+                vec![v("fn"), int(n as i32), v("once"), count()],
             )),
         ],
     )
@@ -336,8 +377,8 @@ fn forget(arities: &BTreeSet<usize>) -> IRFunction {
         .iter()
         .map(|n| {
             if_(
-                cmp(v("id"), crate::ir::IRCompareOp::In, v(&kept(*n))),
-                vec![del_item(v(&kept(*n)), v("id"))],
+                cmp(v("id"), crate::ir::IRCompareOp::In, kept(*n)),
+                vec![del_item(kept(*n), v("id"))],
             )
         })
         .collect();

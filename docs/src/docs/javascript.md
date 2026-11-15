@@ -174,6 +174,8 @@ await exports.fetch_report(7);      // an `async def`: a Promise
 
 A program with a `__main__` block runs through the `start` the same call answers (`await start()`), which is what lets it suspend on a promise (below).
 
+A module using the bridge runs its top level (its module definitions) on first use rather than while it is instantiated, since a definition may reach JavaScript (`canvas = document.createElement("canvas")`, `ticker = create_proxy(frame)`) and the instance is not the loader's until instantiation returns: `start()` runs it first, and so does the first call of an export. A host that instantiates such a module without the loader calls its `__waspy_init` export (it answers 0, or -2 with the exception's message handed to the `fail` import) before anything else. An exception the top level raises is reported as one the `__main__` block raises.
+
 The loader wraps each export by the signature the module lists (its `waspy.exports` custom section), so it takes and answers JavaScript values: numbers, strings, booleans, undefined for None, arrays and plain objects for lists, tuples, and dicts, and any value for a `JsProxy` parameter. A Python exception escaping one is thrown as a `PythonError` whose message is the last line of CPython's report (`ValueError: negative`). A program that uses the bridge gets the wrappers; for one that does not (a plugin a page calls with strings, say), set `CompilerOptions::js_exports`.
 
 ## Promises
@@ -215,6 +217,8 @@ await start();
 ```
 
 Without JSPI (or inside a call JavaScript made into the module, which cannot suspend), such an `await` raises `RuntimeError`; export the coroutine and await it from JavaScript instead.
+
+Under JSPI, `asyncio.run()` with nothing ready also yields to the page rather than blocking it, as Pyodide's loop does, and a call JavaScript makes into the program (an event listener, an animation frame) wakes it, so a task can wait on an `asyncio.Event` a listener sets.
 
 ## Modules loaded by name
 
