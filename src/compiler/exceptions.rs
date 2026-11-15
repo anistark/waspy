@@ -631,6 +631,8 @@ pub(crate) fn build_class_name(ctx: &CompilationContext, by_id: Option<bool>) ->
                 .rsplit_once('.')
                 .map_or(name.as_str(), |(_, n)| n)
                 .to_string(),
+            // `bytearray` is a builtin.
+            Some(true) if name == crate::ir::BYTEARRAY => "<class 'bytearray'>".to_string(),
             // A generator's state class is CPython's `generator`.
             Some(true) if name.starts_with("__Gen_") => "<class 'generator'>".to_string(),
             _ if name.starts_with("__Gen_") => "generator".to_string(),

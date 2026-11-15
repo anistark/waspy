@@ -7120,3 +7120,32 @@ fn and_or_of_operands_with_no_shared_type_are_refused() {
     assert!(try_compile(truth).is_ok());
 }
 
+/// What a bytearray does not implement is refused, never answered wrong: it
+/// is unhashable as in CPython (a set member or a dict key), `decode()` is
+/// not supported (as it is not for bytes), and `bytearray(s, encoding)` needs
+/// `str.encode()`.
+#[test]
+fn bytearray_refuses_what_it_does_not_implement() {
+    for (body, needle) in [
+        (
+            "s = {bytearray(b\"a\")}\n    print(s)",
+            "unhashable type: 'bytearray' cannot be a set member",
+        ),
+        (
+            "d = {bytearray(b\"a\"): 1}\n    print(d)",
+            "unhashable type: 'bytearray' cannot be a dict key",
+        ),
+        (
+            "print(bytearray(b\"a\").decode())",
+            "'bytearray' object has no attribute 'decode'",
+        ),
+        (
+            "print(bytearray(\"abc\", \"utf-8\"))",
+            "bytearray() of a str and its encoding is not supported",
+        ),
+    ] {
+        let src = format!("def main() -> None:\n    {body}\n");
+        let err = try_compile(&src).expect_err("this must be refused");
+        assert!(err.contains(needle), "expected `{needle}` in: {err}");
+    }
+}

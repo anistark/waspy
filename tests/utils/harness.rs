@@ -3091,6 +3091,16 @@ pub fn link_js(linker: &mut Linker<Host>) {
         )
         .unwrap();
     linker
+        .func_wrap(m, "byte_format", |c: Caller<'_, Host>, h: i32| -> i32 {
+            let value = c.data().js.value(h);
+            match graphics::host::<graphics::TypedArray>(&value) {
+                Some(t) if matches!(t.kind, graphics::Kind::U8 | graphics::Kind::U8Clamped) => 1,
+                Some(_) => 0,
+                None => -1,
+            }
+        })
+        .unwrap();
+    linker
         .func_wrap(
             m,
             "resolve",

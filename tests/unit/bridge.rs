@@ -585,16 +585,27 @@ fn item_assignment_and_buffers() {
         "[\"x\",2,9,null,5] 5\nTypeError 'pyodide.ffi.JsProxy' object does not support item assignment\n\
          TypeError 'str' object does not support item assignment\n[7, 2] 2\n",
     );
+    // `assign_to()` writes into a bytearray, which bytes are not, and a
+    // memoryview is not supported.
     refused(
         r#"
         from js import Uint8Array
 
 
         def main() -> None:
-            out = bytearray(2)
-            Uint8Array.new(2).assign_to(out)
+            Uint8Array.new(2).assign_to(b"xy")
         "#,
-        "assign_to() hands over a writable buffer",
+        "assign_to() copies a buffer into a bytearray, and its argument is not one",
+    );
+    refused(
+        r#"
+        from js import Uint8Array
+
+
+        def main() -> None:
+            print(Uint8Array.new(2).to_memoryview())
+        "#,
+        "to_memoryview() answers a memoryview, which is not supported",
     );
 }
 

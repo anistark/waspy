@@ -1,8 +1,9 @@
 """Image processing from Python on a canvas's pixels, as Pyodide does it:
 read an ImageData's bytes in one copy with to_bytes(), compute new pixels in
 Python (an inverted copy, then a grayscale one), write them back in one copy
-with assign() and putImageData(), and set single pixels by item. The
-browser gate runs it against Pyodide in Chromium."""
+with assign() and putImageData(), set single pixels by item, and change
+pixels in place in a bytearray filled by assign_to(). The browser gate runs
+it against Pyodide in Chromium."""
 
 from js import Float32Array, ImageData, Uint8ClampedArray, document
 from pyodide.ffi import JsProxy, to_js
@@ -66,6 +67,21 @@ def main() -> None:
     one.data[3] = 127.5
     ctx.putImageData(one, 2, 1)
     print("one pixel:", one.data.to_bytes()[0], one.data[1], one.data[2], one.data[3])
+
+    # In place: the pixels copied into a bytearray, changed there, and
+    # written back.
+    px = bytearray(len(gray.data))
+    gray.data.assign_to(px)
+    for k in range(0, len(px), 4):
+        px[k] = 255 - px[k]
+        px[k + 3] = 200
+    gray.data.assign(px)
+    ctx.putImageData(gray, 0, 0)
+    print("in place:", first(ctx, 8))
+    try:
+        gray.data.assign_to(bytearray(3))
+    except ValueError as e:
+        print("ValueError:", e)
 
     copy = Uint8ClampedArray.new(to_js(bytes([1, 2, 3, 4])))
     print("from bytes:", len(copy), copy[3])

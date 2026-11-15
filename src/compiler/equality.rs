@@ -122,6 +122,9 @@ pub(crate) fn hash_unsupported(ctx: &CompilationContext, ty: &IRType) -> Option<
         // None unless the class defines it too, and calling a user `__hash__`
         // is not supported here.
         // A named tuple hashes as its tuple of fields.
+        IRType::Class(name) if name == crate::ir::BYTEARRAY => {
+            Some("unhashable type: 'bytearray'".to_string())
+        }
         IRType::Class(name) if crate::compiler::dunders::is_named_tuple(ctx, name) => {
             let fields = ctx
                 .get_function_info(&format!("{name}::{}", crate::ir::VIEW_METHOD))

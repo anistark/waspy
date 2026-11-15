@@ -1,6 +1,7 @@
 pub(crate) mod asyncio;
 pub(crate) mod asyncio_sync;
 pub(crate) mod build;
+pub(crate) mod bytearray;
 pub(crate) mod collections;
 mod context_managers;
 mod converter;
@@ -26,6 +27,7 @@ mod str_methods;
 mod types;
 
 pub use asyncio::ASYNCIO_FN_PREFIX;
+pub use bytearray::{lower_bytearray, ASSIGN_JS_METHOD, BYTEARRAY, BYTE_FORMAT_FN};
 pub use collections::{
     lower_collections, COLLECTIONS_FN_PREFIX, DATA_METHOD, DELEGATES_VAR, FROM_METHOD, FROZEN_VAR,
     MAPPING_METHOD, REFUSED_VAR, REFUSE_COMPREHENSION, REFUSE_WALK, VIEW_METHOD, WALK_METHOD,

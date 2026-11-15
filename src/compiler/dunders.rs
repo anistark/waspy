@@ -151,6 +151,26 @@ fn order_free(expr: &IRExpr) -> bool {
     }
 }
 
+/// Whether `expr` is [`order_free`], or `+`, `-`, or `*` of ints over such
+/// operands, which can neither raise (an int wraps here) nor change anything,
+/// so it reads the same evaluated earlier: an index like `b[k + 1]`.
+fn order_free_index(expr: &IRExpr, ctx: &CompilationContext) -> bool {
+    match expr {
+        IRExpr::BinaryOp {
+            left,
+            right,
+            op: IROp::Add | IROp::Sub | IROp::Mul,
+        } => [left, right].iter().all(|e| {
+            order_free_index(e, ctx)
+                && (matches!(
+                    e.as_ref(),
+                    IRExpr::Const(IRConstant::Int(_)) | IRExpr::BinaryOp { .. }
+                ) || infer_value_type(e, ctx) == IRType::Int)
+        }),
+        other => order_free(other),
+    }
+}
+
 fn call(object: &IRExpr, method: &str, arguments: Vec<IRExpr>) -> IRExpr {
     IRExpr::MethodCall {
         object: Box::new(object.clone()),
@@ -879,6 +899,14 @@ fn rewrite_view(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
                     }
                 }
                 return None;
+            }
+            // `bytes(b)` of a bytearray: a copy of the bytes it holds.
+            if function_name == "bytes" && ctx.get_function_info(function_name).is_none() {
+                let [arg] = arguments.as_slice() else {
+                    return None;
+                };
+                return (class_of(arg, ctx)? == crate::ir::BYTEARRAY)
+                    .then(|| call(arg, crate::ir::VIEW_METHOD, Vec::new()));
             }
             if function_name == "len" {
                 let class = class_of(arguments.first()?, ctx)?;
@@ -1985,7 +2013,7 @@ pub(crate) fn rewrite_statement(
             // A field of a local (`self.counts[k] += 1`) reads the same
             // whichever comes first, unless it is a property.
             let container_free = order_free(container) || plain_field(container, ctx);
-            if !(order_free(value) || (container_free && order_free(index))) {
+            if !(order_free(value) || (container_free && order_free_index(index, ctx))) {
                 return None;
             }
             Some(IRStatement::Expression(call(
