@@ -245,8 +245,8 @@ The whole format specification mini-language works in f-strings, <code>format()<
 Float powers are CPython's, so <code>2.0 ** 0.5</code> works. A negative integer exponent traps because Python's answer is a float an int cannot hold, and a negative float to a fractional power traps because its answer is a complex number. <code>float()</code> and <code>int()</code> of a string with non-ASCII digits or spaces trap too, where CPython would accept them.
 {% endcall %}
 
-{% call shape("Two modules defining the same function name", ["refused", "workaround"]) %}
-Merged modules share one namespace, so <code>utils.format</code> next to <code>report.format</code> is a compile error naming both files. Rename one.
+{% call shape("Two modules defining the same function, class, or variable name", ["refused", "workaround"]) %}
+Merged modules share one namespace, so <code>utils.format</code> next to <code>report.format</code> is a compile error naming the file, and so is <code>log = logging.getLogger(__name__)</code> in two modules. Rename one. The same constant in both (<code>DEBUG = False</code>) is fine, and every module may import the standard library: there is one <code>logging</code>, one <code>re</code> cache, and one event loop for the program.
 {% endcall %}
 
 {% call shape("Object lifetime", ["differs"]) %}

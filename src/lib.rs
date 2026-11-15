@@ -385,6 +385,40 @@ fn compile_merged_sources(
         .find(|(f, s)| matches!(ir::detect_entry_points(s, Some(Path::new(f))), Ok(Some(_))))
         .or(sources.first())
         .map(|(f, _)| f.to_string());
+    let module_name_in = |filename: &str| {
+        if main_name.as_deref() == Some(filename) {
+            "__main__".to_string()
+        } else {
+            module_name_of(filename)
+        }
+    };
+    // A program of several files is lowered twice when its files use the
+    // standard library: the first time each module pass records what its file
+    // uses (`ir::program`), the second time it writes the module out for what
+    // the whole program uses, so every file's copy of it is the same and they
+    // merge into one. What the first lowering made is kept when nothing was
+    // recorded, and a file that fails then is reported by the loop below.
+    let _program = (sources.len() > 1).then(ir::program::scope);
+    let mut lowered_once: std::collections::HashMap<String, ir::IRModule> =
+        std::collections::HashMap::new();
+    if sources.len() > 1 {
+        for (filename, source) in sources {
+            if lowered_once.contains_key(*filename)
+                || core::config::is_config_file(filename)
+                || (skip_special && utils::is_special_python_file(filename))
+            {
+                continue;
+            }
+            if let Ok(ast) = core::parser::parse_python(source) {
+                if let Ok(module) = ir::lower_ast_to_ir_named(&ast, &module_name_in(filename)) {
+                    lowered_once.insert(filename.to_string(), module);
+                }
+            }
+        }
+        if ir::program::recorded() {
+            lowered_once.clear();
+        }
+    }
     for (filename, source) in sources {
         // A module reached through several import paths is merged once (#41).
         if !seen_files.insert(filename.to_string()) {
@@ -424,15 +458,18 @@ fn compile_merged_sources(
         // it down with it, so a call across the import answered 0 and nothing
         // said so. That is the silent wrong answer the correctness rule
         // forbids, and a typo in any imported module reaches it.
-        let ast = core::parser::parse_python(source)
-            .with_context(|| format!("failed to parse {filename}"))?;
-        let module_name = if main_name.as_deref() == Some(*filename) {
-            "__main__".to_string()
-        } else {
-            module_name_of(filename)
+        let mut ir_module = match lowered_once.remove(*filename) {
+            Some(module) => module,
+            None => {
+                let ast = core::parser::parse_python(source)
+                    .with_context(|| format!("failed to parse {filename}"))?;
+                ir::lower_ast_to_ir_named(&ast, &module_name_in(filename))
+                    .with_context(|| format!("failed to compile {filename}"))?
+            }
         };
-        let ir_module = ir::lower_ast_to_ir_named(&ast, &module_name)
-            .with_context(|| format!("failed to compile {filename}"))?;
+        // What the program already has of the standard library this file
+        // uses is kept once, and its state numbered apart (`ir::merge`).
+        ir::merge::reconcile(&mut combined_module, &mut ir_module, filename)?;
 
         // Skip files that contribute nothing (a constants-only module still
         // carries variables worth merging).

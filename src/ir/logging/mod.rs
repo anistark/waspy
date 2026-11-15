@@ -1030,6 +1030,9 @@ fn format_functions(formats: &Formats, constants: &BTreeSet<String>) -> Vec<IRFu
             table.push(key);
         }
     }
+    // The formats the whole program spells out, numbered alike in each of
+    // its files: a formatter made in one file is rendered by this table.
+    let table = crate::ir::program::entries("logging.formats", table);
     let record = || param("record", &classes::ty("LogRecord"));
     let mut out = Vec::new();
     let mut lookup = Vec::new();
@@ -1385,7 +1388,17 @@ pub fn lower_logging(module: &mut IRModule) -> Result<()> {
         expr_body(&mut var.value, |body| tag_functions(body, "<module>"));
     }
 
-    let extras = collect_extras(module)?;
+    // The fields the whole program's `extra=` give a record, when this file
+    // is one of several: every file's `LogRecord` is the same class.
+    let extras = crate::ir::program::entries("logging.extras", collect_extras(module)?);
+    for (k, (key, t)) in extras.iter().enumerate() {
+        if extras[..k].iter().any(|(other, u)| other == key && u != t) {
+            return Err(refused(format!(
+                "extra='s '{key}' is given values of two types in the program's files, which \
+                 one field cannot hold"
+            )));
+        }
+    }
     let mut formats = Formats {
         extras: extras
             .iter()
