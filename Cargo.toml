@@ -14,6 +14,7 @@ authors = ["Kumar Anirudha <hi@anirudha.dev>"]
 include = [
     "/src/**/*.rs",
     "/src/**/*.js",
+    "/src/**/*.py",
     "/Cargo.toml",
     "/README.md",
     "/LICENSE",
@@ -174,3 +175,14 @@ optional_tools = []
 
 [package.metadata.wasm_plugin.exports]
 plugin_create = "wasmrun_plugin_create"
+
+# The interpreter the tests run compiled modules under. The suite's time is
+# spent inside it, so it is built optimized in every profile.
+[profile.dev.package.wasmi]
+opt-level = 3
+
+[profile.dev.package.wasmi_core]
+opt-level = 3
+
+[profile.dev.package.wasmi_arena]
+opt-level = 3

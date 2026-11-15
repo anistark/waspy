@@ -1240,8 +1240,10 @@
         "test": "stdlib::re_bytes_patterns"
       },
       {
-        "name": "re module: patterns computed at run time (refused today)",
-        "status": "todo"
+        "name": "re module: patterns computed at run time (a str or bytes value given to compile, search, sub, and the rest, parsed and compiled as the program runs and cached, with CPython's re.error for one it rejects; such a pattern's findall and split answer strs)",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::re_patterns_at_run_time"
       },
       {
         "name": "datetime: date / time / datetime / timedelta construction, each field checked as CPython checks it",

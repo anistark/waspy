@@ -8,15 +8,23 @@
 //! the matcher (`vm.rs`) runs over a subject's characters. `Pattern` and
 //! `Match` are classes written out in IR (`classes.rs`).
 //!
-//! A pattern is written as a literal, a module constant, or a compiled
-//! pattern; one computed at run time is refused, as its program could not be
-//! compiled. A bytes pattern has classes of its own (`classes::Text`), as its
+//! A pattern written as a literal, a module constant, or a compiled pattern
+//! is compiled with the program. Any other value is a pattern computed at run
+//! time: the same parser and compiler, written again in the Python subset
+//! (`runtime.py`, lowered by `ir::embedded`), run inside the module and make
+//! a `re._PatternR`, whose errors are `re.error` raised where CPython raises
+//! it. A bytes pattern has classes of its own (`classes::Text`), as its
 //! subject, groups, and replacements are bytes.
 
 mod classes;
 mod compile;
 mod parse;
 mod vm;
+
+/// The parser and compiler for a pattern computed at run time, in the Python
+/// subset (`ir::embedded`): `parse.rs` and `compile.rs` written again, to
+/// run inside the compiled module.
+const RUNTIME_SOURCE: &str = include_str!("runtime.py");
 
 use crate::ir::build::*;
 use crate::ir::{IRBody, IRConstant, IRExpr, IRModule, IROp, IRStatement, IRType, IRVariable};
@@ -36,6 +44,22 @@ pub(crate) fn class_name(short: &str) -> String {
 
 fn fname(name: &str) -> String {
     format!("{RE_FN_PREFIX}{name}")
+}
+
+/// The module with the run-time parser and compiler, when it compiles a
+/// pattern as it runs (it then has the function `__re_compile`); `None`
+/// otherwise. Added just before code generation, as the `str` helpers are, so
+/// the helper goes through the passes once.
+pub(crate) fn with_runtime(module: &IRModule) -> Result<Option<IRModule>> {
+    let compiles = [Text::Str, Text::Bytes]
+        .iter()
+        .any(|t| module.functions.iter().any(|f| f.name == t.compile_fn()));
+    if !compiles || module.functions.iter().any(|f| f.name == "__re_rt_compile") {
+        return Ok(None);
+    }
+    let mut module = module.clone();
+    crate::ir::embedded::graft(&mut module, RUNTIME_SOURCE)?;
+    Ok(Some(module))
 }
 
 const FLAGS: &[(&str, u32)] = &[
@@ -201,6 +225,44 @@ impl Cache {
     }
 }
 
+/// The call that compiles a pattern at run time, taken apart: the text it
+/// matches, the pattern, and the flags.
+fn runtime_parts(expr: &IRExpr) -> Option<(Text, IRExpr, IRExpr)> {
+    let t = runtime_text(expr)?;
+    match expr {
+        IRExpr::FunctionCall { arguments, .. } => match arguments.as_slice() {
+            [pattern, flags] => Some((t, pattern.clone(), flags.clone())),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// What a type mismatch at a run-time pattern's argument means, for the
+/// message code generation reports: `re.search(p, s)` of a compiled pattern
+/// the pass could not see was one (a field, a call's result).
+pub(crate) fn pattern_argument_hint(what: &str) -> Option<&'static str> {
+    let named = [Text::Str, Text::Bytes]
+        .iter()
+        .any(|t| what.contains(&t.compile_fn()) || what.contains(&t.finditer_fn()));
+    named.then_some(
+        "a function of the re module is given a value that is not a str (or bytes) pattern \
+         where its pattern is compiled as the program runs. Hint: for a compiled pattern, \
+         call its own method, as p.search(s)",
+    )
+}
+
+/// The text a pattern compiled at run time matches, when `expr` is the call
+/// that compiles one.
+fn runtime_text(expr: &IRExpr) -> Option<Text> {
+    let IRExpr::FunctionCall { function_name, .. } = expr else {
+        return None;
+    };
+    [Text::Str, Text::Bytes]
+        .into_iter()
+        .find(|t| *function_name == t.compile_fn())
+}
+
 fn call_class(short: &str, args: Vec<IRExpr>) -> IRExpr {
     call(&class_name(short), args)
 }
@@ -243,6 +305,13 @@ struct Pass<'a> {
     strings: HashMap<String, Source>,
     /// Module variables holding a compiled pattern, and the text it matches.
     patterns: HashMap<String, Text>,
+    /// The same for the function being rewritten: its parameters declared a
+    /// pattern, and its locals only ever assigned `re.compile(...)`.
+    locals: HashMap<String, Text>,
+    /// Every name the function being rewritten binds (its parameters and
+    /// what it assigns), which a module constant or pattern of the same name
+    /// is not.
+    bound: std::collections::HashSet<String>,
     /// Whether `re.escape` is given bytes.
     escapes_bytes: bool,
     /// The parameters of the function being rewritten, by their types.
@@ -252,6 +321,14 @@ struct Pass<'a> {
     functions: Vec<String>,
     /// Whether `sub` or `subn` is given a function.
     replaces_by_function: bool,
+    /// The kinds of text whose patterns are also compiled at run time.
+    runtime: Vec<Text>,
+}
+
+/// A call's flags: known when the program is compiled, or computed.
+enum Flags {
+    Known(u32),
+    Computed(IRExpr),
 }
 
 impl Pass<'_> {
@@ -279,21 +356,55 @@ impl Pass<'_> {
         }
     }
 
+    /// A call's flags: constants (`re.I | re.M`) are known now, and anything
+    /// else is computed when the program runs, which makes the pattern one
+    /// compiled then.
+    fn call_flags(&self, e: Option<&IRExpr>, call: &str) -> Result<Flags> {
+        match self.flags(e, call) {
+            Ok(flags) => Ok(Flags::Known(flags)),
+            Err(error) => match e {
+                // A name of `re` that is not a flag stays an error.
+                Some(e) if self.computed(e) => Ok(Flags::Computed(e.clone())),
+                _ => Err(error),
+            },
+        }
+    }
+
+    /// Whether a flags expression is one to evaluate at run time, not a
+    /// constant written wrongly.
+    fn computed(&self, e: &IRExpr) -> bool {
+        match e {
+            IRExpr::BinaryOp { left, right, .. } => self.computed(left) || self.computed(right),
+            IRExpr::Const(_) => false,
+            other => self.b.member(other).is_none(),
+        }
+    }
+
     /// The pattern a call names: a cached pattern for a literal or a module
-    /// constant, or the compiled pattern a module variable holds.
-    fn pattern(&mut self, e: Option<IRExpr>, flags: u32, call: &str) -> Result<IRExpr> {
+    /// constant, the compiled pattern a module variable holds, or, for
+    /// anything else, the pattern compiled from that value when the program
+    /// runs (`runtime.py`).
+    fn pattern(&mut self, e: Option<IRExpr>, flags: Flags, call: &str) -> Result<IRExpr> {
+        // A parameter or local named as a module constant is its own value:
+        // the constant's text was compiled in its place.
+        let local = matches!(&e, Some(IRExpr::Variable(n)) if self.bound.contains(n));
         let text = match &e {
             Some(IRExpr::Const(IRConstant::String(s))) => Some(Source::Str(s.clone())),
             Some(IRExpr::Const(IRConstant::Bytes(b))) => Some(Source::Bytes(b.clone())),
-            Some(IRExpr::Variable(n)) => self.strings.get(n).cloned(),
+            Some(IRExpr::Variable(n)) if !local => self.strings.get(n).cloned(),
             _ => None,
         };
         if let Some(text) = text {
-            return self.cache.pattern(&text, flags, call);
+            return match flags {
+                Flags::Known(flags) => self.cache.pattern(&text, flags, call),
+                Flags::Computed(flags) => {
+                    Ok(self.compiled_at_run_time(text.text(), text.value(), flags))
+                }
+            };
         }
         if let Some(IRExpr::Variable(n)) = &e {
-            if self.patterns.contains_key(n) {
-                if flags != 0 {
+            if self.locals.contains_key(n) || (!local && self.patterns.contains_key(n)) {
+                if !matches!(flags, Flags::Known(0)) {
                     return Err(refused(format!(
                         "re.{call}() with flags and a compiled pattern raises ValueError: cannot \
                          process flags argument with a compiled pattern"
@@ -302,18 +413,36 @@ impl Pass<'_> {
                 return Ok(v(n));
             }
         }
-        Err(refused(format!(
-            "re.{call}() is supported with a pattern written as a string literal or a module \
-             constant (or a pattern compiled from one), as patterns are compiled with the \
-             program"
-        )))
+        let Some(e) = e else {
+            return Err(refused(format!(
+                "re.{call}() missing required argument: 'pattern'"
+            )));
+        };
+        // Bytes where the pass can see it: a parameter declared bytes. Any
+        // other value is taken for a str, which code generation checks.
+        let t = match &e {
+            IRExpr::Variable(n) if matches!(self.params.get(n), Some(IRType::Bytes)) => Text::Bytes,
+            _ => Text::Str,
+        };
+        let flags = match flags {
+            Flags::Known(flags) => int(flags as i32),
+            Flags::Computed(flags) => flags,
+        };
+        Ok(self.compiled_at_run_time(t, e, flags))
+    }
+
+    fn compiled_at_run_time(&mut self, t: Text, pattern: IRExpr, flags: IRExpr) -> IRExpr {
+        if !self.runtime.contains(&t) {
+            self.runtime.push(t);
+        }
+        call(&t.compile_fn(), vec![pattern, flags])
     }
 
     /// CPython's TypeError for a str subject of a bytes pattern, or the
     /// reverse, where the subject is written out.
     fn check_subject(&self, pattern: &IRExpr, string: &IRExpr, call: &str) -> Result<()> {
         let t = self.cache.text_of(pattern).or_else(|| match pattern {
-            IRExpr::Variable(n) => self.patterns.get(n).copied(),
+            IRExpr::Variable(n) => self.locals.get(n).or(self.patterns.get(n)).copied(),
             _ => None,
         });
         let why = match (t, string) {
@@ -338,11 +467,11 @@ impl Pass<'_> {
         };
         Ok(Some(match name {
             "compile" => {
-                let flags = self.flags(argument(&arguments, 1, "flags").as_ref(), name)?;
+                let flags = self.call_flags(argument(&arguments, 1, "flags").as_ref(), name)?;
                 self.pattern(argument(&arguments, 0, "pattern"), flags, name)?
             }
             "search" | "match" | "fullmatch" | "findall" | "finditer" => {
-                let flags = self.flags(argument(&arguments, 2, "flags").as_ref(), name)?;
+                let flags = self.call_flags(argument(&arguments, 2, "flags").as_ref(), name)?;
                 let p = self.pattern(argument(&arguments, 0, "pattern"), flags, name)?;
                 let Some(string) = argument(&arguments, 1, "string") else {
                     return Err(refused(format!(
@@ -350,13 +479,20 @@ impl Pass<'_> {
                     )));
                 };
                 self.check_subject(&p, &string, name)?;
-                mcall(p, name, vec![string])
+                match (name, runtime_parts(&p)) {
+                    // `finditer`'s iterator is one a `for` reads by its class,
+                    // which a function's declared result gives it.
+                    ("finditer", Some((t, pattern, flags))) => {
+                        call(&t.finditer_fn(), vec![pattern, flags, string])
+                    }
+                    _ => mcall(p, name, vec![string]),
+                }
             }
             "split" => {
                 if pos > 2 {
                     return Err(deprecated("maxsplit"));
                 }
-                let flags = self.flags(keyword(&arguments, "flags").as_ref(), name)?;
+                let flags = self.call_flags(keyword(&arguments, "flags").as_ref(), name)?;
                 let p = self.pattern(argument(&arguments, 0, "pattern"), flags, name)?;
                 let string = argument(&arguments, 1, "string").unwrap_or_else(|| text(""));
                 self.check_subject(&p, &string, name)?;
@@ -367,7 +503,7 @@ impl Pass<'_> {
                 if pos > 3 {
                     return Err(deprecated("count"));
                 }
-                let flags = self.flags(keyword(&arguments, "flags").as_ref(), name)?;
+                let flags = self.call_flags(keyword(&arguments, "flags").as_ref(), name)?;
                 let p = self.pattern(argument(&arguments, 0, "pattern"), flags, name)?;
                 let repl = argument(&arguments, 1, "repl").unwrap_or_else(|| text(""));
                 let string = argument(&arguments, 2, "string").unwrap_or_else(|| text(""));
@@ -439,8 +575,9 @@ impl Pass<'_> {
             let t = self
                 .cache
                 .text_of(object)
+                .or_else(|| runtime_text(object))
                 .or_else(|| match object.as_ref() {
-                    IRExpr::Variable(n) => self.patterns.get(n).copied(),
+                    IRExpr::Variable(n) => self.locals.get(n).or(self.patterns.get(n)).copied(),
                     _ => None,
                 })
                 .unwrap_or(Text::Str);
@@ -522,6 +659,94 @@ fn expr_body<T>(e: &mut IRExpr, f: impl FnOnce(&mut IRBody) -> T) -> T {
 }
 
 impl Pass<'_> {
+    /// Whether an expression is `re.compile(...)`, and the text its pattern
+    /// matches where that is written out.
+    fn compile_call(&self, e: &IRExpr) -> Option<Text> {
+        let arguments = match e {
+            IRExpr::MethodCall {
+                object,
+                method_name,
+                arguments,
+            } if method_name == "compile"
+                && matches!(object.as_ref(), IRExpr::Variable(m) if self.b.modules.contains(m)) =>
+            {
+                arguments
+            }
+            IRExpr::FunctionCall {
+                function_name,
+                arguments,
+            } if self.b.names.get(function_name).map(String::as_str) == Some("compile") => {
+                arguments
+            }
+            _ => return None,
+        };
+        Some(match positional(arguments).first() {
+            Some(IRExpr::Const(IRConstant::Bytes(_))) => Text::Bytes,
+            Some(IRExpr::Variable(n)) => match (self.strings.get(n), self.params.get(n)) {
+                (Some(Source::Bytes(_)), _) | (_, Some(IRType::Bytes)) => Text::Bytes,
+                _ => Text::Str,
+            },
+            _ => Text::Str,
+        })
+    }
+
+    /// A function's names that hold a compiled pattern wherever they are
+    /// read: a parameter declared `re.Pattern`, and a local every assignment
+    /// of which is `re.compile(...)`.
+    fn local_patterns(
+        &mut self,
+        params: &[crate::ir::IRParam],
+        body: &IRBody,
+    ) -> HashMap<String, Text> {
+        let mut found: HashMap<String, Option<Text>> = HashMap::new();
+        for p in params {
+            let mut ty = p.param_type.clone();
+            rename_type(&mut ty, self.b);
+            let text = [Text::Str, Text::Bytes]
+                .into_iter()
+                .find(|t| ty == t.cty("Pattern"));
+            found.insert(p.name.clone(), text);
+        }
+        fn scan(pass: &Pass, body: &IRBody, found: &mut HashMap<String, Option<Text>>) {
+            for stmt in &body.statements {
+                match stmt {
+                    IRStatement::Assign { target, value, .. } => {
+                        let text = pass.compile_call(value);
+                        found
+                            .entry(target.clone())
+                            .and_modify(|t| {
+                                if *t != text {
+                                    *t = None;
+                                }
+                            })
+                            .or_insert(text);
+                    }
+                    IRStatement::AugAssign { target, .. } => {
+                        found.insert(target.clone(), None);
+                    }
+                    IRStatement::For { target, .. } => {
+                        found.insert(target.clone(), None);
+                    }
+                    IRStatement::TupleUnpack { targets, .. } => {
+                        for t in targets {
+                            found.insert(t.clone(), None);
+                        }
+                    }
+                    _ => {}
+                }
+                for nested in crate::ir::infer::nested_bodies(stmt) {
+                    scan(pass, nested, found);
+                }
+            }
+        }
+        scan(self, body, &mut found);
+        self.bound = found.keys().cloned().collect();
+        found
+            .into_iter()
+            .filter_map(|(name, text)| Some((name, text?)))
+            .collect()
+    }
+
     fn body(&mut self, body: &mut IRBody) -> Result<()> {
         crate::ir::visit_body(body, &mut |e: &mut IRExpr| self.rewrite(e))
     }
@@ -560,12 +785,21 @@ pub fn lower_re(module: &mut IRModule) -> Result<()> {
         },
         functions,
         replaces_by_function: false,
+        runtime: Vec::new(),
+        locals: HashMap::new(),
+        bound: std::collections::HashSet::new(),
     };
     // Module variables first, in order, so a later call can name a pattern
     // one of them compiled.
+    pass.locals.clear();
+    pass.bound.clear();
     for var in &mut module.variables {
         expr_body(&mut var.value, |body| pass.body(body))?;
-        if let Some(t) = pass.cache.text_of(&var.value) {
+        if let Some(t) = pass
+            .cache
+            .text_of(&var.value)
+            .or_else(|| runtime_text(&var.value))
+        {
             pass.patterns.insert(var.name.clone(), t);
         }
         if let Some(t) = &mut var.var_type {
@@ -578,6 +812,7 @@ pub fn lower_re(module: &mut IRModule) -> Result<()> {
             .iter()
             .map(|p| (p.name.clone(), p.param_type.clone()))
             .collect();
+        pass.locals = pass.local_patterns(&f.params, &f.body);
         pass.body(&mut f.body)?;
         f.params
             .iter_mut()
@@ -591,12 +826,15 @@ pub fn lower_re(module: &mut IRModule) -> Result<()> {
                 .iter()
                 .map(|p| (p.name.clone(), p.param_type.clone()))
                 .collect();
+            pass.locals = pass.local_patterns(&m.params, &m.body);
             pass.body(&mut m.body)?;
             m.params
                 .iter_mut()
                 .for_each(|p| rename_type(&mut p.param_type, &b));
             rename_type(&mut m.return_type, &b);
         }
+        pass.locals.clear();
+        pass.bound.clear();
         for var in &mut c.class_vars {
             expr_body(&mut var.value, |body| pass.body(body))?;
         }
@@ -604,15 +842,17 @@ pub fn lower_re(module: &mut IRModule) -> Result<()> {
     // A program with a bytes pattern (or one that escapes bytes) has the
     // bytes classes as well; the bytes template parses as a str one.
     let mut texts = vec![Text::Str];
-    if pass.cache.uses_bytes() || pass.escapes_bytes {
+    if pass.cache.uses_bytes() || pass.escapes_bytes || pass.runtime.contains(&Text::Bytes) {
         texts.push(Text::Bytes);
     }
     let cache = std::mem::take(&mut pass.cache.compiled);
-    let mut classes = classes::all(cache, pass.replaces_by_function, &texts);
+    let mut classes = classes::all(cache, pass.replaces_by_function, &texts, &pass.runtime);
     classes.append(&mut module.classes);
     module.classes = classes;
     module.functions.extend(vm::functions());
-    module.functions.extend(classes::functions(&texts));
+    module
+        .functions
+        .extend(classes::functions(&texts, &pass.runtime));
 
     let mut strings = Vec::new();
     let mut bytes = Vec::new();

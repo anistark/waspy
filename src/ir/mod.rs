@@ -57,6 +57,9 @@ pub use logging::{lower_logging, LOGGING_FN_PREFIX, LOG_METHOD, LOG_NOW_METHOD, 
 pub use metaclasses::{apply_metaclasses, METACLASS_FN_PREFIX};
 pub use partials::{lower_partials, CMP_KEY_PREFIX, PARTIAL_FN_PREFIX};
 pub use re::{lower_re, RE_FN_PREFIX};
+pub(crate) use re::{
+    pattern_argument_hint as re_pattern_argument_hint, with_runtime as with_re_runtime,
+};
 pub use str_methods::{
     helper_name as str_helper_name, with_str_helpers, STR_FN_PREFIX, STR_METHODS,
 };

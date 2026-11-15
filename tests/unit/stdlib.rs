@@ -3210,9 +3210,26 @@ fn re_refusals() {
         r"re.compile('a(?i)b')",
         "global flags not at the start of the expression at position 1",
     );
+    // CPython's search and match disagree here (the search skips to a set
+    // read by the pattern's flags, not the group's), which was answered as
+    // match answers.
     refused(
-        "p = input()\n    re.search(p, 'x')",
-        "written as a string literal or a module constant",
+        r"re.findall(r'(?a:\W)x', 'É.x')",
+        "starts with a class inside (?a:...) or (?u:...)",
+    );
+    refused(
+        r"re.compile(r'((?u:[\w-]))', re.A)",
+        "starts with a class inside (?a:...) or (?u:...)",
+    );
+    // CPython reports the first group a conditional names that is not one,
+    // and a lookbehind's width only once the pattern has parsed.
+    refused(
+        r"re.compile('(?(5)a)(?(3)b)')",
+        "re.error: invalid group reference 5 at position 3",
+    );
+    refused(
+        r"re.compile('(?<=a+)b(')",
+        "re.error: missing ), unterminated subpattern at position 8",
     );
     refused("re.sub('a', 'b', 'aa', 1)", "DeprecationWarning");
     refused("re.split(',', 'a,b', 1)", "DeprecationWarning");
@@ -3268,6 +3285,265 @@ fn re_refusals() {
         "gi = re.compile('(?P<k>a)').groupindex\n    gi['x'] = 3",
         "does not support item assignment",
     );
+}
+
+/// Whether the suite is being run with a collection at every statement.
+fn stressed() -> bool {
+    std::env::var_os("WASPY_GC_STRESS").is_some()
+}
+
+/// A pattern computed at run time is parsed and compiled inside the module
+/// (`src/ir/re/runtime.py`). The fixture gives several hundred patterns to
+/// `re.compile()` as values, each under two sets of flags, and runs each over
+/// a battery of subjects; its expected output is CPython 3.13's for the same
+/// file, a bad pattern's `re.error` message included.
+#[test]
+fn re_patterns_computed_at_run_time() {
+    let source = include_str!("../fixtures/re/runtime_patterns.py");
+    let want = include_str!("../fixtures/re/runtime_patterns.out");
+    // With a collection at every statement, a part of it is enough.
+    let calls = if stressed() { 12 } else { usize::MAX };
+    let mut kept = Vec::new();
+    let mut seen = 0;
+    for line in source.lines() {
+        if line.starts_with("    show(") {
+            seen += 1;
+            if seen > calls {
+                continue;
+            }
+        }
+        kept.push(line);
+    }
+    let run = run_main(&(kept.join("\n") + "\n"), "", &[]);
+    assert_eq!(run.stderr, "", "stderr");
+    let got: Vec<&str> = run.stdout.lines().collect();
+    let want: Vec<&str> = want.lines().take(calls).collect();
+    for (got, want) in got.iter().zip(&want) {
+        assert_eq!(got, want);
+    }
+    assert_eq!(got.len(), want.len());
+}
+
+/// What a program does with a pattern computed at run time: `findall` and
+/// `split`, flags computed too, the cache (`re.compile(p) is re.compile(p)`),
+/// bytes patterns, a compiled pattern passed back to `re`'s functions or held
+/// in a field, and the errors CPython raises for a pattern it rejects.
+#[test]
+fn re_run_time_patterns_in_programs() {
+    prints(
+        r##"
+        import re
+
+
+        def lists(pattern: str, text: str) -> None:
+            print(re.findall(pattern, text), re.split(pattern, text), re.split(pattern, text, maxsplit=1))
+
+
+        def flagged(pattern: str, flags: int, text: str) -> None:
+            p = re.compile(pattern, flags)
+            print(p.findall(text), p.flags, p, p.sub("-", text), re.sub(pattern, "_", text, flags=flags))
+
+
+        def same(pattern: str) -> None:
+            a = re.compile(pattern)
+            b = re.compile(pattern)
+            print(a is b, a == b, a is re.compile(pattern, re.I), a.pattern, a.groups, type(a))
+
+
+        def raw(pattern: bytes, data: bytes) -> None:
+            m = re.search(pattern, data)
+            print(m, re.findall(pattern, data), re.sub(pattern, b"#", data), re.compile(pattern))
+            print([x.span() for x in re.finditer(pattern, data)], re.split(pattern, data))
+
+
+        def held(text: str) -> None:
+            p = re.compile("a+")
+            q = re.compile("a" + "+")
+            print(re.search(p, text), re.findall(q, text), re.sub(q, "-", text), re.fullmatch(p, "aa") is not None)
+
+
+        def passed(p: re.Pattern, text: str) -> None:
+            print(re.search(p, text), p.sub("!", text), [m.group() for m in re.finditer(p, text)])
+
+
+        def raises(pattern: str, flags: int) -> None:
+            try:
+                re.compile(pattern, flags)
+                print("compiled")
+            except re.error as e:
+                print("re.error:", e)
+            except ValueError as e:
+                print("ValueError:", e)
+            except OverflowError as e:
+                print("OverflowError:", e)
+
+
+        class Finder:
+            def __init__(self, word: str) -> None:
+                self.pat = re.compile(r"\b" + re.escape(word) + r"\b", re.IGNORECASE)
+
+            def count(self, text: str) -> int:
+                return len(self.pat.findall(text))
+
+
+        if __name__ == "__main__":
+            lists(r"\d+", "a1b22c333")
+            lists(r"(\d)\w", "a1b22c333")
+            lists(r"\s*", "a b")
+            lists("(?i)[aeiou]", "Education")
+            flagged("[a-c]+", re.I, "ABC abc xyz")
+            flagged("^b", re.M | re.I, "a\nB\nb")
+            flagged("a.c", 0, "a\nc abc")
+            flagged("a.c", re.S, "a\nc abc")
+            flagged(r" \w+ # a word", re.X | re.A, "été ete")
+            same("a(b)c")
+            raw(rb"(\d+)\s", b"12 345 x")
+            raw(rb"(?i)[a-c]+", b"xAbC\xe9c")
+            held("caat aa")
+            passed(re.compile("o+"), "foo boo")
+            passed(re.compile("o" * 2), "foo boo")
+            raises("a(b", 0)
+            raises("(?P<n>a)(?P<n>b)", 0)
+            raises("a**", 0)
+            raises("[z-a]", 0)
+            raises("a\nb(", 0)
+            raises("(?<=a+)b", 0)
+            raises("x", re.A | re.U)
+            raises("x", re.L)
+            raises("a{99999999999}", 0)
+            raises("\\", 0)
+            raises("(?i)ok", re.M)
+            print(Finder("c.t").count("a c.t, a cat, C.T!"))
+            for w in ["apple", "b+"]:
+                print(re.sub(re.escape(w), "<" + w + ">", "apple b+ c"))
+            print(re.fullmatch("|".join(["ab", "cd"]), "cd") is not None)
+            print([m.group(0) for m in re.finditer("a" + "b" * 2, "abb abbb")])
+            for m in re.finditer(r"(\w)" + r"\1", "aabbcd"):
+                print(m.group(0), m.start())
+            print(re.match("é+" + "", "ééa"), re.search("(?i)" + "straße", "STRASSE Straße"))
+    "##,
+        r#"['1', '22', '333'] ['a', 'b', 'c', ''] ['a', 'b22c333']
+['1', '2', '3'] ['a', '1', '', '2', 'c', '3', '3'] ['a', '1', '22c333']
+['', ' ', '', ''] ['', 'a', '', 'b', ''] ['', 'a b']
+['E', 'u', 'a', 'i', 'o'] ['', 'd', 'c', 't', '', 'n'] ['', 'ducation']
+['ABC', 'abc'] 34 re.compile('[a-c]+', re.IGNORECASE) - - xyz _ _ xyz
+['B', 'b'] 42 re.compile('^b', re.IGNORECASE|re.MULTILINE) a
+-
+- a
+_
+_
+['abc'] 32 re.compile('a.c') a
+c - a
+c _
+['a\nc', 'abc'] 48 re.compile('a.c', re.DOTALL) - - _ _
+['t', 'ete'] 320 re.compile(' \\w+ # a word', re.VERBOSE|re.ASCII) é-é - é_é _
+True True False a(b)c 1 <class 're.Pattern'>
+<re.Match object; span=(0, 3), match=b'12 '> [b'12', b'345'] b'##x' re.compile(b'(\\d+)\\s')
+[(0, 3), (3, 7)] [b'', b'12', b'', b'345', b'x']
+<re.Match object; span=(1, 4), match=b'AbC'> [b'AbC', b'c'] b'x#\xe9#' re.compile(b'(?i)[a-c]+', re.IGNORECASE)
+[(1, 4), (5, 6)] [b'x', b'\xe9', b'']
+<re.Match object; span=(1, 3), match='aa'> ['aa', 'aa'] c-t - True
+<re.Match object; span=(1, 3), match='oo'> f! b! ['oo', 'oo']
+<re.Match object; span=(1, 3), match='oo'> f! b! ['oo', 'oo']
+re.error: missing ), unterminated subpattern at position 1
+re.error: redefinition of group name 'n' as group 2; was group 1 at position 12
+re.error: multiple repeat at position 2
+re.error: bad character range z-a at position 1
+re.error: missing ), unterminated subpattern at position 3 (line 2, column 2)
+re.error: look-behind requires fixed-width pattern
+ValueError: ASCII and UNICODE flags are incompatible
+ValueError: cannot use LOCALE flag with a str pattern
+OverflowError: the repetition number is too large
+re.error: bad escape (end of pattern) at position 0
+compiled
+2
+<apple> b+ c
+apple <b+> c
+True
+['abb', 'abb']
+aa 0
+bb 2
+<re.Match object; span=(0, 2), match='éé'> <re.Match object; span=(8, 14), match='Straße'>
+"#,
+    );
+}
+
+/// Where a run-time pattern's answer has a type the compiler could not give
+/// it, or CPython prints a warning, the call raises instead.
+#[test]
+fn re_run_time_patterns_raise_what_they_cannot_answer() {
+    prints(
+        r#"
+        import re
+
+
+        def tried(pattern: str, text: str) -> None:
+            try:
+                print(re.findall(pattern, text))
+            except NotImplementedError:
+                print("findall: not implemented")
+            try:
+                print(re.split(pattern, text))
+            except NotImplementedError:
+                print("split: not implemented")
+
+
+        def compiled(pattern: str, flags: int) -> None:
+            try:
+                re.compile(pattern, flags)
+                print("compiled")
+            except NotImplementedError:
+                print("not implemented")
+
+
+        if __name__ == "__main__":
+            tried(r"(\d)(\w)", "a1b")
+            tried(r"(\d)(\w)", "none")
+            tried("(x)?,", "a,b")
+            tried("(x)?,", "ax,b")
+            compiled(r"\N{DIGIT ONE}", 0)
+            compiled("[[a]", 0)
+            compiled("[a--b]", 0)
+            compiled(r"(a)(?<=\1)", 0)
+            compiled(r"(?a:\W)x", 0)
+            compiled(r"(?u:\w)", re.A)
+            compiled("a", re.DEBUG)
+            compiled(r"(?a:\W)+x", 0)
+        "#,
+        "findall: not implemented\n\
+         ['a', '1', 'b', '']\n\
+         []\n\
+         ['none']\n\
+         ['']\n\
+         split: not implemented\n\
+         ['x']\n\
+         ['a', 'x', 'b']\n\
+         not implemented\n\
+         not implemented\n\
+         not implemented\n\
+         not implemented\n\
+         not implemented\n\
+         not implemented\n\
+         not implemented\n\
+         compiled\n",
+    );
+    // A compiled pattern the pass cannot see is one (a field) is refused
+    // where it is given to `re`'s own function, with the way around it.
+    let err = try_compile(&dedent(
+        r#"
+        import re
+
+
+        class Finder:
+            def __init__(self, word: str) -> None:
+                self.pat = re.compile(word)
+
+            def has(self, text: str) -> bool:
+                return re.search(self.pat, text) is not None
+        "#,
+    ))
+    .expect_err("a field given to re.search");
+    assert!(err.contains("call its own method"), "{err}");
 }
 
 /// `Pattern.groupindex`: a read-only mappingproxy of the group names' numbers, new at each read, that reads as its dict and prints as CPython's (`str` the dict's, `repr` the proxy's).

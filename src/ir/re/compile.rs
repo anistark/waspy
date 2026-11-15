@@ -415,13 +415,7 @@ impl Compiler {
                 del,
                 body,
             } => {
-                // _combine_flags: a type flag added replaces the others.
-                let base = if add & (FLAG_ASCII | FLAG_LOCALE | FLAG_UNICODE) != 0 {
-                    flags & !(FLAG_ASCII | FLAG_LOCALE | FLAG_UNICODE)
-                } else {
-                    flags
-                };
-                let inner = (base | add) & !del;
+                let inner = combine_flags(flags, *add, *del);
                 if let Some(g) = group {
                     self.emit(op::SAVE);
                     self.emit((2 * g) as i32);
@@ -454,7 +448,11 @@ impl Compiler {
                 self.emit(op::LOOK);
                 self.emit(*negate as i32);
                 // Fixed, the parser checked.
-                let width = if *behind { width(body) as i32 } else { -1 };
+                let width = if *behind {
+                    width(body).min(i32::MAX as u64) as i32
+                } else {
+                    -1
+                };
                 self.emit(width);
                 let at = self.code.len();
                 self.emit(0);
@@ -511,7 +509,10 @@ impl Compiler {
     fn repeat(&mut self, kind: Repeat, min: u32, max: u32, body: &[Node], flags: u32) {
         let r = self.repeats as i32;
         self.repeats += 1;
-        let max = if max == MAXREPEAT { -1 } else { max as i32 };
+        // A count past what an int holds is one no subject reaches.
+        let held = |n: u32| n.min(i32::MAX as u32) as i32;
+        let max = if max == MAXREPEAT { -1 } else { held(max) };
+        let min = held(min);
         self.emit(op::REPEAT);
         self.emit(r);
         let until = self.code.len();
@@ -519,7 +520,7 @@ impl Compiler {
             // MAX_UNTIL r min max body exit
             self.emit(op::MAX_UNTIL);
             self.emit(r);
-            self.emit(min as i32);
+            self.emit(min);
             self.emit(max);
             self.emit(0);
             self.emit(0);
@@ -529,7 +530,7 @@ impl Compiler {
             // MIN_UNTIL r min max more body exit, LAZY_MORE r max body
             self.emit(op::MIN_UNTIL);
             self.emit(r);
-            self.emit(min as i32);
+            self.emit(min);
             self.emit(max);
             self.emit(0);
             self.emit(0);
@@ -555,6 +556,78 @@ impl Compiler {
             until + 6
         };
         self.patch(exit_slot, exit);
+    }
+}
+
+/// `_combine_flags`: a type flag added replaces the others.
+fn combine_flags(flags: u32, add: u32, del: u32) -> u32 {
+    let base = if add & (FLAG_ASCII | FLAG_LOCALE | FLAG_UNICODE) != 0 {
+        flags & !(FLAG_ASCII | FLAG_LOCALE | FLAG_UNICODE)
+    } else {
+        flags
+    };
+    (base | add) & !del
+}
+
+/// Whether CPython's search would pass over positions this pattern matches
+/// at. Its search skips to the characters a pattern can start with, a set it
+/// compiles (`_compile_info`) under the pattern's own flags. When the pattern
+/// starts with a class inside a group that changes ASCII to UNICODE or back,
+/// `\w`, `\d`, and `\s` read differently in that set than in the group, and
+/// where the group's reading is the wider one (`(?a:\W)x`: every non-ASCII
+/// letter is `\W` under ASCII and not under UNICODE) `search` never tries
+/// positions `match` matches at. That is not reproduced, so such a pattern
+/// is refused.
+fn search_skips_matches(nodes: &[Node], flags: u32) -> bool {
+    let mut inner = flags;
+    let mut nodes = nodes;
+    loop {
+        match nodes.first() {
+            Some(Node::Subpattern { add, del, body, .. }) => {
+                inner = combine_flags(inner, *add, *del);
+                nodes = body;
+            }
+            Some(Node::In(items)) => {
+                if (flags ^ inner) & FLAG_UNICODE == 0 {
+                    return false;
+                }
+                // `\w`, `\d`, and `\s` match more under UNICODE, their
+                // negations more under ASCII; a negated set turns that round.
+                let unicode = inner & FLAG_UNICODE != 0;
+                let negated = items.contains(&SetItem::Negate);
+                let wider = items.iter().any(|item| match item {
+                    SetItem::Category(c) => {
+                        let positive =
+                            matches!(c, Category::Digit | Category::Space | Category::Word);
+                        (positive == unicode) != negated
+                    }
+                    _ => false,
+                });
+                if !wider {
+                    return false;
+                }
+                // A set with a cased member under IGNORECASE is not skipped to.
+                if inner & FLAG_IGNORECASE != 0 {
+                    let cased = |c: u32| {
+                        if unicode {
+                            iscased(c)
+                        } else {
+                            ascii_iscased(c)
+                        }
+                    };
+                    for item in items {
+                        match *item {
+                            SetItem::Literal(c) if cased(c) => return false,
+                            SetItem::Range(_, hi) if hi > 0xffff => return false,
+                            SetItem::Range(lo, hi) if (lo..=hi).any(cased) => return false,
+                            _ => {}
+                        }
+                    }
+                }
+                return true;
+            }
+            _ => return false,
+        }
     }
 }
 
@@ -596,6 +669,15 @@ pub fn compile(parsed: &Parsed) -> Result<Program, String> {
     if contains_lookbehind_groupref(&parsed.nodes) {
         return Err(
             "a group reference inside a lookbehind is not supported by this compiler".to_string(),
+        );
+    }
+    if search_skips_matches(&parsed.nodes, parsed.flags) {
+        return Err(
+            "unsupported: a pattern that starts with a class inside (?a:...) or (?u:...) \
+             that matches more there than under the pattern's own flags: CPython's search \
+             reads \\w, \\d, and \\s by the pattern's flags and its match by the group's. \
+             Hint: put the flag on the whole pattern"
+                .to_string(),
         );
     }
     let mut c = Compiler {

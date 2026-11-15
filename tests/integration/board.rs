@@ -3877,6 +3877,50 @@ mod stdlib {
         );
     }
 
+    /// re module: patterns computed at run time (a str or bytes value given to compile, search, sub, and the rest, parsed and compiled as the program runs and cached, with CPython's re.error for one it rejects; such a pattern's findall and split answer strs)
+    #[test]
+    fn re_patterns_at_run_time() {
+        check(
+            r#"
+            import re
+
+
+            def find(pattern: str, text: str) -> str:
+                m = re.search(pattern, text)
+                if m is None:
+                    return "None"
+                return m.group(0) + str(m.groups()) + str(m.span())
+
+
+            def bad(pattern: str) -> str:
+                try:
+                    re.compile(pattern)
+                except re.error as e:
+                    return str(e)
+                return "ok"
+
+
+            def f() -> str:
+                word = "c.t"
+                exact = re.compile(r"\b" + re.escape(word) + r"\b", re.I)
+                parts = [find("(a+)(b)?", "xaab"), find("|".join(["cat", "d.g"]), "hot dog"), find("x" * 2, "x")]
+                parts.append(str(exact.findall("a c.t, a cat, C.T!")) + str(exact is re.compile(r"\b" + re.escape(word) + r"\b", re.I)))
+                sep = "[,;]" + r"\s*"
+                parts.append(str(re.split(sep, "x, y;z")) + re.sub("(?P<k>" + r"\w+)=", r"\g<k>: ", "a=1 b=2"))
+                parts.append(str([m.start() for m in re.finditer("an" + "?", "banana")]))
+                parts.append(str(exact) + str(exact.flags) + str(exact.groups))
+                parts.append(bad("a(b") + "; " + bad("(?P<n>a)(?P<n>b)") + "; " + bad("ok+"))
+                return " ".join(parts)
+        "#,
+            &[(
+                "f",
+                Want::Str(
+                    r#"aab('aa', 'b')(1, 4) dog()(4, 7) None ['c.t', 'C.T']True ['x', 'y', 'z']a: 1 b: 2 [1, 3, 5] re.compile('\\bc\\.t\\b', re.IGNORECASE)340 missing ), unterminated subpattern at position 1; redefinition of group name 'n' as group 2; was group 1 at position 12; ok"#,
+                ),
+            )],
+        );
+    }
+
     /// logging module: exception() and exc_info (the exception's last line standing in for its traceback), extra= written out in the call and fields a filter sets, addLevelName, logging.config.dictConfig, logging.handlers' RotatingFileHandler, WatchedFileHandler, BufferingHandler, and MemoryHandler, and shutdown at exit
     #[test]
     fn logging_handlers_and_config() {

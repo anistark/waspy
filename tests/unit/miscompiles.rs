@@ -7313,3 +7313,60 @@ fn list_sort_of_instances_is_still_refused() {
         "{err}"
     );
 }
+
+/// A repeat count past what an int holds (`a{2147483648}`) wrapped to a
+/// negative one, which every subject satisfied: the pattern matched where
+/// CPython's cannot.
+#[test]
+fn a_repeat_count_past_an_int_does_not_wrap() {
+    let src = dedent(
+        r#"
+        import re
+
+        def f() -> int:
+            hits = 0
+            if re.search("a{2147483648}", "aaa") is not None:
+                hits += 1
+            if re.search("a{1,2147483648}", "aaa") is not None:
+                hits += 10
+            if re.search("(?:a{4294967294})?b", "aab") is not None:
+                hits += 100
+            return hits
+        "#,
+    );
+    assert_eq!(call_i32(&src, "f"), 110);
+}
+
+/// A parameter named as a module constant was read as the constant where it
+/// was a pattern: `re.search(PATTERN, s)` compiled the constant's text in
+/// place of what the function was given.
+#[test]
+fn a_parameter_named_as_a_pattern_constant_is_the_parameter() {
+    let src = dedent(
+        r#"
+        import re
+
+        PATTERN = "a+"
+        WORD = re.compile("x")
+
+        def has(PATTERN: str, text: str) -> bool:
+            return re.search(PATTERN, text) is not None
+
+        def held(WORD: str, text: str) -> bool:
+            return re.search(WORD, text) is not None
+
+        def f() -> int:
+            hits = 0
+            if has("b", "bbb"):
+                hits += 1
+            if has("b", "aaa"):
+                hits += 10
+            if held("b", "bbb"):
+                hits += 100
+            if re.search(PATTERN, "caat") is not None:
+                hits += 1000
+            return hits
+        "#,
+    );
+    assert_eq!(call_i32(&src, "f"), 1101);
+}

@@ -87,6 +87,13 @@ fn infer_field_value_type(
                 infer_field_value_type(pull, params, classes)
             })
         }
+        // A function of the module declared to return an instance (a factory,
+        // or `re.compile()` of a pattern computed at run time).
+        IRExpr::FunctionCall { function_name, .. }
+            if params.contains_key(&format!("{RETURNS_OF}{function_name}")) =>
+        {
+            params[&format!("{RETURNS_OF}{function_name}")].clone()
+        }
         // `C::method(...)`: what the method is declared to return.
         IRExpr::FunctionCall { function_name, .. } if function_name.contains("::") => params
             .get(&format!("{RETURNS_OF}{function_name}"))
@@ -1664,6 +1671,18 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, WaspyError> {
         }
         None => ir_module,
     };
+    // The parser and compiler for `re` patterns the program computes as it
+    // runs (`ir::re`).
+    let with_re;
+    let ir_module = match crate::ir::with_re_runtime(ir_module)
+        .map_err(|e| crate::core::errors::other_error(format!("{e:#}")))?
+    {
+        Some(module) => {
+            with_re = module;
+            &with_re
+        }
+        None => ir_module,
+    };
     // A module using the JavaScript bridge: the names its operations carry,
     // and a JavaScript-facing wrapper for each export (`compiler::js`).
     let with_bridge;
@@ -2503,6 +2522,13 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
                     )
                 })
         }));
+        laid_out.extend(
+            ir_module
+                .functions
+                .iter()
+                .filter(|f| matches!(f.return_type, IRType::Class(_)))
+                .map(|f| (format!("{RETURNS_OF}{}", f.name), f.return_type.clone())),
+        );
         for method in &cls.methods {
             let mut params: HashMap<String, IRType> = laid_out.iter().cloned().collect();
             // The fields earlier methods (`__init__` first) gave this class.
