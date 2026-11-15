@@ -160,6 +160,9 @@ pub fn compile_python_to_wasm_with_options(
 
     log_debug!("Starting compilation with options: {:?}", options);
 
+    // The data files the program reads while it is compiled.
+    let _data_files = core::data_files::scope(&options.data_files);
+
     // Parse Python to AST
     log_verbose!("Parsing Python source code...");
     let ast = core::parser::parse_python(source).context("Failed to parse Python code")?;
@@ -336,6 +339,9 @@ fn compile_merged_sources(
     config: Option<&ProjectConfig>,
     skip_special: bool,
 ) -> Result<Vec<u8>> {
+    // The data files the program reads while it is compiled.
+    let _data_files = core::data_files::scope(&options.data_files);
+
     // Parse and convert each Python source to IR
     let mut combined_module = ir::IRModule::new();
     let mut function_names = std::collections::HashSet::new();
@@ -617,6 +623,10 @@ pub fn compile_multiple_python_files_with_config(
 /// Every resolved module is compiled and linked into the single output WASM
 /// module exactly once, however many import paths reach it.
 ///
+/// A data file the program reads when it is compiled (the file a
+/// `logging.config.fileConfig()` call names) is read from the entry file's
+/// directory too; see [`CompilerOptions::data_files`].
+///
 /// # Arguments
 ///
 /// * `path` - Path to the entry `.py` file
@@ -729,10 +739,52 @@ pub fn compile_python_file_with_options<P: AsRef<Path>>(
         .map(|(f, s)| (f.as_str(), s.as_str()))
         .collect();
 
+    // The data files the program reads when it is compiled are found next to
+    // the entry file, as its modules are.
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let options = with_data_files(options, &source_refs, base_dir);
+
     // Resolved module files bypass the special-file skip: the import already
     // vouches for them (a local module legitimately named `config.py` or a
     // package `__init__.py` must still link).
-    compile_merged_sources(&source_refs, options, None, false)
+    compile_merged_sources(&source_refs, &options, None, false)
+}
+
+/// `options` with the data files `sources` name read from `base_dir`: the
+/// file of each `logging.config.fileConfig()` call that names one by a str.
+/// A file the options already give is the caller's, and one that cannot be
+/// read is left out, for the call that names it to report. Only a path
+/// inside `base_dir` is read: a program does not make the compiler read a
+/// file elsewhere, which the caller gives in the options if it is meant.
+fn with_data_files(
+    options: &CompilerOptions,
+    sources: &[(&str, &str)],
+    base_dir: &Path,
+) -> CompilerOptions {
+    use rustpython_parser::Parse;
+    use std::path::Component;
+    let mut options = options.clone();
+    for (_, source) in sources {
+        let Ok(ast) = rustpython_parser::ast::Suite::parse(source, "<module>") else {
+            continue;
+        };
+        for name in ir::config_files(&ast) {
+            if options.data_files.iter().any(|(given, _)| *given == name) {
+                continue;
+            }
+            let inside = Path::new(&name)
+                .components()
+                .all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
+            if !inside {
+                continue;
+            }
+            if let Ok(text) = fs::read_to_string(base_dir.join(&name)) {
+                log_debug!("Read data file '{name}' from {}", base_dir.display());
+                options.data_files.push((name, text));
+            }
+        }
+    }
+    options
 }
 
 /// Compile a Python project directory to WebAssembly.
@@ -779,6 +831,10 @@ pub fn compile_python_project<P: AsRef<Path>>(project_dir: P, optimize: bool) ->
 }
 
 /// Compile a Python project with options.
+///
+/// A data file the project's programs read when they are compiled (the file
+/// a `logging.config.fileConfig()` call names) is read from the project
+/// directory; see [`CompilerOptions::data_files`].
 ///
 /// # Arguments
 ///
@@ -896,8 +952,10 @@ pub fn compile_python_project_with_options<P: AsRef<Path>>(
         .map(|(path, content)| (path.as_str(), content.as_str()))
         .collect();
 
-    // Compile all files together
-    let result = compile_multiple_python_files_with_config(&sources, options.optimize, &config)?;
+    // Compile all files together, with the data files they read when they
+    // are compiled, which are found in the project directory.
+    let options = with_data_files(options, &sources, project_dir);
+    let result = compile_merged_sources(&sources, &options, Some(&config), true)?;
 
     // If we found an entry point, we might need to add special handling here
     if entry_point_info.is_some() {

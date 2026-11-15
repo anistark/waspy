@@ -4697,6 +4697,720 @@ fn logging_dict_config_added_level() {
     );
 }
 
+/// Run a program on the files `fileConfig()` reads: the compiler is given
+/// them, and the program finds the same files when it runs, on a clock fixed
+/// at 1700100000 (local time UTC).
+fn configured(source: &str, files: &[(&str, &str)]) -> (Run, Host) {
+    let files: Vec<(&str, String)> = files.iter().map(|(n, t)| (*n, dedent(t))).collect();
+    let files: Vec<(&str, &str)> = files.iter().map(|(n, t)| (*n, t.as_str())).collect();
+    let mut host = Host::with_input("", &[]);
+    host.clock_ns = Some(1_700_100_000 * 1_000_000_000);
+    for (name, text) in &files {
+        host.files
+            .insert(name.to_string(), text.as_bytes().to_vec());
+    }
+    run_main_with_files(&dedent(source), &files, host)
+}
+
+/// `logging.config.fileConfig()`: the root and a named logger, levels, a
+/// handler on each standard stream, formatters with and without a date
+/// format, and a logger the file does not name disabled. The file is read
+/// when the program is compiled; the output is CPython 3.13's on the same
+/// file and clock.
+#[test]
+fn logging_file_config() {
+    let (run, _) = configured(
+        r#"
+            import logging
+            import logging.config
+            import sys
+
+
+            def main() -> None:
+                early = logging.getLogger("early")
+                logging.config.fileConfig("logging.conf")
+                app = logging.getLogger("app")
+                child = logging.getLogger("app.child")
+                app.debug("debug %d", 1)
+                app.error("bad %s", "thing")
+                child.info("child info")
+                child.critical("child critical")
+                logging.getLogger().warning("root warns")
+                logging.getLogger("other").info("below the root's level")
+                early.error("early is disabled")
+                dated = logging.StreamHandler(sys.stdout)
+                dated.setFormatter(logging.Formatter("%(asctime)s %(message)s", "%Y-%m-%d %H:%M"))
+                app.addHandler(dated)
+                app.error("dated")
+                print(len(app.handlers), len(logging.getLogger().handlers), app.level, logging.getLogger().level)
+
+
+            if __name__ == "__main__":
+                main()
+        "#,
+        &[(
+            "logging.conf",
+            r#"
+                [loggers]
+                keys=root,app
+
+                [handlers]
+                keys=console,errors
+
+                [formatters]
+                keys=plain,timed,dated
+
+                [logger_root]
+                level=WARNING
+                handlers=console
+
+                [logger_app]
+                level=DEBUG
+                handlers=errors
+                qualname=app
+
+                [handler_console]
+                class=StreamHandler
+                level=NOTSET
+                formatter=plain
+                args=(sys.stdout,)
+
+                [handler_errors]
+                class=StreamHandler
+                level=ERROR
+                formatter=timed
+                args=()
+
+                [formatter_plain]
+                format=%(levelname)s:%(name)s:%(message)s
+
+                [formatter_timed]
+                format=%(asctime)s %(name)s [%(levelname)s] %(message)s
+                datefmt=
+
+                [formatter_dated]
+                format=%(asctime)s %(message)s
+                datefmt=%Y-%m-%d %H:%M
+            "#,
+        )],
+    );
+    assert_eq!(
+        run.stdout,
+        r#"DEBUG:app:debug 1
+ERROR:app:bad thing
+INFO:app.child:child info
+CRITICAL:app.child:child critical
+WARNING:root:root warns
+2023-11-16 02:00 dated
+ERROR:app:dated
+2 1 10 30
+"#
+    );
+    assert_eq!(
+        run.stderr,
+        r#"2023-11-16 02:00:00,000 app [ERROR] bad thing
+2023-11-16 02:00:00,000 app.child [CRITICAL] child critical
+2023-11-16 02:00:00,000 app [ERROR] dated
+"#
+    );
+    assert_eq!(run.exit, 0);
+}
+
+/// `fileConfig()` with a `DEFAULT` section interpolated into the handlers'
+/// arguments, `kwargs`, a value continued over lines, comments, both
+/// delimiters, the `{` and `$` styles, a `FileHandler`, a
+/// `RotatingFileHandler`, a `MemoryHandler` whose target is named after it,
+/// `propagate`, a child of a named logger reset, and the path a module
+/// constant.
+#[test]
+fn logging_file_config_handlers_and_interpolation() {
+    let (run, _) = configured(
+        r#"
+            import logging
+            from logging.config import fileConfig
+
+            CONF = "t2.conf"
+
+
+            def show(path: str) -> None:
+                with open(path) as f:
+                    print(path, repr(f.read()))
+
+
+            def main() -> None:
+                stale = logging.getLogger("stale")
+                kept = logging.getLogger("svc.kept")
+                kept.setLevel(logging.ERROR)
+                fileConfig(CONF)
+                svc = logging.getLogger("svc")
+                db = logging.getLogger("svc.db")
+                logging.info("root info")
+                logging.debug("root debug")
+                svc.debug("held in memory")
+                svc.info("svc info %s", "x")
+                db.info("db info")
+                stale.error("stale is disabled")
+                kept.info("kept was reset, so this reaches svc")
+                svc.error("flushes memory")
+                print(len(logging.getLogger().handlers), len(svc.handlers), len(db.handlers))
+                print(svc.level, db.level, logging.getLogger().level, kept.level)
+                print(svc.getEffectiveLevel(), db.getEffectiveLevel())
+                logging.shutdown()
+                show("out-app.log")
+                show("out-rot.log")
+
+
+            if __name__ == "__main__":
+                main()
+        "#,
+        &[(
+            "t2.conf",
+            r#"
+                # A comment
+                ; another
+                [DEFAULT]
+                logdir = out
+                suffix : log
+
+                [loggers]
+                keys = root, svc, svc_db
+
+                [handlers]
+                keys = mem, file, rot, console
+
+                [formatters]
+                keys = brace, dollar, dated
+
+                [logger_root]
+                level = INFO
+                handlers = console
+
+                [logger_svc]
+                level = DEBUG
+                handlers = file, mem
+                qualname = svc
+                propagate = 0
+
+                [logger_svc_db]
+                handlers = rot
+                qualname = svc.db
+
+                [handler_console]
+                class = logging.StreamHandler
+                kwargs = {'stream': sys.stdout}
+                formatter = brace
+
+                [handler_file]
+                class = FileHandler
+                args = ('%(logdir)s-app.%(suffix)s', 'w')
+                level = INFO
+                formatter = dollar
+
+                [handler_rot]
+                class = handlers.RotatingFileHandler
+                args = ('%(logdir)s-rot.%(suffix)s',)
+                kwargs = {'mode': 'w', 'maxBytes': 0,
+                    'backupCount': 2}
+                formatter = dated
+
+                [handler_mem]
+                class = logging.handlers.MemoryHandler
+                args = (10, ERROR)
+                target = console
+
+                [formatter_brace]
+                format = {levelname:<8}|{name}|{message}
+                style = {
+                class = logging.Formatter
+
+                [formatter_dollar]
+                format = ${levelname} ${name}: ${message}
+                style = $
+
+                [formatter_dated]
+                format = %(levelname)s %(message)s 100%%
+                datefmt = %Y
+            "#,
+        )],
+    );
+    assert_eq!(run.stderr, "");
+    assert_eq!(
+        run.stdout,
+        r#"INFO    |root|root info
+DEBUG   |svc|held in memory
+INFO    |svc|svc info x
+INFO    |svc.db|db info
+INFO    |svc.kept|kept was reset, so this reaches svc
+ERROR   |svc|flushes memory
+1 2 1
+10 0 20 0
+10 10
+out-app.log 'INFO svc: svc info x\nINFO svc.db: db info\nINFO svc.kept: kept was reset, so this reaches svc\nERROR svc: flushes memory\n'
+out-rot.log 'INFO db info 100%\n'
+"#
+    );
+}
+
+/// What `fileConfig()` does to the loggers that exist: one the file does not
+/// name is disabled, or enabled again with `disable_existing_loggers=False`,
+/// a child of a named logger loses its level and handlers and propagates
+/// again, and a second call replaces the root's handlers.
+#[test]
+fn logging_file_config_existing_loggers() {
+    let (run, _) = configured(
+        r#"
+            import logging
+            import logging.config
+            import sys
+
+
+            def state(names: list[str]) -> None:
+                for name in names:
+                    lg = logging.getLogger(name)
+                    print(name, lg.level, len(lg.handlers), lg.isEnabledFor(logging.CRITICAL))
+
+
+            def main() -> None:
+                names = ["old", "svc", "svc.child", "svc.child.deep", "fresh"]
+                old = logging.getLogger("old")
+                child = logging.getLogger("svc.child")
+                child.setLevel(logging.ERROR)
+                child.addHandler(logging.StreamHandler(sys.stdout))
+                child.propagate = False
+                deep = logging.getLogger("svc.child.deep")
+                logging.config.fileConfig("first.conf")
+                state(names)
+                old.critical("old is disabled")
+                child.warning("child reaches the root")
+                deep.info("below svc's level")
+                logging.getLogger("fresh").info("fresh")
+                logging.config.fileConfig("second.conf", disable_existing_loggers=False)
+                state(names)
+                old.error("old is enabled again")
+                child.error("child")
+                logging.getLogger("svc").warning("below the handler's level")
+                logging.config.fileConfig("first.conf", None, True)
+                state(names)
+                logging.getLogger("fresh").critical("fresh is disabled")
+                logging.getLogger("svc").error("svc")
+
+
+            if __name__ == "__main__":
+                main()
+        "#,
+        &[
+            (
+                "first.conf",
+                r#"
+                    [loggers]
+                    keys=root,svc
+
+                    [handlers]
+                    keys=out
+
+                    [formatters]
+                    keys=f
+
+                    [logger_root]
+                    level=INFO
+                    handlers=out
+
+                    [logger_svc]
+                    level=WARNING
+                    handlers=
+                    qualname=svc
+
+                    [handler_out]
+                    class=StreamHandler
+                    args=(sys.stdout,)
+                    formatter=f
+
+                    [formatter_f]
+                    format=first %(name)s %(levelname)s %(message)s
+                "#,
+            ),
+            (
+                "second.conf",
+                r#"
+                    [loggers]
+                    keys=root
+
+                    [handlers]
+                    keys=out
+
+                    [formatters]
+                    keys=
+
+                    [logger_root]
+                    handlers=out
+
+                    [handler_out]
+                    class=StreamHandler
+                    level=ERROR
+                    args=(sys.stdout,)
+                "#,
+            ),
+        ],
+    );
+    assert_eq!(run.stderr, "");
+    assert_eq!(
+        run.stdout,
+        r#"old 0 0 False
+svc 30 0 True
+svc.child 0 0 True
+svc.child.deep 0 0 True
+fresh 0 0 True
+first svc.child WARNING child reaches the root
+first fresh INFO fresh
+old 0 0 True
+svc 30 0 True
+svc.child 0 0 True
+svc.child.deep 0 0 True
+fresh 0 0 True
+old is enabled again
+child
+old 0 0 False
+svc 30 0 True
+svc.child 0 0 True
+svc.child.deep 0 0 True
+fresh 0 0 False
+first svc ERROR svc
+"#
+    );
+}
+
+/// `fileConfig(fname, defaults, disable_existing_loggers)` by position, under
+/// another name: the defaults are the file's `DEFAULT` section unless the file
+/// says otherwise, a default named `level` is every logger's and handler's
+/// that has none, and option names are read in lower case.
+#[test]
+fn logging_file_config_defaults() {
+    let (run, host) = configured(
+        r#"
+            import logging
+            from logging.config import fileConfig as configure
+
+
+            def main() -> None:
+                configure("conf.ini", {"logdir": "logs", "LOGFILE": "one.log", "outlevel": "INFO", "level": "WARNING"}, False)
+                root = logging.getLogger()
+                quiet = logging.getLogger("quiet")
+                print(root.level, quiet.level, root.handlers[0].level, root.handlers[1].level)
+                root.warning("below the default level")
+                root.error("root error")
+                quiet.info("quiet info")
+                quiet.error("quiet error")
+                logging.shutdown()
+                with open("logs/one.log") as f:
+                    print(repr(f.read()))
+
+
+            if __name__ == "__main__":
+                main()
+        "#,
+        &[(
+            "conf.ini",
+            r#"
+                [DEFAULT]
+                Level = ERROR
+                where : %(logdir)s/%(logfile)s
+
+                [loggers]
+                keys = root, quiet
+
+                [handlers]
+                keys = file, out
+
+                [formatters]
+                keys = f
+
+                [logger_root]
+                handlers = file, out
+
+                [logger_quiet]
+                level = DEBUG
+                qualname = quiet
+                handlers =
+                propagate = 1
+
+                [handler_file]
+                class = FileHandler
+                args = ('%(where)s', 'w')
+                formatter = f
+
+                [handler_out]
+                class = StreamHandler
+                level = %(outlevel)s
+                args = (sys.stdout,)
+                formatter = f
+
+                [formatter_f]
+                format = %(levelname)s %(name)s %(message)s
+            "#,
+        )],
+    );
+    assert_eq!(run.stderr, "");
+    assert_eq!(
+        run.stdout,
+        r#"40 10 40 20
+ERROR root root error
+INFO quiet quiet info
+ERROR quiet quiet error
+'ERROR root root error\nERROR quiet quiet error\n'
+"#
+    );
+    assert_eq!(
+        host.files.get("logs/one.log").map(|b| b.as_slice()),
+        Some("ERROR root root error\nERROR quiet quiet error\n".as_bytes())
+    );
+}
+
+/// A handler class of the program (`__main__.Tagged`) with `args` and
+/// `kwargs`, a `NullHandler`, and a level `addLevelName()` gave a name, which
+/// the file names and the program looks up when it runs.
+#[test]
+fn logging_file_config_program_handler_and_added_level() {
+    let (run, _) = configured(
+        r#"
+            import logging
+            import logging.config
+
+
+            class Tagged(logging.Handler):
+                def __init__(self, tag: str, limit: int = 3) -> None:
+                    super().__init__()
+                    self.tag = tag
+                    self.limit = limit
+
+                def emit(self, record: logging.LogRecord) -> None:
+                    print(self.tag, self.limit, self.format(record))
+
+
+            def main() -> None:
+                logging.addLevelName(25, "NOTICE")
+                logging.config.fileConfig("logging.conf")
+                root = logging.getLogger()
+                root.log(25, "noticed")
+                root.info("hidden")
+                root.error("shown")
+                print(root.level, len(root.handlers))
+
+
+            if __name__ == "__main__":
+                main()
+        "#,
+        &[(
+            "logging.conf",
+            r#"
+                [loggers]
+                keys=root
+
+                [handlers]
+                keys=tagged,null
+
+                [formatters]
+                keys=f
+
+                [logger_root]
+                level=NOTICE
+                handlers=tagged,null
+
+                [handler_tagged]
+                class=__main__.Tagged
+                level=NOTICE
+                args=('T',)
+                kwargs={'limit': 5}
+                formatter=f
+
+                [handler_null]
+                class=NullHandler
+
+                [formatter_f]
+                format=%(levelname)s %(message)s
+            "#,
+        )],
+    );
+    assert_eq!(run.stderr, "");
+    assert_eq!(
+        run.stdout,
+        r#"T 5 NOTICE noticed
+T 5 ERROR shown
+25 2
+"#
+    );
+}
+
+/// What `fileConfig()` does with its file when the program runs, before it
+/// configures anything: a file that is not there is CPython's
+/// `FileNotFoundError`, a file with `\r\n` line ends reads as CPython reads
+/// it, and a file that says anything but what was compiled is a
+/// `RuntimeError`, since the compiled program cannot follow it.
+#[test]
+fn logging_file_config_checks_its_file() {
+    let source = dedent(
+        r#"
+        import logging
+        import logging.config
+
+        if __name__ == "__main__":
+            logging.warning("before")
+            try:
+                logging.config.fileConfig("logging.conf")
+            except FileNotFoundError as e:
+                print(type(e).__name__, e)
+            except RuntimeError as e:
+                print(type(e).__name__, e)
+            logging.info("after")
+            logging.config.fileConfig("logging.conf")
+            logging.info("configured twice")
+    "#,
+    );
+    let conf = "[loggers]\nkeys=root\n\n[handlers]\nkeys=out\n\n[formatters]\nkeys=\n\n\
+                [logger_root]\nlevel=INFO\nhandlers=out\n\n[handler_out]\nclass=StreamHandler\n\
+                args=(sys.stdout,)\n";
+    let run = |compiled: &str, found: Option<&str>| {
+        let mut host = Host::with_input("", &[]);
+        if let Some(found) = found {
+            host.files
+                .insert("logging.conf".to_string(), found.as_bytes().to_vec());
+        }
+        run_main_with_files(&source, &[("logging.conf", compiled)], host).0
+    };
+
+    let same = run(conf, Some(conf));
+    assert_eq!(same.stdout, "after\nconfigured twice\n");
+    assert_eq!(same.stderr, "WARNING:root:before\n");
+    assert_eq!(same.exit, 0);
+
+    let crlf = conf.replace('\n', "\r\n");
+    assert_eq!(run(&crlf, Some(&crlf)), same);
+
+    let missing = run(conf, None);
+    assert_eq!(
+        missing.stdout,
+        "FileNotFoundError logging.conf doesn't exist\n"
+    );
+    assert_eq!(
+        missing.stderr,
+        "WARNING:root:before\nFileNotFoundError: logging.conf doesn't exist\n"
+    );
+    assert_eq!(missing.exit, 1);
+
+    // Nothing is configured from a file that changed: the root keeps the
+    // handler `logging.warning()` gave it.
+    let changed = run(conf, Some(&conf.replace("level=INFO", "level=DEBUG")));
+    let said = "logging.conf changed since this program was compiled: fileConfig() reads its \
+                file when the program is compiled, so compile the program again";
+    assert_eq!(changed.stdout, format!("RuntimeError {said}\n"));
+    assert_eq!(
+        changed.stderr,
+        format!("WARNING:root:before\nRuntimeError: {said}\n")
+    );
+    assert_eq!(changed.exit, 1);
+}
+
+/// The entry points that compile from disk read the file a `fileConfig()`
+/// call names, in whichever module calls it: next to the entry file, or in
+/// the project directory, unless the caller gives its text. A file that is
+/// in neither place is reported.
+#[test]
+fn logging_file_config_is_read_from_disk() {
+    let dir = std::env::temp_dir().join(format!("waspy-test-file-config-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a directory");
+    let conf = |level: &str| {
+        format!(
+            "[loggers]\nkeys=root\n\n[handlers]\nkeys=out\n\n[formatters]\nkeys=f\n\n\
+             [logger_root]\nlevel={level}\nhandlers=out\n\n[handler_out]\nclass=StreamHandler\n\
+             args=(sys.stdout,)\nformatter=f\n\n[formatter_f]\n\
+             format=%(levelname)s:%(name)s:%(message)s\n"
+        )
+    };
+    let main = dedent(
+        r#"
+        import applog
+
+        def main() -> None:
+            applog.configure()
+            applog.say("hello")
+
+        if __name__ == "__main__":
+            main()
+    "#,
+    );
+    let applog = dedent(
+        r#"
+        import logging
+        import logging.config
+
+        def configure() -> None:
+            logging.config.fileConfig("logging.conf")
+
+        def say(text: str) -> None:
+            logging.getLogger("app").info(text)
+            logging.getLogger("app").error("goodbye")
+    "#,
+    );
+    std::fs::write(dir.join("main.py"), &main).expect("main.py");
+    std::fs::write(dir.join("applog.py"), applog).expect("applog.py");
+    std::fs::write(dir.join("logging.conf"), conf("INFO")).expect("logging.conf");
+    let options = waspy::CompilerOptions {
+        optimize: false,
+        ..waspy::CompilerOptions::default()
+    };
+    let run = |wasm: &[u8], found: &str| {
+        let mut host = Host::with_input("", &[]);
+        host.files
+            .insert("logging.conf".to_string(), found.as_bytes().to_vec());
+        run_wasm_main(wasm, host).0
+    };
+
+    // Next to the entry file.
+    let wasm = waspy::compile_python_file_with_options(dir.join("main.py"), &options)
+        .expect("compiles with the file next to it");
+    let ran = run(&wasm, &conf("INFO"));
+    assert_eq!(ran.stdout, "INFO:app:hello\nERROR:app:goodbye\n");
+    assert_eq!(ran.stderr, "");
+
+    // In the project directory.
+    let wasm = waspy::compile_python_project_with_options(&dir, &options)
+        .expect("compiles with the file in the project");
+    assert_eq!(
+        run(&wasm, &conf("INFO")).stdout,
+        "INFO:app:hello\nERROR:app:goodbye\n"
+    );
+
+    // The text the caller gives is the one compiled, whatever the disk holds.
+    let given = waspy::CompilerOptions {
+        data_files: vec![("logging.conf".to_string(), conf("ERROR"))],
+        ..options.clone()
+    };
+    let wasm = waspy::compile_python_file_with_options(dir.join("main.py"), &given)
+        .expect("compiles with the text given");
+    assert_eq!(run(&wasm, &conf("ERROR")).stdout, "ERROR:app:goodbye\n");
+    let other = run(&wasm, &conf("INFO"));
+    assert_eq!(other.exit, 1);
+    assert!(
+        other
+            .stderr
+            .starts_with("RuntimeError: logging.conf changed since this program was compiled"),
+        "{}",
+        other.stderr
+    );
+
+    // No file anywhere.
+    std::fs::remove_file(dir.join("logging.conf")).expect("removed");
+    let message = waspy::compile_python_file_with_options(dir.join("main.py"), &options)
+        .map(|_| ())
+        .map_err(|e| format!("{e:#}"))
+        .expect_err("a file that is not there must be reported");
+    assert!(
+        message.contains("fileConfig() reads 'logging.conf' at compile time")
+            && message.contains("CompilerOptions::data_files"),
+        "{message}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
 #[test]
 fn logging_filter_adds_a_record_field() {
     prints(

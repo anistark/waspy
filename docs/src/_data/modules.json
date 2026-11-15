@@ -1152,7 +1152,7 @@
   },
   "stdlib": {
     "title": "STANDARD LIBRARY",
-    "status": "progress",
+    "status": "done",
     "version": "0.8.0",
     "features": [
       {
@@ -1324,8 +1324,10 @@
         "test": "stdlib::logging_timed_rotating_file_handler"
       },
       {
-        "name": "logging module: logging.config.fileConfig (refused today)",
-        "status": "todo"
+        "name": "logging module: logging.config.fileConfig, its file read when the program is compiled and checked when it runs: formatters, handlers of logging, logging.handlers, and the program with their args and kwargs, levels, the root and named loggers, qualname, propagate, disable_existing_loggers, defaults, and the file's DEFAULT section and interpolation",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::logging_file_config"
       }
     ]
   },

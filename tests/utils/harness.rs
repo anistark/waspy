@@ -992,6 +992,52 @@ pub fn run_main_on(source: &str, host: Host) -> (Run, Host) {
     (run, host)
 }
 
+/// Compile a program with the data files it reads when it is compiled
+/// (`CompilerOptions::data_files`), each a path as the program writes it and
+/// the file's text.
+pub fn try_compile_with_files(source: &str, files: &[(&str, &str)]) -> Result<Vec<u8>, String> {
+    let options = CompilerOptions {
+        optimize: false,
+        data_files: files
+            .iter()
+            .map(|(path, text)| (path.to_string(), text.to_string()))
+            .collect(),
+        ..CompilerOptions::default()
+    };
+    compile_python_to_wasm_with_options(source, &options).map_err(|e| format!("{e:#}"))
+}
+
+/// Compile a program with the data `files` it reads when it is compiled, and
+/// run its `__main__` block on `host`, whose own files are what the program
+/// finds when it runs.
+pub fn run_main_with_files(source: &str, files: &[(&str, &str)], host: Host) -> (Run, Host) {
+    let wasm =
+        try_compile_with_files(source, files).unwrap_or_else(|e| panic!("compile failed: {e}"));
+    run_wasm_main(&wasm, host)
+}
+
+/// Run a compiled program's `__main__` block (`_start`) on `host`, answering
+/// what it printed and the host as the program left it.
+pub fn run_wasm_main(wasm: &[u8], host: Host) -> (Run, Host) {
+    let (instance, mut store) = instantiate_unstarted(wasm, host);
+    let start = instance
+        .get_typed_func::<(), ()>(&store, "_start")
+        .expect("an exported _start");
+    let exit = match start.call(&mut store, ()) {
+        Ok(()) => 0,
+        Err(trap) => trap
+            .i32_exit_status()
+            .unwrap_or_else(|| panic!("_start trapped: {trap}")),
+    };
+    let host = store.into_data();
+    let run = Run {
+        stdout: String::from_utf8(host.stdout.clone()).expect("utf-8 stdout"),
+        stderr: String::from_utf8(host.stderr.clone()).expect("utf-8 stderr"),
+        exit,
+    };
+    (run, host)
+}
+
 /// Call an exported zero-argument `i32` function and return its answer with
 /// what it printed to standard output.
 pub fn call_i32_printing(source: &str, func: &str) -> (i32, String) {

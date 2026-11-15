@@ -53,7 +53,11 @@ pub(crate) use imports::module_dependencies;
 pub(crate) use imports::resolve_module_bindings;
 pub use itertools::{lower_itertools, ITERTOOLS_FN_PREFIX};
 pub use json::lower_json;
-pub use logging::{lower_logging, LOGGING_FN_PREFIX, LOG_METHOD, LOG_NOW_METHOD, MODULE_ROOT_FN};
+pub(crate) use logging::config_files;
+pub use logging::{
+    lower_logging, FILE_CONFIG_CHECK_FN, LOGGING_FN_PREFIX, LOG_METHOD, LOG_NOW_METHOD,
+    MODULE_ROOT_FN,
+};
 pub use metaclasses::{apply_metaclasses, METACLASS_FN_PREFIX};
 pub use partials::{lower_partials, CMP_KEY_PREFIX, PARTIAL_FN_PREFIX};
 pub use re::{lower_re, RE_FN_PREFIX};

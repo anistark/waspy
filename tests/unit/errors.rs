@@ -6,7 +6,7 @@
 #[path = "../utils/harness.rs"]
 mod harness;
 
-use harness::{dedent, try_compile};
+use harness::{dedent, try_compile, try_compile_with_files};
 
 /// Compile expecting failure and return the full error chain text.
 fn compile_error(source: &str) -> String {
@@ -475,6 +475,356 @@ fn user_classes_refuse_what_they_cannot_answer() {
     }
 }
 
+/// A configuration file `fileConfig()` reads, with `changes` in place of
+/// its lines that set the same option, or added to its handler's section,
+/// which is the last.
+fn logging_conf(changes: &[&str]) -> String {
+    let mut lines: Vec<String> = [
+        "[loggers]",
+        "keys=root",
+        "[handlers]",
+        "keys=h",
+        "[formatters]",
+        "keys=f",
+        "[logger_root]",
+        "level=INFO",
+        "handlers=h",
+        "[formatter_f]",
+        "format=%(message)s",
+        "[handler_h]",
+        "class=StreamHandler",
+        "args=(sys.stdout,)",
+        "formatter=f",
+    ]
+    .iter()
+    .map(|l| l.to_string())
+    .collect();
+    for change in changes {
+        let key = change.split_once('=').map_or(*change, |(k, _)| k);
+        match lines
+            .iter()
+            .position(|l| l.split_once('=').is_some_and(|(k, _)| k == key))
+        {
+            Some(at) => lines[at] = change.to_string(),
+            None => lines.push(change.to_string()),
+        }
+    }
+    lines.join("\n") + "\n"
+}
+
+/// `fileConfig()` reads its file when the program is compiled, so what it
+/// cannot read then, or cannot write out as the classes it has, is refused:
+/// none of it is accepted and left out.
+#[test]
+fn file_config_refuses_what_it_cannot_write_out() {
+    let call =
+        "import logging.config\ndef f() -> None:\n    logging.config.fileConfig(\"f.conf\")\n";
+    // The call itself.
+    let calls: &[(&str, &str)] = &[
+        (
+            "import logging.config\ndef f(path: str) -> None:\n    logging.config.fileConfig(path)\n",
+            "reads its file at compile time",
+        ),
+        (
+            "import logging.config\nimport os\ndef f() -> None:\n    logging.config.fileConfig(os.path.join(\"etc\", \"f.conf\"))\n",
+            "reads its file at compile time",
+        ),
+        (
+            "import logging.config\ndef f(d: dict[str, str]) -> None:\n    logging.config.fileConfig(\"f.conf\", d)\n",
+            "defaults are a dict of strs written out",
+        ),
+        (
+            "import logging.config\ndef f() -> None:\n    logging.config.fileConfig(\"f.conf\", {\"port\": 9000})\n",
+            "defaults are a dict of strs written out",
+        ),
+        (
+            "import logging.config\ndef f() -> None:\n    logging.config.fileConfig(\"f.conf\", encoding=\"latin-1\")\n",
+            "reads its file as UTF-8",
+        ),
+        (
+            "import logging.config\ndef f() -> None:\n    logging.config.fileConfig(\"f.conf\", nope=1)\n",
+            "raises TypeError: fileConfig() got an unexpected keyword argument 'nope'",
+        ),
+        (
+            "import logging.config\ndef f() -> None:\n    logging.config.fileConfig(\"f.conf\", None, True, None, 5)\n",
+            "raises TypeError: fileConfig() takes from 1 to 4 positional arguments but 5 were given",
+        ),
+        (
+            "import logging.config\ndef f() -> None:\n    x = logging.config.fileConfig(\"f.conf\")\n",
+            "fileConfig() is supported as a statement",
+        ),
+        // A logger's flags are the file's ints in CPython, and bools here.
+        (
+            "import logging\nimport logging.config\ndef f() -> bool:\n    logging.config.fileConfig(\"f.conf\")\n    return logging.getLogger(\"a\").propagate\n",
+            "reading a logger's 'propagate' in a program that calls logging.config.fileConfig()",
+        ),
+        (
+            "import logging\nimport logging.config\nlog = logging.getLogger(\"a\")\ndef f() -> None:\n    logging.config.fileConfig(\"f.conf\")\n    print(log.disabled)\n",
+            "reading a logger's 'disabled' in a program that calls logging.config.fileConfig()",
+        ),
+    ];
+    for (source, needle) in calls {
+        let message = try_compile_with_files(source, &[("f.conf", &logging_conf(&[]))])
+            .expect_err("this call must be refused");
+        assert!(message.contains(needle), "{source}\n{message}");
+    }
+    // The file.
+    let files: &[(&[&str], &str)] = &[
+        (&["class=Formatter"], "is not one this module can name"),
+        (
+            &["class=mypackage.Handler"],
+            "is not one this module can name",
+        ),
+        (
+            &["class=handlers.SocketHandler"],
+            "logging.handlers.SocketHandler needs a socket",
+        ),
+        (
+            &["class=FileHandler", "args=(open('a.log'),)"],
+            "which hold an expression that is not a constant",
+        ),
+        (
+            &["class=FileHandler", "args=(os.getcwd() + '/a.log',)"],
+            "which hold an expression that is not a constant",
+        ),
+        (
+            &["class=FileHandler", "args=('a.log')"],
+            "which are not a tuple or a list written out",
+        ),
+        (
+            &["class=FileHandler", "args=(sys.stdout,)"],
+            "the stream of a StreamHandler here",
+        ),
+        (&["args=(name,)"], "which hold the name 'name'"),
+        (
+            &["args=(sys.stdin,)"],
+            "an attribute other than sys.stdout or sys.stderr",
+        ),
+        (&["args=(1,"], "raises SyntaxError"),
+        (&["kwargs=[1]"], "which are not a dict written out"),
+        (
+            &["class=__main__.Mine", "args=()", "target=h"],
+            "names a target, which is supported for handlers.MemoryHandler",
+        ),
+        (
+            &["class=FileHandler", "args=('a.log', 'a', 'latin-1')"],
+            "FileHandler() writes UTF-8 here",
+        ),
+        (
+            &["format=%(nope)s"],
+            "the logging format \"%(nope)s\" cannot be rendered",
+        ),
+    ];
+    for (changes, needle) in files {
+        let conf = logging_conf(changes);
+        let message = try_compile_with_files(call, &[("f.conf", &conf)])
+            .expect_err("this file must be refused");
+        assert!(message.contains(needle), "{conf}\n{message}");
+    }
+    // A formatter's class and defaults, in its own section.
+    for (line, needle) in [
+        (
+            "class=mypackage.Formatter",
+            "where a formatter is a logging.Formatter here",
+        ),
+        ("defaults={'a': 'b'}", "has defaults"),
+    ] {
+        let conf =
+            logging_conf(&[]).replace("format=%(message)s", &format!("format=%(message)s\n{line}"));
+        let message = try_compile_with_files(call, &[("f.conf", &conf)])
+            .expect_err("this formatter must be refused");
+        assert!(message.contains(needle), "{conf}\n{message}");
+    }
+    // The file as it is compiles.
+    try_compile_with_files(call, &[("f.conf", &logging_conf(&[]))])
+        .expect("the file itself compiles");
+}
+
+/// An empty file is CPython's `RuntimeError`, reported when compiling.
+#[test]
+fn file_config_reports_an_empty_file() {
+    let source =
+        "import logging.config\ndef f() -> None:\n    logging.config.fileConfig(\"f.conf\")\n";
+    let message = try_compile_with_files(source, &[("f.conf", "")])
+        .expect_err("an empty file must be rejected");
+    assert!(
+        message
+            .contains("logging.config.fileConfig() raises RuntimeError: f.conf is an empty file"),
+        "{message}"
+    );
+}
+
+/// A program's signatures are read without its data files: nothing is
+/// compiled, so a `fileConfig()` call is not a reason to fail.
+#[test]
+fn file_config_does_not_fail_function_metadata() {
+    let source = "import logging.config\ndef f(n: int) -> None:\n    logging.config.fileConfig(\"f.conf\")\n";
+    let signatures = waspy::get_python_file_metadata(source).expect("signatures");
+    assert_eq!(signatures.len(), 1);
+    assert_eq!(signatures[0].name, "f");
+    assert_eq!(signatures[0].parameters, vec!["n: int"]);
+}
+
+/// A file CPython's `fileConfig()` rejects is rejected when the program is
+/// compiled, with the exception CPython 3.13 raises for the same file: each
+/// message here is CPython's own.
+#[test]
+fn file_config_reports_what_cpython_raises() {
+    let source =
+        "import logging.config\ndef f() -> None:\n    logging.config.fileConfig(\"f.conf\")\n";
+    let cases: &[(&str, &str)] = &[
+        (
+            // no section header
+            "keys=root\n[loggers]\n",
+            "RuntimeError: f.conf is invalid: File contains no section headers.\nfile: 'f.conf', line: 1\n'keys=root\\n'",
+        ),
+        (
+            // a line that is no option
+            "[loggers]\nkeys=root\n\n[handlers]\nkeys=h\n\n[formatters]\nkeys=f\n\n[logger_root]\nlevel=INFO\nhandlers=h\n\n[handler_h]\nclass=StreamHandler\nargs=(sys.stdout,)\nformatter=f\n\n[formatter_f]\nformat=%(message)s\n[more]\nbogus line\nanother\n",
+            "RuntimeError: f.conf is invalid: Source contains parsing errors: 'f.conf'\n\t[line 22]: 'bogus line\\n'\n\t[line 23]: 'another\\n'",
+        ),
+        (
+            // an option twice
+            "[loggers]\nkeys=root\n\n[handlers]\nkeys=h\n\n[formatters]\nkeys=f\n\n[logger_root]\nlevel=INFO\nhandlers=h\n\n[handler_h]\nclass=StreamHandler\nargs=(sys.stdout,)\nformatter=f\n\n[formatter_f]\nformat=%(message)s\n[more]\nk=1\nK=2\n",
+            "configparser.DuplicateOptionError: While reading from 'f.conf' [line 23]: option 'k' in section 'more' already exists",
+        ),
+        (
+            // a section twice
+            "[loggers]\nkeys=root\n\n[handlers]\nkeys=h\n\n[formatters]\nkeys=f\n\n[logger_root]\nlevel=INFO\nhandlers=h\n\n[handler_h]\nclass=StreamHandler\nargs=(sys.stdout,)\nformatter=f\n\n[formatter_f]\nformat=%(message)s\n[loggers]\nkeys=root\n",
+            "configparser.DuplicateSectionError: While reading from 'f.conf' [line 21]: section 'loggers' already exists",
+        ),
+        (
+            // no formatters section
+            "[loggers]\nkeys=root\n\n[handlers]\nkeys=h\n\n[logger_root]\nlevel=INFO\nhandlers=h\n\n[handler_h]\nclass=StreamHandler\nargs=(sys.stdout,)\nformatter=f\n\n[formatter_f]\nformat=%(message)s\n",
+            "KeyError: 'formatters'",
+        ),
+        (
+            // no keys
+            "[loggers]\nkeys=root\n\n[handlers]\n\n[formatters]\nkeys=f\n\n[logger_root]\nlevel=INFO\nhandlers=h\n\n[handler_h]\nclass=StreamHandler\nargs=(sys.stdout,)\nformatter=f\n\n[formatter_f]\nformat=%(message)s\n",
+            "KeyError: 'keys'",
+        ),
+        (
+            // no section for a handler
+            "[loggers]\nkeys=root\n\n[handlers]\nkeys=h\n\n[formatters]\nkeys=f\n\n[logger_root]\nlevel=INFO\nhandlers=h\n\n[formatter_f]\nformat=%(message)s\n",
+            "KeyError: 'handler_h'",
+        ),
+        (
+            // no section for a formatter
+            "[loggers]\nkeys=root\n\n[handlers]\nkeys=h\n\n[formatters]\nkeys=f\n\n[logger_root]\nlevel=INFO\nhandlers=h\n\n[handler_h]\nclass=StreamHandler\nargs=(sys.stdout,)\nformatter=f\n",
+            "KeyError: 'formatter_f'",
+        ),
+        (
+            // a handler with no class
+            "[loggers]\nkeys=root\n\n[handlers]\nkeys=h\n\n[formatters]\nkeys=f\n\n[logger_root]\nlevel=INFO\nhandlers=h\n\n[handler_h]\nargs=(sys.stdout,)\nformatter=f\n\n[formatter_f]\nformat=%(message)s\n",
+            "KeyError: 'class'",
+        ),
+        (
+            // a level with no name
+            "[loggers]\nkeys=root\n\n[handlers]\nkeys=h\n\n[formatters]\nkeys=f\n\n[logger_root]\nlevel=LOUD\nhandlers=h\n\n[handler_h]\nclass=StreamHandler\nargs=(sys.stdout,)\nformatter=f\n\n[formatter_f]\nformat=%(message)s\n",
+            "ValueError: Unknown level: 'LOUD'",
+        ),
+        (
+            // a level written as a number
+            "[loggers]\nkeys=root\n\n[handlers]\nkeys=h\n\n[formatters]\nkeys=f\n\n[logger_root]\nlevel=INFO\nhandlers=h\n\n[handler_h]\nclass=StreamHandler\nargs=(sys.stdout,)\nformatter=f\nlevel=10\n\n[formatter_f]\nformat=%(message)s\n",
+            "ValueError: Unknown level: '10'",
+        ),
+        (
+            // a formatter no section makes
+            "[loggers]\nkeys=root\n\n[handlers]\nkeys=h\n\n[formatters]\nkeys=f\n\n[logger_root]\nlevel=INFO\nhandlers=h\n\n[handler_h]\nclass=StreamHandler\nargs=(sys.stdout,)\nformatter=nope\n\n[formatter_f]\nformat=%(message)s\n",
+            "KeyError: 'nope'",
+        ),
+        (
+            // a handler no section makes
+            "[loggers]\nkeys=root\n\n[handlers]\nkeys=h\n\n[formatters]\nkeys=f\n\n[logger_root]\nlevel=INFO\nhandlers=h, nope\n\n[handler_h]\nclass=StreamHandler\nargs=(sys.stdout,)\nformatter=f\n\n[formatter_f]\nformat=%(message)s\n",
+            "KeyError: 'nope'",
+        ),
+        (
+            // no root logger
+            "[loggers]\nkeys=app\n\n[handlers]\nkeys=h\n\n[formatters]\nkeys=f\n\n[logger_root]\nlevel=INFO\nhandlers=h\n\n[handler_h]\nclass=StreamHandler\nargs=(sys.stdout,)\nformatter=f\n\n[formatter_f]\nformat=%(message)s\n",
+            "ValueError: list.remove(x): x not in list",
+        ),
+        (
+            // no section for the root
+            "[loggers]\nkeys=root\n\n[handlers]\nkeys=h\n\n[formatters]\nkeys=f\n\n[handler_h]\nclass=StreamHandler\nargs=(sys.stdout,)\nformatter=f\n\n[formatter_f]\nformat=%(message)s\n",
+            "KeyError: 'logger_root'",
+        ),
+        (
+            // a root with no handlers option
+            "[loggers]\nkeys=root\n\n[handlers]\nkeys=h\n\n[formatters]\nkeys=f\n\n[logger_root]\nlevel=INFO\n\n[handler_h]\nclass=StreamHandler\nargs=(sys.stdout,)\nformatter=f\n\n[formatter_f]\nformat=%(message)s\n",
+            "KeyError: 'handlers'",
+        ),
+        (
+            // a logger with no qualname
+            "[loggers]\nkeys=root,app\n\n[handlers]\nkeys=h\n\n[formatters]\nkeys=f\n\n[logger_root]\nlevel=INFO\nhandlers=h\n\n[handler_h]\nclass=StreamHandler\nargs=(sys.stdout,)\nformatter=f\n\n[formatter_f]\nformat=%(message)s\n\n[logger_app]\nhandlers=\n",
+            "KeyError: 'qualname'",
+        ),
+        (
+            // a propagate that is no int
+            "[loggers]\nkeys=root,app\n\n[handlers]\nkeys=h\n\n[formatters]\nkeys=f\n\n[logger_root]\nlevel=INFO\nhandlers=h\n\n[handler_h]\nclass=StreamHandler\nargs=(sys.stdout,)\nformatter=f\n\n[formatter_f]\nformat=%(message)s\n\n[logger_app]\nhandlers=\nqualname=app\npropagate=yes\n",
+            "ValueError: invalid literal for int() with base 10: 'yes'",
+        ),
+        (
+            // an interpolation of an option that is not there
+            "[loggers]\nkeys=root\n\n[handlers]\nkeys=h\n\n[formatters]\nkeys=f\n\n[logger_root]\nlevel=INFO\nhandlers=h\n\n[handler_h]\nclass=StreamHandler\nargs=('%(nope)s',)\nformatter=f\n\n[formatter_f]\nformat=%(message)s\n",
+            "configparser.InterpolationMissingOptionError: Bad value substitution: option 'args' in section 'handler_h' contains an interpolation key 'nope' which is not a valid option name. Raw value: \"('%(nope)s',)\"",
+        ),
+        (
+            // a percent sign alone
+            "[loggers]\nkeys=root\n\n[handlers]\nkeys=h\n\n[formatters]\nkeys=f\n\n[logger_root]\nlevel=INFO\nhandlers=h\n\n[handler_h]\nclass=StreamHandler\nargs=('50%',)\nformatter=f\n\n[formatter_f]\nformat=%(message)s\n",
+            "configparser.InterpolationSyntaxError: '%' must be followed by '%' or '(', found: \"%',)\"",
+        ),
+        (
+            // a reference left open
+            "[loggers]\nkeys=root\n\n[handlers]\nkeys=h\n\n[formatters]\nkeys=f\n\n[logger_root]\nlevel=INFO\nhandlers=h\n\n[handler_h]\nclass=StreamHandler\nargs=('%(open',)\nformatter=f\n\n[formatter_f]\nformat=%(message)s\n",
+            "configparser.InterpolationSyntaxError: bad interpolation variable reference \"%(open',)\"",
+        ),
+        (
+            // an interpolation that never ends
+            "[loggers]\nkeys=root\n\n[handlers]\nkeys=h\n\n[formatters]\nkeys=f\n\n[logger_root]\nlevel=INFO\nhandlers=h\n\n[handler_h]\nclass=StreamHandler\nargs=(%(a)s,)\nformatter=f\na=%(b)s\nb=%(a)s\n\n[formatter_f]\nformat=%(message)s\n",
+            "configparser.InterpolationDepthError: Recursion limit exceeded in value substitution: option 'args' in section 'handler_h' contains an interpolation key which cannot be substituted in 10 steps. Raw value: '(%(a)s,)'",
+        ),
+        (
+            // a style that is none of the three
+            "[loggers]\nkeys=root\n\n[handlers]\nkeys=h\n\n[formatters]\nkeys=f\n\n[logger_root]\nlevel=INFO\nhandlers=h\n\n[handler_h]\nclass=StreamHandler\nargs=(sys.stdout,)\nformatter=f\n\n[formatter_f]\nformat=%(message)s\nstyle=?\n",
+            "ValueError: Style must be one of: %,{,$",
+        ),
+        (
+            // a target no section makes
+            "[loggers]\nkeys=root\n\n[handlers]\nkeys=h,m\n\n[formatters]\nkeys=f\n\n[logger_root]\nlevel=INFO\nhandlers=h\n\n[handler_h]\nclass=StreamHandler\nargs=(sys.stdout,)\nformatter=f\n\n[formatter_f]\nformat=%(message)s\n\n[handler_m]\nclass=handlers.MemoryHandler\nargs=(5,)\ntarget=nope\n",
+            "KeyError: 'nope'",
+        ),
+        (
+            // a class of logging.handlers named bare
+            "[loggers]\nkeys=root\n\n[handlers]\nkeys=h\n\n[formatters]\nkeys=f\n\n[logger_root]\nlevel=INFO\nhandlers=h\n\n[handler_h]\nclass=RotatingFileHandler\nargs=('a.log',)\nformatter=f\n\n[formatter_f]\nformat=%(message)s\n",
+            "ModuleNotFoundError: No module named 'RotatingFileHandler'",
+        ),
+        (
+            // too many arguments for a StreamHandler
+            "[loggers]\nkeys=root\n\n[handlers]\nkeys=h\n\n[formatters]\nkeys=f\n\n[logger_root]\nlevel=INFO\nhandlers=h\n\n[handler_h]\nclass=StreamHandler\nargs=(sys.stdout, 5)\nformatter=f\n\n[formatter_f]\nformat=%(message)s\n",
+            "TypeError: StreamHandler.__init__() takes from 1 to 2 positional arguments but 3 were given",
+        ),
+        (
+            // a keyword a StreamHandler does not take
+            "[loggers]\nkeys=root\n\n[handlers]\nkeys=h\n\n[formatters]\nkeys=f\n\n[logger_root]\nlevel=INFO\nhandlers=h\n\n[handler_h]\nclass=StreamHandler\nargs=()\nformatter=f\nkwargs={'mode': 'w'}\n\n[formatter_f]\nformat=%(message)s\n",
+            "TypeError: StreamHandler.__init__() got an unexpected keyword argument 'mode'",
+        ),
+        (
+            // a stream given twice
+            "[loggers]\nkeys=root\n\n[handlers]\nkeys=h\n\n[formatters]\nkeys=f\n\n[logger_root]\nlevel=INFO\nhandlers=h\n\n[handler_h]\nclass=StreamHandler\nargs=(sys.stdout,)\nformatter=f\nkwargs={'stream': sys.stderr}\n\n[formatter_f]\nformat=%(message)s\n",
+            "TypeError: StreamHandler.__init__() got multiple values for argument 'stream'",
+        ),
+    ];
+    for (conf, raised) in cases {
+        let message = try_compile_with_files(source, &[("f.conf", conf)])
+            .expect_err("a file CPython rejects must be rejected");
+        let needle = format!("logging.config.fileConfig() raises {raised}");
+        assert!(
+            message.contains(&needle),
+            "expected `{needle}` in: {message}\nfor the file:\n{conf}"
+        );
+    }
+}
+
 /// A list or tuple in a place declared to hold an instance would be read as
 /// one, its fields being whatever the collection's block holds.
 #[test]
@@ -513,7 +863,11 @@ fn logging_refuses_what_it_cannot_do() {
         ),
         (
             "import logging.config\ndef f() -> None:\n    logging.config.fileConfig(\"x.ini\")\n",
-            "logging.config.fileConfig() is not supported",
+            "the compiler was not given it",
+        ),
+        (
+            "import logging.config\ndef f() -> None:\n    logging.config.listen()\n",
+            "logging.config.listen() is not supported",
         ),
         (
             "import logging\ndef f() -> None:\n    logging.warning(\"x\", extra={\"name\": \"y\"})\n",
