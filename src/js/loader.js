@@ -48,6 +48,9 @@ export class PythonError extends Error {
 /// A value JSON would not carry over as it is.
 class Unsupported extends Error {}
 
+/// A string's code points, each a string.
+const codePoints = (s) => Array.from(s);
+
 export class Bridge {
     constructor({ globals = globalThis, modules = {} } = {}) {
         this.globals = globals;
@@ -228,9 +231,12 @@ export class Bridge {
                 this.memory().set(this.bytes, at);
             },
             equal: (a, b) => (this.get(a) === this.get(b) ? 1 : 0),
+            // A string's length and items count code points, as the str
+            // Pyodide makes of it does.
             length: (h) => {
                 const v = this.get(h);
-                if (typeof v === 'string' || Array.isArray(v)) return v.length;
+                if (typeof v === 'string') return codePoints(v).length;
+                if (Array.isArray(v)) return v.length;
                 if (v !== null && typeof v === 'object') {
                     if (typeof v.length === 'number') return v.length;
                     if (typeof v.size === 'number') return v.size;
@@ -239,10 +245,21 @@ export class Bridge {
             },
             item: (h, i) => {
                 const v = this.get(h);
+                if (typeof v === 'string') {
+                    const chars = codePoints(v);
+                    const at = i < 0 ? i + chars.length : i;
+                    return at < 0 || at >= chars.length ? -4 : this.add(chars[at]);
+                }
+                // What Pyodide indexes: an array, a typed array, and the DOM's
+                // iterable collections (a NodeList, an HTMLCollection), not
+                // any object with a length.
                 const arrayLike =
                     Array.isArray(v) ||
                     ArrayBuffer.isView(v) ||
-                    (v !== null && typeof v === 'object' && typeof v.length === 'number');
+                    (v !== null &&
+                        typeof v === 'object' &&
+                        typeof v.length === 'number' &&
+                        typeof v[Symbol.iterator] === 'function');
                 if (!arrayLike) return -3;
                 const at = i < 0 ? i + v.length : i;
                 return at < 0 || at >= v.length ? -1 : this.add(v[at]);

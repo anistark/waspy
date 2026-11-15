@@ -394,6 +394,45 @@ fn keyword_arguments_and_property_augmented_assignment() {
     );
 }
 
+/// A JavaScript string is the str Pyodide makes of it: its length and items
+/// count code points, and an item past its end is `string index out of
+/// range`. An array's missing item is the index, and an object that only has
+/// a `length` is not subscriptable.
+#[test]
+fn js_strings_are_indexed_by_code_points() {
+    prints(
+        r#"
+        from js import JSON
+
+
+        def main() -> None:
+            s = JSON.parse('"hé\U0001F600lo"')
+            print(len(s), s[2] == "\U0001F600", s[3], s[-1], s[-4])
+            for k in [10, -10]:
+                try:
+                    print(s[k])
+                except IndexError as e:
+                    print("str", k, e)
+            a = JSON.parse("[1, 2]")
+            try:
+                print(a[5])
+            except IndexError as e:
+                print("arr", e)
+            o = JSON.parse('{"length": 2, "0": "x"}')
+            try:
+                print(o[0])
+            except TypeError as e:
+                print(e)
+
+
+        if __name__ == "__main__":
+            main()
+        "#,
+        "5 True l o \u{e9}\nstr 10 string index out of range\nstr -10 string index out of range\n\
+         arr 5\n'pyodide.ffi.JsProxy' object is not subscriptable\n",
+    );
+}
+
 /// A Python function JavaScript calls through `create_proxy`: its
 /// unannotated parameters take JavaScript values, what it answers goes back
 /// converted, a lambda works the same, a function called for its effect

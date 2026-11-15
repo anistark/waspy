@@ -2643,7 +2643,7 @@ pub fn link_js(linker: &mut Linker<Host>) {
         .func_wrap(m, "length", |c: Caller<'_, Host>, h: i32| -> i32 {
             match c.data().js.value(h) {
                 Js::Arr(items) => items.borrow().len() as i32,
-                Js::Str(s) => s.encode_utf16().count() as i32,
+                Js::Str(s) => s.chars().count() as i32,
                 v @ (Js::Obj(..) | Js::ClassList(_)) => match v.get("length") {
                     Some(Js::Num(n)) => n as i32,
                     _ => -1,
@@ -2658,13 +2658,15 @@ pub fn link_js(linker: &mut Linker<Host>) {
             "item",
             |mut c: Caller<'_, Host>, h: i32, i: i32| -> i32 {
                 let w = &mut c.data_mut().js;
-                let Js::Arr(items) = w.value(h) else {
-                    return -3;
+                // A string is indexed by code points, as Pyodide's str is.
+                let (items, missing) = match w.value(h) {
+                    Js::Arr(items) => (items.borrow().clone(), -1),
+                    Js::Str(s) => (s.chars().map(|ch| Js::Str(ch.to_string())).collect(), -4),
+                    _ => return -3,
                 };
-                let items = items.borrow().clone();
                 let at = if i < 0 { i + items.len() as i32 } else { i };
                 if at < 0 || at as usize >= items.len() {
-                    return -1;
+                    return missing;
                 }
                 w.add(items[at as usize].clone())
             },

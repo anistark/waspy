@@ -470,6 +470,10 @@ fn build_check(ctx: &CompilationContext, op: JsOp) -> Function {
                     text(ctx, "'pyodide.ffi.JsProxy' object is not subscriptable"),
                 )
             });
+            // A string is the str Pyodide makes of it.
+            a.if_(status.eq(-4), |a| {
+                raise_text(a, ctx, "IndexError", text(ctx, "string index out of range"))
+            });
         }
         JsOp::Call => a.if_(status.eq(-3), |a| {
             raise_text(
