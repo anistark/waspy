@@ -1526,6 +1526,60 @@ pub(crate) fn build_bytes_of(ctx: &CompilationContext) -> Function {
     f
 }
 
+/// `(b) -> list`: the ints a bytes value holds, as walking it yields them.
+pub(crate) fn build_bytes_ints(ctx: &CompilationContext) -> Function {
+    use crate::compiler::context::{
+        COLLECTION_CAP, COLLECTION_DATA, COLLECTION_HEADER, COLLECTION_SLOT,
+    };
+    let mut f = function(&[ValType::I32; 3]);
+    let b = 0;
+    let (n, list, i) = (1, 2, 3);
+    emit!(
+        f,
+        // The length sits in the word before the bytes.
+        I::LocalGet(b),
+        I::I32Const(4),
+        I::I32Sub,
+        I::I32Load(w32(0)),
+        I::LocalTee(n),
+        I::I32Const(COLLECTION_SLOT as i32),
+        I::I32Mul,
+        I::I32Const(COLLECTION_HEADER as i32),
+        I::I32Add,
+        I::Call(ctx.alloc_fn()),
+        I::LocalTee(list),
+        I::LocalGet(n),
+        I::I32Store(w32(0)),
+        I::LocalGet(list),
+        I::LocalGet(n),
+        I::I32Store(w32(COLLECTION_CAP as u64)),
+        I::LocalGet(list),
+        I::LocalGet(list),
+        I::I32Const(COLLECTION_HEADER as i32),
+        I::I32Add,
+        I::I32Store(w32(COLLECTION_DATA as u64)),
+        I::Block(BlockType::Empty),
+        I::Loop(BlockType::Empty),
+        I::LocalGet(i),
+        I::LocalGet(n),
+        I::I32GeU,
+        I::BrIf(1),
+        I::LocalGet(list),
+        I::LocalGet(i),
+        I::I32Const(COLLECTION_SLOT as i32),
+        I::I32Mul,
+        I::I32Add,
+        I::LocalGet(b),
+        I::LocalGet(i),
+        I::I32Add,
+        I::I32Load8U(byte()),
+        I::I32Store(w32(COLLECTION_HEADER as u64))
+    );
+    incr(&mut f, i, 1);
+    emit!(f, I::Br(0), I::End, I::End, I::LocalGet(list), I::End);
+    f
+}
+
 /// `(n) -> b`: `n` zero bytes.
 pub(crate) fn build_bytes_zero(ctx: &CompilationContext) -> Function {
     let mut f = function(&[ValType::I32; 1]);

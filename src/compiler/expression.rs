@@ -3175,6 +3175,16 @@ pub(crate) fn emit_as_sequence(
             ));
             IRType::List(Box::new(IRType::String))
         }
+        // A walk over bytes visits its ints. A comprehension (and so
+        // `list(b)`) read the bytes' (offset, length) pair as a list header
+        // and built a list of whatever memory followed.
+        IRType::Bytes => {
+            func.instruction(&Instruction::Drop);
+            func.instruction(&Instruction::Call(
+                ctx.helper(crate::compiler::runtime::Helper::BytesInts),
+            ));
+            IRType::List(Box::new(IRType::Int))
+        }
         // A tuple is laid out as a list is, so a walk reads it as one when
         // its members share a type. One that mixes them is refused: a walk
         // reads every member at one type, so `sorted((1, "a"))` sorted the
