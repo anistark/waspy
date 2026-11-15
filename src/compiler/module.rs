@@ -194,6 +194,11 @@ fn infer_field_value_type(
             }
         }
         IRExpr::UnaryOp { operand, .. } => infer_field_value_type(operand, params, classes),
+        IRExpr::BoolOp { left, right, op } => crate::compiler::expression::bool_op_type(
+            infer_field_value_type(left, params, classes),
+            infer_field_value_type(right, params, classes),
+            op,
+        ),
         IRExpr::Conditional { body, orelse, .. } => match (
             infer_field_value_type(body, params, classes),
             infer_field_value_type(orelse, params, classes),

@@ -5041,35 +5041,24 @@ fn emit_string_pad(func: &mut Function, ctx: &CompilationContext, mode: PadMode,
     func.instruction(&Instruction::LocalGet(newlen));
 }
 
-/// Reduce an already-emitted value to a single i32 that is 1 when Python would
-/// call it truthy, and 0 otherwise.
-///
-/// Every caller that tests a value has to go through this. A `str` is an
-/// `(offset, length)` pair, so testing it directly left the offset on the
-/// stack and the module failed to validate; a collection is a pointer, which
-/// is never null, so an empty list tested as True where Python says False.
-/// Int, bool, and an instance pointer are already their own truth value.
-/// `a and b`, `a or b`, short-circuiting, as a bool. Its operands are
-/// emitted as bools; where the whole expression is tested for truth
-/// (`condition`), each is tested for truth too, so a JavaScript value is as
-/// true as Pyodide's. Elsewhere a JavaScript operand is converted to a bool,
-/// which raises for one that is not, since `xs or ys` answers an operand
-/// there, which this bool would not be.
+/// `a and b`, `a or b`, short-circuiting, as a bool, where the whole
+/// expression is tested for truth (an `if`, a loop's test, a
+/// filter, `not`), each operand is tested for truth, so `if n > 0 or name:`
+/// needs no type the two share. Where its answer is used as a value, it is
+/// [`emit_bool_value`] instead.
 fn emit_bool_op(
     left: &IRExpr,
     right: &IRExpr,
     op: &IRBoolOp,
-    condition: bool,
     func: &mut Function,
     ctx: &CompilationContext,
     memory_layout: &MemoryLayout,
 ) -> IRType {
+    // Each operand reduced to its truth: a str is a pair, which left its
+    // offset behind, and a list a pointer, which made `[] or []` true.
     let operand = |e: &IRExpr, func: &mut Function| {
-        if condition {
-            emit_condition(e, func, ctx, memory_layout);
-        } else {
-            emit_expr(e, func, ctx, memory_layout, Some(&IRType::Bool));
-        }
+        let ty = emit_condition(e, func, ctx, memory_layout);
+        emit_truthiness(func, ctx, &ty);
     };
     match op {
         IRBoolOp::And => {
@@ -5108,6 +5097,497 @@ fn emit_bool_op(
     IRType::Bool
 }
 
+/// A value held while a later operand is emitted: one word, a float, or a
+/// string's `(offset, length)` pair.
+#[derive(Clone, Copy)]
+enum Held {
+    Word(u32),
+    Float(u32),
+    Pair(u32, u32),
+}
+
+impl Held {
+    /// Pop the value of type `ty` on the stack into held slots, or leave it
+    /// there and answer None when there are none left.
+    fn take(func: &mut Function, ctx: &CompilationContext, ty: &IRType) -> Option<Held> {
+        Some(match ty {
+            IRType::Float => {
+                let slot = ctx.hold_f64()?;
+                func.instruction(&Instruction::LocalSet(slot));
+                Held::Float(slot)
+            }
+            IRType::String | IRType::Bytes => {
+                let (offset, length) = Held::pair(ctx)?;
+                func.instruction(&Instruction::LocalSet(length));
+                func.instruction(&Instruction::LocalSet(offset));
+                Held::Pair(offset, length)
+            }
+            _ => {
+                let slot = ctx.hold()?;
+                func.instruction(&Instruction::LocalSet(slot));
+                Held::Word(slot)
+            }
+        })
+    }
+
+    /// Two held words, for a string's pair.
+    fn pair(ctx: &CompilationContext) -> Option<(u32, u32)> {
+        let offset = ctx.hold()?;
+        let Some(length) = ctx.hold() else {
+            ctx.release_held();
+            return None;
+        };
+        Some((offset, length))
+    }
+
+    fn get(self, func: &mut Function) {
+        match self {
+            Held::Word(slot) | Held::Float(slot) => {
+                func.instruction(&Instruction::LocalGet(slot));
+            }
+            Held::Pair(offset, length) => {
+                func.instruction(&Instruction::LocalGet(offset));
+                func.instruction(&Instruction::LocalGet(length));
+            }
+        }
+    }
+
+    fn release(self, ctx: &CompilationContext) {
+        match self {
+            Held::Word(_) => ctx.release_held(),
+            Held::Float(_) => ctx.release_held_f64(),
+            Held::Pair(..) => {
+                ctx.release_held();
+                ctx.release_held();
+            }
+        }
+    }
+}
+
+/// `a or b` / `a and b` whose answer is used as a value. CPython answers one
+/// of the operands, not a bool: `0 or 7` is 7, `xs or [1]` is the list, and
+/// `n and m` is `n` when `n` is false. This answered the operands' truth
+/// instead, so `0 or 7` printed True, and a str operand failed validation.
+///
+/// The left operand is evaluated once and held while it is tested: `or`
+/// answers it when it is true and `and` when it is false, the right operand
+/// otherwise. The two are read as one type, unified as a conditional
+/// expression's arms are ([`conditional_type`]), with two refinements. `or`
+/// answers its left only when it is true, which None never is, so an optional
+/// left is read as what it holds (`name or "anon"` is a str). And a
+/// JavaScript value beside a str or a number is converted to it where it is
+/// the answer, as at a typed store, after it was tested as Pyodide tests it.
+/// Operands with no shared type are refused rather than coerced.
+///
+/// A chain folds left (`(a or b) or c`), and the left operand is emitted
+/// once, so only the right one is probed for its type.
+fn emit_bool_value(
+    left: &IRExpr,
+    right: &IRExpr,
+    op: &IRBoolOp,
+    func: &mut Function,
+    ctx: &CompilationContext,
+    memory_layout: &MemoryLayout,
+    expected_type: Option<&IRType>,
+) -> IRType {
+    let is_or = matches!(op, IRBoolOp::Or);
+    let name = if is_or { "or" } else { "and" };
+    if is_or
+        && matches!(
+            left,
+            IRExpr::BoolOp {
+                op: IRBoolOp::And,
+                ..
+            }
+        )
+    {
+        return emit_or_of_and(left, right, func, ctx, memory_layout, expected_type);
+    }
+    let left_ty = emit_value(left, func, ctx, memory_layout, None);
+    let Some(held) = Held::take(func, ctx, &left_ty) else {
+        ctx.report(format!(
+            "an `{name}` is nested inside more expressions than the compiler reserves room \
+             for. Hint: compute its operands into variables first"
+        ));
+        return left_ty;
+    };
+    // None is never true, so `or` answers its right operand.
+    if is_or && left_ty == IRType::None {
+        held.release(ctx);
+        return emit_value(right, func, ctx, memory_layout, expected_type);
+    }
+    // Give back the left operand as the answer, where the right one is refused.
+    let refuse = |func: &mut Function| {
+        held.get(func);
+        held.release(ctx);
+        left_ty.clone()
+    };
+
+    // What the left operand is read as where it is the answer.
+    let narrowed = is_or && matches!(left_ty, IRType::Optional(_));
+    let mut chosen = match &left_ty {
+        IRType::Optional(inner) if is_or => (**inner).clone(),
+        other => other.clone(),
+    };
+    let (mut right_ty, right_failed) = probe_type(right, ctx, memory_layout, expected_type);
+    if right_failed {
+        // Report what the right operand reports; the module is not built.
+        emit_value(
+            right,
+            &mut Function::new([]),
+            ctx,
+            memory_layout,
+            expected_type,
+        );
+        return refuse(func);
+    }
+    let mut right_expected = expected_type.cloned();
+    let convert_left = js_meets_scalar(&mut chosen, &mut right_ty, &mut right_expected);
+    let Some(ty) = conditional_type(ctx, &chosen, &right_ty, expected_type) else {
+        report_bool_operands(ctx, name, &left_ty, &right_ty);
+        return refuse(func);
+    };
+    // CPython keeps an int it answers where a float is declared.
+    if ty == IRType::Float && matches!(chosen, IRType::Int | IRType::Bool) {
+        check_widening(left, &chosen, Some(&IRType::Float), ctx);
+    }
+    // A string answer travels through held slots, which a single-result
+    // block cannot carry; a string left operand is already in them.
+    let result = match (&ty, held) {
+        (IRType::String | IRType::Bytes, Held::Pair(offset, length)) if !narrowed => {
+            Some((offset, length, false))
+        }
+        (IRType::String | IRType::Bytes, _) => match Held::pair(ctx) {
+            Some((offset, length)) => Some((offset, length, true)),
+            None => {
+                ctx.report(format!(
+                    "an `{name}` is nested inside more expressions than the compiler reserves \
+                     room for. Hint: compute its operands into variables first"
+                ));
+                return refuse(func);
+            }
+        },
+        _ => None,
+    };
+
+    held.get(func);
+    emit_truthiness(func, ctx, &left_ty);
+    func.instruction(&Instruction::If(match ty {
+        IRType::Float => BlockType::Result(ValType::F64),
+        IRType::String | IRType::Bytes => BlockType::Empty,
+        _ => BlockType::Result(ValType::I32),
+    }));
+    ctx.enter_expr_blocks(1);
+    let left_arm = |func: &mut Function| {
+        if matches!(result, Some((_, _, false))) {
+            // The answer is the string already held.
+            return;
+        }
+        held.get(func);
+        if narrowed {
+            narrow_true(func, ctx, &left_ty);
+        }
+        answer_as(func, ctx, &chosen, convert_left, &ty);
+        if let Some((offset, length, _)) = result {
+            func.instruction(&Instruction::LocalSet(length));
+            func.instruction(&Instruction::LocalSet(offset));
+        }
+    };
+    let right_arm = |func: &mut Function| {
+        // An optional number's operand is boxed where it is a number.
+        let expected = if ty == IRType::Float || boxed_scalar(&ty).is_some() {
+            Some(&ty)
+        } else {
+            right_expected.as_ref()
+        };
+        let arm_ty = emit_value(right, func, ctx, memory_layout, expected);
+        if ty == IRType::Float && matches!(arm_ty, IRType::Int | IRType::Bool) {
+            func.instruction(&Instruction::F64ConvertI32S);
+        }
+        if let Some((offset, length, _)) = result {
+            func.instruction(&Instruction::LocalSet(length));
+            func.instruction(&Instruction::LocalSet(offset));
+        }
+    };
+    if is_or {
+        left_arm(func);
+        func.instruction(&Instruction::Else);
+        right_arm(func);
+    } else {
+        right_arm(func);
+        func.instruction(&Instruction::Else);
+        left_arm(func);
+    }
+    ctx.exit_expr_blocks(1);
+    func.instruction(&Instruction::End);
+    if let Some((offset, length, fresh)) = result {
+        func.instruction(&Instruction::LocalGet(offset));
+        func.instruction(&Instruction::LocalGet(length));
+        if fresh {
+            ctx.release_held();
+            ctx.release_held();
+        }
+    }
+    held.release(ctx);
+    ty
+}
+
+/// Where a JavaScript operand meets a str or a number in `and` / `or`, the
+/// JavaScript value is converted to it where it is the answer, as at a typed
+/// store. Answers whether the left one is (`chosen` becomes the other
+/// operand's type); a right one is converted by emitting it with the left's
+/// type expected.
+fn js_meets_scalar(
+    chosen: &mut IRType,
+    right_ty: &mut IRType,
+    right_expected: &mut Option<IRType>,
+) -> bool {
+    let scalar = |t: &IRType| {
+        matches!(
+            t,
+            IRType::Int | IRType::Float | IRType::Bool | IRType::String
+        )
+    };
+    if *chosen == IRType::JsProxy && scalar(right_ty) {
+        *chosen = right_ty.clone();
+        return true;
+    }
+    if *right_ty == IRType::JsProxy && scalar(chosen) {
+        *right_expected = Some(chosen.clone());
+        *right_ty = chosen.clone();
+    }
+    false
+}
+
+fn report_bool_operands(ctx: &CompilationContext, name: &str, left: &IRType, right: &IRType) {
+    ctx.report(format!(
+        "the operands of this `{name}` have different types ({} and {}), and the value it \
+         answers is one of them, which can only be read as one type. Hint: make both \
+         operands the same type, or test it where only its truth is used, as in \
+         `if a {name} b:`",
+        crate::type_to_string(left),
+        crate::type_to_string(right)
+    ));
+}
+
+/// Read the optional of type `ty` on the stack, known to be true, as what it
+/// holds: a number out of its box, a string's pair from its offset, an
+/// instance as the pointer it already is. Answers the type it now is.
+fn narrow_true(func: &mut Function, ctx: &CompilationContext, ty: &IRType) -> IRType {
+    let IRType::Optional(inner) = ty else {
+        return ty.clone();
+    };
+    match boxed_scalar(ty) {
+        Some(IRType::Float) => {
+            func.instruction(&Instruction::F64Load(mem_off(0)));
+        }
+        Some(_) => {
+            func.instruction(&Instruction::I32Load(mem_off(0)));
+        }
+        None if matches!(**inner, IRType::String | IRType::Bytes) => {
+            recover_str_pair(func, ctx);
+        }
+        None => {}
+    }
+    (**inner).clone()
+}
+
+/// Turn an operand of type `chosen` on the stack into the answer's type `ty`:
+/// a JavaScript value converted (`convert`), an int widened to a float, a
+/// number boxed into an optional one.
+fn answer_as(
+    func: &mut Function,
+    ctx: &CompilationContext,
+    chosen: &IRType,
+    convert: bool,
+    ty: &IRType,
+) {
+    if convert {
+        crate::compiler::js::convert_at_store(func, ctx, Some(chosen));
+    }
+    match (ty, chosen) {
+        (IRType::Float, IRType::Int | IRType::Bool) => {
+            func.instruction(&Instruction::F64ConvertI32S);
+        }
+        (IRType::Optional(inner), IRType::Int | IRType::Bool | IRType::Float)
+            if boxed_scalar(ty).is_some() =>
+        {
+            emit_box(func, ctx, inner);
+        }
+        _ => {}
+    }
+}
+
+/// Emit `expr` where only a true value of it is wanted: code that branches
+/// out to the label `falsy` blocks up when it is false, and otherwise leaves
+/// its value, read as a true value is (an optional as what it holds). `a and
+/// b` is true only as a true `b`. Opens no block around what it emits, so
+/// the label stays where it is.
+fn emit_truthy(
+    expr: &IRExpr,
+    func: &mut Function,
+    ctx: &CompilationContext,
+    memory_layout: &MemoryLayout,
+    falsy: u32,
+) -> IRType {
+    if let IRExpr::BoolOp {
+        left,
+        right,
+        op: IRBoolOp::And,
+    } = expr
+    {
+        let ty = emit_condition(left, func, ctx, memory_layout);
+        emit_truthiness(func, ctx, &ty);
+        func.instruction(&Instruction::I32Eqz);
+        func.instruction(&Instruction::BrIf(falsy));
+        return emit_truthy(right, func, ctx, memory_layout, falsy);
+    }
+    let ty = emit_value(expr, func, ctx, memory_layout, None);
+    let Some(held) = Held::take(func, ctx, &ty) else {
+        ctx.report(
+            "an `or` is nested inside more expressions than the compiler reserves room for. \
+             Hint: compute its operands into variables first",
+        );
+        return ty;
+    };
+    held.get(func);
+    emit_truthiness(func, ctx, &ty);
+    func.instruction(&Instruction::I32Eqz);
+    func.instruction(&Instruction::BrIf(falsy));
+    held.get(func);
+    let ty = narrow_true(func, ctx, &ty);
+    held.release(ctx);
+    ty
+}
+
+/// `(c and x) or y`, the idiom older Python wrote for `x if c else y`. The
+/// `and` alone answers `c` or `x`, which may share no type, but `or` answers
+/// it only when it is true, which it is only as a true `x`. So the left side
+/// is emitted where only its true value is wanted ([`emit_truthy`]), inside a
+/// block it leaves for `y` when it is false:
+///
+/// ```text
+/// block $done (result ty)
+///   block $falsy
+///     <c, x: br_if $falsy when false>  x as ty  br $done
+///   end
+///   y as ty
+/// end
+/// ```
+fn emit_or_of_and(
+    left: &IRExpr,
+    right: &IRExpr,
+    func: &mut Function,
+    ctx: &CompilationContext,
+    memory_layout: &MemoryLayout,
+    expected_type: Option<&IRType>,
+) -> IRType {
+    let reported = ctx.errors.borrow().len();
+    let mut chosen = emit_truthy(left, &mut Function::new([]), ctx, memory_layout, 0);
+    let left_failed = ctx.errors.borrow().len() > reported;
+    ctx.errors.borrow_mut().truncate(reported);
+    let (mut right_ty, right_failed) = probe_type(right, ctx, memory_layout, expected_type);
+    let placeholder = |func: &mut Function| {
+        func.instruction(&Instruction::I32Const(0));
+        IRType::Unknown
+    };
+    if left_failed || right_failed {
+        // Report what the operands report, once; the module is not built.
+        let mut scratch = Function::new([]);
+        emit_truthy(left, &mut scratch, ctx, memory_layout, 0);
+        emit_value(right, &mut scratch, ctx, memory_layout, expected_type);
+        return placeholder(func);
+    }
+    let mut right_expected = expected_type.cloned();
+    let convert_left = js_meets_scalar(&mut chosen, &mut right_ty, &mut right_expected);
+    let Some(ty) = conditional_type(ctx, &chosen, &right_ty, expected_type) else {
+        report_bool_operands(ctx, "or", &chosen, &right_ty);
+        return placeholder(func);
+    };
+    let pair = matches!(ty, IRType::String | IRType::Bytes);
+    let result = if pair {
+        let Some(slots) = Held::pair(ctx) else {
+            ctx.report(
+                "an `or` is nested inside more expressions than the compiler reserves room \
+                 for. Hint: compute its operands into variables first",
+            );
+            return placeholder(func);
+        };
+        Some(slots)
+    } else {
+        None
+    };
+    let store = |func: &mut Function| {
+        if let Some((offset, length)) = result {
+            func.instruction(&Instruction::LocalSet(length));
+            func.instruction(&Instruction::LocalSet(offset));
+        }
+    };
+
+    func.instruction(&Instruction::Block(match ty {
+        IRType::Float => BlockType::Result(ValType::F64),
+        IRType::String | IRType::Bytes => BlockType::Empty,
+        _ => BlockType::Result(ValType::I32),
+    }));
+    func.instruction(&Instruction::Block(BlockType::Empty));
+    ctx.enter_expr_blocks(2);
+    let left_ty = emit_truthy(left, func, ctx, memory_layout, 0);
+    // A float the left answers where an int is declared, or the reverse, is
+    // refused as it is for a single operand.
+    if ty == IRType::Float && matches!(left_ty, IRType::Int | IRType::Bool) {
+        check_widening(left, &left_ty, Some(&IRType::Float), ctx);
+    }
+    answer_as(func, ctx, &chosen, convert_left, &ty);
+    store(func);
+    func.instruction(&Instruction::Br(1));
+    ctx.exit_expr_blocks(1);
+    func.instruction(&Instruction::End);
+    let expected = if ty == IRType::Float || boxed_scalar(&ty).is_some() {
+        Some(&ty)
+    } else {
+        right_expected.as_ref()
+    };
+    let arm_ty = emit_value(right, func, ctx, memory_layout, expected);
+    if ty == IRType::Float && matches!(arm_ty, IRType::Int | IRType::Bool) {
+        func.instruction(&Instruction::F64ConvertI32S);
+    }
+    store(func);
+    ctx.exit_expr_blocks(1);
+    func.instruction(&Instruction::End);
+    if let Some((offset, length)) = result {
+        func.instruction(&Instruction::LocalGet(offset));
+        func.instruction(&Instruction::LocalGet(length));
+        ctx.release_held();
+        ctx.release_held();
+    }
+    ty
+}
+
+/// The type `a or b` / `a and b` answers, from its operands' inferred
+/// types, for the scans that type a place before code generation: what
+/// [`emit_bool_value`] reads the answer as, where that is plain.
+pub(crate) fn bool_op_type(left: IRType, right: IRType, op: &IRBoolOp) -> IRType {
+    let left = match (left, op) {
+        (IRType::None, IRBoolOp::Or) => return right,
+        (IRType::Optional(inner), IRBoolOp::Or) => *inner,
+        (t, _) => t,
+    };
+    match (left, right) {
+        (a, b) if a == b => a,
+        (IRType::JsProxy, t) | (t, IRType::JsProxy)
+            if matches!(
+                t,
+                IRType::Int | IRType::Float | IRType::Bool | IRType::String
+            ) =>
+        {
+            t
+        }
+        // An int operand the inference cannot see would be widened.
+        (IRType::Unknown, t) | (t, IRType::Unknown) if t != IRType::Float => t,
+        _ => IRType::Unknown,
+    }
+}
+
 /// Emit an expression tested for truth (`ctx.truth_test`), expecting a
 /// bool as conditions do.
 pub(crate) fn emit_condition(
@@ -5120,6 +5600,14 @@ pub(crate) fn emit_condition(
     emit_expr(expr, func, ctx, memory_layout, Some(&IRType::Bool))
 }
 
+/// Reduce an already-emitted value to a single i32 that is 1 when Python would
+/// call it truthy, and 0 otherwise.
+///
+/// Every caller that tests a value has to go through this. A `str` is an
+/// `(offset, length)` pair, so testing it directly left the offset on the
+/// stack and the module failed to validate; a collection is a pointer, which
+/// is never null, so an empty list tested as True where Python says False.
+/// Int, bool, and an instance pointer are already their own truth value.
 pub(crate) fn emit_truthiness(func: &mut Function, ctx: &CompilationContext, ty: &IRType) {
     match ty {
         IRType::String | IRType::Bytes => {
@@ -7894,7 +8382,7 @@ pub fn emit_expr(
     }
     if truth {
         if let IRExpr::BoolOp { left, right, op } = expr {
-            return emit_bool_op(left, right, op, true, func, ctx, memory_layout);
+            return emit_bool_op(left, right, op, func, ctx, memory_layout);
         }
     }
     let ty = emit_expr_inner(expr, func, ctx, memory_layout, expected_type);
@@ -8803,8 +9291,14 @@ fn emit_expr_inner(
             result_type
         }
         IRExpr::UnaryOp { operand, op } => {
-            // `not f()` of a call answering None tests the None it answers.
-            let operand_type = if matches!(op, IRUnaryOp::Not) {
+            // `not f()` of a call answering None tests the None it answers,
+            // and `not (a or b)` (and `bool(a or b)`, which is `not not`)
+            // only the operands' truth.
+            let operand_type = if let (IRUnaryOp::Not, IRExpr::BoolOp { left, right, op }) =
+                (op, operand.as_ref())
+            {
+                emit_bool_op(left, right, op, func, ctx, memory_layout)
+            } else if matches!(op, IRUnaryOp::Not) {
                 emit_value(operand, func, ctx, memory_layout, None)
             } else {
                 emit_expr(operand, func, ctx, memory_layout, None)
@@ -8910,7 +9404,7 @@ fn emit_expr_inner(
             expected_type,
         ),
         IRExpr::BoolOp { left, right, op } => {
-            emit_bool_op(left, right, op, false, func, ctx, memory_layout)
+            emit_bool_value(left, right, op, func, ctx, memory_layout, expected_type)
         }
         IRExpr::Conditional {
             condition,

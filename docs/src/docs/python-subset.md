@@ -23,7 +23,7 @@ Waspy compiles a typed subset of Python ahead of time. The rule it holds to: a c
 ## Numbers and operators
 
 - Types: integers (32-bit, see [Numbers](/docs/numbers/)), floats, booleans, strings, bytes, and the collections below. `bytes()`, `bytes(n)`, and `bytes(ints)` make bytes (a value out of range(0, 256) raises `ValueError`), and `sep.join(parts)` joins bytes
-- Arithmetic (`+`, `-`, `*`, `/`, `%`, `//`, `**`), comparisons (`==`, `!=`, `<`, `<=`, `>`, `>=`, chained as in `0 <= x <= 100`), boolean operators (`and`, `or`, short-circuiting), and bitwise operators (`&`, `|`, `^`, `<<`, `>>`)
+- Arithmetic (`+`, `-`, `*`, `/`, `%`, `//`, `**`), comparisons (`==`, `!=`, `<`, `<=`, `>`, `>=`, chained as in `0 <= x <= 100`), boolean operators (`and`, `or`, short-circuiting and answering the operand that decides, as CPython's do: `0 or 7` is 7, `name or "anon"` a str), and bitwise operators (`&`, `|`, `^`, `<<`, `>>`)
 
 ## Strings and formatting
 
