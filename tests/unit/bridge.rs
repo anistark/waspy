@@ -542,6 +542,62 @@ fn animation_frames_wake_asyncio_run() {
     );
 }
 
+/// `x[i] = v` of a JavaScript array or typed array, as Pyodide stores it:
+/// past the end an array grows and a typed array ignores it, an index before
+/// the start sets nothing an item reads, and a string or a plain object
+/// refuses it with `TypeError`. A typed array's bytes come out with
+/// `to_bytes()`; bytes go in with `to_js()`.
+#[test]
+fn item_assignment_and_buffers() {
+    prints(
+        r#"
+        from js import JSON, Uint8Array
+        from pyodide.ffi import to_js
+
+
+        def main() -> None:
+            a = JSON.parse("[1, 2, 3]")
+            a[0] = "x"
+            a[-1] = 9
+            a[4] = 5
+            a[-9] = 0
+            print(JSON.stringify(a), len(a))
+            o = JSON.parse('{"k": 1}')
+            try:
+                o[0] = 1
+            except TypeError as e:
+                print("TypeError", e)
+            s = JSON.parse('"ab"')
+            try:
+                s[0] = "x"
+            except TypeError as e:
+                print("TypeError", e)
+            t = Uint8Array.new(2)
+            t[5] = 1
+            t[-1] = 258
+            t[0] += 7
+            print(list(t.to_bytes()), to_js(b"hi").length)
+
+
+        if __name__ == "__main__":
+            main()
+        "#,
+        "[\"x\",2,9,null,5] 5\nTypeError 'pyodide.ffi.JsProxy' object does not support item assignment\n\
+         TypeError 'str' object does not support item assignment\n[7, 2] 2\n",
+    );
+    refused(
+        r#"
+        from js import Uint8Array
+
+
+        def main() -> None:
+            out = bytearray(2)
+            Uint8Array.new(2).assign_to(out)
+        "#,
+        "assign_to() hands over a writable buffer",
+    );
+}
+
 /// A Python function JavaScript calls through `create_proxy`: its
 /// unannotated parameters take JavaScript values, what it answers goes back
 /// converted, a lambda works the same, a function called for its effect

@@ -51,6 +51,13 @@ class Unsupported extends Error {}
 /// A string's code points, each a string.
 const codePoints = (s) => Array.from(s);
 
+/// The bytes of a typed array or an ArrayBuffer, as a view, or null.
+const bytesOf = (v) => {
+    if (ArrayBuffer.isView(v)) return new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+    if (v instanceof ArrayBuffer) return new Uint8Array(v);
+    return null;
+};
+
 export class Bridge {
     constructor({ globals = globalThis, modules = {} } = {}) {
         this.globals = globals;
@@ -419,6 +426,52 @@ export class Bridge {
                 };
                 return this.add(fn);
             },
+            // `x[i] = v` of an array or a typed array (a string is Pyodide's
+            // str, which takes no item assignment).
+            set_item: (h, i, v) =>
+                this.guard(() => {
+                    const target = this.get(h);
+                    if (typeof target === 'string') return -4;
+                    const arrayLike =
+                        Array.isArray(target) ||
+                        ArrayBuffer.isView(target) ||
+                        (target !== null &&
+                            typeof target === 'object' &&
+                            typeof target.length === 'number' &&
+                            typeof target[Symbol.iterator] === 'function');
+                    if (!arrayLike) return -3;
+                    // An index before the start sets a stray property, as
+                    // Pyodide's does, which no item reads.
+                    target[i < 0 ? i + target.length : i] = this.get(v);
+                    return 0;
+                }),
+            // A typed array's (or a buffer's) bytes, for `utf8_copy`, as
+            // `JsBuffer.to_bytes()` copies them.
+            buffer_bytes: (h) => {
+                const view = bytesOf(this.get(h));
+                if (!view) return -1;
+                this.bytes = view.slice();
+                return this.bytes.length;
+            },
+            // `JsBuffer.assign(b)`: `n` bytes of memory copied into a typed
+            // array of bytes of that length, with Pyodide's errors.
+            assign: (h, at, n) => {
+                const target = this.get(h);
+                const view = bytesOf(target);
+                if (!view) return -1;
+                if (ArrayBuffer.isView(target) && !(target instanceof Uint8Array || target instanceof Uint8ClampedArray)) {
+                    this.lastError = 'TypedArray and memorybuffer have incompatible formats';
+                    return -7;
+                }
+                if (view.length !== n) {
+                    this.lastError = `cannot assign to TypedArray of length ${n} from buffer of length ${view.length}`;
+                    return -7;
+                }
+                view.set(this.memory().subarray(at, at + n));
+                return 0;
+            },
+            // `to_js(b)` of bytes: a `Uint8Array` of them.
+            bytes: (at, n) => this.add(this.memory().slice(at, at + n)),
             resolve: (token, failed, h) => {
                 let value = this.get(h);
                 this.drop(h);

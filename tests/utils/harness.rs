@@ -2990,6 +2990,107 @@ pub fn link_js(linker: &mut Linker<Host>) {
     linker
         .func_wrap(
             m,
+            "set_item",
+            |mut c: Caller<'_, Host>, h: i32, i: i32, v: i32| -> i32 {
+                let w = &mut c.data_mut().js;
+                let value = w.value(v);
+                match w.value(h) {
+                    Js::Str(_) => -4,
+                    Js::Arr(items) => {
+                        let mut items = items.borrow_mut();
+                        let at = if i < 0 { i + items.len() as i32 } else { i };
+                        // Before the start, a stray property no item reads.
+                        if at < 0 {
+                            return 0;
+                        }
+                        let at = at as usize;
+                        if at >= items.len() {
+                            items.resize(at + 1, Js::Undefined);
+                        }
+                        items[at] = value;
+                        0
+                    }
+                    Js::Host(o) => match o.length() {
+                        Some(n) => {
+                            let at = if i < 0 { i + n as i32 } else { i };
+                            // Outside it, a typed array ignores the store.
+                            if at >= 0 && (at as usize) < n {
+                                o.set_item(at as usize, &value);
+                            }
+                            0
+                        }
+                        None => -3,
+                    },
+                    _ => -3,
+                }
+            },
+        )
+        .unwrap();
+    linker
+        .func_wrap(
+            m,
+            "buffer_bytes",
+            |mut c: Caller<'_, Host>, h: i32| -> i32 {
+                let w = &mut c.data_mut().js;
+                let value = w.value(h);
+                match graphics::host::<graphics::TypedArray>(&value) {
+                    Some(t) => {
+                        w.bytes = t.bytes();
+                        w.bytes.len() as i32
+                    }
+                    None => -1,
+                }
+            },
+        )
+        .unwrap();
+    linker
+        .func_wrap(
+            m,
+            "assign",
+            |mut c: Caller<'_, Host>, h: i32, at: i32, n: i32| -> i32 {
+                let memory = memory_of(&mut c);
+                let bytes = memory.data(&c)[at as usize..(at + n) as usize].to_vec();
+                let w = &mut c.data_mut().js;
+                let value = w.value(h);
+                let Some(t) = graphics::host::<graphics::TypedArray>(&value) else {
+                    return -1;
+                };
+                if !matches!(t.kind, graphics::Kind::U8 | graphics::Kind::U8Clamped) {
+                    w.last_error = Js::Str(
+                        "TypedArray and memorybuffer have incompatible formats".to_string(),
+                    );
+                    return -7;
+                }
+                let len = t.data.borrow().len();
+                if len != n as usize {
+                    w.last_error = Js::Str(format!(
+                        "cannot assign to TypedArray of length {n} from buffer of length {len}"
+                    ));
+                    return -7;
+                }
+                *t.data.borrow_mut() = bytes.into_iter().map(f64::from).collect();
+                0
+            },
+        )
+        .unwrap();
+    linker
+        .func_wrap(
+            m,
+            "bytes",
+            |mut c: Caller<'_, Host>, at: i32, n: i32| -> i32 {
+                let memory = memory_of(&mut c);
+                let bytes = memory.data(&c)[at as usize..(at + n) as usize].to_vec();
+                let array = graphics::TypedArray::make(
+                    graphics::Kind::U8,
+                    bytes.into_iter().map(f64::from),
+                );
+                c.data_mut().js.add(array)
+            },
+        )
+        .unwrap();
+    linker
+        .func_wrap(
+            m,
             "resolve",
             |mut c: Caller<'_, Host>, token: i32, failed: i32, h: i32| {
                 let w = &mut c.data_mut().js;

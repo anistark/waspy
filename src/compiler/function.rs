@@ -4675,6 +4675,65 @@ fn compile_statement(
                 );
             }
 
+            // `x[i] = v` of a JavaScript value. `x[i] += v` (lowered to
+            // `x[i] = x[i] + v`) reads the item as the kind of what it is
+            // combined with, as a property's augmented assignment does.
+            IRStatement::IndexAssign {
+                container,
+                index,
+                value,
+            } if !ctx.js.is_empty() && infer_value_type(container, ctx) == IRType::JsProxy => {
+                let value = match value {
+                    IRExpr::BinaryOp { left, right, op }
+                        if matches!(
+                            left.as_ref(),
+                            IRExpr::Indexing { container: c, index: i }
+                                if format!("{c:?}") == format!("{container:?}")
+                                    && format!("{i:?}") == format!("{index:?}")
+                        ) =>
+                    {
+                        let kind = match right.as_ref() {
+                            IRExpr::Const(IRConstant::Int(_)) => IRType::Int,
+                            IRExpr::Const(IRConstant::Float(_)) => IRType::Float,
+                            IRExpr::Const(IRConstant::String(_)) => IRType::String,
+                            other => infer_value_type(other, ctx),
+                        };
+                        let conv = match kind {
+                            IRType::String => "as_str",
+                            IRType::Int => "as_int",
+                            IRType::Float => "float",
+                            _ => {
+                                ctx.report(
+                                    "an augmented assignment to an item of a JavaScript value \
+                                     is supported with a str, int, or float on the right. Hint: \
+                                     convert the item first, for example 'n: int = x[i]' then \
+                                     'x[i] = n + 1'",
+                                );
+                                return;
+                            }
+                        };
+                        IRExpr::BinaryOp {
+                            left: Box::new(IRExpr::FunctionCall {
+                                function_name: crate::compiler::js::intrinsic(conv),
+                                arguments: vec![(**left).clone()],
+                            }),
+                            right: right.clone(),
+                            op: op.clone(),
+                        }
+                    }
+                    other => other.clone(),
+                };
+                emit_expr(
+                    &IRExpr::FunctionCall {
+                        function_name: crate::compiler::js::intrinsic("set_item"),
+                        arguments: vec![container.clone(), index.clone(), value],
+                    },
+                    func,
+                    ctx,
+                    memory_layout,
+                    None,
+                );
+            }
             IRStatement::IndexAssign {
                 container,
                 index,

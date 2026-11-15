@@ -1912,7 +1912,9 @@
       },
       {
         "name": "Image manipulation & processing",
-        "status": "todo"
+        "status": "done",
+        "version": "upcoming",
+        "test": "graphics::image_processing"
       }
     ]
   }
