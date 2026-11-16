@@ -636,6 +636,9 @@ fn lower_module(ast: &Suite, hoisted: usize) -> Result<IRModule> {
 /// Numbers the item names of the comprehensions `list()` and `tuple()` lower
 /// to, so nested ones never share one.
 static LIST_CALL_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Numbers the temporaries a tuple assignment to subscripts or attributes
+/// holds its values in.
+static UNPACK_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// `tuple(iterable)`: a list of the items, which code generation reads as a
 /// tuple of their type (a tuple of one element type is laid out as a list).
@@ -3173,6 +3176,59 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                             var_type: None,
                         });
                     }
+                    // `a[i], a[j] = a[j], a[i]`: targets that are not all
+                    // names, from a tuple of as many values. CPython evaluates
+                    // every value first, then assigns the targets left to
+                    // right, evaluating each target's own parts as it goes, so
+                    // the values are held in temporaries and each target is an
+                    // ordinary assignment of one. It was refused.
+                    Expr::Tuple(tuple_expr)
+                        if tuple_expr
+                            .elts
+                            .iter()
+                            .any(|e| matches!(e, Expr::Subscript(_) | Expr::Attribute(_)))
+                            && !tuple_expr
+                                .elts
+                                .iter()
+                                .any(|e| matches!(e, Expr::Starred(_)))
+                            && matches!(&*assign.value, Expr::Tuple(values)
+                                if values.elts.len() == tuple_expr.elts.len()
+                                    && !values.elts.iter().any(|e| matches!(e, Expr::Starred(_)))) =>
+                    {
+                        use rustpython_parser::ast::{
+                            ExprContext, ExprName, Identifier, StmtAssign,
+                        };
+                        let Expr::Tuple(values) = &*assign.value else {
+                            unreachable!("matched above")
+                        };
+                        let n = UNPACK_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let name = |i: usize, ctx: ExprContext| {
+                            Expr::Name(ExprName {
+                                range: assign.range,
+                                id: Identifier::new(format!("__unpack_{n}_{i}")),
+                                ctx,
+                            })
+                        };
+                        let assign_to = |target: Expr, value: Expr| {
+                            Stmt::Assign(StmtAssign {
+                                range: assign.range,
+                                targets: vec![target],
+                                value: Box::new(value),
+                                type_comment: None,
+                            })
+                        };
+                        let mut desugared: Vec<Stmt> = values
+                            .elts
+                            .iter()
+                            .enumerate()
+                            .map(|(i, v)| assign_to(name(i, ExprContext::Store), v.clone()))
+                            .collect();
+                        desugared.extend(tuple_expr.elts.iter().enumerate().map(|(i, target)| {
+                            assign_to(target.clone(), name(i, ExprContext::Load))
+                        }));
+                        ir_statements
+                            .extend(lower_function_body(&desugared, memory_layout)?.statements);
+                    }
                     Expr::Tuple(tuple_expr) => {
                         // Tuple unpacking like "a, b = (1, 2)", including one
                         // starred target ("a, *b, c = xs") which collects the
@@ -5396,73 +5452,88 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                                 // it and always answered correctly.
                                 "find" => {
                                     // find(sub) - return index of substring
-                                    if !arguments.is_empty() {
-                                        if let IRExpr::Const(IRConstant::String(sub)) =
-                                            &arguments[0]
-                                        {
-                                            // A code point index, as CPython
-                                            // counts; it was the byte offset.
-                                            let index = s
-                                                .find(sub.as_str())
-                                                .map(|i| s[..i].chars().count() as i32)
-                                                .unwrap_or(-1);
-                                            return Ok(IRExpr::Const(IRConstant::Int(index)));
-                                        }
+                                    // One argument only: a start or end
+                                    // narrows the search, which the fold
+                                    // ignored, so `"banana".find("a", 2)`
+                                    // answered 1. Otherwise the call is left
+                                    // to the runtime, which refuses it.
+                                    if let [IRExpr::Const(IRConstant::String(sub))] =
+                                        arguments.as_slice()
+                                    {
+                                        // A code point index, as CPython
+                                        // counts; it was the byte offset.
+                                        let index = s
+                                            .find(sub.as_str())
+                                            .map(|i| s[..i].chars().count() as i32)
+                                            .unwrap_or(-1);
+                                        return Ok(IRExpr::Const(IRConstant::Int(index)));
                                     }
                                     // Fall through to runtime handling
                                 }
                                 "index" => {
                                     // index(sub) - like find but raises on not found
-                                    if !arguments.is_empty() {
-                                        if let IRExpr::Const(IRConstant::String(sub)) =
-                                            &arguments[0]
-                                        {
-                                            // A miss is left to the runtime,
-                                            // which raises ValueError; it
-                                            // folded to 0.
-                                            if let Some(i) = s.find(sub.as_str()) {
-                                                let index = s[..i].chars().count() as i32;
-                                                return Ok(IRExpr::Const(IRConstant::Int(index)));
-                                            }
+                                    // One argument only: a start or end
+                                    // narrows the search, which the fold
+                                    // ignored, so `"banana".find("a", 2)`
+                                    // answered 1. Otherwise the call is left
+                                    // to the runtime, which refuses it.
+                                    if let [IRExpr::Const(IRConstant::String(sub))] =
+                                        arguments.as_slice()
+                                    {
+                                        // A miss is left to the runtime,
+                                        // which raises ValueError; it
+                                        // folded to 0.
+                                        if let Some(i) = s.find(sub.as_str()) {
+                                            let index = s[..i].chars().count() as i32;
+                                            return Ok(IRExpr::Const(IRConstant::Int(index)));
                                         }
                                     }
                                     // Fall through to runtime handling
                                 }
                                 "count" => {
                                     // count(sub) - count occurrences
-                                    if !arguments.is_empty() {
-                                        if let IRExpr::Const(IRConstant::String(sub)) =
-                                            &arguments[0]
-                                        {
-                                            if !sub.is_empty() {
-                                                let count = s.matches(sub.as_str()).count() as i32;
-                                                return Ok(IRExpr::Const(IRConstant::Int(count)));
-                                            }
+                                    // One argument only: a start or end
+                                    // narrows the search, which the fold
+                                    // ignored, so `"banana".find("a", 2)`
+                                    // answered 1. Otherwise the call is left
+                                    // to the runtime, which refuses it.
+                                    if let [IRExpr::Const(IRConstant::String(sub))] =
+                                        arguments.as_slice()
+                                    {
+                                        if !sub.is_empty() {
+                                            let count = s.matches(sub.as_str()).count() as i32;
+                                            return Ok(IRExpr::Const(IRConstant::Int(count)));
                                         }
                                     }
                                     // Fall through to runtime handling
                                 }
                                 "startswith" => {
                                     // startswith(prefix) - check if starts with
-                                    if !arguments.is_empty() {
-                                        if let IRExpr::Const(IRConstant::String(prefix)) =
-                                            &arguments[0]
-                                        {
-                                            let result = s.starts_with(prefix.as_str());
-                                            return Ok(IRExpr::Const(IRConstant::Bool(result)));
-                                        }
+                                    // One argument only: a start or end
+                                    // narrows the search, which the fold
+                                    // ignored, so `"banana".find("a", 2)`
+                                    // answered 1. Otherwise the call is left
+                                    // to the runtime, which refuses it.
+                                    if let [IRExpr::Const(IRConstant::String(prefix))] =
+                                        arguments.as_slice()
+                                    {
+                                        let result = s.starts_with(prefix.as_str());
+                                        return Ok(IRExpr::Const(IRConstant::Bool(result)));
                                     }
                                     // Fall through to runtime handling
                                 }
                                 "endswith" => {
                                     // endswith(suffix) - check if ends with
-                                    if !arguments.is_empty() {
-                                        if let IRExpr::Const(IRConstant::String(suffix)) =
-                                            &arguments[0]
-                                        {
-                                            let result = s.ends_with(suffix.as_str());
-                                            return Ok(IRExpr::Const(IRConstant::Bool(result)));
-                                        }
+                                    // One argument only: a start or end
+                                    // narrows the search, which the fold
+                                    // ignored, so `"banana".find("a", 2)`
+                                    // answered 1. Otherwise the call is left
+                                    // to the runtime, which refuses it.
+                                    if let [IRExpr::Const(IRConstant::String(suffix))] =
+                                        arguments.as_slice()
+                                    {
+                                        let result = s.ends_with(suffix.as_str());
+                                        return Ok(IRExpr::Const(IRConstant::Bool(result)));
                                     }
                                     // Fall through to runtime handling
                                 }

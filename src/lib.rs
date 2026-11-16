@@ -166,6 +166,9 @@ pub fn compile_python_to_wasm_with_options(
     // Parse Python to AST
     log_verbose!("Parsing Python source code...");
     let ast = core::parser::parse_python(source).context("Failed to parse Python code")?;
+    // One source is the whole program, so every import names a module the
+    // compiler supports.
+    core::parser::check_imports(&ast, source, &|_| false).context("Failed to parse Python code")?;
     log_debug!("Successfully parsed Python AST");
 
     // Lower AST to IR
@@ -392,6 +395,30 @@ fn compile_merged_sources(
             module_name_of(filename)
         }
     };
+    // Every import names a module the compiler supports or a file of this
+    // program: by its module name, the end of one (a file given by its whole
+    // path), or the package one is in.
+    let provided: Vec<String> = sources.iter().map(|(f, _)| module_name_of(f)).collect();
+    let provides = |name: &str| {
+        provided.iter().any(|p| {
+            p == name
+                || p.ends_with(&format!(".{name}"))
+                || p.starts_with(&format!("{name}."))
+                || p.contains(&format!(".{name}."))
+        })
+    };
+    for (filename, source) in sources {
+        if core::config::is_config_file(filename)
+            || (skip_special && utils::is_special_python_file(filename))
+        {
+            continue;
+        }
+        // A file that does not parse is reported where it is lowered.
+        if let Ok(ast) = core::parser::parse_python(source) {
+            core::parser::check_imports(&ast, source, &provides)
+                .with_context(|| format!("failed to parse {filename}"))?;
+        }
+    }
     // A program of several files is lowered twice when its files use the
     // standard library: the first time each module pass records what its file
     // uses (`ir::program`), the second time it writes the module out for what

@@ -164,6 +164,8 @@ impl Types {
                 let (l, r) = (self.of(left, env), self.of(right, env));
                 match op {
                     IROp::Div => IRType::Float,
+                    // An int to a negative constant power is a float.
+                    IROp::Pow if is_negative_int_constant(right) => IRType::Float,
                     _ if l == IRType::Float || r == IRType::Float => IRType::Float,
                     _ if l == r => l,
                     _ => IRType::Unknown,
@@ -651,5 +653,18 @@ pub(crate) fn nested_bodies(stmt: &IRStatement) -> Vec<&IRBody> {
             v
         }
         _ => Vec::new(),
+    }
+}
+
+/// Whether `expr` is a negative int written as a constant (`-1`, `-(2)`), the
+/// exponent that makes an int's power a float.
+pub(crate) fn is_negative_int_constant(expr: &IRExpr) -> bool {
+    match expr {
+        IRExpr::Const(IRConstant::Int(n)) => *n < 0,
+        IRExpr::UnaryOp {
+            op: IRUnaryOp::Neg,
+            operand,
+        } => matches!(**operand, IRExpr::Const(IRConstant::Int(n)) if n > 0),
+        _ => false,
     }
 }
