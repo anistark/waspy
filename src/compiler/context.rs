@@ -404,6 +404,16 @@ pub struct CompilationContext {
     /// one at the type its first assignment gave it, so the scan records each
     /// global's type as it goes and a later assignment keeps it.
     pub start_runs: bool,
+    /// The standard-library functions written in Python whose untyped
+    /// parameters take each call's types (`ir::pystdlib`), with their
+    /// declared parameter types (`Unknown` where a call decides). A call is
+    /// compiled as a call of the instance for its arguments' types.
+    pub generic_functions: HashMap<String, Vec<IRType>>,
+    /// Likewise the classes whose `__init__` takes untyped parameters, with
+    /// `__init__`'s parameter types after `self`, and the methods that take
+    /// untyped parameters, keyed `(class, method)`.
+    pub generic_classes: HashMap<String, Vec<IRType>>,
+    pub generic_methods: HashMap<(String, String), Vec<IRType>>,
     /// The names the function being compiled declares `global`: assigning one
     /// stores into its module global instead of making a local.
     pub declared_globals: HashSet<String>,
@@ -648,6 +658,9 @@ impl CompilationContext {
             module_global_types: HashMap::new(),
             in_module_init: false,
             start_runs: false,
+            generic_functions: HashMap::new(),
+            generic_classes: HashMap::new(),
+            generic_methods: HashMap::new(),
             declared_globals: HashSet::new(),
             temp_local: 0,
             temp_local_f64: 0,

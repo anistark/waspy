@@ -40,11 +40,137 @@ pub const STR_METHODS: [&str; 11] = [
 /// The methods written in Python, with the source that defines each one's
 /// helpers. `translate` has a helper per kind of table (`dict[int, int]`
 /// and `dict[int, str]`), which code generation picks by the table's type.
-const PYTHON_HELPERS: [(&str, &str); 3] = [
+const PYTHON_HELPERS: [(&str, &str); 10] = [
+    ("readlines", FILE_LINES_SOURCE),
     ("translate", TRANSLATE_SOURCE),
     ("maketrans", MAKETRANS_SOURCE),
     ("encode", ENCODE_SOURCE),
+    ("split", RANGE_SOURCE),
+    ("find", RANGE_SOURCE),
+    ("rfind", RANGE_SOURCE),
+    ("index", RANGE_SOURCE),
+    ("rindex", RANGE_SOURCE),
+    ("count", RANGE_SOURCE),
 ];
+
+/// A file's lines, each with its `\n` (the last one may lack it): what
+/// `readlines()` answers and a `for` over a file walks, from its `read()`.
+const FILE_LINES_SOURCE: &str = r#"
+def __str_file_lines(text: str) -> list[str]:
+    lines: list[str] = []
+    rest = text
+    while rest != "":
+        k = rest.find("\n")
+        if k < 0:
+            lines.append(rest)
+            break
+        lines.append(rest[: k + 1])
+        rest = rest[k + 1:]
+    return lines
+"#;
+
+/// The methods whose helper in Python is wanted only for a call passing more
+/// than their first argument: `split(sep, maxsplit)`, and a search bounded by
+/// `start` and `end` (code generation compiles the one-argument forms).
+const RANGE_METHODS: [&str; 6] = ["split", "find", "rfind", "index", "rindex", "count"];
+
+/// `str.split(sep, maxsplit)` and the searches bounded by `start` and `end`,
+/// as CPython answers them (`Objects/stringlib/split.h`, `find` with slice
+/// bounds normalized as `ADJUST_INDICES` does).
+const RANGE_SOURCE: &str = r#"from typing import Optional
+
+
+def __str_split_max(s: str, sep: Optional[str], maxsplit: int) -> list[str]:
+    parts: list[str] = []
+    n = len(s)
+    if sep is None:
+        i = 0
+        while True:
+            while i < n and s[i].isspace():
+                i += 1
+            if i >= n:
+                break
+            if maxsplit >= 0 and len(parts) == maxsplit:
+                parts.append(s[i:])
+                break
+            j = i
+            while j < n and not s[j].isspace():
+                j += 1
+            parts.append(s[i:j])
+            i = j
+        return parts
+    sep_s: str = sep
+    m = len(sep_s)
+    if m == 0:
+        raise ValueError("empty separator")
+    start = 0
+    while maxsplit < 0 or len(parts) < maxsplit:
+        k = s.find(sep_s, start) if start > 0 else s.find(sep_s)
+        if k < 0:
+            break
+        parts.append(s[start:k])
+        start = k + m
+    parts.append(s[start:])
+    return parts
+
+
+def __str_bounds(n: int, start: int, end: int) -> tuple[int, int]:
+    if end > n:
+        end = n
+    elif end < 0:
+        end += n
+        if end < 0:
+            end = 0
+    if start < 0:
+        start += n
+        if start < 0:
+            start = 0
+    return start, end
+
+
+def __str_find_range(s: str, sub: str, start: int, end: int) -> int:
+    n = len(s)
+    lo, hi = __str_bounds(n, start, end)
+    if lo > n or hi - lo < len(sub):
+        return -1
+    k = s[lo:hi].find(sub)
+    if k < 0:
+        return -1
+    return k + lo
+
+
+def __str_rfind_range(s: str, sub: str, start: int, end: int) -> int:
+    n = len(s)
+    lo, hi = __str_bounds(n, start, end)
+    if lo > n or hi - lo < len(sub):
+        return -1
+    k = s[lo:hi].rfind(sub)
+    if k < 0:
+        return -1
+    return k + lo
+
+
+def __str_index_range(s: str, sub: str, start: int, end: int) -> int:
+    k = __str_find_range(s, sub, start, end)
+    if k < 0:
+        raise ValueError("substring not found")
+    return k
+
+
+def __str_rindex_range(s: str, sub: str, start: int, end: int) -> int:
+    k = __str_rfind_range(s, sub, start, end)
+    if k < 0:
+        raise ValueError("substring not found")
+    return k
+
+
+def __str_count_range(s: str, sub: str, start: int, end: int) -> int:
+    n = len(s)
+    lo, hi = __str_bounds(n, start, end)
+    if lo > n or hi - lo < len(sub):
+        return 0
+    return s[lo:hi].count(sub)
+"#;
 
 /// `str.translate(table)`: each character whose code point is a key of the
 /// table replaced by what it maps to (a code point, or a string, the empty
@@ -165,15 +291,24 @@ pub fn with_str_helpers(module: &IRModule) -> anyhow::Result<Option<IRModule>> {
                     .iter()
                     .find(|(m, _)| *m == method_name.as_str())
                 {
-                    in_python.insert(m);
+                    if !RANGE_METHODS.contains(m) || arguments.len() >= 2 {
+                        in_python.insert(m);
+                    }
                 }
             }
             Ok(())
         });
     }
     // The helpers a helper calls.
-    if wanted.contains("rindex") || wanted.contains("rpartition") {
+    if wanted.contains("rindex")
+        || wanted.contains("rpartition")
+        || RANGE_METHODS.iter().any(|m| in_python.contains(m))
+    {
         wanted.insert("rfind");
+    }
+    // A `for` over a file walks its lines through the helper too.
+    if crate::compiler::module_uses_file_io(module) {
+        in_python.insert("readlines");
     }
     if wanted.is_empty() && in_python.is_empty() {
         return Ok(None);

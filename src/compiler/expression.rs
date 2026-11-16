@@ -1822,6 +1822,79 @@ pub(crate) fn emit_value(
 /// discarding the code and anything it reported. The flag says whether it
 /// reported anything.
 /// The type `expr` emits, found by a dry run that writes nothing.
+/// The parameter types of a template's instance for a call: each declared
+/// type, and where a parameter is untyped, the type of the argument passed.
+fn template_argument_types(
+    declared: &[IRType],
+    arguments: &[IRExpr],
+    ctx: &CompilationContext,
+    memory_layout: &MemoryLayout,
+) -> Vec<IRType> {
+    arguments
+        .iter()
+        .enumerate()
+        .map(|(i, arg)| match declared.get(i) {
+            Some(t) if !matches!(t, IRType::Unknown) => t.clone(),
+            _ => probe_value_type(arg, ctx, memory_layout),
+        })
+        .collect()
+}
+
+/// The type a call of a template answers, where its instance for the
+/// arguments' types (as the scan infers them) exists: the scan's typing of a
+/// local that holds it.
+pub(crate) fn template_call_type(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRType> {
+    let types = |declared: &[IRType], arguments: &[IRExpr]| -> Option<Vec<IRType>> {
+        arguments
+            .iter()
+            .enumerate()
+            .map(|(i, arg)| match declared.get(i) {
+                Some(t) if !matches!(t, IRType::Unknown) => Some(t.clone()),
+                _ => match crate::compiler::function::infer_value_type(arg, ctx) {
+                    IRType::Unknown => None,
+                    t => Some(t),
+                },
+            })
+            .collect()
+    };
+    match expr {
+        IRExpr::FunctionCall {
+            function_name,
+            arguments,
+        } => {
+            if let Some(declared) = ctx.generic_functions.get(function_name.as_str()) {
+                let name =
+                    crate::ir::pystdlib::instance_name(function_name, &types(declared, arguments)?);
+                return ctx.get_function_info(&name).map(|f| f.return_type.clone());
+            }
+            if let Some(declared) = ctx.generic_classes.get(function_name.as_str()) {
+                let name =
+                    crate::ir::pystdlib::instance_name(function_name, &types(declared, arguments)?);
+                return ctx.get_class_info(&name).map(|_| IRType::Class(name));
+            }
+            None
+        }
+        IRExpr::MethodCall {
+            object,
+            method_name,
+            arguments,
+        } if !ctx.generic_methods.is_empty() => {
+            let IRType::Class(class) = crate::compiler::function::infer_value_type(object, ctx)
+            else {
+                return None;
+            };
+            let declared = ctx
+                .generic_methods
+                .get(&(class.clone(), method_name.clone()))?;
+            let name =
+                crate::ir::pystdlib::instance_name(method_name, &types(declared, arguments)?);
+            ctx.get_function_info(&format!("{class}::{name}"))
+                .map(|f| f.return_type.clone())
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn probe_value_type(
     expr: &IRExpr,
     ctx: &CompilationContext,
@@ -7688,21 +7761,21 @@ fn emit_user_argument(
     func: &mut Function,
     ctx: &CompilationContext,
     memory_layout: &MemoryLayout,
-) {
+) -> IRType {
     let callee = &crate::compiler::function::display_function_name(callee);
     // The tuple a call's surplus positional arguments are bound into, built
     // at the member type, each member checked as an argument is.
     if let (Some(IRType::VarTuple(member)), IRExpr::TupleLiteral(items)) = (param, arg) {
         let built = emit_sequence_of(items, member, func, ctx, memory_layout, callee);
         check_class_arg(ctx, &built, param, position, callee);
-        return;
+        return built;
     }
     // The dict `**kwargs` collects, built at the parameter's value type.
     if let (Some(IRType::Dict(key, value)), IRExpr::DictLiteral(pairs)) = (param, arg) {
         if matches!(key.as_ref(), IRType::String) {
             let built = emit_dict_literal(pairs, Some(value), func, ctx, memory_layout);
             check_class_arg(ctx, &built, param, position, callee);
-            return;
+            return built;
         }
     }
     // A standard-library class or function takes either kind of number.
@@ -7750,6 +7823,7 @@ fn emit_user_argument(
         check_var_tuple_arg(ctx, &arg_type, member, position, callee);
     }
     check_class_arg(ctx, &arg_type, param, position, callee);
+    arg_type
 }
 
 /// A value passed where a `tuple[T, ...]` is taken must already be laid out as
@@ -8625,6 +8699,7 @@ fn is_stdlib_code(name: &str, ctx: &CompilationContext) -> bool {
             crate::ir::RE_FN_PREFIX,
             crate::ir::ASYNCIO_FN_PREFIX,
             "__Coro___asyncio_",
+            crate::ir::PY_PREFIX,
         ]
         .iter()
         .any(|prefix| name.starts_with(prefix))
@@ -11177,6 +11252,32 @@ fn emit_function_call_expr(
 ) -> IRType {
     let _ = expr;
     let _ = expected_type;
+    // A class of a module written in Python whose `__init__` takes untyped
+    // parameters: the instance of the class for these arguments' types
+    // (`ir::pystdlib`).
+    if let Some(declared) = ctx.generic_classes.get(function_name.as_str()) {
+        let types = template_argument_types(declared, arguments, ctx, memory_layout);
+        let instance = crate::ir::pystdlib::instance_name(function_name, &types);
+        if ctx.get_class_info(&instance).is_some() {
+            return emit_expr(
+                &IRExpr::FunctionCall {
+                    function_name: instance,
+                    arguments: arguments.clone(),
+                },
+                func,
+                ctx,
+                memory_layout,
+                expected_type,
+            );
+        }
+        crate::ir::pystdlib::need(crate::ir::pystdlib::Instance::Class(
+            function_name.clone(),
+            types,
+        ));
+        ctx.report(crate::ir::pystdlib::PENDING_INSTANCE);
+        func.instruction(&Instruction::I32Const(0));
+        return IRType::Unknown;
+    }
     // `from mod import f as g` on a user-written module (#41): calls
     // to `g` resolve to the merged `f` — the imported module's
     // definitions are statically linked into this single WASM module.
@@ -11284,6 +11385,26 @@ fn emit_function_call_expr(
             recover_str_pair(func, ctx);
         }
         return *inner;
+    }
+    // Wrapping 32-bit arithmetic, for the standard-library code that computes
+    // on words (`hashlib`): an int holding 32 bits as two's complement, which
+    // the checked operators would refuse past 32 bits.
+    let wrapping = match function_name.as_str() {
+        "__waspy_u32_add" => Some(Instruction::I32Add),
+        "__waspy_u32_shl" => Some(Instruction::I32Shl),
+        "__waspy_u32_shr" => Some(Instruction::I32ShrU),
+        "__waspy_u32_rotr" => Some(Instruction::I32Rotr),
+        "__waspy_u32_rotl" => Some(Instruction::I32Rotl),
+        _ => None,
+    };
+    if let Some(op) = wrapping {
+        if arguments.len() == 2 && ctx.get_function_info(function_name).is_none() {
+            for arg in arguments {
+                emit_expr(arg, func, ctx, memory_layout, Some(&IRType::Int));
+            }
+            func.instruction(&op);
+            return IRType::Int;
+        }
     }
     // The host's clock, in microseconds since the epoch (an exact integer
     // as a float until long after 2038), for `datetime.now()`.
@@ -11516,6 +11637,53 @@ fn emit_function_call_expr(
             return IRType::Unknown;
         };
         let ty = emit_expr(pull, func, ctx, memory_layout, None);
+        // `next(it, default)`: the default where the iterator is exhausted,
+        // the StopIteration flag cleared.
+        if let Some(default) = arguments.get(1) {
+            let float = matches!(ty, IRType::Float);
+            let text = matches!(ty, IRType::String | IRType::Bytes);
+            if text {
+                func.instruction(&Instruction::Drop);
+            }
+            let slot = if float { ctx.hold_f64() } else { ctx.hold() };
+            let Some(slot) = slot else {
+                ctx.report(
+                    "a next() with a default nests more deeply than the compiler reserves room for",
+                );
+                return ty;
+            };
+            func.instruction(&Instruction::LocalSet(slot));
+            func.instruction(&Instruction::GlobalGet(1));
+            func.instruction(&Instruction::If(BlockType::Empty));
+            func.instruction(&Instruction::I32Const(0));
+            func.instruction(&Instruction::GlobalSet(1));
+            ctx.enter_expr_blocks(1);
+            let given = emit_expr(default, func, ctx, memory_layout, Some(&ty));
+            ctx.exit_expr_blocks(1);
+            if matches!(given, IRType::String | IRType::Bytes) {
+                func.instruction(&Instruction::Drop);
+            }
+            if !matches!(ty, IRType::Unknown) && given != ty && !matches!(given, IRType::None) {
+                ctx.report(format!(
+                    "next()'s default is a '{}', where the iterator yields '{}', which can only \
+                     be read as one type",
+                    crate::type_to_string(&given),
+                    crate::type_to_string(&ty)
+                ));
+            }
+            func.instruction(&Instruction::LocalSet(slot));
+            func.instruction(&Instruction::End);
+            func.instruction(&Instruction::LocalGet(slot));
+            if float {
+                ctx.release_held_f64();
+            } else {
+                ctx.release_held();
+            }
+            if text {
+                recover_str_pair(func, ctx);
+            }
+            return ty;
+        }
         let in_try = !ctx.try_stack.is_empty();
         let in_generator = ctx
             .current_class
@@ -11959,6 +12127,41 @@ fn emit_function_call_expr(
         return return_type;
     }
 
+    // A standard-library function written in Python whose parameters take
+    // each call's types: the instance for these arguments (`ir::pystdlib`).
+    if let Some(declared) = ctx.generic_functions.get(function_name.as_str()) {
+        let declared = declared.clone();
+        let mark = begin_call_arguments(func, ctx);
+        let mut types = Vec::with_capacity(arguments.len());
+        for (i, arg) in arguments.iter().enumerate() {
+            let param = declared.get(i).filter(|t| !matches!(t, IRType::Unknown));
+            let t = emit_user_argument(arg, param, i, function_name, func, ctx, memory_layout);
+            types.push(param.cloned().unwrap_or(t));
+        }
+        let instance = crate::ir::pystdlib::instance_name(function_name, &types);
+        if let Some(info) = ctx.get_function_info(&instance) {
+            let (index, return_type) = (info.index, info.return_type.clone());
+            emit_user_call_with(func, ctx, index, mark);
+            finish_user_call(func, ctx, &return_type);
+            return return_type;
+        }
+        // Not made yet: the module is compiled again with it.
+        crate::ir::pystdlib::need_instance(function_name, types);
+        for _ in arguments {
+            func.instruction(&Instruction::Drop);
+        }
+        if let Some(mark) = mark {
+            func.instruction(&Instruction::LocalGet(mark));
+            func.instruction(&Instruction::GlobalSet(
+                crate::compiler::gc::ARGS_BASE_GLOBAL,
+            ));
+            ctx.release_held();
+        }
+        ctx.report(crate::ir::pystdlib::PENDING_INSTANCE);
+        func.instruction(&Instruction::I32Const(0));
+        return IRType::Unknown;
+    }
+
     // Push arguments onto the stack in order. For a call to a known user
     // function, a string/bytes argument must be narrowed to its single
     // offset word: each parameter is one i32 slot, so the callee recovers
@@ -12367,6 +12570,36 @@ fn emit_function_call_expr(
                 IRType::None
             }
             "min" | "max" => emit_min_max(func, ctx, function_name == "min", &arg_types),
+            // `hash(x)`: CPython's 64-bit hash (an int's, a bool's, a
+            // float's, a tuple's, as the sets compute it), its low 32 bits
+            // where it does not fit an int here. CPython's own hash values
+            // differ between 32- and 64-bit builds, and a str's or bytes'
+            // between runs, so what holds is that equal values hash equal.
+            "hash" if arg_types.len() == 1 => {
+                let ty = arg_types[0].clone();
+                if let Some(why) = crate::compiler::equality::hash_unsupported(ctx, &ty) {
+                    ctx.report(why);
+                    if matches!(ty, IRType::String | IRType::Bytes) {
+                        func.instruction(&Instruction::Drop);
+                    }
+                    func.instruction(&Instruction::Drop);
+                    func.instruction(&Instruction::I32Const(0));
+                    return IRType::Int;
+                }
+                if matches!(ty, IRType::String | IRType::Bytes) {
+                    func.instruction(&Instruction::Drop);
+                }
+                let held = crate::compiler::sets::Held::of(ctx, &ty);
+                match held {
+                    crate::compiler::sets::Held::Word(l) | crate::compiler::sets::Held::F64(l) => {
+                        func.instruction(&Instruction::LocalSet(l));
+                    }
+                }
+                crate::compiler::sets::emit_hash(func, ctx, &ty, held);
+                held.release(ctx);
+                func.instruction(&Instruction::I32WrapI64);
+                IRType::Int
+            }
             // `set(iterable)`; `set()` is lowered to an empty display.
             "set" if arg_types.len() == 1 => {
                 crate::compiler::sets::emit_set_from(func, ctx, &arg_types[0])
@@ -14333,6 +14566,64 @@ fn emit_method_call_expr(
     expected_type: Option<&IRType>,
 ) -> IRType {
     let _ = expr;
+    // A method of a class of a module written in Python that takes untyped
+    // parameters: the instance of the method for these arguments' types
+    // (`ir::pystdlib`).
+    if !ctx.generic_methods.is_empty() {
+        // A receiver that is a class template's call is its instance for the
+        // arguments' types (`csv.writer(f).writerow(row)`).
+        let receiver = match object.as_ref() {
+            IRExpr::FunctionCall {
+                function_name: class,
+                arguments: args,
+            } if ctx.generic_classes.contains_key(class.as_str()) => {
+                let declared = ctx.generic_classes[class.as_str()].clone();
+                let types = template_argument_types(&declared, args, ctx, memory_layout);
+                IRType::Class(crate::ir::pystdlib::instance_name(class, &types))
+            }
+            _ => crate::compiler::function::infer_value_type(object, ctx),
+        };
+        if let IRType::Class(class) = receiver {
+            let key = (class.clone(), method_name.clone());
+            if let Some(declared) = ctx.generic_methods.get(&key) {
+                let types = template_argument_types(declared, arguments, ctx, memory_layout);
+                let instance = crate::ir::pystdlib::instance_name(method_name, &types);
+                // The class's own instance of the method, not one inherited.
+                let has = ctx.get_class_info(&class).is_some_and(|c| {
+                    c.methods.contains_key(&instance)
+                        && c.method_owner
+                            .get(&instance)
+                            .map_or(true, |owner| *owner == class)
+                });
+                if has {
+                    return emit_expr(
+                        &IRExpr::MethodCall {
+                            object: object.clone(),
+                            method_name: instance,
+                            arguments: arguments.clone(),
+                        },
+                        func,
+                        ctx,
+                        memory_layout,
+                        expected_type,
+                    );
+                }
+                // A receiver typed as a class template is one whose instance
+                // the next round types it as; its method's instance belongs
+                // to that class.
+                if !ctx.generic_classes.contains_key(&class) {
+                    crate::ir::pystdlib::need(crate::ir::pystdlib::Instance::Method(
+                        class,
+                        method_name.clone(),
+                        types,
+                    ));
+                }
+                ctx.report(crate::ir::pystdlib::PENDING_INSTANCE);
+                func.instruction(&Instruction::I32Const(0));
+                return IRType::Unknown;
+            }
+        }
+    }
     // `encoder.encode(o)` and `decoder.decode(s)`, through `dumps` and
     // `loads` with the instance's options.
     if let Some(t) = crate::compiler::stdlib::json::emit_instance_call(
@@ -15743,8 +16034,27 @@ fn emit_file_method_call(
             func.instruction(&Instruction::Drop); // fd
             IRType::None
         }
+        // `readlines()`: its `read()`, split after each `\n`.
+        "readlines"
+            if arguments.is_empty() && ctx.get_function_info("__str_file_lines").is_some() =>
+        {
+            let read = emit_file_method_call(func, ctx, memory_layout, "read", &[]);
+            let _ = read;
+            func.instruction(&Instruction::Drop); // the length; the offset carries it
+            let lines = ctx
+                .get_function_info("__str_file_lines")
+                .map(|f| f.index)
+                .expect("checked");
+            emit_user_call(func, ctx, lines);
+            IRType::List(Box::new(IRType::String))
+        }
         _ => {
-            // Unknown file method: consume everything, yield 0.
+            // A file method this compiler does not implement is refused: it
+            // answered 0, so `f.readline()` printed 0.
+            ctx.report(format!(
+                "the file method '{method_name}()' is not supported. Hint: read() the file \
+                 and split it, or use readlines()"
+            ));
             func.instruction(&Instruction::Drop); // fd
             for arg in arguments {
                 let t = emit_expr(arg, func, ctx, memory_layout, None);

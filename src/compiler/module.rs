@@ -1691,6 +1691,26 @@ pub(crate) fn is_pure_constant(
 /// an imported module at its first import, and a module first imported in a
 /// function when that import runs.
 pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, WaspyError> {
+    // A standard-library function written in Python is compiled once per set
+    // of argument types its calls pass (`ir::pystdlib`): code generation asks
+    // for an instance it does not find, and the module is compiled again with
+    // it, until every call has its own. An instance calling another template
+    // asks for that one on the next round.
+    crate::ir::pystdlib::take_instances();
+    let mut current: Option<IRModule> = None;
+    for _ in 0..16 {
+        let module = current.as_ref().unwrap_or(ir_module);
+        let result = compile_with_runtime(module);
+        let wanted = crate::ir::pystdlib::take_instances();
+        match crate::ir::pystdlib::with_instances(module, &wanted) {
+            Some(next) => current = Some(next),
+            None => return result,
+        }
+    }
+    compile_with_runtime(current.as_ref().unwrap_or(ir_module))
+}
+
+fn compile_with_runtime(ir_module: &IRModule) -> Result<Vec<u8>, WaspyError> {
     // The dynamic-value runtime (`ir::dynamic`), when the module names `Any`.
     let runtime = |force: bool| {
         crate::ir::dynamic::with_any_runtime(ir_module, force)
@@ -1713,7 +1733,27 @@ fn compile_staged(ir_module: &IRModule) -> Result<Vec<u8>, WaspyError> {
     // Each top level placed where CPython runs it, a module first imported in
     // a function given a start of its own.
     let staged = crate::compiler::start::stage(ir_module)?;
-    let ir_module = &staged.module;
+    // Top-level statements stand in the start, not in a function yet: a
+    // function holding them while the module is scanned for the helpers and
+    // runtimes its code needs, removed before the start is made.
+    let probe_name = format!("{}probe", crate::ir::TOPLEVEL_FN_PREFIX);
+    let probed;
+    let ir_module = if staged.runs {
+        let mut module = staged.module.clone();
+        module.functions.push(crate::ir::IRFunction {
+            name: probe_name.clone(),
+            params: Vec::new(),
+            body: IRBody {
+                statements: staged.start.clone(),
+            },
+            return_type: IRType::None,
+            decorators: Vec::new(),
+        });
+        probed = module;
+        &probed
+    } else {
+        &staged.module
+    };
     // The `str` methods written in IR that the program calls (`ir::str_methods`).
     let with_strs;
     let helped = crate::ir::with_str_helpers(ir_module)
@@ -1849,6 +1889,7 @@ fn compile_staged(ir_module: &IRModule) -> Result<Vec<u8>, WaspyError> {
         names.insert(0, crate::compiler::js::STARTED_FLAG.to_string());
     }
     let mut with_init = ir_module.clone();
+    with_init.functions.retain(|f| f.name != probe_name);
     with_init.functions.push(crate::ir::IRFunction {
         name: MODULE_INIT_FN.to_string(),
         params: Vec::new(),
@@ -1868,6 +1909,105 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
     // Unannotated closure parameters are typed from their calls, and captured
     // cells from their stores, before any signature is fixed.
     // So are the unannotated parameters of the program's own functions.
+    // A template is compiled only as its instances (`ir::pystdlib`): its own
+    // body, untyped, stands empty.
+    let templates: HashMap<String, Vec<IRType>> = ir_module
+        .functions
+        .iter()
+        .filter(|f| crate::ir::pystdlib::is_template(f))
+        .map(|f| {
+            (
+                f.name.clone(),
+                f.params.iter().map(|p| p.param_type.clone()).collect(),
+            )
+        })
+        .collect();
+    let class_templates: HashMap<String, Vec<IRType>> = ir_module
+        .classes
+        .iter()
+        .filter(|c| crate::ir::pystdlib::is_class_template(c))
+        .filter_map(|c| {
+            let init = c.methods.iter().find(|m| m.name == "__init__")?;
+            Some((
+                c.name.clone(),
+                init.params
+                    .iter()
+                    .skip(1)
+                    .map(|p| p.param_type.clone())
+                    .collect(),
+            ))
+        })
+        .collect();
+    let method_templates: HashMap<(String, String), Vec<IRType>> = ir_module
+        .classes
+        .iter()
+        .flat_map(|c| {
+            c.methods
+                .iter()
+                .filter(|m| crate::ir::pystdlib::is_method_template(c, m))
+                .map(|m| {
+                    (
+                        (c.name.clone(), m.name.clone()),
+                        m.params
+                            .iter()
+                            .skip(1)
+                            .map(|p| p.param_type.clone())
+                            .collect(),
+                    )
+                })
+        })
+        .collect();
+    let stubbed;
+    let ir_module =
+        if templates.is_empty() && class_templates.is_empty() && method_templates.is_empty() {
+            ir_module
+        } else {
+            let mut module = ir_module.clone();
+            // A template keeps its signature (a function's instances are called
+            // instead, a class's override it as subclasses); its body never runs.
+            let stub_method = |f: &mut crate::ir::IRFunction| {
+                f.body = crate::ir::IRBody {
+                    statements: vec![IRStatement::Raise {
+                        exception: Some(IRExpr::FunctionCall {
+                            function_name: "NotImplementedError".to_string(),
+                            arguments: vec![IRExpr::Const(crate::ir::IRConstant::String(
+                                f.name.clone(),
+                            ))],
+                        }),
+                        cause: None,
+                    }],
+                };
+                if matches!(f.return_type, IRType::Unknown) {
+                    f.return_type = IRType::None;
+                }
+                for p in &mut f.params {
+                    if matches!(p.param_type, IRType::Unknown) && p.name != "self" {
+                        p.param_type = IRType::Int;
+                    }
+                }
+            };
+            for f in &mut module.functions {
+                if templates.contains_key(&f.name) {
+                    stub_method(f);
+                }
+            }
+            let mut names: Vec<String> = templates.keys().cloned().collect();
+            for c in &mut module.classes {
+                let whole = class_templates.contains_key(&c.name);
+                let name = c.name.clone();
+                for m in &mut c.methods {
+                    if whole || method_templates.contains_key(&(name.clone(), m.name.clone())) {
+                        stub_method(m);
+                        names.push(m.name.clone());
+                    }
+                }
+            }
+            for n in names {
+                module.memory_layout.add_string(&n);
+            }
+            stubbed = module;
+            &stubbed
+        };
     let untyped = crate::compiler::closures::type_untyped_functions(ir_module);
     let (typed, capture_types) = crate::compiler::closures::type_closures(&untyped);
     let ir_module = &typed;
@@ -1878,6 +2018,9 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
         .functions
         .iter()
         .any(|f| f.name.starts_with(crate::ir::TOPLEVEL_FN_PREFIX));
+    ctx.generic_functions = templates;
+    ctx.generic_classes = class_templates;
+    ctx.generic_methods = method_templates;
     for (i, name) in module_globals.iter().enumerate() {
         ctx.module_global_index
             .insert(name.clone(), FIRST_MODULE_GLOBAL + i as u32);
@@ -2708,7 +2851,11 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
 
             // Export method with qualified name; a builtin exception's are
             // the runtime's own.
-            if !crate::compiler::exceptions::is_builtin_exception(&cls.name) {
+            // A builtin exception's and a standard-library class's (`ir::pystdlib`)
+            // are the runtime's own.
+            if !crate::compiler::exceptions::is_builtin_exception(&cls.name)
+                && !cls.name.starts_with(crate::ir::PY_PREFIX)
+            {
                 exports.export(&qualified_name, wasm_encoder::ExportKind::Func, func_idx);
             }
             func_idx += 1;

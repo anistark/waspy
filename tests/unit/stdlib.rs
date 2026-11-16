@@ -6212,3 +6212,434 @@ fn os_listdir_and_getmtime_errors() {
          [Errno 2] No such file or directory: 'nope'\n"
     );
 }
+
+/// Heapq and bisect are cpythons: the output is CPython 3.13's for the
+/// same program.
+#[test]
+fn heapq_and_bisect_are_cpythons() {
+    prints(
+        r#"
+import heapq
+import bisect
+
+def main() -> None:
+    h: list[int] = []
+    for x in [5, 1, 4, 2, 3]:
+        heapq.heappush(h, x)
+    print([heapq.heappop(h) for _ in range(3)], h)
+    tasks: list[tuple[int, str]] = []
+    heapq.heappush(tasks, (2, "write"))
+    heapq.heappush(tasks, (1, "plan"))
+    print(heapq.heappop(tasks), heapq.nlargest(2, [3, 9, 1]), heapq.nsmallest(2, [3, 9, 1]))
+    xs = [9, 3, 7, 1]
+    heapq.heapify(xs)
+    print(xs[0], heapq.heappushpop(xs, 0), heapq.heapreplace(xs, 8))
+    s = [1, 3, 5, 7]
+    print(bisect.bisect_left(s, 5), bisect.bisect_right(s, 5), bisect.bisect(s, 4))
+    bisect.insort(s, 4)
+    words = ["apple", "fig", "kiwi"]
+    bisect.insort(words, "grape")
+    print(s, words, bisect.bisect_left(words, "fig"))
+
+if __name__ == "__main__":
+    main()
+"#,
+        "[1, 2, 3] [4, 5]\n(1, 'plan') [9, 3] [1, 3]\n1 0 1\n2 3 2\n[1, 3, 4, 5, 7] ['apple', 'fig', 'grape', 'kiwi'] 1\n",
+    );
+}
+
+/// String and textwrap are cpythons: the output is CPython 3.13's for the
+/// same program.
+#[test]
+fn string_and_textwrap_are_cpythons() {
+    prints(
+        r#"
+import string
+import textwrap
+
+def main() -> None:
+    print(string.ascii_lowercase, string.digits, string.punctuation[:5])
+    print(string.capwords("hello big  world"), string.capwords("a-b c", "-"))
+    text = "The quick brown fox jumps over the lazy dog, then keeps running well-known roads."
+    print(textwrap.wrap(text, 20))
+    print(textwrap.fill(text, 30, initial_indent="> ", subsequent_indent="  "))
+    print(textwrap.shorten(text, 25))
+    print(repr(textwrap.dedent("    a\n      b\n    c")), repr(textwrap.indent("x\n\ny", "| ")))
+
+if __name__ == "__main__":
+    main()
+"#,
+        "abcdefghijklmnopqrstuvwxyz 0123456789 !\"#$%\nHello Big World A-B c\n['The quick brown fox', 'jumps over the lazy', 'dog, then keeps', 'running well-known', 'roads.']\n> The quick brown fox jumps\n  over the lazy dog, then\n  keeps running well-known\n  roads.\nThe quick brown fox [...]\n'a\\n  b\\nc' '| x\\n\\n| y'\n",
+    );
+}
+
+/// Io stringio is cpythons: the output is CPython 3.13's for the
+/// same program.
+#[test]
+fn io_stringio_is_cpythons() {
+    prints(
+        r#"
+import io
+
+def main() -> None:
+    s = io.StringIO()
+    s.write("hello ")
+    print(s.write("world\n"), repr(s.getvalue()))
+    r = io.StringIO("a\nb\nc")
+    print(repr(r.readline()), r.readlines(), repr(r.read()))
+    r.seek(0)
+    for line in r:
+        print(repr(line))
+    w = io.StringIO("abc")
+    w.write("X")
+    print(w.getvalue(), w.tell())
+
+if __name__ == "__main__":
+    main()
+"#,
+        "6 'hello world\\n'\n'a\\n' ['b\\n', 'c'] ''\n'a\\n'\n'b\\n'\n'c'\nXbc 1\n",
+    );
+}
+
+/// Operator functions and getters are cpythons: the output is CPython 3.13's for the
+/// same program.
+#[test]
+fn operator_functions_and_getters_are_cpythons() {
+    prints(
+        r#"
+import operator
+from operator import itemgetter, attrgetter
+
+class P:
+    def __init__(self, name: str, age: int):
+        self.name: str = name
+        self.age: int = age
+
+def main() -> None:
+    print(operator.add(2, 3), operator.mul(4, 5), operator.neg(3), operator.eq("a", "a"))
+    pairs = [(1, "b"), (0, "c"), (2, "a")]
+    print(sorted(pairs, key=itemgetter(1)), sorted(pairs, key=operator.itemgetter(0)))
+    people = [P("ann", 30), P("bob", 25)]
+    print([p.name for p in sorted(people, key=attrgetter("age"))])
+
+if __name__ == "__main__":
+    main()
+"#,
+        "5 20 -3 True\n[(2, 'a'), (1, 'b'), (0, 'c')] [(0, 'c'), (1, 'b'), (2, 'a')]\n['bob', 'ann']\n",
+    );
+}
+
+/// Base64 hashlib and uuid are cpythons: the output is CPython 3.13's for the
+/// same program.
+#[test]
+fn base64_hashlib_and_uuid_are_cpythons() {
+    prints(
+        r#"
+import base64
+import hashlib
+import uuid
+
+def main() -> None:
+    print(base64.b64encode(b"hello world"), base64.b64decode(b"aGVsbG8="), base64.urlsafe_b64encode(b"\xff\xfe\xfd"))
+    print(base64.b16encode(b"hi"), base64.b16decode(b"6869"))
+    try:
+        base64.b64decode(b"abc")
+    except ValueError as e:
+        print("error:", e)
+    print(hashlib.sha256(b"abc").hexdigest())
+    print(hashlib.md5(b"abc").hexdigest(), hashlib.sha1(b"").hexdigest())
+    h = hashlib.sha256()
+    h.update(b"a")
+    h.update(b"bc")
+    print(h.hexdigest() == hashlib.sha256(b"abc").hexdigest(), h.digest_size)
+    u = uuid.uuid5(uuid.NAMESPACE_DNS, "python.org")
+    print(u, repr(u), u.version, uuid.uuid3(uuid.NAMESPACE_URL, "x"))
+    r = uuid.uuid4()
+    print(len(str(r)), r.version, str(r)[14])
+
+if __name__ == "__main__":
+    main()
+"#,
+        "b'aGVsbG8gd29ybGQ=' b'hello' b'__79'\nb'6869' b'hi'\nerror: Incorrect padding\nba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n900150983cd24fb0d6963f7d28e17f72 da39a3ee5e6b4b0d3255bfef95601890afd80709\nTrue 32\n886313e1-3b8a-5372-9b90-0c9aee199e5d UUID('886313e1-3b8a-5372-9b90-0c9aee199e5d') 5 60a7f89c-e446-309c-8b4f-460bfdfd0dee\n36 4 4\n",
+    );
+}
+
+/// Urllib parse is cpythons: the output is CPython 3.13's for the
+/// same program.
+#[test]
+fn urllib_parse_is_cpythons() {
+    prints(
+        r#"
+from urllib.parse import quote, quote_plus, unquote, urlencode, urlparse, urljoin, parse_qs
+
+def main() -> None:
+    print(quote("a b/c?d"), quote_plus("a b&c"), unquote("caf%C3%A9%20x"))
+    print(urlencode({"q": "x y", "lang": "en"}))
+    u = urlparse("https://user:pw@example.com:8080/path/x;p?q=1&r=2#frag")
+    print(u)
+    print(u.scheme, u.netloc, u.hostname, u.port, u.username, u.path, u.query, u.fragment, u.geturl())
+    print(urljoin("http://a/b/c/d;p?q", "../g"), urljoin("http://a/b/", "http://x/y"))
+    print(parse_qs("a=1&a=2&b=3"))
+
+if __name__ == "__main__":
+    main()
+"#,
+        "a%20b/c%3Fd a+b%26c caf\u{e9} x\nq=x+y&lang=en\nParseResult(scheme='https', netloc='user:pw@example.com:8080', path='/path/x', params='p', query='q=1&r=2', fragment='frag')\nhttps user:pw@example.com:8080 example.com 8080 user /path/x q=1&r=2 frag https://user:pw@example.com:8080/path/x;p?q=1&r=2#frag\nhttp://a/b/g http://x/y\n{'a': ['1', '2'], 'b': ['3']}\n",
+    );
+}
+
+/// Csv reads and writes as cpython does: the output is CPython 3.13's for the
+/// same program.
+#[test]
+fn csv_reads_and_writes_as_cpython_does() {
+    prints(
+        r#"
+import csv
+import io
+
+def main() -> None:
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(["name", "note"])
+    w.writerow(["bob", "says \"hi\", twice"])
+    w.writerow([1, 2.5])
+    print(repr(out.getvalue()))
+    rows = list(csv.reader(io.StringIO(out.getvalue())))
+    print(rows)
+    src = io.StringIO("name,age\nbob,30\nann,25\n")
+    for row in csv.DictReader(src):
+        print(row["name"], int(row["age"]) + 1)
+    out2 = io.StringIO()
+    dw = csv.DictWriter(out2, fieldnames=["a", "b"])
+    dw.writeheader()
+    dw.writerow({"a": "1", "b": "x,y"})
+    print(repr(out2.getvalue()))
+
+if __name__ == "__main__":
+    main()
+"#,
+        "'name,note\\r\\nbob,\"says \"\"hi\"\", twice\"\\r\\n1,2.5\\r\\n'\n[['name', 'note'], ['bob', 'says \"hi\", twice'], ['1', '2.5']]\nbob 31\nann 26\n'a,b\\r\\n1,\"x,y\"\\r\\n'\n",
+    );
+}
+
+/// Pathlib paths are cpythons: the output is CPython 3.13's for the
+/// same program.
+#[test]
+fn pathlib_paths_are_cpythons() {
+    prints(
+        r#"
+from pathlib import Path
+
+def main() -> None:
+    p = Path("notes") / "2024" / "todo.tar.gz"
+    print(p, repr(p), p.name, p.suffix, p.suffixes, p.stem, p.parent, p.parts)
+    print(Path("/a//b/./c/").is_absolute(), Path("/a//b/./c/"), Path("a").with_suffix(".py"), p.with_name("x.txt"))
+    print(Path("/x/y/z").relative_to("/x"), Path("").name == "", str(Path("")))
+
+if __name__ == "__main__":
+    main()
+"#,
+        "notes/2024/todo.tar.gz PosixPath('notes/2024/todo.tar.gz') todo.tar.gz .gz ['.tar', '.gz'] todo.tar notes/2024 ('notes', '2024', 'todo.tar.gz')\nTrue /a/b/c a.py notes/2024/x.txt\ny/z True .\n",
+    );
+}
+
+/// Enum members are cpythons: the output is CPython 3.13's for the
+/// same program.
+#[test]
+fn enum_members_are_cpythons() {
+    prints(
+        r#"
+from enum import Enum, auto
+
+class Color(Enum):
+    RED = 1
+    GREEN = 2
+    BLUE = 3
+
+class State(Enum):
+    IDLE = auto()
+    RUNNING = auto()
+
+    def label(self) -> str:
+        return self.name.lower()
+
+def main() -> None:
+    print(Color.RED, repr(Color.RED), Color.RED.name, Color.RED.value, Color(2), Color["BLUE"])
+    print(Color.RED == Color.RED, Color.RED == Color.GREEN, list(Color), len(Color), Color.GREEN in Color)
+    print([c.name for c in Color], State.RUNNING.value, State.RUNNING.label(), f"{State.IDLE}")
+    try:
+        Color(9)
+    except ValueError as e:
+        print("ValueError:", e)
+
+if __name__ == "__main__":
+    main()
+"#,
+        "Color.RED <Color.RED: 1> RED 1 Color.GREEN Color.BLUE\nTrue False [<Color.RED: 1>, <Color.GREEN: 2>, <Color.BLUE: 3>] 3 True\n['RED', 'GREEN', 'BLUE'] 2 running State.IDLE\nValueError: 9 is not a valid Color\n",
+    );
+}
+
+/// Contextlib suppress copy and typing are cpythons: the output is CPython 3.13's for the
+/// same program.
+#[test]
+fn contextlib_suppress_copy_and_typing_are_cpythons() {
+    prints(
+        r#"
+import copy
+from contextlib import suppress
+from typing import Literal, TypedDict
+
+class User(TypedDict):
+    name: str
+    age: int
+
+def main() -> None:
+    with suppress(KeyError):
+        d: dict[str, int] = {}
+        print(d["missing"])
+    print("after")
+    a = [[1, 2], [3]]
+    b = copy.deepcopy(a)
+    c = copy.copy(a)
+    b[0].append(9)
+    c[1].append(8)
+    print(a, b, c, copy.copy({"k": 1}))
+    u: User = User(name="bob", age=3)
+    mode: Literal["r", "w"] = "r"
+    print(u["name"], u["age"], mode)
+
+if __name__ == "__main__":
+    main()
+"#,
+        "after\n[[1, 2], [3, 8]] [[1, 2, 9], [3]] [[1, 2], [3, 8]] {'k': 1}\nbob 3 r\n",
+    );
+}
+
+/// Builtins written in python are cpythons: the output is CPython 3.13's for the
+/// same program.
+#[test]
+fn builtins_written_in_python_are_cpythons() {
+    prints(
+        r#"
+def gen():
+    yield 1
+    yield 2
+
+def main() -> None:
+    print(hex(255), hex(-42), oct(8), bin(5), bin(-3), bin(0))
+    print(divmod(17, 5), divmod(-17, 5), divmod(7.5, 2))
+    print(pow(3, 4, 5), pow(2, 10), pow(-2, 3, 7), pow(3, -1, 7))
+    print(int("ff", 16), int("0x1f", 16), int("777", 8), int("1010", 2), int("z", 36), int("0b11", 0))
+    print(list(filter(None, [0, 1, 2, 3])), list(filter(lambda x: x > 1, [1, 2, 3])))
+    g = gen()
+    print(next(g), next(g), next(g, -1))
+    print(hash(42), hash(True), hash("ab") == hash("ab"))
+    print("banana".find("a", 2), "banana".count("a", 2), "a b c d".split(" ", 2), "a b  c".split(None, 1))
+    try:
+        int("zz", 16)
+    except ValueError as e:
+        print("ValueError:", e)
+
+if __name__ == "__main__":
+    main()
+"#,
+        "0xff -0x2a 0o10 0b101 -0b11 0b0\n(3, 2) (-4, 3) (3.0, 1.5)\n1 1024 6 5\n255 31 511 10 35 3\n[1, 2, 3] [2, 3]\n1 2 -1\n42 1 True\n3 2 ['a', 'b', 'c d'] ['a', 'b  c']\nValueError: invalid literal for int() with base 16: 'zz'\n",
+    );
+}
+
+/// An argparse command line: values typed from `type=` and `action=`, the
+/// help, and the errors with their exit status 2, each CPython 3.13's for
+/// the same program and arguments.
+#[test]
+fn argparse_parses_as_cpython_does() {
+    let src = dedent(
+        r#"
+        import argparse
+
+        def main() -> None:
+            parser = argparse.ArgumentParser(prog="greet", description="Greet people.")
+            parser.add_argument("name", help="who to greet")
+            parser.add_argument("--count", type=int, default=1, help="how many times")
+            parser.add_argument("-v", "--verbose", action="store_true", help="talk more")
+            parser.add_argument("--tag", action="append")
+            parser.add_argument("files", nargs="*")
+            args = parser.parse_args()
+            for _ in range(args.count):
+                print("hello", args.name)
+            print(args)
+
+        if __name__ == "__main__":
+            main()
+        "#,
+    );
+    let usage = "usage: greet [-h] [--count COUNT] [-v] [--tag TAG] name [files ...]\n";
+    let run = run_main(&src, "", &["bob", "--count", "2", "-v", "--tag", "a", "f1"]);
+    assert_eq!(
+        (run.stdout.as_str(), run.exit),
+        (
+            "hello bob\nhello bob\nNamespace(name='bob', count=2, verbose=True, tag=['a'], files=['f1'])\n",
+            0
+        )
+    );
+    let run = run_main(&src, "", &["-h"]);
+    assert_eq!(
+        run.stdout,
+        format!(
+            "{usage}\nGreet people.\n\npositional arguments:\n  name           who to greet\n  files\n\n\
+             options:\n  -h, --help     show this help message and exit\n  --count COUNT  how many times\n  \
+             -v, --verbose  talk more\n  --tag TAG\n"
+        )
+    );
+    assert_eq!(run.exit, 0);
+    let run = run_main(&src, "", &[]);
+    assert_eq!(
+        (run.stderr, run.exit),
+        (
+            format!("{usage}greet: error: the following arguments are required: name\n"),
+            2
+        )
+    );
+    let run = run_main(&src, "", &["bob", "--count", "x"]);
+    assert_eq!(
+        (run.stderr, run.exit),
+        (
+            format!("{usage}greet: error: argument --count: invalid int value: 'x'\n"),
+            2
+        )
+    );
+}
+
+/// A file's lines, by readlines() and by a for loop over the file, as
+/// CPython reads them; readline() is refused rather than answering 0, which
+/// it did.
+#[test]
+fn a_file_reads_its_lines_as_cpython_does() {
+    prints(
+        r#"
+        def main() -> None:
+            with open("t.txt", "w") as f:
+                f.write("a\nb\nlast")
+            with open("t.txt") as f:
+                print(f.readlines())
+            with open("t.txt") as f:
+                for line in f:
+                    print(repr(line))
+
+        if __name__ == "__main__":
+            main()
+        "#,
+        "['a\\n', 'b\\n', 'last']\n'a\\n'\n'b\\n'\n'last'\n",
+    );
+    let err = try_compile(&dedent(
+        r#"
+        def main() -> None:
+            with open("t.txt") as f:
+                print(f.readline())
+        "#,
+    ))
+    .expect_err("readline() on a file is refused");
+    assert!(
+        err.contains("the file method 'readline()' is not supported"),
+        "{err}"
+    );
+}

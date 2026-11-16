@@ -1132,12 +1132,14 @@ impl Desugarer<'_> {
                 if let [IRExpr::FunctionCall {
                     function_name: inner,
                     arguments: pull,
-                }] = arguments.as_mut_slice()
+                }, rest @ ..] = arguments.as_mut_slice()
                 {
                     if inner == NEXT_FN {
+                        let mut collapsed = std::mem::take(pull);
+                        collapsed.extend(rest.iter().cloned());
                         *expr = IRExpr::FunctionCall {
                             function_name: NEXT_FN.to_string(),
-                            arguments: std::mem::take(pull),
+                            arguments: collapsed,
                         };
                         return;
                     }

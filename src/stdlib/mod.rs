@@ -58,6 +58,10 @@ pub fn get_stdlib_attributes(module: &str, attr: &str) -> Option<StdlibValue> {
 
 /// A stdlib module or one of its submodules, by its dotted name (`os.path`).
 pub fn is_stdlib_module_path(name: &str) -> bool {
+    // A module written in Python, compiled with the program (`ir::pystdlib`).
+    if crate::ir::pystdlib::is_module(name) {
+        return true;
+    }
     match name.split_once('.') {
         None => is_stdlib_module(name),
         Some((module, sub)) => is_stdlib_module(module) && is_stdlib_submodule(module, sub),

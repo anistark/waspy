@@ -1334,6 +1334,90 @@
         "status": "done",
         "version": "upcoming",
         "test": "stdlib::logging_file_config"
+      },
+      {
+        "name": "heapq and bisect: heappush, heappop, heapify, heappushpop, heapreplace, nlargest, nsmallest, bisect_left / bisect_right / insort, on any element type that orders, CPython's algorithms",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::heapq_and_bisect"
+      },
+      {
+        "name": "string's constants and capwords; textwrap: wrap, fill, shorten, dedent, indent, with CPython's TextWrapper options and its word splitting",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::string_and_textwrap"
+      },
+      {
+        "name": "io.StringIO: write, getvalue, read, readline, readlines, seek, tell, iteration, and with",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::io_stringio"
+      },
+      {
+        "name": "operator: the operator functions, and itemgetter, attrgetter, and methodcaller as the functions they make",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::operator_module"
+      },
+      {
+        "name": "base64 (b64, urlsafe, b16, with binascii's errors), hashlib (md5, sha1, sha224, sha256), uuid (UUID, uuid3, uuid4, uuid5)",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::base64_hashlib_uuid"
+      },
+      {
+        "name": "urllib.parse: quote, quote_plus, unquote, urlencode, urlparse / urlsplit (with hostname, port, username, password, geturl), urljoin, parse_qs / parse_qsl",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::urllib_parse"
+      },
+      {
+        "name": "csv: reader, writer, DictReader, DictWriter over files and StringIO, with the excel dialect's quoting and CPython's parser",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::csv_module"
+      },
+      {
+        "name": "pathlib.Path: joining with /, name, suffix, suffixes, stem, parent, parts, with_name / with_suffix / with_stem, relative_to, and exists, read_text, write_text, iterdir, unlink, rename",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::pathlib_module"
+      },
+      {
+        "name": "time: time, monotonic, perf_counter, sleep, gmtime / localtime (UTC on WASI), strftime",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::time_module"
+      },
+      {
+        "name": "argparse: positional and optional arguments, store / store_true / store_false / count / append, nargs, choices, required, help and usage, and CPython's errors with exit status 2; the Namespace typed from the program's add_argument calls",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::argparse_module"
+      },
+      {
+        "name": "enum: Enum (members with name and value, lookup by value and by name, iteration, auto, methods), IntEnum and StrEnum (members as their values)",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::enum_module"
+      },
+      {
+        "name": "contextlib.suppress; copy.copy and copy.deepcopy of lists, sets, and dicts",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::contextlib_and_copy"
+      },
+      {
+        "name": "typing.TypedDict (a dict of dynamic values, made by its call) and Literal (the type its values share)",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::typing_typeddict_literal"
+      },
+      {
+        "name": "Builtins hex, oct, bin, divmod, pow(a, b, m), int(s, base), filter, next(it, default), hash; str.split(sep, maxsplit) and find / rfind / index / rindex / count with start and end",
+        "status": "done",
+        "version": "upcoming",
+        "test": "stdlib::python_builtins"
       }
     ]
   },

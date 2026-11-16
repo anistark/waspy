@@ -440,8 +440,9 @@ const ANNOTATION_MODULES: &[&str] = &[
 /// What a program can import, for the refusal of anything else.
 const IMPORTABLE: &str = "its own modules, the standard-library modules sys, os, math, random, \
                           json, re, datetime, collections, itertools, functools, logging, \
-                          asyncio, abc, dataclasses, importlib, and typing, and js and pyodide \
-                          for the JavaScript bridge";
+                          asyncio, abc, dataclasses, importlib, typing, base64, bisect, csv, \
+                          hashlib, heapq, io, operator, pathlib, string, textwrap, time, \
+                          urllib.parse, and uuid, and js and pyodide for the JavaScript bridge";
 
 /// Refuse an import of a module the program cannot have: neither a module the
 /// compiler supports nor one of the program's own (`provides`). A

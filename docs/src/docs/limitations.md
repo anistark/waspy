@@ -10,6 +10,9 @@ Each of these is refused at compile time, or traps, rather than answering differ
 
 These answer differently from CPython without an error. Each is known, and anything else is a bug:
 
+- An `IntEnum`'s or `StrEnum`'s member is its value: `str()`, comparison, and arithmetic are CPython's, but `repr()` (and a list of members printed) shows the value (`1`, `'r'`) where CPython shows `<Prio.LOW: 1>`, and `.name` is refused
+- `hash()` answers 32 bits: where CPython's 64-bit hash does not fit an int here (a tuple's, a fractional float's), its low 32 bits. CPython's own hash values differ between 32- and 64-bit builds, and a str's between runs; equal values hash equal
+- `Path.iterdir()` answers a list, where CPython answers a generator: walking it is the same, printing it is not
 - A NaN inside a collection does not equal itself: `(x,) == (x,)` is False for `x = float("nan")`, where CPython answers True (see [Numbers](/docs/numbers/))
 - A temporary lives to the end of its statement: in `print(Res().name)` the `Res` is finalized after the line is printed, where CPython finalizes it as soon as `.name` is read. What a variable, a field, or a collection holds, a function's own locals, and the arguments of a call to a function, a method, or a constructor are let go of exactly where CPython lets go of them
 - An object in a reference cycle is finalized when the collector next runs (after enough has been allocated, or as the program ends), which is not the allocation count CPython's collector runs at. Both finalize what is left at exit; a module with no `__main__` block has no exit, so nothing is finalized when its host drops it
@@ -85,6 +88,14 @@ These answer differently from CPython without an error. Each is known, and anyth
 
 ## The standard library
 
+- `csv.reader` and `csv.DictReader` take a file or a `StringIO` and read its lines when they are made (CPython reads one line per row); a list of lines is refused
+- `argparse` has no subparsers, argument groups, mutually exclusive groups, or `parse_known_args`, and `add_argument` takes its names and keywords written in the program
+- `enum`'s `Flag` and `IntFlag` are not supported; an Enum's members take values of one type
+- `iter()` of a list, a str, or a dict is refused; `next(it, default)` works on generators and iterator classes
+- A file's `readline()`, `seek()`, and `tell()` are refused; `read()`, `readlines()`, `write()`, and a `for` over the file work
+- `textwrap`'s `fix_sentence_endings` raises `NotImplementedError`
+- `copy.deepcopy()` of a dict whose values are mutable, and `copy.copy()` of an instance, are refused
+- `contextlib`'s `contextmanager`, `closing`, and `nullcontext` are not supported
 - `random.seed()` of a str or bytes is refused: CPython seeds those from their SHA-512 digest. Seed with an int or a float
 - `math`'s transcendental functions round as musl's libm does, which CPython on macOS or glibc can differ from in the last bit (see [Numbers](/docs/numbers/#the-math-module))
 - `os.getcwd()` is `"/"` and `os.getpid()` is 42, as on CPython for WASI, which has neither; `sys.path` is empty, since every import is linked at compile time

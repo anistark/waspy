@@ -1148,6 +1148,11 @@ fn ensure_local(ctx: &mut CompilationContext, name: &str, var_type: IRType) {
 /// anything else is left `Unknown` (an i32 slot, which collections and pointers
 /// also use).
 pub(crate) fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRType {
+    // A call of a standard-library template answers what its instance for
+    // the arguments' types does (`ir::pystdlib`).
+    if let Some(ty) = crate::compiler::expression::template_call_type(value, ctx) {
+        return ty;
+    }
     // An operator on an instance answers what its special method does. A
     // binary operator is one only when an operand is an instance, which its
     // arm below checks first: asking the rewrite of every operator in a chain
@@ -1398,7 +1403,8 @@ pub(crate) fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRTy
         }
         IRExpr::FunctionCall { function_name, .. } if function_name == "float" => IRType::Float,
         IRExpr::FunctionCall { function_name, .. }
-            if function_name == "ord" && ctx.get_function_info("ord").is_none() =>
+            if matches!(function_name.as_str(), "ord" | "hash")
+                && ctx.get_function_info(function_name).is_none() =>
         {
             IRType::Int
         }
@@ -2999,7 +3005,12 @@ fn compile_statement(
                 } else {
                     ctx.module_global_types.get(target).cloned()
                 };
-                let expected = recorded.as_ref().or(var_type.as_ref());
+                // A type the scan only partly knew (a list of what it could
+                // not tell) is not what the value is built as.
+                let expected = recorded
+                    .as_ref()
+                    .filter(|t| !(ctx.in_module_init && has_unknown(t)))
+                    .or(var_type.as_ref());
                 let emitted = crate::compiler::expression::emit_value(
                     value,
                     func,

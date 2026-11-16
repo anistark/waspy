@@ -4347,6 +4347,226 @@ app.audit|ERROR|an error flushes
             ],
         );
     }
+
+    /// heapq and bisect: heappush, heappop, heapify, heappushpop, heapreplace, nlargest, nsmallest, bisect_left / bisect_right / insort, on any element type that orders, CPython's algorithms
+    #[test]
+    fn heapq_and_bisect() {
+        let run = run_main(
+            r#"import heapq
+import bisect
+h: list[tuple[int, str]] = []
+heapq.heappush(h, (2, "b"))
+heapq.heappush(h, (1, "a"))
+s = [1, 3, 5]
+bisect.insort(s, 4)
+print(heapq.heappop(h), s, bisect.bisect_left(s, 4))
+"#,
+            "",
+            &[],
+        );
+        assert_eq!(run.stdout, "(1, 'a') [1, 3, 4, 5] 2\n");
+    }
+
+    /// string's constants and capwords; textwrap: wrap, fill, shorten, dedent, indent, with CPython's TextWrapper options and its word splitting
+    #[test]
+    fn string_and_textwrap() {
+        let run = run_main(
+            r#"import string
+import textwrap
+print(string.ascii_uppercase[:3], string.capwords("a b"), textwrap.wrap("a well-known fox jumps far", 9))
+"#,
+            "",
+            &[],
+        );
+        assert_eq!(
+            run.stdout,
+            "ABC A B ['a well-', 'known fox', 'jumps far']\n"
+        );
+    }
+
+    /// io.StringIO: write, getvalue, read, readline, readlines, seek, tell, iteration, and with
+    #[test]
+    fn io_stringio() {
+        let run = run_main(
+            r#"import io
+s = io.StringIO("x\ny")
+print(s.readline(), s.read(), s.write("!"), s.getvalue())
+"#,
+            "",
+            &[],
+        );
+        assert_eq!(run.stdout, "x\n y 1 x\ny!\n");
+    }
+
+    /// operator: the operator functions, and itemgetter, attrgetter, and methodcaller as the functions they make
+    #[test]
+    fn operator_module() {
+        let run = run_main(
+            r#"import operator
+print(operator.add(1, 2), sorted([(1, "b"), (0, "a")], key=operator.itemgetter(1)))
+"#,
+            "",
+            &[],
+        );
+        assert_eq!(run.stdout, "3 [(0, 'a'), (1, 'b')]\n");
+    }
+
+    /// base64 (b64, urlsafe, b16, with binascii's errors), hashlib (md5, sha1, sha224, sha256), uuid (UUID, uuid3, uuid4, uuid5)
+    #[test]
+    fn base64_hashlib_uuid() {
+        let run = run_main(
+            r#"import base64
+import hashlib
+import uuid
+print(base64.b64encode(b"hi"), hashlib.sha256(b"").hexdigest()[:16], uuid.uuid5(uuid.NAMESPACE_DNS, "a"))
+"#,
+            "",
+            &[],
+        );
+        assert_eq!(
+            run.stdout,
+            "b'aGk=' e3b0c44298fc1c14 4f3f2898-69e3-5a0d-820a-c4e87987dbce\n"
+        );
+    }
+
+    /// urllib.parse: quote, quote_plus, unquote, urlencode, urlparse / urlsplit (with hostname, port, username, password, geturl), urljoin, parse_qs / parse_qsl
+    #[test]
+    fn urllib_parse() {
+        let run = run_main(
+            r#"from urllib.parse import urlparse, quote, urljoin
+u = urlparse("http://h:80/p?q=1")
+print(u.hostname, u.port, quote("a b"), urljoin("http://a/b/c", "d"))
+"#,
+            "",
+            &[],
+        );
+        assert_eq!(run.stdout, "h 80 a%20b http://a/b/d\n");
+    }
+
+    /// csv: reader, writer, DictReader, DictWriter over files and StringIO, with the excel dialect's quoting and CPython's parser
+    #[test]
+    fn csv_module() {
+        let run = run_main(
+            r#"import csv
+import io
+o = io.StringIO()
+csv.writer(o).writerow(["a", "b,c"])
+print(repr(o.getvalue()), list(csv.reader(io.StringIO(o.getvalue()))))
+"#,
+            "",
+            &[],
+        );
+        assert_eq!(run.stdout, "'a,\"b,c\"\\r\\n' [['a', 'b,c']]\n");
+    }
+
+    /// pathlib.Path: joining with /, name, suffix, suffixes, stem, parent, parts, with_name / with_suffix / with_stem, relative_to, and exists, read_text, write_text, iterdir, unlink, rename
+    #[test]
+    fn pathlib_module() {
+        let run = run_main(
+            r#"from pathlib import Path
+p = Path("a") / "b.txt"
+print(p, p.suffix, p.parent, p.with_suffix(".md"))
+"#,
+            "",
+            &[],
+        );
+        assert_eq!(run.stdout, "a/b.txt .txt a a/b.md\n");
+    }
+
+    /// time: time, monotonic, perf_counter, sleep, gmtime / localtime (UTC on WASI), strftime
+    #[test]
+    fn time_module() {
+        let run = run_main(
+            r#"import time
+t = time.monotonic()
+time.sleep(0.001)
+print(time.monotonic() >= t, time.time() > 1e9)
+"#,
+            "",
+            &[],
+        );
+        assert_eq!(run.stdout, "True True\n");
+    }
+
+    /// argparse: positional and optional arguments, store / store_true / store_false / count / append, nargs, choices, required, help and usage, and CPython's errors with exit status 2; the Namespace typed from the program's add_argument calls
+    #[test]
+    fn argparse_module() {
+        let run = run_main(
+            r#"import argparse
+p = argparse.ArgumentParser(prog="t")
+p.add_argument("n", type=int)
+p.add_argument("-q", action="store_true")
+a = p.parse_args(["3", "-q"])
+print(a.n + 1, a.q, a)
+"#,
+            "",
+            &[],
+        );
+        assert_eq!(run.stdout, "4 True Namespace(n=3, q=True)\n");
+    }
+
+    /// enum: Enum (members with name and value, lookup by value and by name, iteration, auto, methods), IntEnum and StrEnum (members as their values)
+    #[test]
+    fn enum_module() {
+        let run = run_main(
+            r#"from enum import Enum, auto
+class C(Enum):
+    A = auto()
+    B = auto()
+print(C.A, C(2), C["A"].value, list(C))
+"#,
+            "",
+            &[],
+        );
+        assert_eq!(run.stdout, "C.A C.B 1 [<C.A: 1>, <C.B: 2>]\n");
+    }
+
+    /// contextlib.suppress; copy.copy and copy.deepcopy of lists, sets, and dicts
+    #[test]
+    fn contextlib_and_copy() {
+        let run = run_main(
+            r#"import copy
+from contextlib import suppress
+with suppress(ZeroDivisionError):
+    print(1 // 0)
+a = [[1]]
+b = copy.deepcopy(a)
+b[0].append(2)
+print(a, b)
+"#,
+            "",
+            &[],
+        );
+        assert_eq!(run.stdout, "[[1]] [[1, 2]]\n");
+    }
+
+    /// typing.TypedDict (a dict of dynamic values, made by its call) and Literal (the type its values share)
+    #[test]
+    fn typing_typeddict_literal() {
+        let run = run_main(
+            r#"from typing import TypedDict, Literal
+class P(TypedDict):
+    x: int
+m: Literal["a", "b"] = "a"
+print(P(x=1)["x"], m)
+"#,
+            "",
+            &[],
+        );
+        assert_eq!(run.stdout, "1 a\n");
+    }
+
+    /// Builtins hex, oct, bin, divmod, pow(a, b, m), int(s, base), filter, next(it, default), hash; str.split(sep, maxsplit) and find / rfind / index / rindex / count with start and end
+    #[test]
+    fn python_builtins() {
+        let run = run_main(
+            r#"print(hex(255), divmod(7, 2), pow(3, -1, 7), int("ff", 16), list(filter(None, [0, 1])), "a,b,c".split(",", 1), "abcab".find("b", 2))
+"#,
+            "",
+            &[],
+        );
+        assert_eq!(run.stdout, "0xff (3, 1) 5 255 [1] ['a', 'b,c'] 4\n");
+    }
 }
 
 mod comprehensions {

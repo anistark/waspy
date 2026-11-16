@@ -22,5 +22,6 @@ mod stdlib;
 mod unicode;
 mod validate;
 
+pub(crate) use module::module_uses_file_io;
 pub use module::{compile_ir_module, COMMENTS_SECTION_NAME};
 pub use validate::validate_wasm;

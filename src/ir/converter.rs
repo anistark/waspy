@@ -87,6 +87,9 @@ struct Lowering {
     /// When the module imports `logging`: the names it calls the module's
     /// logging functions by (`from logging import info`).
     logging: Option<std::collections::HashSet<String>>,
+    /// The module's `TypedDict` classes: each is `dict[str, Any]`, and a call
+    /// of one a dict of its keyword arguments.
+    typed_dicts: std::collections::HashSet<String>,
 }
 
 thread_local! {
@@ -229,6 +232,29 @@ fn log_line_keyword(call: &rustpython_parser::ast::ExprCall) -> Option<IRExpr> {
     })
 }
 
+/// The classes of a module that derive from `TypedDict`: at run time a dict,
+/// as CPython's are.
+fn typed_dict_classes(ast: &Suite) -> std::collections::HashSet<String> {
+    ast.iter()
+        .filter_map(|stmt| match stmt {
+            Stmt::ClassDef(c)
+                if c.bases.iter().any(|b| match b {
+                    Expr::Name(n) => n.id.as_str() == "TypedDict",
+                    Expr::Attribute(a) => a.attr.as_str() == "TypedDict",
+                    _ => false,
+                }) =>
+            {
+                Some(c.name.to_string())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn is_typed_dict(name: &str) -> bool {
+    LOWERING.with(|l| l.borrow().typed_dicts.contains(name))
+}
+
 /// Lower a Python AST (Suite) into our IR, as the module `__main__`.
 pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
     lower_ast_to_ir_named(ast, "__main__")
@@ -239,14 +265,25 @@ pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
 pub fn lower_ast_to_ir_named(ast: &Suite, module_name: &str) -> Result<IRModule> {
     // Every way of binding a module, read as the module's own name.
     let resolved = crate::ir::resolve_module_bindings(ast)?;
-    let ast = &resolved.ast;
+    // The standard-library modules written in Python that it imports, placed
+    // ahead of it (`ir::pystdlib`).
+    let embedded = if module_name == "<embedded>" {
+        None
+    } else {
+        crate::ir::pystdlib::embed(&resolved.ast, resolved.hoisted)?
+    };
+    let (ast, hoisted) = match &embedded {
+        Some((ast, hoisted)) => (ast, *hoisted),
+        None => (&resolved.ast, resolved.hoisted),
+    };
     let previous = LOWERING.with(|l| {
         l.replace(Lowering {
             module_name: module_name.to_string(),
             logging: logging_imports(ast),
+            typed_dicts: typed_dict_classes(ast),
         })
     });
-    let lowered = lower_module(ast, resolved.hoisted);
+    let lowered = lower_module(ast, hoisted);
     LOWERING.with(|l| l.replace(previous));
     let mut lowered = lowered?;
     for (module, place) in resolved.import_values {
@@ -501,6 +538,8 @@ fn lower_module(ast: &Suite, hoisted: usize) -> Result<IRModule> {
                     decorators,
                 });
             }
+            // A `TypedDict` is a dict at run time: its class makes nothing.
+            Stmt::ClassDef(c) if is_typed_dict(c.name.as_str()) => continue,
             Stmt::ClassDef(_) => {
                 // Process class definition
                 let mut class = process_class_definition(stmt, &mut memory_layout)?;
@@ -2730,8 +2769,13 @@ pub(crate) fn is_top_level_statement(stmt: &Stmt) -> bool {
         | Stmt::Pass(_)
         | Stmt::Global(_)
         | Stmt::Expr(_) => false,
-        Stmt::Assign(a) => !matches!(a.targets.as_slice(), [Expr::Name(_)]),
-        Stmt::AnnAssign(a) => !matches!(&*a.target, Expr::Name(_)),
+        Stmt::Assign(a) => {
+            !matches!(a.targets.as_slice(), [Expr::Name(_)]) || walks_an_iterable(&a.value)
+        }
+        Stmt::AnnAssign(a) => {
+            !matches!(&*a.target, Expr::Name(_))
+                || a.value.as_deref().is_some_and(walks_an_iterable)
+        }
         Stmt::If(s) => !is_main_guard(&s.test),
         Stmt::Try(s) => {
             let handler_bodies = s.handlers.iter().flat_map(|h| {
@@ -2746,6 +2790,52 @@ pub(crate) fn is_top_level_statement(stmt: &Stmt) -> bool {
                 .all(|s| matches!(s, Stmt::Import(_) | Stmt::ImportFrom(_) | Stmt::Pass(_)))
         }
         _ => true,
+    }
+}
+
+/// Whether a value walks an iterable as it is computed: a comprehension, or
+/// a builtin that consumes one (`list(it)`, `sorted(xs)`, `sum(...)`). The
+/// module passes consume an iterator (a generator, a class with `__next__`)
+/// in code, and a module definition's value is not code they see, so such an
+/// assignment runs as a statement.
+fn walks_an_iterable(expr: &Expr) -> bool {
+    const CONSUMERS: &[&str] = &[
+        "list",
+        "tuple",
+        "set",
+        "frozenset",
+        "dict",
+        "sorted",
+        "sum",
+        "min",
+        "max",
+        "any",
+        "all",
+        "next",
+        "enumerate",
+        "zip",
+        "reversed",
+        "map",
+        "filter",
+    ];
+    match expr {
+        Expr::ListComp(_) | Expr::SetComp(_) | Expr::DictComp(_) | Expr::GeneratorExp(_) => true,
+        Expr::Call(c) => {
+            let consumer = matches!(&*c.func, Expr::Name(n) if CONSUMERS.contains(&n.id.as_str()))
+                && c.args
+                    .iter()
+                    .any(|a| matches!(a, Expr::Call(_) | Expr::Name(_)));
+            consumer
+                || walks_an_iterable(&c.func)
+                || c.args.iter().any(walks_an_iterable)
+                || c.keywords.iter().any(|k| walks_an_iterable(&k.value))
+        }
+        Expr::BinOp(b) => walks_an_iterable(&b.left) || walks_an_iterable(&b.right),
+        Expr::Attribute(a) => walks_an_iterable(&a.value),
+        Expr::Subscript(s) => walks_an_iterable(&s.value) || walks_an_iterable(&s.slice),
+        Expr::Tuple(t) => t.elts.iter().any(walks_an_iterable),
+        Expr::List(l) => l.elts.iter().any(walks_an_iterable),
+        _ => false,
     }
 }
 
@@ -3108,6 +3198,11 @@ fn type_annotation_to_ir_type(expr: &Expr) -> Result<IRType> {
             }),
             // `pyodide.ffi.JsProxy`, a JavaScript value.
             "JsProxy" => Ok(IRType::JsProxy),
+            // A `TypedDict` is a dict of dynamic values.
+            other if is_typed_dict(other) => Ok(IRType::Dict(
+                Box::new(IRType::String),
+                Box::new(crate::ir::dynamic::any_type()),
+            )),
             _ => Ok(IRType::Class(name.id.to_string())),
         },
         // `datetime.date`: a module's class, named through the module.
@@ -3275,6 +3370,32 @@ fn type_annotation_to_ir_type(expr: &Expr) -> Result<IRType> {
                     "Optional" => {
                         let inner_type = type_annotation_to_ir_type(&subscript.slice)?;
                         Ok(IRType::Optional(Box::new(inner_type)))
+                    }
+                    // `Literal["r", "w"]`: the type its values share, else a
+                    // dynamic value.
+                    "Literal" => {
+                        let values: Vec<&Expr> = match &*subscript.slice {
+                            Expr::Tuple(t) => t.elts.iter().collect(),
+                            one => vec![one],
+                        };
+                        let kinds: Vec<IRType> = values
+                            .iter()
+                            .map(|v| match v {
+                                Expr::Constant(c) => match &c.value {
+                                    rustpython_parser::ast::Constant::Str(_) => IRType::String,
+                                    rustpython_parser::ast::Constant::Bool(_) => IRType::Bool,
+                                    rustpython_parser::ast::Constant::Int(_) => IRType::Int,
+                                    rustpython_parser::ast::Constant::Bytes(_) => IRType::Bytes,
+                                    rustpython_parser::ast::Constant::None => IRType::None,
+                                    _ => crate::ir::dynamic::any_type(),
+                                },
+                                _ => crate::ir::dynamic::any_type(),
+                            })
+                            .collect();
+                        Ok(match kinds.first() {
+                            Some(first) if kinds.iter().all(|k| k == first) => first.clone(),
+                            _ => crate::ir::dynamic::any_type(),
+                        })
                     }
                     // `type[A]`: the class object of A or of a subclass.
                     "Type" | "type" => match type_annotation_to_ir_type(&subscript.slice)? {
@@ -5420,6 +5541,37 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                         memory_layout.add_string("\n");
                     }
 
+                    // A `TypedDict`'s call makes the dict of its keywords.
+                    if is_typed_dict(&function_name) {
+                        let mut entries = Vec::new();
+                        if let [one] = call.args.as_slice() {
+                            if call.keywords.is_empty() {
+                                return lower_expr(one, memory_layout);
+                            }
+                        }
+                        if !call.args.is_empty() {
+                            return Err(crate::core::errors::unsupported_feature(
+                                format!("{function_name}() takes its fields as keyword arguments"),
+                                None,
+                            )
+                            .into());
+                        }
+                        for kw in &call.keywords {
+                            let Some(key) = &kw.arg else {
+                                return Err(crate::core::errors::unsupported_feature(
+                                    format!("{function_name}(**kwargs) is not supported"),
+                                    None,
+                                )
+                                .into());
+                            };
+                            memory_layout.add_string(key.as_str());
+                            entries.push((
+                                IRExpr::Const(IRConstant::String(key.to_string())),
+                                lower_expr(&kw.value, memory_layout)?,
+                            ));
+                        }
+                        return Ok(IRExpr::DictLiteral(entries));
+                    }
                     // The builtin lowerings below read positional arguments
                     // only. A call with keywords keeps them for the finalize
                     // pass to place, or for code generation to refuse.
@@ -5617,15 +5769,21 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
                     // next(it) advances an iterator: lower to the protocol
                     // method so the generator pass can dispatch it statically,
                     // inside the intrinsic that raises its StopIteration.
-                    if function_name == "next" && call.args.len() == 1 {
+                    // `next(it, default)` answers the default where the
+                    // pull finds the iterator exhausted.
+                    if function_name == "next" && (call.args.len() == 1 || call.args.len() == 2) {
                         let object = lower_expr(&call.args[0], memory_layout)?;
+                        let mut arguments = vec![IRExpr::MethodCall {
+                            object: Box::new(object),
+                            method_name: "__next__".to_string(),
+                            arguments: Vec::new(),
+                        }];
+                        if let Some(default) = call.args.get(1) {
+                            arguments.push(lower_expr(default, memory_layout)?);
+                        }
                         return Ok(IRExpr::FunctionCall {
                             function_name: crate::ir::NEXT_FN.to_string(),
-                            arguments: vec![IRExpr::MethodCall {
-                                object: Box::new(object),
-                                method_name: "__next__".to_string(),
-                                arguments: Vec::new(),
-                            }],
+                            arguments,
                         });
                     }
 

@@ -623,6 +623,16 @@ pub(crate) fn build_class_name(ctx: &CompilationContext, by_id: Option<bool>) ->
             _ if crate::ir::collections::is_view_class(name) => {
                 name.split('<').next().unwrap_or(name).to_string()
             }
+            // A class of a standard-library module written in Python is
+            // named as CPython names it (`ir::pystdlib`).
+            Some(true) if crate::ir::pystdlib::display_name(name).is_some() => format!(
+                "<class '{}'>",
+                crate::ir::pystdlib::display_name(name).expect("checked")
+            ),
+            _ if crate::ir::pystdlib::display_name(name).is_some() => {
+                let shown = crate::ir::pystdlib::display_name(name).expect("checked");
+                shown.rsplit('.').next().unwrap_or(&shown).to_string()
+            }
             // A `datetime` class is named in its module.
             Some(true) if name.starts_with("datetime.") || name.starts_with("logging.") => {
                 format!("<class '{name}'>")
@@ -767,6 +777,26 @@ pub(crate) fn emit_report_uncaught(
             I::LocalSet(line),
             I::End
         );
+    }
+    // So is one a standard-library module written in Python raises
+    // (`binascii.Error`, `_csv.Error`).
+    let mut written: Vec<(&String, String)> = ctx
+        .class_map
+        .keys()
+        .filter_map(|n| crate::ir::pystdlib::display_name(n).map(|d| (n, d)))
+        .collect();
+    written.sort();
+    for (name, shown) in written {
+        if is_exception_class(ctx, name) {
+            emit_pending_is(f, ctx, name);
+            emit!(
+                f,
+                I::If(BlockType::Empty),
+                I::Call(ctx.helper(Helper::ExcText(shown))),
+                I::LocalSet(line),
+                I::End
+            );
+        }
     }
     for name in [
         "JSONDecodeError",

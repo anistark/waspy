@@ -1286,9 +1286,9 @@ fn unimplemented_decorators_are_refused_and_caching_ones_accepted() {
              \x20   @contextlib.contextmanager\n\
              \x20   def d(self) -> int:\n\
              \x20       return self.v * 2\n",
-            // `contextlib` is no module the compiler supports, so the
-            // program is refused at its import, before the decorator.
-            "cannot import 'contextlib'",
+            // `contextlib.contextmanager` is not implemented, so the
+            // decorator is refused by name.
+            "decorator '@contextlib.contextmanager' on method 'N.d' is not supported",
         ),
         (
             "def deco(cls):\n\
@@ -1323,18 +1323,18 @@ fn a_call_to_an_unknown_function_is_refused() {
          def f() -> int:\n\
          \x20   return choices([1, 2, 3])[0]\n",
         "def f() -> int:\n\
-         \x20   return divmod(7, 2)[0]\n",
+         \x20   return len(memoryview(b\"ab\"))\n",
         "def total(a: int) -> int:\n\
          \x20   return a\n\
          \n\
          def f() -> int:\n\
          \x20   return totl(3)\n",
     ];
-    for (src, name) in
-        cases
-            .iter()
-            .zip(["'random.choices()'", "call to 'divmod'", "call to 'totl'"])
-    {
+    for (src, name) in cases.iter().zip([
+        "'random.choices()'",
+        "call to 'memoryview'",
+        "call to 'totl'",
+    ]) {
         let err = try_compile(src).expect_err("an unknown callee must be refused");
         assert!(
             err.contains(name),
@@ -7794,22 +7794,12 @@ fn unpacking_a_str_or_bytes_binds_its_characters() {
 
 /// A search method on a literal folded with its first argument alone, so a
 /// start or end was dropped: `"banana".find("a", 2)` answered 1, where
-/// CPython answers 3. It is refused, as the same call on a variable is.
+/// CPython answers 3. A search with bounds is computed with them, on a
+/// literal as on a variable; `startswith` and `endswith` with bounds are
+/// still refused.
 #[test]
-fn a_search_on_a_literal_with_a_start_is_refused_not_folded() {
+fn a_search_on_a_literal_with_a_start_is_not_folded() {
     for (call, needle) in [
-        (
-            r#""banana".find("a", 2)"#,
-            "str.find() takes exactly one argument",
-        ),
-        (
-            r#""banana".index("a", 2, 4)"#,
-            "str.index() takes exactly one argument",
-        ),
-        (
-            r#""banana".count("a", 2)"#,
-            "str.count() takes exactly one argument",
-        ),
         (
             r#""banana".startswith("an", 1)"#,
             "str.startswith() takes exactly one argument",
@@ -7821,6 +7811,11 @@ fn a_search_on_a_literal_with_a_start_is_refused_not_folded() {
     ] {
         refused(&format!("def main() -> None:\n    print({call})\n"), needle);
     }
+    // CPython 3.13's answers.
+    let src = "def main() -> None:\n    print(\"banana\".find(\"a\", 2), \"banana\".index(\"a\", 2, 4), \
+               \"banana\".count(\"a\", 2), \"abcabc\".rfind(\"b\", 0, 3), \"a b c d\".split(\" \", 2))\n\n\
+               if __name__ == \"__main__\":\n    main()\n";
+    assert_eq!(run_main(src, "", &[]).stdout, "3 3 2 1 ['a', 'b', 'c d']\n");
     // With one argument the fold stands.
     let src =
         "def main() -> None:\n    print(\"banana\".find(\"an\"), \"banana\".count(\"a\"))\n\n\
@@ -8062,7 +8057,7 @@ fn an_import_of_a_module_the_program_cannot_have_is_refused() {
             "numpy",
         ),
         ("from pandas import DataFrame\n", "pandas"),
-        ("import os\nimport heapq\n", "heapq"),
+        ("import os\nimport sqlite3\n", "sqlite3"),
         (
             "def f() -> int:\n    import requests\n    return 1\n",
             "requests",
