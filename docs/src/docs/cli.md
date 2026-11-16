@@ -12,12 +12,6 @@ The `waspy` command compiles a Python file or project to WebAssembly, checks one
 cargo install waspy
 ```
 
-or, from Python's package index, which builds the same binary:
-
-```sh
-pip install waspy
-```
-
 `waspy run` runs the compiled module with a WebAssembly runtime, [wasmtime](https://wasmtime.dev) by default, which it expects on the `PATH`.
 
 ## Commands
