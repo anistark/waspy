@@ -36,7 +36,8 @@ check   compile without writing anything: report what the compiler refuses,
         if there is any.
 run     compile, then run the module with a WebAssembly runtime (wasmtime by
         default, or the --runtime command), with the current directory
-        preopened and <args> as sys.argv[1:].
+        preopened and <args> as sys.argv[1:]; a program making HTTP requests
+        runs with wasmtime's HTTP support turned on.
 ";
 
 fn main() -> ExitCode {
@@ -336,6 +337,11 @@ fn run(args: &[String]) -> ExitCode {
         .is_some_and(|n| n.to_string_lossy().starts_with("wasmtime"))
     {
         command.args(["run", "--dir=."]);
+        // A program making HTTP requests is a component importing
+        // `wasi:http`, which wasmtime provides when asked.
+        if wasm.get(4..8) == Some(&[0x0d, 0x00, 0x01, 0x00]) {
+            command.args(["-S", "http"]);
+        }
     }
     command.arg(&module).args(&parsed.rest);
     let status = command.status();

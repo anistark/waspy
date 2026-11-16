@@ -2131,7 +2131,21 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
     for (k, import) in js_imports.iter().enumerate() {
         ctx.js.insert(*import, (wasi_imports.len() + k) as u32);
     }
-    let import_count: u32 = (wasi_imports.len() + js_imports.len()) as u32;
+    // `wasi:http`'s imports, after the bridge's, when the module makes
+    // requests (a module using the bridge sends them through fetch instead).
+    let http_imports: Vec<crate::compiler::http::HttpImport> = if cfg!(feature = "wasi-http")
+        && crate::compiler::http::uses_http(ir_module)
+        && js_imports.is_empty()
+    {
+        crate::compiler::http::HttpImport::ALL.to_vec()
+    } else {
+        Vec::new()
+    };
+    for (k, import) in http_imports.iter().enumerate() {
+        ctx.http
+            .insert(*import, (wasi_imports.len() + js_imports.len() + k) as u32);
+    }
+    let import_count: u32 = (wasi_imports.len() + js_imports.len() + http_imports.len()) as u32;
 
     // Resolve each function's (and method's) return type up front, inferring
     // unannotated ones from their bodies, so the type section, the registered
@@ -2299,6 +2313,16 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
         types.ty().function(params, results);
         host_imports.import(
             crate::compiler::js::MODULE,
+            import.name(),
+            EntityType::Function(type_index),
+        );
+    }
+    for import in &http_imports {
+        let (params, results) = import.signature();
+        let type_index = types.len();
+        types.ty().function(params, results);
+        host_imports.import(
+            &import.module(),
             import.name(),
             EntityType::Function(type_index),
         );
@@ -3073,6 +3097,23 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
     {
         let start = ctx.helper(crate::compiler::runtime::Helper::Start);
         exports.export("_start", wasm_encoder::ExportKind::Func, start);
+    }
+
+    // A module importing `wasi:http` answers the host's lists into blocks
+    // its `cabi_realloc` takes.
+    if !ctx.http.is_empty() {
+        let realloc = ctx.helper(crate::compiler::runtime::Helper::Http(
+            crate::compiler::http::HttpFn::Realloc,
+        ));
+        exports.export("cabi_realloc", wasm_encoder::ExportKind::Func, realloc);
+        let adapter = ctx.helper(crate::compiler::runtime::Helper::Http(
+            crate::compiler::http::HttpFn::AdapterRealloc,
+        ));
+        exports.export(
+            "cabi_realloc_adapter",
+            wasm_encoder::ExportKind::Func,
+            adapter,
+        );
     }
 
     // Export memory

@@ -566,6 +566,8 @@ pub struct CompilationContext {
     /// The function index of each JavaScript bridge import, when the module
     /// uses the bridge (`compiler::js`).
     pub js: HashMap<crate::compiler::js::JsImport, u32>,
+    /// The `wasi:http` imports (`compiler::http`), when the module makes requests.
+    pub http: HashMap<crate::compiler::http::HttpImport, u32>,
     pub helper_base: u32,
     /// True while compiling an `__init__` method. Its `return` paths (explicit
     /// bare `return` and the implicit fall-through) yield `self` (local 0)
@@ -692,6 +694,7 @@ impl CompilationContext {
             signature_types: HashMap::new(),
             wasi: HashMap::new(),
             js: HashMap::new(),
+            http: HashMap::new(),
             cell_types: RefCell::new(HashMap::new()),
             pending_captures: RefCell::new(Vec::new()),
             capture_types: HashMap::new(),

@@ -1,5 +1,7 @@
 mod asm;
 mod closures;
+#[cfg(feature = "wasi-http")]
+pub mod component;
 mod context;
 mod dunders;
 mod emit;
@@ -11,6 +13,7 @@ mod format;
 mod function;
 mod gc;
 mod host;
+pub(crate) mod http;
 pub(crate) mod js;
 mod libm;
 mod module;

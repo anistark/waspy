@@ -2089,6 +2089,12 @@
         "status": "done",
         "version": "upcoming",
         "test": "packages::anthropic_messages"
+      },
+      {
+        "name": "requests and Anthropic's synchronous client over WASI preview 2's outgoing HTTP (a program making requests is a component run with wasmtime -S http)",
+        "status": "done",
+        "version": "upcoming",
+        "test": "packages::requests_over_wasi_http"
       }
     ]
   }

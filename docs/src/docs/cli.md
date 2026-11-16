@@ -66,6 +66,8 @@ waspy run app.py --runtime wasmtime
 
 `--runtime` names another runtime command, as does the `WASPY_RUNTIME` environment variable; one other than wasmtime is given the module's path and the arguments.
 
+A program that makes HTTP requests is compiled to a component and run with wasmtime's HTTP support (`wasmtime run -S http`); see [Running compiled modules](/docs/running/#http-requests).
+
 ## What a program looks like
 
 A script runs top to bottom as it does under `python3`: statements at the top level run where they stand, and an `if __name__ == "__main__":` block runs after them. A program that uses the JavaScript bridge (`import js`) needs the loader in a browser or Node rather than `waspy run`. See [Running compiled modules](/docs/running/) for the WASI functions a module imports.

@@ -182,6 +182,8 @@ pub enum Helper {
     Json(crate::compiler::stdlib::json::JsonFn),
     /// A routine of the JavaScript bridge (`compiler::js`).
     Js(crate::compiler::js::JsFn),
+    /// A routine of the HTTP client (`compiler::http`).
+    Http(crate::compiler::http::HttpFn),
 }
 
 /// The parameter and result types of `helper`.
@@ -282,6 +284,7 @@ pub fn signature(helper: &Helper) -> (Vec<ValType>, Vec<ValType>) {
             )
         }
         Helper::Js(routine) => routine.signature(),
+        Helper::Http(routine) => routine.signature(),
         Helper::Libm(routine) => {
             let (params, result) = routine.signature();
             (
@@ -379,6 +382,7 @@ pub fn build(helper: &Helper, ctx: &CompilationContext) -> Function {
         Helper::Os(routine) => crate::compiler::stdlib::build_os(ctx, *routine),
         Helper::Json(routine) => crate::compiler::stdlib::json::build(ctx, routine),
         Helper::Js(routine) => crate::compiler::js::build(routine, ctx),
+        Helper::Http(routine) => crate::compiler::http::build(routine, ctx),
     }
 }
 

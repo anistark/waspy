@@ -42,7 +42,7 @@ let wasm = compile_python_to_wasm_with_options(source, &options)?;
 
 ## Building without Binaryen
 
-Binaryen is a native C++ library behind the default `optimize` feature. Turn the feature off to build waspy for a target with no C++ toolchain, such as `wasm32-unknown-unknown`; `optimize` then has no effect and the output is the unoptimized module. The [playground](/playground/) runs waspy built this way.
+Binaryen is a native C++ library behind the default `optimize` feature. Turn the feature off to build waspy for a target with no C++ toolchain, such as `wasm32-unknown-unknown`; `optimize` then has no effect and the output is the unoptimized module. The [playground](/playground/) runs waspy built this way. The other default feature, `wasi-http`, makes a program that sends HTTP requests a component ([Running compiled modules](/docs/running/#http-requests)); without it, such a program is refused.
 
 ```toml
 [dependencies]

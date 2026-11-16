@@ -44,6 +44,16 @@ A program with an `if __name__ == "__main__":` block, or with statements at its 
 
 Writes are unbuffered, one `fd_write` per `print` or `write`, so standard output and standard error come out in the order the program wrote them. Standard input is read in UTF-8, as CPython's is on POSIX: lines end at `\n` alone (a `\r` is kept, as CPython keeps it there), and bytes that are not UTF-8 raise `UnicodeDecodeError`. `input()` at the end of input raises `EOFError`. `sys.argv[0]` is whatever the host passes first (`wasmtime` passes the module's path). `sys.stdout` and the other streams are used through their methods; one passed around as a value is refused.
 
+## HTTP requests
+
+A program that makes HTTP requests (through `requests`, or the Anthropic client's `Anthropic`, see [Third-party packages](/docs/packages/)) imports [`wasi:http`](https://github.com/WebAssembly/wasi-http), WASI preview 2's outgoing HTTP, which only a component can import. So the compiler answers a component for it rather than a core module: the module importing `wasi:http/types` and `wasi:http/outgoing-handler` (version 0.2.12), with its preview 1 imports served by the preview 1 adapter, exporting `wasi:cli/run` when it has a `_start` (a reactor otherwise). A runtime runs it with HTTP turned on:
+
+```sh
+wasmtime run -S http program.wasm
+```
+
+`waspy run` passes `-S http` for such a program. A component starts with the bytes `00 61 73 6d 0d 00 01 00` where a core module's version is `01 00 00 00`, so a host can tell which it was handed. Every other program is the core module it always was. Making a component takes the default `wasi-http` feature; a build without it (the playground's) refuses a program that makes requests, and so does a program using the JavaScript bridge, whose requests go through `fetch` (`httpx.AsyncClient`).
+
 ## File I/O
 
 A path is resolved against the host's preopened directories as wasi-libc resolves it: an absolute path against the longest preopen naming a prefix of it, a relative one against the first relative preopen (`.`), else `/`. So `wasmtime run --dir . program.wasm` reads and writes the current directory, and a program run with no preopen can open nothing. A file `open()` cannot open raises CPython's exception, with CPython's message on a POSIX host: `FileNotFoundError: [Errno 2] No such file or directory: 'notes.txt'`, and `PermissionError`, `IsADirectoryError`, `NotADirectoryError`, and `FileExistsError` for the matching WASI errors. A size-less `f.read()` asks for at most one 64 KiB page per call.

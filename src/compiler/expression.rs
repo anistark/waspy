@@ -11417,6 +11417,12 @@ fn emit_function_call_expr(
             return IRType::Int;
         }
     }
+    // An HTTP request through `wasi:http` (`compiler::http`).
+    if function_name == crate::compiler::http::HTTP_FN
+        && ctx.get_function_info(function_name).is_none()
+    {
+        return crate::compiler::http::emit_call(arguments, func, ctx, memory_layout);
+    }
     // The host's clock, in microseconds since the epoch (an exact integer
     // as a float until long after 2038), for `datetime.now()`.
     if function_name == crate::ir::DATETIME_CLOCK_FN

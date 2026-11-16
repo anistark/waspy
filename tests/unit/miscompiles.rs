@@ -8058,10 +8058,7 @@ fn an_import_of_a_module_the_program_cannot_have_is_refused() {
         ),
         ("from pandas import DataFrame\n", "pandas"),
         ("import os\nimport sqlite3\n", "sqlite3"),
-        (
-            "def f() -> int:\n    import requests\n    return 1\n",
-            "requests",
-        ),
+        ("def f() -> int:\n    import boto3\n    return 1\n", "boto3"),
     ] {
         let err = try_compile(source).expect_err("an unknown module must be refused");
         assert!(err.contains(&format!("cannot import '{module}'")), "{err}");

@@ -243,7 +243,13 @@ pub(crate) fn with_instances(
 
 /// The modules, by their dotted names, and their sources.
 const MODULES: &[(&str, &str)] = &[
-    ("anthropic", include_str!("pystdlib/anthropic.py")),
+    (
+        "anthropic",
+        concat!(
+            include_str!("pystdlib/anthropic.py"),
+            include_str!("pystdlib/anthropic_sync.py")
+        ),
+    ),
     ("base64", include_str!("pystdlib/base64.py")),
     ("bisect", include_str!("pystdlib/bisect.py")),
     ("builtins", include_str!("pystdlib/builtins.py")),
@@ -264,12 +270,20 @@ const MODULES: &[(&str, &str)] = &[
     ("operator", include_str!("pystdlib/operator.py")),
     ("pathlib", include_str!("pystdlib/pathlib.py")),
     ("pydantic", include_str!("pystdlib/pydantic.py")),
+    ("requests", include_str!("pystdlib/requests.py")),
     ("string", include_str!("pystdlib/string.py")),
     ("textwrap", include_str!("pystdlib/textwrap.py")),
     ("time", include_str!("pystdlib/time.py")),
     ("urllib.parse", include_str!("pystdlib/urllib_parse.py")),
     ("uuid", include_str!("pystdlib/uuid.py")),
 ];
+
+/// `anthropic` for a program that uses its AsyncAnthropic, over httpx and
+/// the host's fetch, in place of the Anthropic client over requests.
+const ANTHROPIC_ASYNC: &str = concat!(
+    include_str!("pystdlib/anthropic.py"),
+    include_str!("pystdlib/anthropic_async.py")
+);
 
 /// Whether `name` is one of the modules written in Python (or a package
 /// holding one, `urllib`).
@@ -304,6 +318,21 @@ pub fn display_name(name: &str) -> Option<String> {
                 ("base64", "Error") => "binascii.Error".to_string(),
                 ("pathlib", "Path") => "pathlib._local.PosixPath".to_string(),
                 ("hashlib", "_Hash") => "_hashlib.HASH".to_string(),
+                ("requests", c)
+                    if c.ends_with("Error")
+                        || c.ends_with("Exception")
+                        || matches!(
+                            c,
+                            "Timeout"
+                                | "MissingSchema"
+                                | "InvalidSchema"
+                                | "InvalidURL"
+                                | "InvalidHeader"
+                        ) =>
+                {
+                    format!("requests.exceptions.{c}")
+                }
+                ("anthropic", c) if c.ends_with("Error") => format!("anthropic.{c}"),
                 ("pydantic", "ValidationError") => {
                     "pydantic_core._pydantic_core.ValidationError".to_string()
                 }
@@ -1054,6 +1083,42 @@ fn imported(body: &[Stmt]) -> Vec<String> {
         }
     }
     out
+}
+
+/// Whether a body reads the name `name` anywhere (as a name or an attribute).
+fn mentions(body: &[Stmt], name: &str) -> bool {
+    struct Finder<'a>(&'a str, bool);
+    impl ast::fold::Fold<ast::text_size::TextRange> for Finder<'_> {
+        type TargetU = ast::text_size::TextRange;
+        type Error = std::convert::Infallible;
+        type UserContext = ();
+        fn will_map_user(&mut self, _user: &ast::text_size::TextRange) -> Self::UserContext {}
+        fn map_user(
+            &mut self,
+            user: ast::text_size::TextRange,
+            _context: (),
+        ) -> std::result::Result<ast::text_size::TextRange, Self::Error> {
+            Ok(user)
+        }
+        fn fold_expr(&mut self, expr: Expr) -> std::result::Result<Expr, Self::Error> {
+            match &expr {
+                Expr::Name(n) if n.id.as_str() == self.0 => self.1 = true,
+                Expr::Attribute(a) if a.attr.as_str() == self.0 => self.1 = true,
+                _ => {}
+            }
+            ast::fold::fold_expr(self, expr)
+        }
+    }
+    let mut finder = Finder(name, false);
+    for stmt in body {
+        if let Stmt::ImportFrom(s) = stmt {
+            if s.names.iter().any(|a| a.name.as_str() == name) {
+                return true;
+            }
+        }
+        let _ = ast::fold::Fold::fold_stmt(&mut finder, stmt.clone());
+    }
+    finder.1
 }
 
 /// The top-level names a module's source defines.
@@ -1832,21 +1897,29 @@ pub(crate) fn embed(body: &[Stmt], hoisted: usize) -> Result<Option<(Suite, usiz
     // Each module, after the modules it imports.
     let mut order: Vec<String> = Vec::new();
     let mut sources: HashMap<String, Suite> = HashMap::new();
+    // The Anthropic client a program's `AsyncAnthropic` names is the one
+    // over httpx; any other program's is over requests.
+    let async_client = mentions(body, "AsyncAnthropic");
     fn visit(
         m: &str,
         order: &mut Vec<String>,
         sources: &mut HashMap<String, Suite>,
         stack: &mut Vec<String>,
+        async_client: bool,
     ) -> Result<()> {
         if order.iter().any(|o| o == m) || stack.iter().any(|s| s == m) {
             return Ok(());
         }
-        let source = source_of(m).ok_or_else(|| anyhow!("no module {m}"))?;
+        let source = if m == "anthropic" && async_client {
+            ANTHROPIC_ASYNC
+        } else {
+            source_of(m).ok_or_else(|| anyhow!("no module {m}"))?
+        };
         let ast = Suite::parse(source, &format!("<{m}>"))
             .map_err(|e| anyhow!("the standard-library module {m} does not parse: {e}"))?;
         stack.push(m.to_string());
         for dep in imported(&ast) {
-            visit(&dep, order, sources, stack)?;
+            visit(&dep, order, sources, stack, async_client)?;
         }
         stack.pop();
         sources.insert(m.to_string(), ast);
@@ -1854,7 +1927,7 @@ pub(crate) fn embed(body: &[Stmt], hoisted: usize) -> Result<Option<(Suite, usiz
         Ok(())
     }
     for m in &wanted {
-        visit(m, &mut order, &mut sources, &mut Vec::new())?;
+        visit(m, &mut order, &mut sources, &mut Vec::new(), async_client)?;
     }
     if let (Some(ns), Some(src)) = (namespace, sources.get_mut("argparse")) {
         src.extend(ns);

@@ -12,8 +12,9 @@ What the compiler has instead is a short list of packages written again for it, 
 |---|---|---|
 | `pydantic` | `BaseModel` with typed fields, lax validation, dumps | Everywhere |
 | `fastapi` | Routes on the module's functions, `HTTPException`, `TestClient` | Everywhere |
+| `requests` | `get`, `post`, and the other methods, `Response` | Under WASI with HTTP (`wasmtime run -S http`) |
 | `httpx` | `AsyncClient` | A program run in JavaScript |
-| `anthropic` | `AsyncAnthropic().messages.create(...)` | A program run in JavaScript |
+| `anthropic` | `Anthropic` and `AsyncAnthropic`, `messages.create(...)` | `Anthropic` under WASI with HTTP, `AsyncAnthropic` in JavaScript |
 
 Any other package is an import of a module the program does not have, which is refused when compiling.
 
@@ -106,6 +107,28 @@ print(client.get("/notes/x").status_code)                 # 422
 
 A host serves the application through `app.handle(method, url, body)`, which answers the same response; it is this compiler's entry point for a host, not FastAPI's. Not supported: `APIRouter`, `Depends`, `Request`, background tasks, websockets, more than one application with routes, path converters (`{p:path}`), and a handler parameter of another type than a scalar, an `Optional` scalar, or a model.
 
+## requests
+
+`requests` sends each request through the host's [`wasi:http`](/docs/running/#http-requests), so a program using it is a component, run with `wasmtime run -S http` (`waspy run` does that):
+
+```python
+import requests
+
+r = requests.get("https://api.example.com/scores", params={"limit": 10}, headers={"Accept": "application/json"})
+r.raise_for_status()
+print(r.status_code, r.json())
+
+r = requests.post("https://api.example.com/notes", json={"text": "hi"})
+print(r.status_code, r.headers["Content-Type"])
+```
+
+- `get`, `post`, `put`, `patch`, `delete`, `head`, and `request` take `params=`, `headers=`, a `json=` body (written as `json.dumps` writes it), a `data=` body (a str as it is, a dict form-encoded), and `allow_redirects=`
+- A response has `status_code`, `reason`, `ok`, `text`, `content`, `json()`, `headers` (looked up without regard to case), `url`, `history`, `is_redirect`, and `raise_for_status()`, which raises `HTTPError` with requests 2.34's message
+- A redirect is followed as requests follows it (a 303, and a POST answered 301 or 302, become a GET without the body), up to 30
+- A URL with no scheme raises `MissingSchema`, another scheme than `http` and `https` `InvalidSchema`, and a request the host cannot send `ConnectionError` (`Timeout` for one that timed out); they are `RequestException`s, which are `OSError`s
+
+There are no sessions, cookies, authentication helpers, streaming, or files to upload, and `timeout=` is accepted but the host's own limits apply. The body is read whole as text, so a response whose body is not UTF-8 raises `UnicodeDecodeError`.
+
 ## httpx
 
 `httpx.AsyncClient` sends requests through the host's `fetch`, so it works in a program run in JavaScript ([JavaScript and async](/docs/javascript/)), not under WASI, which has no network:
@@ -126,11 +149,25 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`get`, `post`, `put`, `patch`, `delete`, and `request` take `params=`, `headers=`, and a `json=` or `content=` body. A response has `status_code`, `reason_phrase`, `text`, `json()`, `headers`, `url`, `is_success`, `is_error`, and `raise_for_status()`, which raises `HTTPStatusError` with httpx 0.28's message; a request that cannot be sent raises `ConnectError`. There is no synchronous client (`httpx.get`, `httpx.Client`).
+`get`, `post`, `put`, `patch`, `delete`, and `request` take `params=`, `headers=`, and a `json=` or `content=` body. A response has `status_code`, `reason_phrase`, `text`, `json()`, `headers`, `url`, `is_success`, `is_error`, and `raise_for_status()`, which raises `HTTPStatusError` with httpx 0.28's message; a request that cannot be sent raises `ConnectError`. There is no synchronous client (`httpx.get`, `httpx.Client`); under WASI, use `requests`.
 
 ## The Anthropic API
 
-`anthropic.AsyncAnthropic` is a client for Anthropic's Messages API in the shape of the official SDK's async client, written over the `httpx` client above, so it runs where that does:
+`anthropic.Anthropic` and `anthropic.AsyncAnthropic` are clients for Anthropic's Messages API in the shape of the official SDK's clients. `Anthropic` is written over `requests`, so it runs under WASI with HTTP, which is how a command-line tool or a service calls the API:
+
+```python
+import anthropic
+
+client = anthropic.Anthropic()  # the key from ANTHROPIC_API_KEY
+message = client.messages.create(
+    model="claude-opus-5-5",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "What is WebAssembly?"}],
+)
+print(message.content[0].text)
+```
+
+`AsyncAnthropic` is written over the `httpx` client above, so it runs in a program run in JavaScript:
 
 ```python
 import asyncio
@@ -160,4 +197,4 @@ asyncio.run(main())
 - An error status raises the SDK's exception for it (`BadRequestError`, `AuthenticationError`, `PermissionDeniedError`, `NotFoundError`, `RateLimitError`, `InternalServerError`, all `APIStatusError`s with `status_code`, `type`, and `body`), with the SDK's message; a request that cannot be sent raises `APIConnectionError`
 - `api_key=` and `base_url=` default to `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL`
 
-There is no synchronous client and no streaming yet. A `messages` list built up in a variable is annotated `list[Any]` (a list of dicts of strs held in a variable cannot be passed where a dynamic value is, see [the Python subset](/docs/python-subset/)); written out in the call, it needs nothing.
+There is no streaming yet. A `messages` list built up in a variable is annotated `list[Any]` (a list of dicts of strs held in a variable cannot be passed where a dynamic value is, see [the Python subset](/docs/python-subset/)); written out in the call, it needs nothing.

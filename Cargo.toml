@@ -22,11 +22,15 @@ include = [
 ]
 
 [features]
-default = ["optimize"]
+default = ["optimize", "wasi-http"]
 # The Binaryen optimization pass. Binaryen is a native C++ library, so turn
 # this off (`default-features = false`) to build waspy itself for wasm32.
 optimize = ["dep:binaryen"]
 wasm-plugin = ["serde"]
+# Outgoing HTTP under WASI preview 2: a program that makes requests is
+# emitted as a component importing `wasi:http`, wrapped with the preview 1
+# adapter. Off, such a program is refused.
+wasi-http = ["dep:wit-component", "dep:wit-parser", "dep:wasi-preview1-component-adapter-provider"]
 
 [dependencies]
 rustpython-parser = "0.4.0"
@@ -44,6 +48,12 @@ regex-syntax = "0.8"
 # Character names for `\N{...}` in re patterns (already a dependency of
 # rustpython-parser); filtered to CPython 3.13's Unicode 15.1.
 unicode_names2 = "1.3"
+# Components for `wasi-http`, and the adapter that serves preview 1's
+# imports through preview 2 (an older adapter imports older WASI versions,
+# which newer runtimes still provide).
+wit-component = { version = "0.243", optional = true }
+wit-parser = { version = "0.243", optional = true }
+wasi-preview1-component-adapter-provider = { version = "=40.0.0", optional = true }
 
 [dev-dependencies]
 wasmi = "0.31"
@@ -116,6 +126,10 @@ path = "tests/integration/board.rs"
 [[test]]
 name = "integration_cli"
 path = "tests/integration/cli.rs"
+
+[[test]]
+name = "integration_http"
+path = "tests/integration/http.rs"
 
 [[test]]
 name = "unit_basics"

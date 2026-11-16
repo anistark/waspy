@@ -8420,4 +8420,78 @@ tags
 ",
         );
     }
+
+    /// requests over WASI preview 2: the program is a component, run with
+    /// `wasmtime run -S http` against a server in the test; a GET read as
+    /// JSON and a 404's raise_for_status(), as requests 2.34 answers them.
+    /// Skipped without wasmtime (CI's runtime job runs the full set in
+    /// `tests/integration/http.rs`).
+    #[test]
+    fn requests_over_wasi_http() {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                loop {
+                    let mut h = String::new();
+                    reader.read_line(&mut h).unwrap();
+                    if h.trim().is_empty() {
+                        break;
+                    }
+                }
+                let (status, body) = if line.contains("/missing") {
+                    ("404 Not Found", "nothing".to_string())
+                } else {
+                    ("200 OK", r#"{"ok": true, "n": 3}"#.to_string())
+                };
+                let mut out = stream;
+                let _ = write!(
+                    out,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        let source = dedent(
+            r#"
+            import requests
+
+
+            def main() -> None:
+                r = requests.get("http://127.0.0.1:PORT/data")
+                print(r.status_code, r.json())
+                try:
+                    requests.get("http://127.0.0.1:PORT/missing").raise_for_status()
+                except requests.HTTPError as e:
+                    print(e.response.status_code, str(e).split(" for url")[0])
+
+
+            if __name__ == "__main__":
+                main()
+            "#,
+        )
+        .replace("PORT", &port.to_string());
+        let wasm = waspy::compile_python_to_wasm(&source).expect("compiles");
+        let path =
+            std::env::temp_dir().join(format!("waspy-board-http-{}.wasm", std::process::id()));
+        std::fs::write(&path, &wasm).unwrap();
+        let out = std::process::Command::new("wasmtime")
+            .args(["run", "-S", "http"])
+            .arg(&path)
+            .output();
+        let _ = std::fs::remove_file(&path);
+        let Ok(out) = out else {
+            eprintln!("wasmtime not found; skipped");
+            return;
+        };
+        assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "200 {'ok': True, 'n': 3}\n404 404 Client Error: Not Found\n"
+        );
+    }
 }

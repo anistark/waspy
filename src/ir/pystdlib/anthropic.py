@@ -1,15 +1,17 @@
 # A client for Anthropic's Messages API in the shape of the `anthropic`
-# SDK's AsyncAnthropic (`client.messages.create(...)`), written over the
-# httpx client here, so over the host's fetch: a program run in JavaScript.
-# The request is the API's JSON (POST /v1/messages with the `x-api-key` and
-# `anthropic-version` headers), and the response's content blocks, stop
-# reason, and usage are read back as the SDK's attributes. An error answers
-# the SDK's exception for its status, with its message.
+# SDK (`client.messages.create(...)`). The request is the API's JSON (POST
+# /v1/messages with the `x-api-key` and `anthropic-version` headers), and
+# the response's content blocks, stop reason, and usage are read back as the
+# SDK's attributes. An error answers the SDK's exception for its status,
+# with its message. This part is the same for both clients; the module is
+# this file and `anthropic_sync.py` (Anthropic, over requests, for WASI), or
+# this file and `anthropic_async.py` (AsyncAnthropic, over httpx, for a
+# program run in JavaScript), as the program uses one or the other.
 
+import json
 import os
 from typing import Any, Optional
 
-import httpx
 
 
 API_VERSION = "2026-10-21"
@@ -168,72 +170,65 @@ def _message(data: Any) -> Message:
     return Message(_text(d, "id"), _text(d, "model"), _text(d, "role"), stop, blocks, usage)
 
 
-class _Messages:
-    def __init__(self, base_url: str, api_key: str) -> None:
-        self.base_url: str = base_url
-        self.api_key: str = api_key
-
-    async def create(self, model: str, max_tokens: int, messages: Any, system: Any = None, tools: Any = None, tool_choice: Any = None, thinking: Any = None, output_config: Any = None, stop_sequences: Any = None, metadata: Any = None) -> Message:
-        payload: dict[str, Any] = {}
-        payload["model"] = model
-        payload["max_tokens"] = max_tokens
-        payload["messages"] = messages
-        if system is not None:
-            payload["system"] = system
-        if tools is not None:
-            payload["tools"] = tools
-        if tool_choice is not None:
-            payload["tool_choice"] = tool_choice
-        if thinking is not None:
-            payload["thinking"] = thinking
-        if output_config is not None:
-            payload["output_config"] = output_config
-        if stop_sequences is not None:
-            payload["stop_sequences"] = stop_sequences
-        if metadata is not None:
-            payload["metadata"] = metadata
-        headers: dict[str, Any] = {}
-        headers["x-api-key"] = self.api_key
-        headers["anthropic-version"] = API_VERSION
-        client = httpx.AsyncClient()
-        try:
-            r = await client.post(self.base_url + "/v1/messages", json=payload, headers=headers)
-        except httpx.RequestError as e:
-            raise APIConnectionError("Connection error.")
-        if r.is_success:
-            return _message(r.json())
-        body: Any = None
-        error_type = ""
-        try:
-            body = r.json()
-        except ValueError:
-            body = r.text
-        if isinstance(body, dict):
-            d: dict[str, Any] = body
-            if "error" in d and isinstance(d["error"], dict):
-                inner: dict[str, Any] = d["error"]
-                error_type = _text(inner, "type")
-        error = _status_error(r.status_code, "Error code: " + str(r.status_code) + " - " + str(body))
-        error.status_code = r.status_code
-        error.body = body
-        error.type = error_type
-        if "request-id" in r.headers:
-            error.request_id = r.headers["request-id"]
-        raise error
+def _payload(model: str, max_tokens: int, messages: Any, system: Any, tools: Any, tool_choice: Any, thinking: Any, output_config: Any, stop_sequences: Any, metadata: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    payload["model"] = model
+    payload["max_tokens"] = max_tokens
+    payload["messages"] = messages
+    if system is not None:
+        payload["system"] = system
+    if tools is not None:
+        payload["tools"] = tools
+    if tool_choice is not None:
+        payload["tool_choice"] = tool_choice
+    if thinking is not None:
+        payload["thinking"] = thinking
+    if output_config is not None:
+        payload["output_config"] = output_config
+    if stop_sequences is not None:
+        payload["stop_sequences"] = stop_sequences
+    if metadata is not None:
+        payload["metadata"] = metadata
+    return payload
 
 
-class AsyncAnthropic:
-    def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None) -> None:
-        key = ""
-        if api_key is not None:
-            key = str(api_key)
-        elif "ANTHROPIC_API_KEY" in os.environ:
-            key = os.environ["ANTHROPIC_API_KEY"]
-        url = "https://api.anthropic.com"
-        if base_url is not None:
-            url = str(base_url)
-        elif "ANTHROPIC_BASE_URL" in os.environ:
-            url = os.environ["ANTHROPIC_BASE_URL"]
-        self.api_key: str = key
-        self.base_url: str = url
-        self.messages: _Messages = _Messages(url, key)
+def _headers(api_key: str) -> dict[str, Any]:
+    headers: dict[str, Any] = {}
+    headers["x-api-key"] = api_key
+    headers["anthropic-version"] = API_VERSION
+    return headers
+
+
+def _failure(status: int, text: str, request_id: Optional[str]) -> APIStatusError:
+    body: Any = None
+    error_type = ""
+    try:
+        body = json.loads(text)
+    except ValueError:
+        body = text
+    if isinstance(body, dict):
+        d: dict[str, Any] = body
+        if "error" in d and isinstance(d["error"], dict):
+            inner: dict[str, Any] = d["error"]
+            error_type = _text(inner, "type")
+    error = _status_error(status, "Error code: " + str(status) + " - " + str(body))
+    error.status_code = status
+    error.body = body
+    error.type = error_type
+    if request_id is not None:
+        error.request_id = str(request_id)
+    return error
+
+
+def _settings(api_key: Optional[str], base_url: Optional[str]) -> list[str]:
+    key = ""
+    if api_key is not None:
+        key = str(api_key)
+    elif "ANTHROPIC_API_KEY" in os.environ:
+        key = os.environ["ANTHROPIC_API_KEY"]
+    url = "https://api.anthropic.com"
+    if base_url is not None:
+        url = str(base_url)
+    elif "ANTHROPIC_BASE_URL" in os.environ:
+        url = os.environ["ANTHROPIC_BASE_URL"]
+    return [key, url]
