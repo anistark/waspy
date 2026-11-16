@@ -114,6 +114,10 @@ name = "integration_board"
 path = "tests/integration/board.rs"
 
 [[test]]
+name = "integration_cli"
+path = "tests/integration/cli.rs"
+
+[[test]]
 name = "unit_basics"
 path = "tests/unit/basics.rs"
 

@@ -4,6 +4,7 @@ export default [
         title: "Start here",
         items: [
             { label: "Getting started", href: "/docs/" },
+            { label: "The command line", href: "/docs/cli/" },
             { label: "Using the library", href: "/docs/library/" },
         ],
     },

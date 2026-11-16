@@ -93,6 +93,9 @@ struct Lowering {
 }
 
 thread_local! {
+    /// The byte offset of the statement being lowered, innermost first, so an
+    /// error the lowering raises without a place is reported at it.
+    static STATEMENT_AT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
     static LOWERING: std::cell::RefCell<Lowering> = std::cell::RefCell::new(Lowering::default());
     /// Set while the body of an `async def` is lowered (and cleared for the
     /// functions and lambdas nested in it), where `await` may stand.
@@ -255,6 +258,54 @@ fn is_typed_dict(name: &str) -> bool {
     LOWERING.with(|l| l.borrow().typed_dicts.contains(name))
 }
 
+/// An error the lowering raised without a place, given the place of the
+/// statement it was lowering.
+fn located_at_statement(err: anyhow::Error) -> anyhow::Error {
+    use crate::core::errors::WaspyError;
+    let Some(offset) = STATEMENT_AT.with(|s| s.get()) else {
+        return err;
+    };
+    let Some(place) = crate::core::parser::location_of(offset, None) else {
+        return err;
+    };
+    match err.downcast::<WaspyError>() {
+        Ok(WaspyError::UnsupportedFeature {
+            message,
+            location: None,
+        }) => WaspyError::UnsupportedFeature {
+            message,
+            location: Some(place),
+        }
+        .into(),
+        Ok(WaspyError::TypeError {
+            message,
+            location: None,
+        }) => WaspyError::TypeError {
+            message,
+            location: Some(place),
+        }
+        .into(),
+        Ok(WaspyError::NameError {
+            message,
+            location: None,
+        }) => WaspyError::NameError {
+            message,
+            location: Some(place),
+        }
+        .into(),
+        Ok(other) => other.into(),
+        // A plain message: an unsupported construct at that statement.
+        Err(plain) if plain.chain().count() == 1 && !plain.to_string().contains("at line ") => {
+            WaspyError::UnsupportedFeature {
+                message: plain.to_string(),
+                location: Some(place),
+            }
+            .into()
+        }
+        Err(other) => other,
+    }
+}
+
 /// Lower a Python AST (Suite) into our IR, as the module `__main__`.
 pub fn lower_ast_to_ir(ast: &Suite) -> Result<IRModule> {
     lower_ast_to_ir_named(ast, "__main__")
@@ -283,7 +334,9 @@ pub fn lower_ast_to_ir_named(ast: &Suite, module_name: &str) -> Result<IRModule>
             typed_dicts: typed_dict_classes(ast),
         })
     });
-    let lowered = lower_module(ast, hoisted);
+    STATEMENT_AT.with(|s| s.set(None));
+    let lowered = lower_module(ast, hoisted).map_err(located_at_statement);
+    STATEMENT_AT.with(|s| s.set(None));
     LOWERING.with(|l| l.replace(previous));
     let mut lowered = lowered?;
     for (module, place) in resolved.import_values {
@@ -350,6 +403,7 @@ fn lower_module(ast: &Suite, hoisted: usize) -> Result<IRModule> {
     };
 
     for (index, stmt) in ast.iter().enumerate() {
+        STATEMENT_AT.with(|s| s.set(Some(rustpython_parser::ast::Ranged::start(stmt).into())));
         if main_block.is_some() {
             module_statement_bindings(stmt, &mut defined_after);
         }
@@ -718,6 +772,7 @@ fn lower_module(ast: &Suite, hoisted: usize) -> Result<IRModule> {
     // resolved offsets to emit loads and the data section.
     module.memory_layout = memory_layout;
 
+    STATEMENT_AT.with(|s| s.set(None));
     // `logging` and `re` first (logging names records' functions as the
     // program wrote them), `json`'s classes (before keyword placement, which
     // its constructors' options reach in the form the fields hold), then
@@ -2858,6 +2913,9 @@ fn top_level_run(
             Stmt::ClassDef(s) => format!("class '{}'", s.name),
             _ => return,
         };
+        if nested.is_none() {
+            STATEMENT_AT.with(|s| s.set(Some(rustpython_parser::ast::Ranged::start(stmt).into())));
+        }
         nested.get_or_insert(what);
     });
     if let Some(what) = nested {
@@ -3579,6 +3637,7 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
     let mut ir_statements = Vec::new();
 
     for stmt in stmts {
+        STATEMENT_AT.with(|s| s.set(Some(rustpython_parser::ast::Ranged::start(stmt).into())));
         if IN_ASYNC.with(|c| c.get()) {
             refuse_in_coroutine(stmt)?;
         }
