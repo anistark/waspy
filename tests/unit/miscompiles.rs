@@ -7426,3 +7426,216 @@ fn a_class_two_files_define_is_refused() {
         .expect_err("two files defining Point");
     assert!(err.contains("duplicate class 'Point' in main.py"), "{err}");
 }
+
+// ---------------------------------------------------------------------------
+// Comprehensions and method arguments
+// ---------------------------------------------------------------------------
+
+/// A comprehension's filter, and the element `any()` and `all()` decide on,
+/// were emitted as values and branched on as they were: a float left an f64
+/// where a bool goes and the module failed to validate, a str did the same
+/// with its pair, and a list or an instance tested its pointer, which is never
+/// zero, so `[g for g in groups if g]` kept the empty lists and
+/// `any(g for g in [[], []])` was True. They are tested for truth now, as an
+/// `if` statement tests them.
+#[test]
+fn a_comprehension_filter_tests_its_value_for_truth() {
+    let src = dedent(
+        r#"
+        class Box:
+            def __init__(self, n: int):
+                self.n = n
+
+            def __len__(self) -> int:
+                return self.n
+
+
+        def main():
+            fines = [3.0, 0.0, 1.5]
+            print([f for f in fines if f])
+            words = ["a", "", "bc", ""]
+            print([w for w in words if w], {w for w in words if w} == {"a", "bc"})
+            groups = [[1], [], [2, 3], []]
+            print(len([g for g in groups if g]), {len(g): g for g in groups if g})
+            boxes = [Box(0), Box(2), Box(1)]
+            print([b.n for b in boxes if b])
+            print(any(g for g in [[], []]), all(g for g in [[1], []]), any(g for g in [[], [0]]))
+            print(any(w for w in ["", ""]), all(w for w in ["x", ""]), all(w for w in ["x", "y"]))
+            print(any(f for f in [0.0, 0.0]), all(f for f in [1.5, 0.0]), any(f for f in [0.0, -2.5]))
+
+
+        if __name__ == "__main__":
+            main()
+        "#,
+    );
+    assert_eq!(
+        run_main(&src, "", &[]).stdout,
+        "[3.0, 1.5]\n['a', 'bc'] True\n2 {1: [1], 2: [2, 3]}\n[2, 1]\nFalse False True\nFalse False True\nFalse False True\n"
+    );
+}
+
+/// `{k: v for k, v in d.items()}` over floats: every unpacked member was
+/// read as an i32 word into the f64 local made for it, and the module failed
+/// to validate. A float member is read as the whole slot it is, as the `for`
+/// statement reads it, and a name bound twice (`_, x, _`) keeps its last
+/// value.
+#[test]
+fn a_comprehension_unpacks_a_float_member_at_its_width() {
+    let src = dedent(
+        r#"
+        def main():
+            env = {"x": 2.5, "y": -1.25}
+            print({k: v * 2 for k, v in env.items()})
+            print([v for k, v in env.items()], [round(v, 1) for _, v in env.items() if v > 0])
+            pairs = [(1.5, 2), (0.5, 4)]
+            print(sum(p * q for p, q in pairs), [q for p, q in pairs if p])
+            points = [("a", 1.0, 2.0), ("b", 3.5, -0.5)]
+            print([f"{name}:{x + y:.2f}" for name, x, y in points])
+            print(max(x for _, x, _ in points), any(y < 0 for _, _, y in points))
+            print([last for last, _, last in [(1.0, "s", 2.0)]])
+            nested = [[(1.0, 2.0)], [(3.0, 4.0), (5.0, 6.0)]]
+            print([a * b for row in nested for a, b in row])
+
+
+        if __name__ == "__main__":
+            main()
+        "#,
+    );
+    assert_eq!(
+        run_main(&src, "", &[]).stdout,
+        "{'x': 5.0, 'y': -2.5}\n[2.5, -1.25] [2.5]\n5.0 [2, 4]\n['a:3.00', 'b:3.00']\n3.5 True\n[2.0]\n[2.0, 12.0, 30.0]\n"
+    );
+}
+
+/// `{p for p, n in counts.items()}` with tuple keys: a target unpacked from
+/// a tuple was typed only when it was a str, float, or instance, so a tuple
+/// member was an untyped word, hashed by its address where `in` hashes a
+/// tuple by value. The set could not find its own elements, and a Game of
+/// Life step answered an empty board.
+#[test]
+fn a_set_or_dict_comprehension_keyed_by_an_unpacked_tuple_finds_its_keys() {
+    let src = dedent(
+        r#"
+        from itertools import product
+
+
+        def life_step(alive: set[tuple[int, int]]) -> set[tuple[int, int]]:
+            counts: dict[tuple[int, int], int] = {}
+            for r, c in alive:
+                for dr, dc in product((-1, 0, 1), repeat=2):
+                    if dr or dc:
+                        key = (r + dr, c + dc)
+                        counts[key] = counts.get(key, 0) + 1
+            return {p for p, n in counts.items() if n == 3 or (n == 2 and p in alive)}
+
+
+        def main():
+            pairs: list[tuple[tuple[int, int], int]] = [((0, 1), 3), ((2, 2), 4)]
+            s = {p for p, n in pairs}
+            print((0, 1) in s, (2, 2) in s, (1, 0) in s, len(s))
+            print([p in s for p in s])
+            d = {p: n for p, n in pairs}
+            print((0, 1) in d, d.get((2, 2), -1), d[(0, 1)])
+            rows: list[tuple[str, int, int]] = [("a", 1, 2), ("b", 3, 4)]
+            named = {name: (x, y) for name, x, y in rows}
+            print(named, {v: k for k, v in named.items()}[(3, 4)])
+            blinker = {(1, 0), (1, 1), (1, 2)}
+            once = life_step(blinker)
+            print(sorted(once), life_step(once) == blinker)
+
+
+        if __name__ == "__main__":
+            main()
+        "#,
+    );
+    assert_eq!(
+        run_main(&src, "", &[]).stdout,
+        "True True False 2\n[True, True]\nTrue 4 3\n{'a': (1, 2), 'b': (3, 4)} b\n[(0, 1), (1, 1), (2, 1)] True\n"
+    );
+}
+
+/// `m.group(m.lastindex)`: no variant of `group` took an `Optional[int]`, so
+/// the call fell to the method that takes no argument with one on the stack,
+/// which trapped or failed to validate. None is no group, CPython's
+/// `IndexError`.
+#[test]
+fn match_group_of_an_optional_int_is_the_group_or_index_error() {
+    let src = dedent(
+        r#"
+        import re
+        from typing import Optional
+
+
+        def first(text: str) -> str:
+            m = re.match(r"(\d+)|([a-z]+)", text)
+            if not m:
+                return "-"
+            return str(m.group(m.lastindex)) + "/" + str(m[m.lastindex])
+
+
+        def main():
+            print(first("42"), first("ab"), first("!"))
+            m = re.match(r"x", "x")
+            if m:
+                n: Optional[int] = m.lastindex
+                try:
+                    print(m.group(n))
+                except IndexError as e:
+                    print("IndexError:", e)
+                try:
+                    print(m[n])
+                except IndexError as e:
+                    print("IndexError:", e)
+
+
+        if __name__ == "__main__":
+            main()
+        "#,
+    );
+    assert_eq!(
+        run_main(&src, "", &[]).stdout,
+        "42/42 ab/ab -\nIndexError: no such group\nIndexError: no such group\n"
+    );
+}
+
+/// A method called with more positional arguments than it takes pushed the
+/// extra one onto the stack, and the module failed to validate. CPython raises
+/// `TypeError`, so it is refused, as a call of a module function is.
+#[test]
+fn a_method_given_the_wrong_number_of_arguments_is_refused() {
+    let source = r#"
+        class A:
+            def f(self) -> int:
+                return 1
+
+            def g(self, x: int, y: int = 2) -> int:
+                return x + y
+
+        def main() -> None:
+            print(CALL)
+        "#;
+    for (call, needle) in [
+        (
+            "A().f(5)",
+            "A.f() takes 1 positional argument but 2 were given",
+        ),
+        ("A().g()", "A.g() missing 1 required positional argument"),
+        (
+            "A().g(1, 2, 3)",
+            "A.g() takes from 2 to 3 positional arguments but 4 were given",
+        ),
+    ] {
+        refused(&source.replace("CALL", call), needle);
+    }
+    refused(
+        r#"
+        import re
+
+        def main() -> None:
+            m = re.match("(a)", "a")
+            if m:
+                print(m.start(1, 2))
+        "#,
+        "re.Match.start() expected at most 1 argument, got 2",
+    );
+}

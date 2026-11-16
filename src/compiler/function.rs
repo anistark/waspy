@@ -1600,7 +1600,12 @@ fn infer_unpack_source(value: &IRExpr, ctx: &CompilationContext) -> IRType {
 }
 
 /// The type of target `i` of `count` when unpacking a value of type `source`.
-fn unpack_member_type(source: &IRType, i: usize, count: usize, starred: Option<usize>) -> IRType {
+pub(crate) fn unpack_member_type(
+    source: &IRType,
+    i: usize,
+    count: usize,
+    starred: Option<usize>,
+) -> IRType {
     match source {
         IRType::Tuple(members) if starred.is_none() && members.len() == count => members[i].clone(),
         IRType::Tuple(members) if starred.is_some() => {
@@ -1871,6 +1876,26 @@ fn collect_return_type(body: &IRBody, ctx: &CompilationContext, out: &mut IRType
     }
 }
 
+/// The type a comprehension's target is given for the element it binds: an
+/// f64 element needs an f64 local, a string a `String` local with its length
+/// companion, and a tuple, collection, or instance the type its reads (and a
+/// set's or dict's hashing of it) go by. Anything else is an untyped word.
+fn comp_target_type(elem: IRType) -> IRType {
+    match elem {
+        ty @ (IRType::Float | IRType::String | IRType::Bytes | IRType::Int | IRType::Bool) => ty,
+        class @ IRType::Class(_) => class,
+        // An optional instance: its pointer or 0.
+        IRType::Optional(inner) if matches!(*inner, IRType::Class(_)) => IRType::Optional(inner),
+        IRType::JsProxy => IRType::JsProxy,
+        ty @ (IRType::Tuple(_)
+        | IRType::VarTuple(_)
+        | IRType::List(_)
+        | IRType::Set(_)
+        | IRType::Dict(_, _)) => ty,
+        _ => IRType::Unknown,
+    }
+}
+
 /// Reserve the helper locals a comprehension needs (result pointer, write
 /// index, capacity, iterator state per generator, and the generator target
 /// variables themselves), then recurse into its subexpressions one nesting
@@ -1922,31 +1947,8 @@ fn scan_expr_locals(expr: &IRExpr, ctx: &mut CompilationContext, depth: u32) {
                     // element needs a `String` local so `len(w)` reads the
                     // companion length rather than treating the offset as a
                     // collection pointer.
-                    let target_ty = match infer_iterable_elem_type(&generator.iterable, ctx) {
-                        // A number, so a tuple or key built from it compares
-                        // by its members' types.
-                        ty @ (IRType::Float
-                        | IRType::String
-                        | IRType::Bytes
-                        | IRType::Int
-                        | IRType::Bool) => ty,
-                        class @ IRType::Class(_) => class,
-                        // An optional instance: its pointer or 0.
-                        IRType::Optional(inner) if matches!(*inner, IRType::Class(_)) => {
-                            IRType::Optional(inner)
-                        }
-                        IRType::JsProxy => IRType::JsProxy,
-                        // A tuple or collection element is a pointer whose
-                        // type the reads of the target need: an untyped one
-                        // rendered its address.
-                        ty @ (IRType::Tuple(_)
-                        | IRType::VarTuple(_)
-                        | IRType::List(_)
-                        | IRType::Set(_)
-                        | IRType::Dict(_, _)) => ty,
-                        _ => IRType::Unknown,
-                    };
-                    ensure_local(ctx, target, target_ty);
+                    let elem = infer_iterable_elem_type(&generator.iterable, ctx);
+                    ensure_local(ctx, target, comp_target_type(elem));
                     // A string element binds as an (offset, length) pair, and
                     // the local vector is fixed before codegen runs, so the
                     // companion has to be reserved here even though the element
@@ -1954,24 +1956,22 @@ fn scan_expr_locals(expr: &IRExpr, ctx: &mut CompilationContext, depth: u32) {
                     ensure_local(ctx, &strlen_local_name(target), IRType::Int);
                 } else {
                     // `for k, v in pairs`: each target takes its own position's
-                    // type from the tuple, so a string member is a `String`
-                    // local rather than an untyped word.
-                    let member_types = match infer_iterable_elem_type(&generator.iterable, ctx) {
-                        IRType::Tuple(types) if types.len() == generator.targets.len() => {
-                            Some(types)
-                        }
-                        _ => None,
-                    };
+                    // type, by the same rule as a single target. A member left
+                    // untyped was a word: a tuple key bound that way was hashed
+                    // by its address where `in` hashes it by value, so a set or
+                    // dict comprehension keyed by it could not find its own
+                    // elements.
+                    let elem = infer_iterable_elem_type(&generator.iterable, ctx);
+                    let count = generator.targets.len();
                     for (j, target) in generator.targets.iter().enumerate() {
-                        let ty = match &member_types {
-                            Some(types) => match &types[j] {
-                                t @ (IRType::String | IRType::Bytes | IRType::Float) => t.clone(),
-                                class @ IRType::Class(_) => class.clone(),
-                                _ => IRType::Unknown,
-                            },
-                            None => IRType::Unknown,
-                        };
-                        ensure_local(ctx, target, ty);
+                        // A name bound twice (`_, x, _`) keeps its last value,
+                        // so its last position types it, and codegen binds
+                        // only that one.
+                        if generator.targets[j + 1..].contains(target) {
+                            continue;
+                        }
+                        let member = unpack_member_type(&elem, j, count, None);
+                        ensure_local(ctx, target, comp_target_type(member));
                         // A string element binds as an (offset, length) pair,
                         // and the local vector is fixed before codegen runs, so
                         // the companion has to be reserved here even though the

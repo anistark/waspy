@@ -6478,7 +6478,8 @@ fn emit_comp_loops(
         // Filters guard everything inside this iteration.
         if with_conditions {
             for condition in &generator.conditions {
-                emit_condition(condition, func, ctx, memory_layout);
+                let cond_ty = emit_condition(condition, func, ctx, memory_layout);
+                emit_truthiness(func, ctx, &cond_ty);
                 func.instruction(&Instruction::If(BlockType::Empty));
                 ctx.enter_expr_blocks(1);
             }
@@ -6641,19 +6642,72 @@ fn emit_comp_loops(
             }
         } else {
             // `for k, v in items`: the element is a tuple pointer; unpack its
-            // slots positionally (i32 words — float members keep the existing
-            // tuple-unpack limitation).
+            // slots positionally, each at its member's width: a float member
+            // is a whole f64 slot, read into the f64 local the scan made for
+            // its target, as the `for` statement reads it.
             let elem = comp_local(ctx, comp_local_name("elem", depth));
+            let elem_ty = crate::compiler::function::walked_element(&ty);
+            let count = generator.targets.len();
             func.instruction(&Instruction::LocalGet(elem_slot));
             func.instruction(&Instruction::I32Load(mem_off(0)));
             func.instruction(&Instruction::LocalSet(elem));
             for (j, target) in generator.targets.iter().enumerate() {
+                // A name bound twice (`_, x, _`) keeps its last value, as in
+                // CPython, so only its last position is bound.
+                if generator.targets[j + 1..].contains(target) {
+                    continue;
+                }
                 let target_idx = comp_local(ctx, target.clone());
+                let member =
+                    crate::compiler::function::unpack_member_type(&elem_ty, j, count, None);
+                let target_is_float = matches!(
+                    ctx.get_local_info(target).map(|i| &i.var_type),
+                    Some(IRType::Float)
+                );
+                if matches!(member, IRType::Float) && !target_is_float {
+                    ctx.report(format!(
+                        "the comprehension variable '{target}' binds float values, but it was \
+                         typed before its iterable was known. Hint: annotate the collection it \
+                         walks"
+                    ));
+                }
+                // An untyped variable is read as an int, so one binding a str,
+                // tuple, collection, or instance rendered its address
+                // (`{v: k for k, v in a | b}` printed numbers for the keys),
+                // as the single-target path refuses.
+                let open = matches!(
+                    ctx.get_local_info(target).map(|i| &i.var_type),
+                    Some(IRType::Unknown | IRType::Any)
+                );
+                if open
+                    && !matches!(
+                        member,
+                        IRType::Int
+                            | IRType::Bool
+                            | IRType::Float
+                            | IRType::None
+                            | IRType::Unknown
+                            | IRType::Any
+                    )
+                {
+                    ctx.report(format!(
+                        "the comprehension variable '{target}' binds {} values, but its type \
+                         could not be worked out where it is used. Hint: annotate the collection \
+                         it walks",
+                        crate::type_to_string(&member)
+                    ));
+                }
                 func.instruction(&Instruction::LocalGet(elem));
                 emit_data_base(func);
-                func.instruction(&Instruction::I32Load(mem_off(
-                    (j as u32 * COLLECTION_SLOT) as u64,
-                )));
+                let at = mem_off((j as u32 * COLLECTION_SLOT) as u64);
+                if target_is_float && matches!(member, IRType::Float) {
+                    func.instruction(&Instruction::F64Load(at));
+                } else {
+                    func.instruction(&Instruction::I32Load(at));
+                    if target_is_float {
+                        func.instruction(&Instruction::F64ConvertI32S);
+                    }
+                }
                 func.instruction(&Instruction::LocalSet(target_idx));
                 // A string member's slot holds only its offset, so its length
                 // has to be recovered from the blob's own prefix word, exactly
@@ -6675,7 +6729,8 @@ fn emit_comp_loops(
 
         if with_conditions {
             for condition in &generator.conditions {
-                emit_condition(condition, func, ctx, memory_layout);
+                let cond_ty = emit_condition(condition, func, ctx, memory_layout);
+                emit_truthiness(func, ctx, &cond_ty);
                 func.instruction(&Instruction::If(BlockType::Empty));
                 ctx.enter_expr_blocks(1);
             }
@@ -7900,7 +7955,8 @@ fn emit_decided_comprehension(
     func.instruction(&Instruction::LocalSet(res));
     // The element decides when it is true for any(), false for all().
     let decide = |func: &mut Function, outer: u32| {
-        emit_condition(element, func, ctx, memory_layout);
+        let element_ty = emit_condition(element, func, ctx, memory_layout);
+        emit_truthiness(func, ctx, &element_ty);
         if !any {
             func.instruction(&Instruction::I32Eqz);
         }
@@ -13556,6 +13612,94 @@ fn emit_attribute_expr(
     }
 }
 
+/// Whether a call of an instance's method passes as many positional
+/// arguments as the method takes, reporting CPython's `TypeError` when it
+/// does not. Keywords and defaults are placed before this, so what is left is
+/// one argument per parameter after `self` (or `cls`). One too many was
+/// emitted onto the stack and the module failed to validate.
+fn method_arguments_fit(
+    ctx: &CompilationContext,
+    class_name: &str,
+    owner: &str,
+    method_name: &str,
+    arguments: &[IRExpr],
+    params: usize,
+    implicit: usize,
+) -> bool {
+    if params < implicit
+        || arguments
+            .iter()
+            .any(|a| matches!(a, IRExpr::Keyword { .. }))
+    {
+        return true;
+    }
+    let most = params - implicit;
+    let least = ctx
+        .method_defaults
+        .get(&format!("{owner}::{method_name}"))
+        .map(|defaults| {
+            defaults
+                .iter()
+                .skip(implicit)
+                .filter(|d| d.is_none())
+                .count()
+        })
+        .unwrap_or(most)
+        .min(most);
+    let given = arguments.len();
+    if (least..=most).contains(&given) {
+        return true;
+    }
+    let shown = match crate::ir::collections::spec::parse(class_name) {
+        Some((kind, _)) => kind.name().to_string(),
+        None => class_name.to_string(),
+    };
+    // A method with variants by its argument's type (`group<int>`) takes one
+    // argument through them: one that picked none is of a type they do not
+    // take, and more than one is past what any takes.
+    let prefix = format!("{method_name}<");
+    let variants = ctx
+        .get_class_info(class_name)
+        .is_some_and(|ci| ci.methods.keys().any(|k| k.starts_with(&prefix)));
+    if variants {
+        if given == 1 {
+            let ty = crate::compiler::function::infer_value_type(&arguments[0], ctx);
+            ctx.report(format!(
+                "{shown}.{method_name}() of a '{}' is not supported",
+                crate::type_to_string(&ty)
+            ));
+        } else {
+            let most = most.max(1);
+            ctx.report(format!(
+                "{shown}.{method_name}() expected at most {most} argument{}, got {given}",
+                if most == 1 { "" } else { "s" }
+            ));
+        }
+        return false;
+    }
+    // CPython counts `self` among the positional arguments it names.
+    let (least, most, given) = (least + implicit, most + implicit, given + implicit);
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    if given > most {
+        let takes = if least == most {
+            format!("{most} positional argument{}", plural(most))
+        } else {
+            format!("from {least} to {most} positional arguments")
+        };
+        let were = if given == 1 { "was" } else { "were" };
+        ctx.report(format!(
+            "{shown}.{method_name}() takes {takes} but {given} {were} given"
+        ));
+    } else {
+        let missing = least - given;
+        ctx.report(format!(
+            "{shown}.{method_name}() missing {missing} required positional argument{}",
+            plural(missing)
+        ));
+    }
+    false
+}
+
 #[inline(never)]
 #[allow(clippy::ptr_arg, clippy::too_many_arguments, clippy::borrowed_box)]
 fn emit_method_call_expr(
@@ -14501,6 +14645,35 @@ fn emit_method_call_expr(
                     .get_function_info(&format!("{owner}::{method_name}"))
                     .map(|f| (f.param_types.clone(), f.return_type.clone()))
                     .unwrap_or((Vec::new(), IRType::Unknown));
+                let implicit = if kind == MethodKind::Static { 0 } else { 1 };
+                if !method_arguments_fit(
+                    ctx,
+                    class_name,
+                    &owner,
+                    method_name,
+                    arguments,
+                    param_types.len(),
+                    implicit,
+                ) {
+                    func.instruction(&Instruction::Drop);
+                    for arg in arguments {
+                        let t = emit_expr(arg, func, ctx, memory_layout, None);
+                        func.instruction(&Instruction::Drop);
+                        if matches!(t, IRType::String | IRType::Bytes) {
+                            func.instruction(&Instruction::Drop);
+                        }
+                    }
+                    // The call's word, in the shape its result takes, so
+                    // the module still validates and every refusal is
+                    // reported in one run.
+                    if matches!(ret, IRType::Float) {
+                        func.instruction(&Instruction::F64Const(f64_const(0.0)));
+                    } else {
+                        func.instruction(&Instruction::I32Const(0));
+                    }
+                    finish_user_call(func, ctx, &ret);
+                    return ret;
+                }
 
                 // A method some subclass overrides dispatches through
                 // the vtable on the receiver's *runtime* class, not the
