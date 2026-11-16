@@ -114,7 +114,12 @@ github-release title="":
     
     VERSION="{{version}}"
     # Use provided title or default if none provided
-    RELEASE_TITLE="${title:-v$VERSION}"
+    TITLE="{{title}}"
+    RELEASE_TITLE="${TITLE:-v$VERSION}"
+    # A version with a pre-release part (1.0.0-rc.1) is a GitHub pre-release,
+    # which does not become the repository's latest release.
+    PRERELEASE=""
+    case "$VERSION" in *-*) PRERELEASE="--prerelease" ;; esac
     
     echo "Creating GitHub release for v$VERSION..."
     git tag -a "v$VERSION" -m "Release v$VERSION"
@@ -122,7 +127,7 @@ github-release title="":
     
     if command -v gh >/dev/null 2>&1; then
       echo "Creating GitHub release using the GitHub CLI..."
-      gh release create "v$VERSION"
+      gh release create "v$VERSION" --title "$RELEASE_TITLE" $PRERELEASE
     else
       ENCODED_TITLE=$(echo "$RELEASE_TITLE" | sed 's/ /%20/g')
       echo "GitHub CLI not found. Please install it or create the release manually at:"

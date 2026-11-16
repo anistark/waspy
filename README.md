@@ -32,7 +32,7 @@ Or add it to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-waspy = "0.18.0"
+waspy = "1.0.0-rc.1"
 ```
 
 The default `optimize` feature runs Binaryen, a native C++ library, over the output. To build waspy for a target without a C++ toolchain, such as `wasm32-unknown-unknown`, see [Building without Binaryen](https://anistark.github.io/waspy/docs/library/#building-without-binaryen).

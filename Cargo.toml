@@ -1,6 +1,6 @@
 [package]
 name = "waspy"
-version = "0.18.0"
+version = "1.0.0-rc.1"
 edition = "2021"
 rust-version = "1.70.0"
 description = "A Python to WebAssembly compiler written in Rust."
@@ -15,6 +15,9 @@ include = [
     "/src/**/*.rs",
     "/src/**/*.js",
     "/src/**/*.py",
+    # WASI's interface definitions for `wasi-http`, and their notice.
+    "/src/**/*.wit",
+    "/src/compiler/wit/README.md",
     "/Cargo.toml",
     "/README.md",
     "/LICENSE",
