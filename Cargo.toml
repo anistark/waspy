@@ -15,6 +15,9 @@ include = [
     "/src/**/*.rs",
     "/src/**/*.js",
     "/src/**/*.py",
+    # WASI's interface definitions for `wasi-http`, and their notice.
+    "/src/**/*.wit",
+    "/src/compiler/wit/README.md",
     "/Cargo.toml",
     "/README.md",
     "/LICENSE",
