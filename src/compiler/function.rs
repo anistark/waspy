@@ -1181,12 +1181,20 @@ pub(crate) fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRTy
                     return infer_value_type(&call, ctx);
                 }
             }
-            if lt == IRType::Float || rt == IRType::Float || matches!(op, IROp::Div) {
+            // An int to a negative constant power is a float, as `/` is.
+            if lt == IRType::Float
+                || rt == IRType::Float
+                || matches!(op, IROp::Div)
+                || (matches!(op, IROp::Pow) && crate::ir::infer::is_negative_int_constant(right))
+            {
                 IRType::Float
             } else if matches!(op, IROp::Add | IROp::Mul)
                 && matches!(lt, IRType::String | IRType::Bytes)
             {
                 // Concatenation and repetition yield the same kind.
+                lt
+            } else if matches!(op, IROp::Add) && matches!(lt, IRType::List(_)) && lt == rt {
+                // Two lists of one element type join into another.
                 lt
             } else if matches!(op, IROp::Mul) && matches!(rt, IRType::String | IRType::Bytes) {
                 rt
@@ -1227,7 +1235,7 @@ pub(crate) fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRTy
         // A tuple carries one type per position. `for k, v in pairs` needs
         // these so a string member binds as a string rather than a bare word.
         IRExpr::TupleLiteral(items) => {
-            IRType::Tuple(items.iter().map(|e| infer_value_type(e, ctx)).collect())
+            IRType::Tuple(items.iter().map(|e| literal_member_type(e, ctx)).collect())
         }
         // Float-valued stdlib constants (e.g. `math.pi`, `math.e`) must make
         // their local an f64; otherwise the f64 store lands in an i32 slot.
@@ -1284,8 +1292,9 @@ pub(crate) fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRTy
         }
         // Slicing a string/bytes yields the same kind; indexing a string yields
         // a one-character string (bytes/list indexing yields a scalar).
+        // A slice is the kind of sequence it was taken from.
         IRExpr::Slicing { container, .. } => match infer_value_type(container, ctx) {
-            t @ (IRType::String | IRType::Bytes) => t,
+            t @ (IRType::String | IRType::Bytes | IRType::List(_) | IRType::VarTuple(_)) => t,
             _ => IRType::Unknown,
         },
         IRExpr::Indexing { container, index } => match infer_value_type(container, ctx) {
@@ -1321,8 +1330,16 @@ pub(crate) fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRTy
             value,
             ..
         } => {
+            // A nested comprehension's lists (`[[f(x) for x in r] for r in m]`)
+            // are typed too, so what walks them knows their elements.
             let plain = |e: &IRExpr| match infer_value_type(e, ctx) {
-                t @ (IRType::Class(_) | IRType::Tuple(_) | IRType::String | IRType::Float) => t,
+                t @ (IRType::Class(_)
+                | IRType::Tuple(_)
+                | IRType::String
+                | IRType::Float
+                | IRType::List(_)
+                | IRType::Set(_)
+                | IRType::Dict(..)) => t,
                 _ => IRType::Unknown,
             };
             match kind {
@@ -1489,6 +1506,27 @@ pub(crate) fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRTy
         {
             IRType::Float
         }
+        // `total = sum(xs)` over floats (or from a float start) is a float,
+        // which the local it is stored in needs: an i32 local took the f64
+        // and the module failed to validate.
+        IRExpr::FunctionCall {
+            function_name,
+            arguments,
+        } if function_name == "sum" && ctx.get_function_info("sum").is_none() => {
+            let start = arguments.get(1).map(|s| match s {
+                IRExpr::Keyword { value, .. } => value.as_ref(),
+                other => other,
+            });
+            let float_start = start.is_some_and(|s| {
+                matches!(s, IRExpr::Const(IRConstant::Float(_)))
+                    || matches!(infer_value_type(s, ctx), IRType::Float)
+            });
+            match arguments.first().map(|a| infer_iterable_elem_type(a, ctx)) {
+                Some(IRType::Float) => IRType::Float,
+                _ if float_start => IRType::Float,
+                _ => IRType::Unknown,
+            }
+        }
         // `open()` yields a file handle; its local must be typed so file
         // method calls dispatch to the host I/O lowering.
         IRExpr::FunctionCall { function_name, .. }
@@ -1599,8 +1637,44 @@ fn infer_unpack_source(value: &IRExpr, ctx: &CompilationContext) -> IRType {
     }
 }
 
+/// `a, *b = s` for a str or bytes `s`: the list of its characters or byte
+/// values it unpacks as, the comprehension `list(s)` lowers to. The scan
+/// reserves its locals from the same expression, which codegen then emits.
+fn unpack_listed(value: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
+    let item = match infer_unpack_source(value, ctx) {
+        IRType::String => "__unpack_char",
+        IRType::Bytes => "__unpack_byte",
+        _ => return None,
+    };
+    Some(IRExpr::Comprehension {
+        kind: crate::ir::IRComprehensionKind::List,
+        element: Box::new(IRExpr::Variable(item.to_string())),
+        value: None,
+        generators: vec![crate::ir::IRGenerator {
+            targets: vec![item.to_string()],
+            iterable: value.clone(),
+            conditions: Vec::new(),
+        }],
+    })
+}
+
+/// What a value unpacks as: a str as its characters, bytes as their byte
+/// values, anything else as itself.
+fn unpacked_sequence(source: IRType) -> IRType {
+    match source {
+        IRType::String => IRType::List(Box::new(IRType::String)),
+        IRType::Bytes => IRType::List(Box::new(IRType::Int)),
+        other => other,
+    }
+}
+
 /// The type of target `i` of `count` when unpacking a value of type `source`.
-fn unpack_member_type(source: &IRType, i: usize, count: usize, starred: Option<usize>) -> IRType {
+pub(crate) fn unpack_member_type(
+    source: &IRType,
+    i: usize,
+    count: usize,
+    starred: Option<usize>,
+) -> IRType {
     match source {
         IRType::Tuple(members) if starred.is_none() && members.len() == count => members[i].clone(),
         IRType::Tuple(members) if starred.is_some() => {
@@ -1703,16 +1777,60 @@ fn refine_annotation(annotated: IRType, inferred: &IRType) -> IRType {
 /// Element type of a collection literal: the type shared by every element, or
 /// `Unknown` for an empty or mixed literal. A mixed literal has no single WASM
 /// slot width, so it keeps the i32 default rather than mis-typing some elements.
+/// The type of an element of a collection literal. An int or bool literal is
+/// its type here, as a dict literal's are, though elsewhere the inference
+/// leaves it to code generation: code generation builds the collection with
+/// that type, and a scan that typed it unknown named the locals it reserves
+/// after another type (`dict([("a", 1)])` panicked on its pair local).
+fn literal_member_type(e: &IRExpr, ctx: &CompilationContext) -> IRType {
+    match e {
+        IRExpr::Const(IRConstant::Int(_)) => IRType::Int,
+        IRExpr::Const(IRConstant::Bool(_)) => IRType::Bool,
+        IRExpr::UnaryOp {
+            op: crate::ir::IRUnaryOp::Neg,
+            operand,
+        } if matches!(**operand, IRExpr::Const(IRConstant::Int(_))) => IRType::Int,
+        other => infer_value_type(other, ctx),
+    }
+}
+
 fn literal_elem_type(elems: &[IRExpr], ctx: &CompilationContext) -> IRType {
-    let mut types = elems.iter().map(|e| infer_value_type(e, ctx));
+    let mut types = elems.iter().map(|e| literal_member_type(e, ctx));
     let Some(first) = types.next() else {
         return IRType::Unknown;
     };
-    if types.all(|t| t == first) {
-        first
-    } else {
-        IRType::Unknown
-    }
+    // A conflict anywhere leaves the whole literal to code generation, which
+    // unifies instances to their common base: an unknown taken up again by
+    // a later element typed `[Sq(), Tri(), Sq()]` as a list of `Sq`, and
+    // `Tri`'s method was dispatched as `Sq`'s.
+    types
+        .try_fold(first, |acc, t| unify_scanned(&acc, &t, ctx))
+        .unwrap_or(IRType::Unknown)
+}
+
+/// The one type two elements of a literal share, where a part one does not
+/// know takes the other's (`[[], [0]]` is a `list[list[int]]`) and two
+/// instances their nearest common base, as code generation unifies them, or
+/// `None` when they differ. An unknown never takes a float, whose width
+/// differs.
+fn unify_scanned(a: &IRType, b: &IRType, ctx: &CompilationContext) -> Option<IRType> {
+    let both = |x: &IRType, y: &IRType| unify_scanned(x, y, ctx).map(Box::new);
+    Some(match (a, b) {
+        _ if a == b => a.clone(),
+        (IRType::Unknown, t) | (t, IRType::Unknown) if *t != IRType::Float => t.clone(),
+        (IRType::Class(x), IRType::Class(y)) => IRType::Class(ctx.common_base(x, y)?),
+        (IRType::List(x), IRType::List(y)) => IRType::List(both(x, y)?),
+        (IRType::Set(x), IRType::Set(y)) => IRType::Set(both(x, y)?),
+        (IRType::VarTuple(x), IRType::VarTuple(y)) => IRType::VarTuple(both(x, y)?),
+        (IRType::Dict(k1, v1), IRType::Dict(k2, v2)) => IRType::Dict(both(k1, k2)?, both(v1, v2)?),
+        (IRType::Tuple(xs), IRType::Tuple(ys)) if xs.len() == ys.len() => IRType::Tuple(
+            xs.iter()
+                .zip(ys)
+                .map(|(x, y)| unify_scanned(x, y, ctx))
+                .collect::<Option<Vec<_>>>()?,
+        ),
+        _ => return None,
+    })
 }
 
 /// Best-effort element type of a `for`-loop iterable, used to decide whether the
@@ -1781,6 +1899,9 @@ fn infer_iterable_elem_type(iterable: &IRExpr, ctx: &CompilationContext) -> IRTy
             IRType::Dict(k, _) => *k,
             _ => IRType::Unknown,
         },
+        // A slice holds the elements of what it was taken from
+        // (`for v in smooth(xs)[2:-2]`).
+        IRExpr::Slicing { container, .. } => infer_iterable_elem_type(container, ctx),
         other => match infer_value_type(other, ctx) {
             IRType::String => IRType::String,
             // A call's or a method's declared result.
@@ -1871,6 +1992,26 @@ fn collect_return_type(body: &IRBody, ctx: &CompilationContext, out: &mut IRType
     }
 }
 
+/// The type a comprehension's target is given for the element it binds: an
+/// f64 element needs an f64 local, a string a `String` local with its length
+/// companion, and a tuple, collection, or instance the type its reads (and a
+/// set's or dict's hashing of it) go by. Anything else is an untyped word.
+fn comp_target_type(elem: IRType) -> IRType {
+    match elem {
+        ty @ (IRType::Float | IRType::String | IRType::Bytes | IRType::Int | IRType::Bool) => ty,
+        class @ IRType::Class(_) => class,
+        // An optional instance: its pointer or 0.
+        IRType::Optional(inner) if matches!(*inner, IRType::Class(_)) => IRType::Optional(inner),
+        IRType::JsProxy => IRType::JsProxy,
+        ty @ (IRType::Tuple(_)
+        | IRType::VarTuple(_)
+        | IRType::List(_)
+        | IRType::Set(_)
+        | IRType::Dict(_, _)) => ty,
+        _ => IRType::Unknown,
+    }
+}
+
 /// Reserve the helper locals a comprehension needs (result pointer, write
 /// index, capacity, iterator state per generator, and the generator target
 /// variables themselves), then recurse into its subexpressions one nesting
@@ -1922,31 +2063,8 @@ fn scan_expr_locals(expr: &IRExpr, ctx: &mut CompilationContext, depth: u32) {
                     // element needs a `String` local so `len(w)` reads the
                     // companion length rather than treating the offset as a
                     // collection pointer.
-                    let target_ty = match infer_iterable_elem_type(&generator.iterable, ctx) {
-                        // A number, so a tuple or key built from it compares
-                        // by its members' types.
-                        ty @ (IRType::Float
-                        | IRType::String
-                        | IRType::Bytes
-                        | IRType::Int
-                        | IRType::Bool) => ty,
-                        class @ IRType::Class(_) => class,
-                        // An optional instance: its pointer or 0.
-                        IRType::Optional(inner) if matches!(*inner, IRType::Class(_)) => {
-                            IRType::Optional(inner)
-                        }
-                        IRType::JsProxy => IRType::JsProxy,
-                        // A tuple or collection element is a pointer whose
-                        // type the reads of the target need: an untyped one
-                        // rendered its address.
-                        ty @ (IRType::Tuple(_)
-                        | IRType::VarTuple(_)
-                        | IRType::List(_)
-                        | IRType::Set(_)
-                        | IRType::Dict(_, _)) => ty,
-                        _ => IRType::Unknown,
-                    };
-                    ensure_local(ctx, target, target_ty);
+                    let elem = infer_iterable_elem_type(&generator.iterable, ctx);
+                    ensure_local(ctx, target, comp_target_type(elem));
                     // A string element binds as an (offset, length) pair, and
                     // the local vector is fixed before codegen runs, so the
                     // companion has to be reserved here even though the element
@@ -1954,24 +2072,22 @@ fn scan_expr_locals(expr: &IRExpr, ctx: &mut CompilationContext, depth: u32) {
                     ensure_local(ctx, &strlen_local_name(target), IRType::Int);
                 } else {
                     // `for k, v in pairs`: each target takes its own position's
-                    // type from the tuple, so a string member is a `String`
-                    // local rather than an untyped word.
-                    let member_types = match infer_iterable_elem_type(&generator.iterable, ctx) {
-                        IRType::Tuple(types) if types.len() == generator.targets.len() => {
-                            Some(types)
-                        }
-                        _ => None,
-                    };
+                    // type, by the same rule as a single target. A member left
+                    // untyped was a word: a tuple key bound that way was hashed
+                    // by its address where `in` hashes it by value, so a set or
+                    // dict comprehension keyed by it could not find its own
+                    // elements.
+                    let elem = infer_iterable_elem_type(&generator.iterable, ctx);
+                    let count = generator.targets.len();
                     for (j, target) in generator.targets.iter().enumerate() {
-                        let ty = match &member_types {
-                            Some(types) => match &types[j] {
-                                t @ (IRType::String | IRType::Bytes | IRType::Float) => t.clone(),
-                                class @ IRType::Class(_) => class.clone(),
-                                _ => IRType::Unknown,
-                            },
-                            None => IRType::Unknown,
-                        };
-                        ensure_local(ctx, target, ty);
+                        // A name bound twice (`_, x, _`) keeps its last value,
+                        // so its last position types it, and codegen binds
+                        // only that one.
+                        if generator.targets[j + 1..].contains(target) {
+                            continue;
+                        }
+                        let member = unpack_member_type(&elem, j, count, None);
+                        ensure_local(ctx, target, comp_target_type(member));
                         // A string element binds as an (offset, length) pair,
                         // and the local vector is fixed before codegen runs, so
                         // the companion has to be reserved here even though the
@@ -2076,11 +2192,15 @@ fn scan_expr_locals(expr: &IRExpr, ctx: &mut CompilationContext, depth: u32) {
 /// already recurses into them and calls this for each inner statement.
 fn scan_stmt_exprs(stmt: &IRStatement, ctx: &mut CompilationContext) {
     match stmt {
+        // A str or bytes unpacks through the list codegen builds of it.
+        IRStatement::TupleUnpack { value, .. } => match unpack_listed(value, ctx) {
+            Some(listed) => scan_expr_locals(&listed, ctx, 0),
+            None => scan_expr_locals(value, ctx, 0),
+        },
         IRStatement::Return(Some(expr))
         | IRStatement::Expression(expr)
         | IRStatement::Assign { value: expr, .. }
         | IRStatement::AugAssign { value: expr, .. }
-        | IRStatement::TupleUnpack { value: expr, .. }
         | IRStatement::If {
             condition: expr, ..
         }
@@ -2352,7 +2472,7 @@ pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
                 // Each target takes its member's type, which is what lets a
                 // float member get an f64 local (it used to bind as its low 32
                 // bits) and a string or tuple member be used as one.
-                let source = infer_unpack_source(value, ctx);
+                let source = unpacked_sequence(infer_unpack_source(value, ctx));
                 // A loop's element unpacked (`for k, v in pairs`): what each
                 // target binds, for an empty collection it is stored in.
                 if let (IRType::Unknown, IRExpr::Variable(element)) = (&source, value) {
@@ -2967,8 +3087,15 @@ fn compile_statement(
                         func.instruction(&Instruction::LocalSet(local_idx));
                     }
                 } else {
-                    // Handle the case where the variable is not found in the context
-                    panic!("Variable {target} not found in context");
+                    // No variable was reserved for the name: report it rather
+                    // than stop the compiler, keeping the stack balanced.
+                    ctx.report(format!(
+                        "'{target}' is assigned where no variable was reserved for it"
+                    ));
+                    func.instruction(&Instruction::Drop);
+                    if matches!(value_type, IRType::String | IRType::Bytes) {
+                        func.instruction(&Instruction::Drop);
+                    }
                 }
             }
             IRStatement::TupleUnpack {
@@ -2976,9 +3103,25 @@ fn compile_statement(
                 value,
                 starred,
             } => {
+                // A str or bytes unpacks as its characters or byte values
+                // (`head, *tail = "abc"`), the list `unpack_listed` builds; the
+                // pair it is was walked as a collection pointer, and the module
+                // failed to validate.
+                let listed = unpack_listed(value, ctx);
+                let value = listed.as_ref().unwrap_or(value);
                 // Emit code for the value (a tuple or list pointer; both share
                 // the [len:i32][slot0][slot1]... layout)
                 let value_type = emit_expr(value, func, ctx, memory_layout, None);
+                if matches!(value_type, IRType::String | IRType::Bytes) {
+                    ctx.report(
+                        "unpacking a str or bytes value whose type is not known before it is \
+                         computed is not supported. Hint: assign it to an annotated variable \
+                         first",
+                    );
+                    func.instruction(&Instruction::Drop);
+                    func.instruction(&Instruction::Drop);
+                    return;
+                }
 
                 // What each target holds, now that the value's type is known
                 // exactly. An untyped target adopts an i32-slot member type
@@ -3053,7 +3196,10 @@ fn compile_statement(
                             }
                         }
                     } else {
-                        panic!("Variable {target} not found in context");
+                        ctx.report(format!(
+                            "'{target}' is assigned where no variable was reserved for it"
+                        ));
+                        func.instruction(&Instruction::Drop);
                     }
                 };
 
@@ -3774,6 +3920,19 @@ fn compile_statement(
                 // `len(line)` at 0, `x /= 2` on an int divided as integers
                 // (3.0 for 7 / 2), `x %= 2.0` subtracted the wrong way round,
                 // and `%=` and `//=` truncated where Python floors.
+                //
+                // A name nothing assigned before is CPython's
+                // UnboundLocalError (a module variable included, without a
+                // `global` declaration). It reached the assignment below with
+                // no variable reserved for it, and the compiler panicked.
+                if ctx.get_local_info(target).is_none() && !assigns_module_global(ctx, target) {
+                    ctx.report(format!(
+                        "cannot access local variable '{target}' where it is not associated \
+                         with a value: '{target} {}= ...' reads it before anything assigns it",
+                        crate::compiler::expression::operator_symbol(op)
+                    ));
+                    return;
+                }
                 let local_ty = ctx
                     .get_local_info(target)
                     .map(|info| info.var_type.clone())

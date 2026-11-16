@@ -201,8 +201,13 @@ fn infer_field_value_type(
         IRExpr::BinaryOp { left, right, op } => {
             let lt = infer_field_value_type(left, params, classes);
             let rt = infer_field_value_type(right, params, classes);
-            // `/` is true division whatever its operands (#132).
-            if lt == IRType::Float || rt == IRType::Float || matches!(op, IROp::Div) {
+            // `/` is true division whatever its operands (#132), and an int
+            // to a negative constant power is a float.
+            if lt == IRType::Float
+                || rt == IRType::Float
+                || matches!(op, IROp::Div)
+                || (matches!(op, IROp::Pow) && crate::ir::infer::is_negative_int_constant(right))
+            {
                 IRType::Float
             } else {
                 lt

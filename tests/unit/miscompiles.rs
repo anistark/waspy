@@ -1280,7 +1280,9 @@ fn unimplemented_decorators_are_refused_and_caching_ones_accepted() {
              \x20   @contextlib.contextmanager\n\
              \x20   def d(self) -> int:\n\
              \x20       return self.v * 2\n",
-            "'@contextlib.contextmanager' on method 'N.d'",
+            // `contextlib` is no module the compiler supports, so the
+            // program is refused at its import, before the decorator.
+            "cannot import 'contextlib'",
         ),
         (
             "def deco(cls):\n\
@@ -7425,4 +7427,720 @@ fn a_class_two_files_define_is_refused() {
     let err = try_compile_multi(&[("mod.py", module), ("main.py", main)])
         .expect_err("two files defining Point");
     assert!(err.contains("duplicate class 'Point' in main.py"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// Comprehensions and method arguments
+// ---------------------------------------------------------------------------
+
+/// A comprehension's filter, and the element `any()` and `all()` decide on,
+/// were emitted as values and branched on as they were: a float left an f64
+/// where a bool goes and the module failed to validate, a str did the same
+/// with its pair, and a list or an instance tested its pointer, which is never
+/// zero, so `[g for g in groups if g]` kept the empty lists and
+/// `any(g for g in [[], []])` was True. They are tested for truth now, as an
+/// `if` statement tests them.
+#[test]
+fn a_comprehension_filter_tests_its_value_for_truth() {
+    let src = dedent(
+        r#"
+        class Box:
+            def __init__(self, n: int):
+                self.n = n
+
+            def __len__(self) -> int:
+                return self.n
+
+
+        def main():
+            fines = [3.0, 0.0, 1.5]
+            print([f for f in fines if f])
+            words = ["a", "", "bc", ""]
+            print([w for w in words if w], {w for w in words if w} == {"a", "bc"})
+            groups = [[1], [], [2, 3], []]
+            print(len([g for g in groups if g]), {len(g): g for g in groups if g})
+            boxes = [Box(0), Box(2), Box(1)]
+            print([b.n for b in boxes if b])
+            print(any(g for g in [[], []]), all(g for g in [[1], []]), any(g for g in [[], [0]]))
+            print(any(w for w in ["", ""]), all(w for w in ["x", ""]), all(w for w in ["x", "y"]))
+            print(any(f for f in [0.0, 0.0]), all(f for f in [1.5, 0.0]), any(f for f in [0.0, -2.5]))
+
+
+        if __name__ == "__main__":
+            main()
+        "#,
+    );
+    assert_eq!(
+        run_main(&src, "", &[]).stdout,
+        "[3.0, 1.5]\n['a', 'bc'] True\n2 {1: [1], 2: [2, 3]}\n[2, 1]\nFalse False True\nFalse False True\nFalse False True\n"
+    );
+}
+
+/// `{k: v for k, v in d.items()}` over floats: every unpacked member was
+/// read as an i32 word into the f64 local made for it, and the module failed
+/// to validate. A float member is read as the whole slot it is, as the `for`
+/// statement reads it, and a name bound twice (`_, x, _`) keeps its last
+/// value.
+#[test]
+fn a_comprehension_unpacks_a_float_member_at_its_width() {
+    let src = dedent(
+        r#"
+        def main():
+            env = {"x": 2.5, "y": -1.25}
+            print({k: v * 2 for k, v in env.items()})
+            print([v for k, v in env.items()], [round(v, 1) for _, v in env.items() if v > 0])
+            pairs = [(1.5, 2), (0.5, 4)]
+            print(sum(p * q for p, q in pairs), [q for p, q in pairs if p])
+            points = [("a", 1.0, 2.0), ("b", 3.5, -0.5)]
+            print([f"{name}:{x + y:.2f}" for name, x, y in points])
+            print(max(x for _, x, _ in points), any(y < 0 for _, _, y in points))
+            print([last for last, _, last in [(1.0, "s", 2.0)]])
+            nested = [[(1.0, 2.0)], [(3.0, 4.0), (5.0, 6.0)]]
+            print([a * b for row in nested for a, b in row])
+
+
+        if __name__ == "__main__":
+            main()
+        "#,
+    );
+    assert_eq!(
+        run_main(&src, "", &[]).stdout,
+        "{'x': 5.0, 'y': -2.5}\n[2.5, -1.25] [2.5]\n5.0 [2, 4]\n['a:3.00', 'b:3.00']\n3.5 True\n[2.0]\n[2.0, 12.0, 30.0]\n"
+    );
+}
+
+/// `{p for p, n in counts.items()}` with tuple keys: a target unpacked from
+/// a tuple was typed only when it was a str, float, or instance, so a tuple
+/// member was an untyped word, hashed by its address where `in` hashes a
+/// tuple by value. The set could not find its own elements, and a Game of
+/// Life step answered an empty board.
+#[test]
+fn a_set_or_dict_comprehension_keyed_by_an_unpacked_tuple_finds_its_keys() {
+    let src = dedent(
+        r#"
+        from itertools import product
+
+
+        def life_step(alive: set[tuple[int, int]]) -> set[tuple[int, int]]:
+            counts: dict[tuple[int, int], int] = {}
+            for r, c in alive:
+                for dr, dc in product((-1, 0, 1), repeat=2):
+                    if dr or dc:
+                        key = (r + dr, c + dc)
+                        counts[key] = counts.get(key, 0) + 1
+            return {p for p, n in counts.items() if n == 3 or (n == 2 and p in alive)}
+
+
+        def main():
+            pairs: list[tuple[tuple[int, int], int]] = [((0, 1), 3), ((2, 2), 4)]
+            s = {p for p, n in pairs}
+            print((0, 1) in s, (2, 2) in s, (1, 0) in s, len(s))
+            print([p in s for p in s])
+            d = {p: n for p, n in pairs}
+            print((0, 1) in d, d.get((2, 2), -1), d[(0, 1)])
+            rows: list[tuple[str, int, int]] = [("a", 1, 2), ("b", 3, 4)]
+            named = {name: (x, y) for name, x, y in rows}
+            print(named, {v: k for k, v in named.items()}[(3, 4)])
+            blinker = {(1, 0), (1, 1), (1, 2)}
+            once = life_step(blinker)
+            print(sorted(once), life_step(once) == blinker)
+
+
+        if __name__ == "__main__":
+            main()
+        "#,
+    );
+    assert_eq!(
+        run_main(&src, "", &[]).stdout,
+        "True True False 2\n[True, True]\nTrue 4 3\n{'a': (1, 2), 'b': (3, 4)} b\n[(0, 1), (1, 1), (2, 1)] True\n"
+    );
+}
+
+/// `m.group(m.lastindex)`: no variant of `group` took an `Optional[int]`, so
+/// the call fell to the method that takes no argument with one on the stack,
+/// which trapped or failed to validate. None is no group, CPython's
+/// `IndexError`.
+#[test]
+fn match_group_of_an_optional_int_is_the_group_or_index_error() {
+    let src = dedent(
+        r#"
+        import re
+        from typing import Optional
+
+
+        def first(text: str) -> str:
+            m = re.match(r"(\d+)|([a-z]+)", text)
+            if not m:
+                return "-"
+            return str(m.group(m.lastindex)) + "/" + str(m[m.lastindex])
+
+
+        def main():
+            print(first("42"), first("ab"), first("!"))
+            m = re.match(r"x", "x")
+            if m:
+                n: Optional[int] = m.lastindex
+                try:
+                    print(m.group(n))
+                except IndexError as e:
+                    print("IndexError:", e)
+                try:
+                    print(m[n])
+                except IndexError as e:
+                    print("IndexError:", e)
+
+
+        if __name__ == "__main__":
+            main()
+        "#,
+    );
+    assert_eq!(
+        run_main(&src, "", &[]).stdout,
+        "42/42 ab/ab -\nIndexError: no such group\nIndexError: no such group\n"
+    );
+}
+
+/// A method called with more positional arguments than it takes pushed the
+/// extra one onto the stack, and the module failed to validate. CPython raises
+/// `TypeError`, so it is refused, as a call of a module function is.
+#[test]
+fn a_method_given_the_wrong_number_of_arguments_is_refused() {
+    let source = r#"
+        class A:
+            def f(self) -> int:
+                return 1
+
+            def g(self, x: int, y: int = 2) -> int:
+                return x + y
+
+        def main() -> None:
+            print(CALL)
+        "#;
+    for (call, needle) in [
+        (
+            "A().f(5)",
+            "A.f() takes 1 positional argument but 2 were given",
+        ),
+        ("A().g()", "A.g() missing 1 required positional argument"),
+        (
+            "A().g(1, 2, 3)",
+            "A.g() takes from 2 to 3 positional arguments but 4 were given",
+        ),
+    ] {
+        refused(&source.replace("CALL", call), needle);
+    }
+    refused(
+        r#"
+        import re
+
+        def main() -> None:
+            m = re.match("(a)", "a")
+            if m:
+                print(m.start(1, 2))
+        "#,
+        "re.Match.start() expected at most 1 argument, got 2",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Numbers, strs, and refusals in place of crashes
+// ---------------------------------------------------------------------------
+
+/// `any(words)` over a list of strs answered the first one's truth: the
+/// test of a str parks its length in the scratch local that held the list,
+/// so `any(["", "a"])` was False. The list, the position, and the answer are
+/// held now.
+#[test]
+fn any_of_a_list_of_strs_tests_every_element() {
+    let src = dedent(
+        r#"
+        def main():
+            words = ["", "a", "bb", "", "ccc"]
+            print(any(words), all(words), any(["", "", "b"]), any(["", ""]))
+            print(all(["x", "y"]), all(["x", ""]), any(["a", ""]), any([]))
+            names: list[str] = ["", ""]
+            names.append("z")
+            print(any(names), all(names[2:]))
+
+
+        if __name__ == "__main__":
+            main()
+        "#,
+    );
+    assert_eq!(
+        run_main(&src, "", &[]).stdout,
+        "True False True False\nTrue False True False\nTrue True\n"
+    );
+}
+
+/// `2 ** -1` is 0.5 in CPython, which an int result cannot hold, so the
+/// integer power trapped. A negative constant exponent makes the power a
+/// float, in a local, a field, a return, and a list alike, and `0 ** -1` is
+/// CPython's ZeroDivisionError.
+#[test]
+fn an_int_to_a_negative_constant_power_is_a_float() {
+    let src = dedent(
+        r#"
+        class C:
+            def __init__(self):
+                self.half = 2 ** -1
+
+
+        def f() -> float:
+            return 4 ** -2
+
+
+        def main():
+            print(2 ** -1, 10 ** -2, (-2) ** -3, True ** -1)
+            x = 2 ** -1
+            y = 10 ** -2 * 3
+            print(x, y, x + 1, f(), C().half)
+            vals = [2 ** -1, 4 ** -1]
+            print(vals, sum(vals))
+            try:
+                print(0 ** -1)
+            except ZeroDivisionError as e:
+                print("ZeroDivisionError:", e)
+
+
+        if __name__ == "__main__":
+            main()
+        "#,
+    );
+    assert_eq!(
+        run_main(&src, "", &[]).stdout,
+        "0.5 0.01 -0.125 1.0\n0.5 0.03 1.5 0.0625 0.5\n[0.5, 0.25] 0.75\nZeroDivisionError: 0.0 cannot be raised to a negative power\n"
+    );
+}
+
+/// `round(1234.5678, -2)` trapped, since only 0 to 22 digits were handled.
+/// A negative count rounds to tens, hundreds, and so on, halves to even on
+/// the exact value as CPython does (`round(25.0, -1)` is 20.0), keeping the
+/// sign of zero.
+#[test]
+fn round_of_a_float_to_negative_digits() {
+    let src = dedent(
+        r#"
+        def main():
+            print(round(1234.5678, -2), round(-1234.5678, -2), round(1250.0, -2), round(1350.0, -2))
+            print(round(5.0, -1), round(15.0, -1), round(25.0, -1), round(-5.0, -1), round(-4.0, -1))
+            print(round(999.5, -1), round(9995.0, -1), round(123456789.123, -3), round(0.001, -1))
+            print(round(1e20, -5), round(4.5e15, -1), round(1e300, -22), round(7.0e10, -10))
+            print(round(2.675, 2), round(0.125, 2), round(-3.14159, 3), round(2.5, 0))
+
+
+        if __name__ == "__main__":
+            main()
+        "#,
+    );
+    assert_eq!(
+        run_main(&src, "", &[]).stdout,
+        "1200.0 -1200.0 1200.0 1400.0\n0.0 20.0 20.0 -0.0 -0.0\n1000.0 10000.0 123457000.0 0.0\n1e+20 4500000000000000.0 1e+300 70000000000.0\n2.67 0.12 -3.142 2.0\n"
+    );
+}
+
+/// `head, *tail = "abc"` (and any unpacking of a str or bytes) walked the
+/// pair a str is as a collection pointer, and the module failed to validate.
+/// A str unpacks as its characters and bytes as their values, starred targets
+/// included, with CPython's ValueError for the wrong count.
+#[test]
+fn unpacking_a_str_or_bytes_binds_its_characters() {
+    let src = dedent(
+        r#"
+        def initials(name: str) -> str:
+            first, *rest = name
+            return first + str(len(rest))
+
+
+        def main():
+            a, b = "xy"
+            print(a, b, len(a))
+            x, y, z = "héy"
+            print(x, y, z)
+            head, *tail = "abc"
+            print(head, tail, len(tail))
+            *init, last = "wxyz"
+            print(init, last)
+            p, *mid, q = "pqrs"
+            print(p, mid, q)
+            i, *j = b"xyz"
+            print(i, j)
+            word = "ok"
+            m, n = word
+            print(m + n, initials("Ada"))
+            try:
+                u, v = "abc"
+            except ValueError as e:
+                print("ValueError:", e)
+
+
+        if __name__ == "__main__":
+            main()
+        "#,
+    );
+    assert_eq!(
+        run_main(&src, "", &[]).stdout,
+        "x y 1\nh é y\na ['b', 'c'] 2\n['w', 'x', 'y'] z\np ['q', 'r'] s\n120 [121, 122]\nok A2\nValueError: too many values to unpack (expected 2)\n"
+    );
+}
+
+/// A search method on a literal folded with its first argument alone, so a
+/// start or end was dropped: `"banana".find("a", 2)` answered 1, where
+/// CPython answers 3. It is refused, as the same call on a variable is.
+#[test]
+fn a_search_on_a_literal_with_a_start_is_refused_not_folded() {
+    for (call, needle) in [
+        (
+            r#""banana".find("a", 2)"#,
+            "str.find() takes exactly one argument",
+        ),
+        (
+            r#""banana".index("a", 2, 4)"#,
+            "str.index() takes exactly one argument",
+        ),
+        (
+            r#""banana".count("a", 2)"#,
+            "str.count() takes exactly one argument",
+        ),
+        (
+            r#""banana".startswith("an", 1)"#,
+            "str.startswith() takes exactly one argument",
+        ),
+        (
+            r#""banana".endswith("an", 0, 4)"#,
+            "str.endswith() takes exactly one argument",
+        ),
+    ] {
+        refused(&format!("def main() -> None:\n    print({call})\n"), needle);
+    }
+    // With one argument the fold stands.
+    let src =
+        "def main() -> None:\n    print(\"banana\".find(\"an\"), \"banana\".count(\"a\"))\n\n\
+               if __name__ == \"__main__\":\n    main()\n";
+    assert_eq!(run_main(src, "", &[]).stdout, "1 3\n");
+}
+
+/// `total += 1` before anything assigns `total` is CPython's
+/// UnboundLocalError, a module variable without a `global` declaration
+/// included. The compiler panicked.
+#[test]
+fn augmented_assignment_before_any_assignment_is_refused() {
+    refused(
+        r#"
+        def main() -> None:
+            total += 1
+            print(total)
+        "#,
+        "cannot access local variable 'total' where it is not associated with a value",
+    );
+    refused(
+        r#"
+        COUNT = 0
+
+        def bump() -> int:
+            COUNT += 1
+            return COUNT
+        "#,
+        "cannot access local variable 'COUNT'",
+    );
+}
+
+/// A comprehension that unpacks each str it walks read the str's text as a
+/// tuple's slots and trapped. It is refused, pointing at the `for` statement,
+/// which unpacks one.
+#[test]
+fn a_comprehension_unpacking_strs_is_refused() {
+    refused(
+        r#"
+        def main() -> None:
+            print([a + b for a, b in ["xy", "zw"]])
+        "#,
+        "a comprehension unpacking each str it walks into several targets is not supported",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Numeric programs: zip, enumerate, sum, swaps, and imports
+// ---------------------------------------------------------------------------
+
+/// `zip()` and `enumerate()` were refused anywhere but a `for` statement's
+/// iterable, so `sum(x * y for x, y in zip(xs, ys))`, `dict(zip(k, v))`, and
+/// a comprehension over `enumerate(names, 1)` were. Where something walks
+/// them once they are the tuples they yield, built by indexing the sequences
+/// (a slice of one included, `zip(xs, xs[1:])`).
+#[test]
+fn zip_and_enumerate_where_they_are_walked() {
+    let src = dedent(
+        r#"
+        def dot(xs: list[float], ys: list[float]) -> float:
+            return sum(x * y for x, y in zip(xs, ys))
+
+
+        def main():
+            names = ["ann", "bob", "cy"]
+            scores = [91.5, 78.0, 85.25]
+            ages = [31, 25, 40]
+            print({n: s for n, s in zip(names, scores)})
+            print([f"{n}:{a}" for n, a in zip(names, ages)])
+            print([f"{n}:{a}:{s:.1f}" for n, a, s in zip(names, ages, scores)])
+            print(list(zip(names, ages)), sorted(zip(ages, names)), max(zip(scores, names)))
+            print(dict(zip(names, ages)), dot(scores, [1.0, 2.0, 0.5]))
+            print([i for i, s in enumerate(scores)], [c for i, c in enumerate("abc")])
+            print({i: n for i, n in enumerate(names, 1)}, list(enumerate("xy", start=10)))
+            print(any(a > 30 for a, n in zip(ages, names)), all(s > 70 for _, s in zip(names, scores)))
+            print([a - b for a, b in zip(ages, ages[1:])], list(zip("abc", range(2))))
+            totals = {"x": 1, "y": 2}
+            print([(k, i) for i, k in enumerate(totals)], list(zip(totals, ["p", "q"])))
+            print(sum(i * s for i, s in enumerate(scores)), [round(s, 1) for _, s in zip(names, scores)])
+
+
+        if __name__ == "__main__":
+            main()
+        "#,
+    );
+    assert_eq!(
+        run_main(&src, "", &[]).stdout,
+        "{'ann': 91.5, 'bob': 78.0, 'cy': 85.25}\n['ann:31', 'bob:25', 'cy:40']\n['ann:31:91.5', 'bob:25:78.0', 'cy:40:85.2']\n[('ann', 31), ('bob', 25), ('cy', 40)] [(25, 'bob'), (31, 'ann'), (40, 'cy')] (91.5, 'ann')\n{'ann': 31, 'bob': 25, 'cy': 40} 290.125\n[0, 1, 2] ['a', 'b', 'c']\n{1: 'ann', 2: 'bob', 3: 'cy'} [(10, 'x'), (11, 'y')]\nTrue True\n[6, -15] [('a', 0), ('b', 1)]\n[('x', 0), ('y', 1)] [('x', 'p'), ('y', 'q')]\n248.5 [91.5, 78.0, 85.2]\n"
+    );
+}
+
+/// CPython 3.12+ adds floats with Neumaier's compensated summation, so
+/// `sum([0.1] * 10)` is 1.0 and `sum([1e100, 1.0, -1e100])` is 1.0; a plain
+/// loop answered 0.9999999999999999 and 0.0. A float start makes an int
+/// sum a float, and a range is summed (it was refused).
+#[test]
+fn sum_adds_floats_as_cpython_does() {
+    let src = dedent(
+        r#"
+        import math
+
+
+        def main():
+            print(sum([0.1] * 10), sum([1e100, 1.0, -1e100]), sum([0.1, 0.2, 0.3]))
+            print(sum([1.0, 1e16, -1e16]), sum([-0.0]), sum([-0.0], -0.0), sum([math.inf, 1.0]))
+            print(sum([math.inf, -math.inf]), sum([1e308, 1e308]), sum([], 2.5), sum([0.5], 1.25))
+            print(sum([1, 2, 3], 0.5), sum((0.1, 0.2)), sum(range(10)), sum(range(10, 0, -3)), sum(range(5), 0.5))
+            print(sum(range(0)), sum([True, True, False]), sum([3, -4]), sum(range(-3, 3)))
+            xs = [0.1 * i for i in range(1, 30)]
+            total = sum(xs)
+            print(total, sum(x * x for x in xs), sum(xs) / len(xs))
+
+
+        if __name__ == "__main__":
+            main()
+        "#,
+    );
+    assert_eq!(
+        run_main(&src, "", &[]).stdout,
+        "1.0 1.0 0.6\n1.0 0.0 -0.0 inf\nnan inf 2.5 1.75\n6.5 0.30000000000000004 45 22 10.5\n0 2 -1 -3\n43.5 85.55000000000001 1.5\n"
+    );
+}
+
+/// `total = sum(xs)` over floats stored an f64 in the i32 local the scan
+/// had typed for an unknown call, and the module failed to validate, as did
+/// `dict(pairs)` of int pairs, which panicked on a helper local the scan named
+/// after another type. A method named `sum` no longer hides the builtin from
+/// a generator expression inside it, and a nested comprehension and a list
+/// concatenation are typed.
+#[test]
+fn a_float_sum_in_a_local_compiles() {
+    let src = dedent(
+        r#"
+        import math
+
+
+        def mean(xs: list[float]) -> float:
+            return sum(xs) / len(xs)
+
+
+        def corrcoef(xs: list[float], ys: list[float]) -> float:
+            mx, my = mean(xs), mean(ys)
+            cov = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+            return cov / math.sqrt(sum((x - mx) ** 2 for x in xs) * sum((y - my) ** 2 for y in ys))
+
+
+        def main():
+            total = sum([0.5, 0.25])
+            squares = sum([x * x for x in [1.5, 2.0]])
+            pairs = [("a", 1), ("b", 2)]
+            print(total, squares, round(corrcoef([1.0, 2.0, 4.0], [3.0, 5.0, 4.0]), 12), dict(pairs))
+            rows = [[1.0, 2.0], [3.0, 4.0]]
+            cells = [[f"{x:.1f}" for x in r] for r in rows]
+            print([len(c) for r in cells for c in r], [r + [0.0] for r in rows][1])
+
+
+        class Grid:
+            def __init__(self, cells: list[float]):
+                self.cells = cells
+
+            def sum(self) -> float:
+                return sum(c * 2 for c in self.cells)
+
+
+        if __name__ == "__main__":
+            main()
+            print(Grid([1.5, 2.5]).sum())
+        "#,
+    );
+    assert_eq!(
+        run_main(&src, "", &[]).stdout,
+        "0.75 6.25 0.327326835354 {'a': 1, 'b': 2}\n[3, 3, 3, 3] [3.0, 4.0, 0.0]\n8.0\n"
+    );
+}
+
+/// `a[i], a[j] = a[j], a[i]` was refused. The values are evaluated first,
+/// then the targets assigned left to right, as CPython does (`a[i], i = 9, 2`
+/// stores at the old `i`).
+#[test]
+fn tuple_assignment_to_subscripts_and_attributes() {
+    let src = dedent(
+        r#"
+        class Point:
+            def __init__(self, x: int, y: int):
+                self.x = x
+                self.y = y
+
+
+        def bubble(xs: list[int]) -> list[int]:
+            n = len(xs)
+            for i in range(n):
+                for j in range(n - 1 - i):
+                    if xs[j] > xs[j + 1]:
+                        xs[j], xs[j + 1] = xs[j + 1], xs[j]
+            return xs
+
+
+        def main():
+            a = [1, 2, 3, 4]
+            a[0], a[3] = a[3], a[0]
+            print(a)
+            i = 0
+            a[i], i = 9, 2
+            print(a, i)
+            rows = [[1.0, 2.0], [3.0, 4.0]]
+            rows[0], rows[1] = rows[1], rows[0]
+            print(rows)
+            p = Point(1, 2)
+            p.x, p.y = p.y, p.x
+            print(p.x, p.y)
+            d = {"a": 1}
+            d["a"], d["b"] = d.get("b", 0), d["a"]
+            print(d)
+            print(bubble([5, 1, 4, 2, 3]))
+            m = [[0] * 2 for _ in range(2)]
+            m[0][1], m[1][0] = 7, 8
+            print(m)
+
+
+        if __name__ == "__main__":
+            main()
+        "#,
+    );
+    assert_eq!(
+        run_main(&src, "", &[]).stdout,
+        "[4, 2, 3, 1]\n[9, 2, 3, 1] 2\n[[3.0, 4.0], [1.0, 2.0]]\n2 1\n{'a': 0, 'b': 1}\n[1, 2, 3, 4, 5]\n[[0, 7], [8, 0]]\n"
+    );
+}
+
+/// An import of a module the program cannot have (a third-party package, or
+/// a standard-library module the compiler does not support) is refused at the
+/// import, with its line. It was skipped with a warning, and every use then
+/// failed with a hint that could not help.
+#[test]
+fn an_import_of_a_module_the_program_cannot_have_is_refused() {
+    for (source, module) in [
+        (
+            "import numpy as np\n\ndef f() -> int:\n    return 1\n",
+            "numpy",
+        ),
+        ("from pandas import DataFrame\n", "pandas"),
+        ("import os\nimport heapq\n", "heapq"),
+        (
+            "def f() -> int:\n    import requests\n    return 1\n",
+            "requests",
+        ),
+    ] {
+        let err = try_compile(source).expect_err("an unknown module must be refused");
+        assert!(err.contains(&format!("cannot import '{module}'")), "{err}");
+        assert!(err.contains("(at line"), "{err}");
+    }
+    // Annotations' modules, a guarded import, and the program's own modules
+    // are imported as before.
+    let fine = "from __future__ import annotations\nfrom typing import Optional\n\
+                from collections.abc import Iterator\n\
+                try:\n    import ujson as json\nexcept ImportError:\n    import json\n\n\
+                def f(x: Optional[int]) -> int:\n    return 1\n";
+    try_compile(fine).expect("annotation modules and a guarded import compile");
+    let module = "def helper() -> int:\n    return 41\n";
+    let main = "import helpers\n\ndef f() -> int:\n    return helpers.helper() + 1\n";
+    try_compile_multi(&[("helpers.py", module), ("main.py", main)])
+        .expect("a module the program provides is imported");
+}
+
+/// `zip()` and `enumerate()` outside a walk are CPython's iterator objects,
+/// which a list would answer differently for, so they stay refused; so does
+/// one over an expression that would be evaluated once per element.
+#[test]
+fn zip_outside_a_walk_is_still_refused() {
+    refused(
+        r#"
+        def main() -> None:
+            z = zip([1], [2])
+            print(z)
+        "#,
+        "call to 'zip'",
+    );
+    refused(
+        r#"
+        def pairs() -> list[int]:
+            return [1, 2]
+
+        def main() -> None:
+            print([a + b for a, b in zip(pairs(), pairs())])
+        "#,
+        "zip() of an expression is not supported here",
+    );
+}
+
+/// The scan types a collection literal's elements as one type, a part one
+/// does not know taking the other's (`[[], [0]]` is a list of int lists), and
+/// any conflict leaves the literal to code generation, which unifies
+/// instances to their common base. A conflict taken up again by a later
+/// element typed `[Sq(), Tri(), Sq(), Tri()]` as a list of `Sq`.
+#[test]
+fn a_literal_s_elements_unify_as_code_generation_does() {
+    let src = dedent(
+        r#"
+        class Shape:
+            def area(self) -> int:
+                return 0
+
+
+        class Sq(Shape):
+            def area(self) -> int:
+                return 4
+
+
+        class Tri(Shape):
+            def area(self) -> int:
+                return 3
+
+
+        def main():
+            lists = [[], [0], [], [1, 2]]
+            print([len(x) for x in lists if x], len(lists[3]))
+            shapes = [Sq(), Tri(), Sq(), Tri()]
+            print([s.area() for s in shapes])
+            pairs = [("a", 1), ("b", -2)]
+            print({k: v * 10 for k, v in pairs})
+
+
+        if __name__ == "__main__":
+            main()
+        "#,
+    );
+    assert_eq!(
+        run_main(&src, "", &[]).stdout,
+        "[1, 2] 2\n[4, 3, 4, 3]\n{'a': 10, 'b': -20}\n"
+    );
 }

@@ -1523,6 +1523,220 @@ fn constant_default(expr: &IRExpr) -> bool {
     }
 }
 
+/// An expression that reads the same value every time it is evaluated, with
+/// nothing run on the way: a walk that indexes a sequence reads it once for its
+/// length and again for each element.
+fn plain_path(e: &IRExpr) -> bool {
+    match e {
+        IRExpr::Variable(_) | IRExpr::Param(_) | IRExpr::Const(_) => true,
+        IRExpr::RangeCall { start, stop, step } => {
+            plain_path(stop) && [start, step].into_iter().flatten().all(|p| plain_path(p))
+        }
+        IRExpr::UnaryOp { operand, .. } => plain_path(operand),
+        IRExpr::Attribute { object, .. } => plain_path(object),
+        IRExpr::MethodCall {
+            object,
+            method_name,
+            arguments,
+        } => {
+            arguments.is_empty()
+                && matches!(
+                    method_name.as_str(),
+                    crate::ir::DATA_METHOD | crate::ir::VIEW_METHOD | "keys"
+                )
+                && plain_path(object)
+        }
+        // A literal of constants builds the same values each time.
+        IRExpr::ListLiteral(items) | IRExpr::TupleLiteral(items) => {
+            items.iter().all(|i| matches!(i, IRExpr::Const(_)))
+        }
+        _ => false,
+    }
+}
+
+/// A sequence `zip()` or `enumerate()` may index: a plain path, or a slice of
+/// one with plain bounds (`zip(xs, xs[1:])`), which reads the same elements
+/// each time and runs nothing on the way, at the cost of a copy per element.
+fn pure_sequence(e: &IRExpr) -> bool {
+    match e {
+        IRExpr::Slicing {
+            container,
+            start,
+            end,
+            step,
+        } => {
+            plain_path(container)
+                && [start, end, step]
+                    .into_iter()
+                    .flatten()
+                    .all(|b| plain_path(b))
+        }
+        other => plain_path(other),
+    }
+}
+
+/// A local name for a walk's index, the same wherever the walk is rewritten
+/// (the scan reserves it, codegen reads it).
+fn walk_index(prefix: &str, of: &[IRExpr]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    format!("{of:?}").hash(&mut h);
+    format!("{prefix}_{:x}", h.finish())
+}
+
+/// What a walk indexes for `arg`: the argument itself where indexing reads
+/// what iterating yields (a list, tuple, str, bytes, or range), a dict's keys,
+/// else nothing.
+fn indexed_sequence(arg: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
+    match infer_value_type(arg, ctx) {
+        IRType::List(_)
+        | IRType::VarTuple(_)
+        | IRType::Tuple(_)
+        | IRType::String
+        | IRType::Bytes
+        | IRType::Range => Some(arg.clone()),
+        IRType::Dict(..) => Some(call(arg, "keys", Vec::new())),
+        _ => None,
+    }
+}
+
+/// `zip(a, b, ...)` where it is walked: the tuples it yields, built by
+/// indexing each sequence up to the shortest one's length. Anywhere else it is
+/// CPython's iterator object, which is refused as a call of an unknown builtin.
+/// It was refused wherever it was not a `for` statement's iterable, so
+/// `sum(x * y for x, y in zip(xs, ys))` and `dict(zip(keys, values))` were.
+fn zip_walk(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
+    let IRExpr::FunctionCall {
+        function_name,
+        arguments,
+    } = expr
+    else {
+        return None;
+    };
+    if function_name != "zip"
+        || ctx.get_function_info(function_name).is_some()
+        || arguments.is_empty()
+        || arguments
+            .iter()
+            .any(|a| matches!(a, IRExpr::Keyword { .. }))
+    {
+        return None;
+    }
+    let seqs = arguments
+        .iter()
+        .map(|a| indexed_sequence(a, ctx))
+        .collect::<Option<Vec<_>>>()?;
+    if !seqs.iter().all(pure_sequence) {
+        ctx.report(
+            "zip() of an expression is not supported here. Hint: assign each sequence to a \
+             variable first",
+        );
+        return None;
+    }
+    let i = walk_index("__zip", &seqs);
+    let len = |s: &IRExpr| IRExpr::FunctionCall {
+        function_name: "len".to_string(),
+        arguments: vec![s.clone()],
+    };
+    let stop = match seqs.as_slice() {
+        [one] => len(one),
+        many => IRExpr::FunctionCall {
+            function_name: "min".to_string(),
+            arguments: many.iter().map(len).collect(),
+        },
+    };
+    Some(IRExpr::Comprehension {
+        kind: crate::ir::IRComprehensionKind::List,
+        element: Box::new(IRExpr::TupleLiteral(
+            seqs.iter()
+                .map(|s| IRExpr::Indexing {
+                    container: Box::new(s.clone()),
+                    index: Box::new(IRExpr::Variable(i.clone())),
+                })
+                .collect(),
+        )),
+        value: None,
+        generators: vec![crate::ir::IRGenerator {
+            targets: vec![i],
+            iterable: IRExpr::RangeCall {
+                start: None,
+                stop: Box::new(stop),
+                step: None,
+            },
+            conditions: Vec::new(),
+        }],
+    })
+}
+
+/// `enumerate(xs[, start])` where it is walked: `(i + start, xs[i])` for each
+/// position, as [`zip_walk`] builds its tuples.
+fn enumerate_walk(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
+    let IRExpr::FunctionCall {
+        function_name,
+        arguments,
+    } = expr
+    else {
+        return None;
+    };
+    if function_name != "enumerate" || ctx.get_function_info(function_name).is_some() {
+        return None;
+    }
+    let (arg, start) = match arguments.as_slice() {
+        [arg] => (arg, None),
+        [arg, IRExpr::Keyword { name, value }] if name == "start" => (arg, Some(&**value)),
+        [arg, start] if !matches!(start, IRExpr::Keyword { .. }) => (arg, Some(start)),
+        _ => return None,
+    };
+    let seq = indexed_sequence(arg, ctx)?;
+    if !pure_sequence(&seq) || start.is_some_and(|s| !plain_path(s)) {
+        ctx.report(
+            "enumerate() of an expression is not supported here. Hint: assign the sequence (and \
+             the start) to a variable first",
+        );
+        return None;
+    }
+    let i = walk_index("__enum", std::slice::from_ref(&seq));
+    let position = match start {
+        None => IRExpr::Variable(i.clone()),
+        Some(s) => IRExpr::BinaryOp {
+            left: Box::new(IRExpr::Variable(i.clone())),
+            right: Box::new(s.clone()),
+            op: IROp::Add,
+        },
+    };
+    Some(IRExpr::Comprehension {
+        kind: crate::ir::IRComprehensionKind::List,
+        element: Box::new(IRExpr::TupleLiteral(vec![
+            position,
+            IRExpr::Indexing {
+                container: Box::new(seq.clone()),
+                index: Box::new(IRExpr::Variable(i.clone())),
+            },
+        ])),
+        value: None,
+        generators: vec![crate::ir::IRGenerator {
+            targets: vec![i],
+            iterable: IRExpr::RangeCall {
+                start: None,
+                stop: Box::new(IRExpr::FunctionCall {
+                    function_name: "len".to_string(),
+                    arguments: vec![seq],
+                }),
+                step: None,
+            },
+            conditions: Vec::new(),
+        }],
+    })
+}
+
+/// A walked iterator builtin as the list it yields: `reversed()`, `zip()`,
+/// `enumerate()`.
+fn iterator_walk(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
+    reversed_walk(expr, ctx)
+        .or_else(|| zip_walk(expr, ctx))
+        .or_else(|| enumerate_walk(expr, ctx))
+}
+
 /// `reversed(x)` where it is walked (a loop, a comprehension, a builtin that
 /// iterates its argument): the elements from the last, as a list built by
 /// indexing from the end. Anywhere else it is CPython's iterator object,
@@ -1564,30 +1778,7 @@ fn reversed_walk(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
         _ => return None,
     };
     // Read twice (its length, then each element), so it has to be a path.
-    fn plain(e: &IRExpr) -> bool {
-        match e {
-            IRExpr::Variable(_) | IRExpr::Param(_) | IRExpr::Const(_) => true,
-            IRExpr::RangeCall { start, stop, step } => {
-                plain(stop) && [start, step].into_iter().flatten().all(|p| plain(p))
-            }
-            IRExpr::UnaryOp { operand, .. } => plain(operand),
-            IRExpr::Attribute { object, .. } => plain(object),
-            IRExpr::MethodCall {
-                object,
-                method_name,
-                arguments,
-            } => {
-                arguments.is_empty()
-                    && matches!(
-                        method_name.as_str(),
-                        crate::ir::DATA_METHOD | crate::ir::VIEW_METHOD | "keys"
-                    )
-                    && plain(object)
-            }
-            _ => false,
-        }
-    }
-    if !plain(&seq) {
+    if !plain_path(&seq) {
         ctx.report(
             "reversed() of an expression is not supported here. Hint: assign the sequence to a \
              variable first",
@@ -1625,11 +1816,12 @@ fn reversed_walk(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
     })
 }
 
-/// The places that walk a `reversed()`: a comprehension's iterables, and the
-/// arguments of the builtins and methods that iterate theirs.
+/// The places that walk a `reversed()`, `zip()`, or `enumerate()`: a
+/// comprehension's iterables, and the arguments of the builtins and methods
+/// that iterate theirs.
 fn rewrite_reversed_uses(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
     let replaced = |items: &[IRExpr]| -> Option<Vec<IRExpr>> {
-        let walks: Vec<Option<IRExpr>> = items.iter().map(|a| reversed_walk(a, ctx)).collect();
+        let walks: Vec<Option<IRExpr>> = items.iter().map(|a| iterator_walk(a, ctx)).collect();
         if walks.iter().all(Option::is_none) {
             return None;
         }
@@ -1642,6 +1834,24 @@ fn rewrite_reversed_uses(expr: &IRExpr, ctx: &CompilationContext) -> Option<IREx
         )
     };
     match expr {
+        // `any(x > y for x, y in zip(xs, ys))`: the comprehension `any()` and
+        // `all()` decide on stands inside their wrapper.
+        IRExpr::FunctionCall {
+            function_name,
+            arguments,
+        } if matches!(
+            function_name.as_str(),
+            crate::ir::ANY_GEN_FN | crate::ir::ALL_GEN_FN
+        ) =>
+        {
+            let [comprehension] = arguments.as_slice() else {
+                return None;
+            };
+            Some(IRExpr::FunctionCall {
+                function_name: function_name.clone(),
+                arguments: vec![rewrite_reversed_uses(comprehension, ctx)?],
+            })
+        }
         IRExpr::FunctionCall {
             function_name,
             arguments,

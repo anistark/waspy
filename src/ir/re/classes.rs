@@ -1323,6 +1323,20 @@ fn matched(t: Text) -> IRClass {
             t.opt(),
             vec![check_index(), ret_val(group_text())],
         ));
+        // `m.group(m.lastindex)`: None is no group, as CPython answers.
+        let opt_int = IRType::Optional(Box::new(i()));
+        m.push(method(
+            &variant(name, &opt_int),
+            vec![me_m(), param("g", &opt_int)],
+            t.opt(),
+            vec![
+                if_(
+                    cmp(v("g"), IRCompareOp::Is, none()),
+                    vec![raise_expr("IndexError", text("no such group"))],
+                ),
+                ret_val(mcall(v("self"), &variant(name, &i()), vec![v("g")])),
+            ],
+        ));
         m.push(method(
             &variant(name, &s()),
             vec![me_m(), param("g", &s())],

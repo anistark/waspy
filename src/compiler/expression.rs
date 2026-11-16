@@ -3934,12 +3934,18 @@ pub(crate) fn operator_symbol(op: &IROp) -> &'static str {
 /// result by `10**n` (both exact) gives the correctly rounded quotient, which
 /// is the double CPython returns.
 ///
-/// `n` outside 0..=22 traps, since `10**n` is then inexact; a product of 2^52
-/// or more is already an integer at that precision, so `x` is returned as is,
-/// as CPython does.
+/// A negative `n` rounds to tens, hundreds, ...: `x` is divided by `10**-n`
+/// instead, the quotient's exact remainder (the same two-product, of the
+/// quotient and the divisor) settles a tie, and the rounded quotient is
+/// multiplied back. It trapped.
+///
+/// `n` outside -22..=22 traps, since `10**|n|` is then inexact; a scaled value
+/// of 2^52 or more is already an integer at that precision, so `x` is returned
+/// as is, as CPython does.
 fn emit_round_ndigits(func: &mut Function, ctx: &CompilationContext) {
     let n = ctx.temp_local;
     let i = ctx.temp_local + 1;
+    let m = ctx.temp_local + 2;
     let mut f = Vec::new();
     let mut taken = 0;
     for _ in 0..12 {
@@ -3963,15 +3969,25 @@ fn emit_round_ndigits(func: &mut Function, ctx: &CompilationContext) {
     func.instruction(&I::LocalSet(n));
     func.instruction(&I::LocalSet(x));
 
-    // 0 <= n <= 22, unsigned-compare as one test.
+    // m = |n|, 0 <= m <= 22, unsigned-compare as one test.
     func.instruction(&I::LocalGet(n));
+    func.instruction(&I::I32Const(0));
+    func.instruction(&I::I32LtS);
+    func.instruction(&I::If(BlockType::Result(ValType::I32)));
+    func.instruction(&I::I32Const(0));
+    func.instruction(&I::LocalGet(n));
+    func.instruction(&I::I32Sub);
+    func.instruction(&I::Else);
+    func.instruction(&I::LocalGet(n));
+    func.instruction(&I::End);
+    func.instruction(&I::LocalTee(m));
     func.instruction(&I::I32Const(22));
     func.instruction(&I::I32GtU);
     func.instruction(&I::If(BlockType::Empty));
     func.instruction(&I::Unreachable);
     func.instruction(&I::End);
 
-    // p = 10 ** n, exact for these n.
+    // p = 10 ** m, exact for these m.
     func.instruction(&I::F64Const(f64_const(1.0)));
     func.instruction(&I::LocalSet(p));
     func.instruction(&I::I32Const(0));
@@ -3979,7 +3995,7 @@ fn emit_round_ndigits(func: &mut Function, ctx: &CompilationContext) {
     func.instruction(&I::Block(BlockType::Empty));
     func.instruction(&I::Loop(BlockType::Empty));
     func.instruction(&I::LocalGet(i));
-    func.instruction(&I::LocalGet(n));
+    func.instruction(&I::LocalGet(m));
     func.instruction(&I::I32GeS);
     func.instruction(&I::BrIf(1));
     func.instruction(&I::LocalGet(p));
@@ -3994,11 +4010,65 @@ fn emit_round_ndigits(func: &mut Function, ctx: &CompilationContext) {
     func.instruction(&I::End);
     func.instruction(&I::End);
 
+    // The exact product `a * b` as `t + lo`: Dekker's two-product over
+    // Veltkamp halves, which needs only multiply and add.
+    let two_product = |func: &mut Function, a: u32, b: u32| {
+        for (v, vhi, vlo) in [(a, ahi, alo), (b, bhi, blo)] {
+            func.instruction(&I::F64Const(c));
+            func.instruction(&I::LocalGet(v));
+            func.instruction(&I::F64Mul);
+            func.instruction(&I::LocalTee(t));
+            func.instruction(&I::LocalGet(t));
+            func.instruction(&I::LocalGet(v));
+            func.instruction(&I::F64Sub);
+            func.instruction(&I::F64Sub);
+            func.instruction(&I::LocalSet(vhi));
+            func.instruction(&I::LocalGet(v));
+            func.instruction(&I::LocalGet(vhi));
+            func.instruction(&I::F64Sub);
+            func.instruction(&I::LocalSet(vlo));
+        }
+        func.instruction(&I::LocalGet(a));
+        func.instruction(&I::LocalGet(b));
+        func.instruction(&I::F64Mul);
+        func.instruction(&I::LocalSet(t));
+        // lo = ((ahi*bhi - t) + ahi*blo + alo*bhi) + alo*blo
+        func.instruction(&I::LocalGet(ahi));
+        func.instruction(&I::LocalGet(bhi));
+        func.instruction(&I::F64Mul);
+        func.instruction(&I::LocalGet(t));
+        func.instruction(&I::F64Sub);
+        func.instruction(&I::LocalGet(ahi));
+        func.instruction(&I::LocalGet(blo));
+        func.instruction(&I::F64Mul);
+        func.instruction(&I::F64Add);
+        func.instruction(&I::LocalGet(alo));
+        func.instruction(&I::LocalGet(bhi));
+        func.instruction(&I::F64Mul);
+        func.instruction(&I::F64Add);
+        func.instruction(&I::LocalGet(alo));
+        func.instruction(&I::LocalGet(blo));
+        func.instruction(&I::F64Mul);
+        func.instruction(&I::F64Add);
+        func.instruction(&I::LocalSet(lo));
+    };
+
     func.instruction(&I::Block(BlockType::Empty));
-    // hi = x * p
+    // hi = x * p, or x / p for a negative n (`round(1234.5, -2)` rounds to
+    // hundreds). Either way `lo` ends up with the sign of the exact value's
+    // distance from `hi`.
+    func.instruction(&I::LocalGet(n));
+    func.instruction(&I::I32Const(0));
+    func.instruction(&I::I32LtS);
+    func.instruction(&I::If(BlockType::Result(ValType::F64)));
+    func.instruction(&I::LocalGet(x));
+    func.instruction(&I::LocalGet(p));
+    func.instruction(&I::F64Div);
+    func.instruction(&I::Else);
     func.instruction(&I::LocalGet(x));
     func.instruction(&I::LocalGet(p));
     func.instruction(&I::F64Mul);
+    func.instruction(&I::End);
     func.instruction(&I::LocalSet(hi));
     // Not below 2^52 (or NaN, or infinite): nothing to round.
     func.instruction(&I::LocalGet(x));
@@ -4010,41 +4080,24 @@ fn emit_round_ndigits(func: &mut Function, ctx: &CompilationContext) {
     func.instruction(&I::I32Eqz);
     func.instruction(&I::BrIf(0));
 
-    // Split x and p into halves that multiply exactly.
-    for (v, vhi, vlo) in [(x, ahi, alo), (p, bhi, blo)] {
-        func.instruction(&I::F64Const(c));
-        func.instruction(&I::LocalGet(v));
-        func.instruction(&I::F64Mul);
-        func.instruction(&I::LocalTee(t));
-        func.instruction(&I::LocalGet(t));
-        func.instruction(&I::LocalGet(v));
-        func.instruction(&I::F64Sub);
-        func.instruction(&I::F64Sub);
-        func.instruction(&I::LocalSet(vhi));
-        func.instruction(&I::LocalGet(v));
-        func.instruction(&I::LocalGet(vhi));
-        func.instruction(&I::F64Sub);
-        func.instruction(&I::LocalSet(vlo));
-    }
-    // lo = ((ahi*bhi - hi) + ahi*blo + alo*bhi) + alo*blo
-    func.instruction(&I::LocalGet(ahi));
-    func.instruction(&I::LocalGet(bhi));
-    func.instruction(&I::F64Mul);
-    func.instruction(&I::LocalGet(hi));
+    func.instruction(&I::LocalGet(n));
+    func.instruction(&I::I32Const(0));
+    func.instruction(&I::I32LtS);
+    func.instruction(&I::If(BlockType::Empty));
+    // The quotient is hi + (x - hi*p) / p, and x - hi*p is exactly
+    // (x - t) - lo: x and t are within a factor of two, so their difference
+    // is exact.
+    two_product(func, hi, p);
+    func.instruction(&I::LocalGet(x));
+    func.instruction(&I::LocalGet(t));
     func.instruction(&I::F64Sub);
-    func.instruction(&I::LocalGet(ahi));
-    func.instruction(&I::LocalGet(blo));
-    func.instruction(&I::F64Mul);
-    func.instruction(&I::F64Add);
-    func.instruction(&I::LocalGet(alo));
-    func.instruction(&I::LocalGet(bhi));
-    func.instruction(&I::F64Mul);
-    func.instruction(&I::F64Add);
-    func.instruction(&I::LocalGet(alo));
-    func.instruction(&I::LocalGet(blo));
-    func.instruction(&I::F64Mul);
-    func.instruction(&I::F64Add);
+    func.instruction(&I::LocalGet(lo));
+    func.instruction(&I::F64Sub);
     func.instruction(&I::LocalSet(lo));
+    func.instruction(&I::Else);
+    // The product is hi + lo, with hi = t.
+    two_product(func, x, p);
+    func.instruction(&I::End);
 
     // r = nearest(hi); d = hi - r, exact.
     func.instruction(&I::LocalGet(hi));
@@ -4054,7 +4107,7 @@ fn emit_round_ndigits(func: &mut Function, ctx: &CompilationContext) {
     func.instruction(&I::LocalGet(r));
     func.instruction(&I::F64Sub);
     func.instruction(&I::LocalSet(d));
-    // At a tie, `nearest` took the even side; the true product is off the tie
+    // At a tie, `nearest` took the even side; the exact value is off the tie
     // in the direction of `lo`.
     for (half, lo_test, step) in [(0.5, I::F64Gt, 1.0), (-0.5, I::F64Lt, -1.0)] {
         func.instruction(&I::LocalGet(d));
@@ -4071,9 +4124,20 @@ fn emit_round_ndigits(func: &mut Function, ctx: &CompilationContext) {
         func.instruction(&I::LocalSet(r));
         func.instruction(&I::End);
     }
+    // Back to the scale of x: the correctly rounded quotient or product of
+    // two exact values, the double CPython returns.
+    func.instruction(&I::LocalGet(n));
+    func.instruction(&I::I32Const(0));
+    func.instruction(&I::I32LtS);
+    func.instruction(&I::If(BlockType::Result(ValType::F64)));
+    func.instruction(&I::LocalGet(r));
+    func.instruction(&I::LocalGet(p));
+    func.instruction(&I::F64Mul);
+    func.instruction(&I::Else);
     func.instruction(&I::LocalGet(r));
     func.instruction(&I::LocalGet(p));
     func.instruction(&I::F64Div);
+    func.instruction(&I::End);
     func.instruction(&I::LocalSet(res));
     func.instruction(&I::End);
 
@@ -6478,7 +6542,8 @@ fn emit_comp_loops(
         // Filters guard everything inside this iteration.
         if with_conditions {
             for condition in &generator.conditions {
-                emit_condition(condition, func, ctx, memory_layout);
+                let cond_ty = emit_condition(condition, func, ctx, memory_layout);
+                emit_truthiness(func, ctx, &cond_ty);
                 func.instruction(&Instruction::If(BlockType::Empty));
                 ctx.enter_expr_blocks(1);
             }
@@ -6641,19 +6706,81 @@ fn emit_comp_loops(
             }
         } else {
             // `for k, v in items`: the element is a tuple pointer; unpack its
-            // slots positionally (i32 words — float members keep the existing
-            // tuple-unpack limitation).
+            // slots positionally, each at its member's width: a float member
+            // is a whole f64 slot, read into the f64 local the scan made for
+            // its target, as the `for` statement reads it.
             let elem = comp_local(ctx, comp_local_name("elem", depth));
+            let elem_ty = crate::compiler::function::walked_element(&ty);
+            let count = generator.targets.len();
+            // Each element is read as a tuple's block, so a str's text was
+            // read as its slots and the program trapped.
+            if matches!(elem_ty, IRType::String | IRType::Bytes) {
+                ctx.report(format!(
+                    "a comprehension unpacking each {} it walks into several targets is not \
+                     supported. Hint: unpack it in a for statement, which does",
+                    crate::type_to_string(&elem_ty)
+                ));
+            }
             func.instruction(&Instruction::LocalGet(elem_slot));
             func.instruction(&Instruction::I32Load(mem_off(0)));
             func.instruction(&Instruction::LocalSet(elem));
             for (j, target) in generator.targets.iter().enumerate() {
+                // A name bound twice (`_, x, _`) keeps its last value, as in
+                // CPython, so only its last position is bound.
+                if generator.targets[j + 1..].contains(target) {
+                    continue;
+                }
                 let target_idx = comp_local(ctx, target.clone());
+                let member =
+                    crate::compiler::function::unpack_member_type(&elem_ty, j, count, None);
+                let target_is_float = matches!(
+                    ctx.get_local_info(target).map(|i| &i.var_type),
+                    Some(IRType::Float)
+                );
+                if matches!(member, IRType::Float) && !target_is_float {
+                    ctx.report(format!(
+                        "the comprehension variable '{target}' binds float values, but it was \
+                         typed before its iterable was known. Hint: annotate the collection it \
+                         walks"
+                    ));
+                }
+                // An untyped variable is read as an int, so one binding a str,
+                // tuple, collection, or instance rendered its address
+                // (`{v: k for k, v in a | b}` printed numbers for the keys),
+                // as the single-target path refuses.
+                let open = matches!(
+                    ctx.get_local_info(target).map(|i| &i.var_type),
+                    Some(IRType::Unknown | IRType::Any)
+                );
+                if open
+                    && !matches!(
+                        member,
+                        IRType::Int
+                            | IRType::Bool
+                            | IRType::Float
+                            | IRType::None
+                            | IRType::Unknown
+                            | IRType::Any
+                    )
+                {
+                    ctx.report(format!(
+                        "the comprehension variable '{target}' binds {} values, but its type \
+                         could not be worked out where it is used. Hint: annotate the collection \
+                         it walks",
+                        crate::type_to_string(&member)
+                    ));
+                }
                 func.instruction(&Instruction::LocalGet(elem));
                 emit_data_base(func);
-                func.instruction(&Instruction::I32Load(mem_off(
-                    (j as u32 * COLLECTION_SLOT) as u64,
-                )));
+                let at = mem_off((j as u32 * COLLECTION_SLOT) as u64);
+                if target_is_float && matches!(member, IRType::Float) {
+                    func.instruction(&Instruction::F64Load(at));
+                } else {
+                    func.instruction(&Instruction::I32Load(at));
+                    if target_is_float {
+                        func.instruction(&Instruction::F64ConvertI32S);
+                    }
+                }
                 func.instruction(&Instruction::LocalSet(target_idx));
                 // A string member's slot holds only its offset, so its length
                 // has to be recovered from the blob's own prefix word, exactly
@@ -6675,7 +6802,8 @@ fn emit_comp_loops(
 
         if with_conditions {
             for condition in &generator.conditions {
-                emit_condition(condition, func, ctx, memory_layout);
+                let cond_ty = emit_condition(condition, func, ctx, memory_layout);
+                emit_truthiness(func, ctx, &cond_ty);
                 func.instruction(&Instruction::If(BlockType::Empty));
                 ctx.enter_expr_blocks(1);
             }
@@ -6953,7 +7081,23 @@ fn emit_any_all(
         func.instruction(&Instruction::I32Const(0));
         return IRType::Bool;
     };
-    let (ptr, idx, out) = (ctx.temp_local, ctx.temp_local + 1, ctx.temp_local + 2);
+    // The list, the position, and the answer live in held slots: testing an
+    // element for truth uses the scratch run (a str's test parks its length
+    // in `temp_local`), which overwrote the list pointer here, so `any()` of
+    // strs answered the first one's truth.
+    let held: Vec<u32> = (0..3).map_while(|_| ctx.hold()).collect();
+    let [ptr, idx, out] = held[..] else {
+        for _ in &held {
+            ctx.release_held();
+        }
+        ctx.report(format!(
+            "{name}() is nested inside more collection literals and method calls than the \
+             compiler reserves room for. Hint: assign its argument to a variable first"
+        ));
+        func.instruction(&Instruction::Drop);
+        func.instruction(&Instruction::I32Const(0));
+        return IRType::Bool;
+    };
     func.instruction(&Instruction::LocalSet(ptr));
     func.instruction(&Instruction::I32Const(!is_any as i32));
     func.instruction(&Instruction::LocalSet(out));
@@ -6991,6 +7135,9 @@ fn emit_any_all(
     func.instruction(&Instruction::End);
     func.instruction(&Instruction::End);
     func.instruction(&Instruction::LocalGet(out));
+    for _ in 0..3 {
+        ctx.release_held();
+    }
     IRType::Bool
 }
 
@@ -7900,7 +8047,8 @@ fn emit_decided_comprehension(
     func.instruction(&Instruction::LocalSet(res));
     // The element decides when it is true for any(), false for all().
     let decide = |func: &mut Function, outer: u32| {
-        emit_condition(element, func, ctx, memory_layout);
+        let element_ty = emit_condition(element, func, ctx, memory_layout);
+        emit_truthiness(func, ctx, &element_ty);
         if !any {
             func.instruction(&Instruction::I32Eqz);
         }
@@ -9146,6 +9294,22 @@ fn emit_expr_inner(
             // side to f64 when the other operand is a float.
             let left_int_like = matches!(left_type, IRType::Int | IRType::Bool | IRType::Unknown);
             let right_int_like = matches!(right_type, IRType::Int | IRType::Bool | IRType::Unknown);
+            // `2 ** -1`: an int to a negative power is a float in CPython
+            // (0.5), which an int result cannot hold, so the integer power
+            // trapped. A negative constant exponent says so when compiling;
+            // a computed one still traps on a negative value.
+            if matches!(op, IROp::Pow)
+                && matches!(left_type, IRType::Int | IRType::Bool)
+                && matches!(right_type, IRType::Int | IRType::Bool)
+                && crate::ir::infer::is_negative_int_constant(right)
+            {
+                func.instruction(&Instruction::LocalSet(ctx.temp_local));
+                func.instruction(&Instruction::F64ConvertI32S);
+                func.instruction(&Instruction::LocalGet(ctx.temp_local));
+                func.instruction(&Instruction::F64ConvertI32S);
+                emit_float_power_operation(func, ctx);
+                return IRType::Float;
+            }
             if left_type == IRType::Float && right_int_like {
                 // Right operand (top of stack) is i32; widen it to f64.
                 func.instruction(&Instruction::F64ConvertI32S);
@@ -12472,7 +12636,8 @@ fn emit_function_call_expr(
                 // loop the [len][slot0][slot1]... layout, accumulating
                 // into a scratch local. Float elements accumulate at
                 // f64 width; everything else uses the slot's low i32
-                // word (bools sum as 0/1, like Python).
+                // word (bools sum as 0/1, like Python). A range is walked
+                // from its [start][stop][step] fields.
                 let elem_type = match &arg_types[0] {
                     IRType::List(elem) | IRType::VarTuple(elem) => (**elem).clone(),
                     // A tuple sums at f64 width only when every member
@@ -12485,6 +12650,7 @@ fn emit_function_call_expr(
                             IRType::Int
                         }
                     }
+                    IRType::Range => IRType::Int,
                     // Anything else cannot be walked as `[len][slots]`.
                     // This used to answer the argument itself, so
                     // `sum()` of a set, or of a list whose element type
@@ -12506,12 +12672,32 @@ fn emit_function_call_expr(
                         return IRType::Int;
                     }
                 };
-                let is_float = matches!(elem_type, IRType::Float);
+                let is_range = matches!(arg_types[0], IRType::Range);
+                let elem_float = matches!(elem_type, IRType::Float);
+                // A float start makes the total a float, whatever is added
+                // to it (`sum(ints, 0.5)` stored an f64 in an i32 total).
+                let is_float = elem_float || matches!(arg_types.get(1), Some(IRType::Float));
                 let ptr = ctx.temp_local;
                 let len = ctx.temp_local + 1;
                 let idx = ctx.temp_local + 2;
                 let acc_i32 = ctx.temp_local + 3;
+                let step = ctx.temp_local + 4;
                 let acc_f64 = ctx.temp_local_f64;
+                // CPython 3.12+ adds floats with Neumaier's compensated
+                // summation, keeping the error each addition drops in `c`
+                // and adding it once at the end, so `sum([0.1] * 10)` is
+                // 1.0 and `sum([1e100, 1.0, -1e100])` is 1.0. A plain loop
+                // answered 0.9999999999999999 and 0.0.
+                let held: Vec<u32> = if elem_float {
+                    (0..3).map_while(|_| ctx.hold_f64()).collect()
+                } else {
+                    Vec::new()
+                };
+                if elem_float && held.len() < 3 {
+                    ctx.report("sum() of floats is nested too deeply here");
+                }
+                let slot = |i: usize| held.get(i).copied().unwrap_or(ctx.temp_local_f64);
+                let (c, x, t) = (slot(0), slot(1), slot(2));
 
                 // Seed the accumulator with `start` (top of stack when
                 // present) or zero, then pop the iterable pointer.
@@ -12532,50 +12718,139 @@ fn emit_function_call_expr(
                     func.instruction(&Instruction::LocalSet(acc_i32));
                 }
                 func.instruction(&Instruction::LocalSet(ptr));
+                if elem_float {
+                    func.instruction(&Instruction::F64Const(0.0.into()));
+                    func.instruction(&Instruction::LocalSet(c));
+                }
 
-                // len = *ptr; idx = 0.
-                func.instruction(&Instruction::LocalGet(ptr));
-                func.instruction(&Instruction::I32Load(slot_arg()));
-                func.instruction(&Instruction::LocalSet(len));
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::LocalSet(idx));
+                // Add the int on the stack to the total.
+                let add_int = |func: &mut Function| {
+                    if is_float {
+                        func.instruction(&Instruction::F64ConvertI32S);
+                        func.instruction(&Instruction::LocalGet(acc_f64));
+                        func.instruction(&Instruction::F64Add);
+                        func.instruction(&Instruction::LocalSet(acc_f64));
+                    } else {
+                        func.instruction(&Instruction::LocalGet(acc_i32));
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::LocalSet(acc_i32));
+                    }
+                };
 
-                // while idx < len: acc += slot[idx]; idx += 1.
+                if is_range {
+                    for (field, local) in [(0u64, idx), (4, len), (8, step)] {
+                        func.instruction(&Instruction::LocalGet(ptr));
+                        func.instruction(&Instruction::I32Load(mem_off(field)));
+                        func.instruction(&Instruction::LocalSet(local));
+                    }
+                } else {
+                    func.instruction(&Instruction::LocalGet(ptr));
+                    func.instruction(&Instruction::I32Load(slot_arg()));
+                    func.instruction(&Instruction::LocalSet(len));
+                    func.instruction(&Instruction::I32Const(0));
+                    func.instruction(&Instruction::LocalSet(idx));
+                }
+
                 func.instruction(&Instruction::Block(BlockType::Empty));
                 func.instruction(&Instruction::Loop(BlockType::Empty));
-                func.instruction(&Instruction::LocalGet(idx));
-                func.instruction(&Instruction::LocalGet(len));
-                func.instruction(&Instruction::I32GeS);
-                func.instruction(&Instruction::BrIf(1));
-
-                if is_float {
-                    func.instruction(&Instruction::LocalGet(acc_f64));
+                if is_range {
+                    // Done once idx reaches stop: from below for a
+                    // positive step, from above for a negative one.
+                    func.instruction(&Instruction::LocalGet(step));
+                    func.instruction(&Instruction::I32Const(0));
+                    func.instruction(&Instruction::I32GtS);
+                    func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+                    func.instruction(&Instruction::LocalGet(idx));
+                    func.instruction(&Instruction::LocalGet(len));
+                    func.instruction(&Instruction::I32GeS);
+                    func.instruction(&Instruction::Else);
+                    func.instruction(&Instruction::LocalGet(idx));
+                    func.instruction(&Instruction::LocalGet(len));
+                    func.instruction(&Instruction::I32LeS);
+                    func.instruction(&Instruction::End);
+                    func.instruction(&Instruction::BrIf(1));
+                    func.instruction(&Instruction::LocalGet(idx));
+                    add_int(func);
+                    func.instruction(&Instruction::LocalGet(idx));
+                    func.instruction(&Instruction::LocalGet(step));
                 } else {
-                    func.instruction(&Instruction::LocalGet(acc_i32));
-                }
-                func.instruction(&Instruction::LocalGet(ptr));
-                emit_data_base(func);
-                func.instruction(&Instruction::LocalGet(idx));
-                func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
-                func.instruction(&Instruction::I32Mul);
-                func.instruction(&Instruction::I32Add);
-                if is_float {
-                    func.instruction(&Instruction::F64Load(mem_off(0)));
-                    func.instruction(&Instruction::F64Add);
-                    func.instruction(&Instruction::LocalSet(acc_f64));
-                } else {
-                    func.instruction(&Instruction::I32Load(mem_off(0)));
+                    func.instruction(&Instruction::LocalGet(idx));
+                    func.instruction(&Instruction::LocalGet(len));
+                    func.instruction(&Instruction::I32GeS);
+                    func.instruction(&Instruction::BrIf(1));
+                    func.instruction(&Instruction::LocalGet(ptr));
+                    emit_data_base(func);
+                    func.instruction(&Instruction::LocalGet(idx));
+                    func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
+                    func.instruction(&Instruction::I32Mul);
                     func.instruction(&Instruction::I32Add);
-                    func.instruction(&Instruction::LocalSet(acc_i32));
+                    if elem_float {
+                        // t = s + x; c += (s - t) + x, or (x - t) + s when x
+                        // is the larger; s = t.
+                        func.instruction(&Instruction::F64Load(mem_off(0)));
+                        func.instruction(&Instruction::LocalSet(x));
+                        func.instruction(&Instruction::LocalGet(acc_f64));
+                        func.instruction(&Instruction::LocalGet(x));
+                        func.instruction(&Instruction::F64Add);
+                        func.instruction(&Instruction::LocalSet(t));
+                        func.instruction(&Instruction::LocalGet(acc_f64));
+                        func.instruction(&Instruction::F64Abs);
+                        func.instruction(&Instruction::LocalGet(x));
+                        func.instruction(&Instruction::F64Abs);
+                        func.instruction(&Instruction::F64Ge);
+                        func.instruction(&Instruction::If(BlockType::Empty));
+                        for (big, small) in [(acc_f64, x), (x, acc_f64)] {
+                            func.instruction(&Instruction::LocalGet(c));
+                            func.instruction(&Instruction::LocalGet(big));
+                            func.instruction(&Instruction::LocalGet(t));
+                            func.instruction(&Instruction::F64Sub);
+                            func.instruction(&Instruction::LocalGet(small));
+                            func.instruction(&Instruction::F64Add);
+                            func.instruction(&Instruction::F64Add);
+                            func.instruction(&Instruction::LocalSet(c));
+                            if big == acc_f64 {
+                                func.instruction(&Instruction::Else);
+                            }
+                        }
+                        func.instruction(&Instruction::End);
+                        func.instruction(&Instruction::LocalGet(t));
+                        func.instruction(&Instruction::LocalSet(acc_f64));
+                    } else {
+                        func.instruction(&Instruction::I32Load(mem_off(0)));
+                        add_int(func);
+                    }
+                    func.instruction(&Instruction::LocalGet(idx));
+                    func.instruction(&Instruction::I32Const(1));
                 }
-
-                func.instruction(&Instruction::LocalGet(idx));
-                func.instruction(&Instruction::I32Const(1));
                 func.instruction(&Instruction::I32Add);
                 func.instruction(&Instruction::LocalSet(idx));
                 func.instruction(&Instruction::Br(0));
                 func.instruction(&Instruction::End);
                 func.instruction(&Instruction::End);
+
+                // The compensation joins the total once, when there is one
+                // and it is finite: an infinite or overflowed sum keeps its
+                // infinity instead of turning into a NaN, and -0.0 its sign.
+                if elem_float {
+                    func.instruction(&Instruction::LocalGet(c));
+                    func.instruction(&Instruction::F64Const(0.0.into()));
+                    func.instruction(&Instruction::F64Ne);
+                    func.instruction(&Instruction::LocalGet(c));
+                    func.instruction(&Instruction::LocalGet(c));
+                    func.instruction(&Instruction::F64Sub);
+                    func.instruction(&Instruction::F64Const(0.0.into()));
+                    func.instruction(&Instruction::F64Eq);
+                    func.instruction(&Instruction::I32And);
+                    func.instruction(&Instruction::If(BlockType::Empty));
+                    func.instruction(&Instruction::LocalGet(acc_f64));
+                    func.instruction(&Instruction::LocalGet(c));
+                    func.instruction(&Instruction::F64Add);
+                    func.instruction(&Instruction::LocalSet(acc_f64));
+                    func.instruction(&Instruction::End);
+                }
+                for _ in &held {
+                    ctx.release_held_f64();
+                }
 
                 if is_float {
                     func.instruction(&Instruction::LocalGet(acc_f64));
@@ -13556,6 +13831,94 @@ fn emit_attribute_expr(
     }
 }
 
+/// Whether a call of an instance's method passes as many positional
+/// arguments as the method takes, reporting CPython's `TypeError` when it
+/// does not. Keywords and defaults are placed before this, so what is left is
+/// one argument per parameter after `self` (or `cls`). One too many was
+/// emitted onto the stack and the module failed to validate.
+fn method_arguments_fit(
+    ctx: &CompilationContext,
+    class_name: &str,
+    owner: &str,
+    method_name: &str,
+    arguments: &[IRExpr],
+    params: usize,
+    implicit: usize,
+) -> bool {
+    if params < implicit
+        || arguments
+            .iter()
+            .any(|a| matches!(a, IRExpr::Keyword { .. }))
+    {
+        return true;
+    }
+    let most = params - implicit;
+    let least = ctx
+        .method_defaults
+        .get(&format!("{owner}::{method_name}"))
+        .map(|defaults| {
+            defaults
+                .iter()
+                .skip(implicit)
+                .filter(|d| d.is_none())
+                .count()
+        })
+        .unwrap_or(most)
+        .min(most);
+    let given = arguments.len();
+    if (least..=most).contains(&given) {
+        return true;
+    }
+    let shown = match crate::ir::collections::spec::parse(class_name) {
+        Some((kind, _)) => kind.name().to_string(),
+        None => class_name.to_string(),
+    };
+    // A method with variants by its argument's type (`group<int>`) takes one
+    // argument through them: one that picked none is of a type they do not
+    // take, and more than one is past what any takes.
+    let prefix = format!("{method_name}<");
+    let variants = ctx
+        .get_class_info(class_name)
+        .is_some_and(|ci| ci.methods.keys().any(|k| k.starts_with(&prefix)));
+    if variants {
+        if given == 1 {
+            let ty = crate::compiler::function::infer_value_type(&arguments[0], ctx);
+            ctx.report(format!(
+                "{shown}.{method_name}() of a '{}' is not supported",
+                crate::type_to_string(&ty)
+            ));
+        } else {
+            let most = most.max(1);
+            ctx.report(format!(
+                "{shown}.{method_name}() expected at most {most} argument{}, got {given}",
+                if most == 1 { "" } else { "s" }
+            ));
+        }
+        return false;
+    }
+    // CPython counts `self` among the positional arguments it names.
+    let (least, most, given) = (least + implicit, most + implicit, given + implicit);
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    if given > most {
+        let takes = if least == most {
+            format!("{most} positional argument{}", plural(most))
+        } else {
+            format!("from {least} to {most} positional arguments")
+        };
+        let were = if given == 1 { "was" } else { "were" };
+        ctx.report(format!(
+            "{shown}.{method_name}() takes {takes} but {given} {were} given"
+        ));
+    } else {
+        let missing = least - given;
+        ctx.report(format!(
+            "{shown}.{method_name}() missing {missing} required positional argument{}",
+            plural(missing)
+        ));
+    }
+    false
+}
+
 #[inline(never)]
 #[allow(clippy::ptr_arg, clippy::too_many_arguments, clippy::borrowed_box)]
 fn emit_method_call_expr(
@@ -14501,6 +14864,35 @@ fn emit_method_call_expr(
                     .get_function_info(&format!("{owner}::{method_name}"))
                     .map(|f| (f.param_types.clone(), f.return_type.clone()))
                     .unwrap_or((Vec::new(), IRType::Unknown));
+                let implicit = if kind == MethodKind::Static { 0 } else { 1 };
+                if !method_arguments_fit(
+                    ctx,
+                    class_name,
+                    &owner,
+                    method_name,
+                    arguments,
+                    param_types.len(),
+                    implicit,
+                ) {
+                    func.instruction(&Instruction::Drop);
+                    for arg in arguments {
+                        let t = emit_expr(arg, func, ctx, memory_layout, None);
+                        func.instruction(&Instruction::Drop);
+                        if matches!(t, IRType::String | IRType::Bytes) {
+                            func.instruction(&Instruction::Drop);
+                        }
+                    }
+                    // The call's word, in the shape its result takes, so
+                    // the module still validates and every refusal is
+                    // reported in one run.
+                    if matches!(ret, IRType::Float) {
+                        func.instruction(&Instruction::F64Const(f64_const(0.0)));
+                    } else {
+                        func.instruction(&Instruction::I32Const(0));
+                    }
+                    finish_user_call(func, ctx, &ret);
+                    return ret;
+                }
 
                 // A method some subclass overrides dispatches through
                 // the vtable on the receiver's *runtime* class, not the

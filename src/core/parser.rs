@@ -200,6 +200,8 @@ fn validate_generator_expressions(ast: &Suite, source: &str) -> Result<()> {
         defined: HashSet<String>,
         library_modules: HashSet<String>,
         library_names: HashSet<String>,
+        /// Folding a class's own body, whose functions are its methods.
+        in_class_body: bool,
     }
     impl Fold<TextRange> for Names {
         type TargetU = TextRange;
@@ -214,11 +216,16 @@ fn validate_generator_expressions(ast: &Suite, source: &str) -> Result<()> {
             Ok(user)
         }
         fn fold_stmt(&mut self, stmt: Stmt) -> std::result::Result<Stmt, Self::Error> {
+            // A method is reached as an attribute, never by its bare name, so
+            // `sum(...)` in a method named `sum` is still the builtin; the
+            // functions a method defines are names in its body.
+            let in_class_body =
+                std::mem::replace(&mut self.in_class_body, matches!(stmt, Stmt::ClassDef(_)));
             match &stmt {
-                Stmt::FunctionDef(def) => {
+                Stmt::FunctionDef(def) if !in_class_body => {
                     self.defined.insert(def.name.to_string());
                 }
-                Stmt::AsyncFunctionDef(def) => {
+                Stmt::AsyncFunctionDef(def) if !in_class_body => {
                     self.defined.insert(def.name.to_string());
                 }
                 Stmt::ClassDef(def) => {
@@ -250,7 +257,9 @@ fn validate_generator_expressions(ast: &Suite, source: &str) -> Result<()> {
                 }
                 _ => {}
             }
-            ast::fold::fold_stmt(self, stmt)
+            let folded = ast::fold::fold_stmt(self, stmt);
+            self.in_class_body = in_class_body;
+            folded
         }
     }
 
@@ -499,6 +508,119 @@ fn validate_module_level(body: &[Stmt], source: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Modules a program may import for its annotations alone: nothing of them
+/// runs, and their names are read only where types are written.
+const ANNOTATION_MODULES: &[&str] = &[
+    "typing",
+    "typing_extensions",
+    "__future__",
+    "collections.abc",
+];
+
+/// What a program can import, for the refusal of anything else.
+const IMPORTABLE: &str = "its own modules, the standard-library modules sys, os, math, random, \
+                          json, re, datetime, collections, itertools, functools, logging, \
+                          asyncio, abc, dataclasses, importlib, and typing, and js and pyodide \
+                          for the JavaScript bridge";
+
+/// Refuse an import of a module the program cannot have: neither a module the
+/// compiler supports nor one of the program's own (`provides`). A
+/// third-party package (`import numpy as np`) was skipped with a warning, and
+/// every use of it then failed apart from the import, with hints that could
+/// not help (pass `axis` positionally, name 'stats' is not defined). An
+/// import guarded by `try`/`except ImportError` is the program's own fallback
+/// and is left alone, as is a relative import, which names a file of the
+/// program.
+pub fn check_imports(ast: &Suite, source: &str, provides: &dyn Fn(&str) -> bool) -> Result<()> {
+    fn check(
+        name: &str,
+        offset: usize,
+        source: &str,
+        provides: &dyn Fn(&str) -> bool,
+        function: Option<&str>,
+    ) -> Result<()> {
+        if name.is_empty()
+            || crate::stdlib::is_stdlib_module_path(name)
+            || ANNOTATION_MODULES.contains(&name)
+            || provides(name)
+        {
+            return Ok(());
+        }
+        Err(unsupported(
+            format!(
+                "cannot import '{name}': a program can import {IMPORTABLE}. A third-party \
+                 package such as numpy or pandas cannot be compiled into the program, and \
+                 nothing runs in it that was not compiled"
+            ),
+            source,
+            offset,
+            function,
+        ))
+    }
+    fn walk(
+        body: &[Stmt],
+        source: &str,
+        provides: &dyn Fn(&str) -> bool,
+        function: Option<&str>,
+    ) -> Result<()> {
+        for stmt in body {
+            match stmt {
+                Stmt::Import(i) => {
+                    for alias in &i.names {
+                        check(
+                            alias.name.as_str(),
+                            i.range.start().into(),
+                            source,
+                            provides,
+                            function,
+                        )?;
+                    }
+                }
+                Stmt::ImportFrom(i) if i.level.as_ref().map_or(0, |l| l.to_usize()) == 0 => {
+                    let module = i.module.as_ref().map(|m| m.to_string()).unwrap_or_default();
+                    check(&module, i.range.start().into(), source, provides, function)?;
+                }
+                Stmt::FunctionDef(d) => walk(&d.body, source, provides, Some(d.name.as_str()))?,
+                Stmt::AsyncFunctionDef(d) => {
+                    walk(&d.body, source, provides, Some(d.name.as_str()))?
+                }
+                Stmt::ClassDef(c) => walk(&c.body, source, provides, function)?,
+                Stmt::If(s) => {
+                    walk(&s.body, source, provides, function)?;
+                    walk(&s.orelse, source, provides, function)?;
+                }
+                Stmt::For(s) => {
+                    walk(&s.body, source, provides, function)?;
+                    walk(&s.orelse, source, provides, function)?;
+                }
+                Stmt::AsyncFor(s) => {
+                    walk(&s.body, source, provides, function)?;
+                    walk(&s.orelse, source, provides, function)?;
+                }
+                Stmt::While(s) => {
+                    walk(&s.body, source, provides, function)?;
+                    walk(&s.orelse, source, provides, function)?;
+                }
+                Stmt::With(s) => walk(&s.body, source, provides, function)?,
+                Stmt::AsyncWith(s) => walk(&s.body, source, provides, function)?,
+                Stmt::Try(s) if is_import_guard(s) => {}
+                Stmt::Try(s) => {
+                    walk(&s.body, source, provides, function)?;
+                    for handler in &s.handlers {
+                        let rustpython_parser::ast::ExceptHandler::ExceptHandler(h) = handler;
+                        walk(&h.body, source, provides, function)?;
+                    }
+                    walk(&s.orelse, source, provides, function)?;
+                    walk(&s.finalbody, source, provides, function)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+    walk(ast, source, provides, None)
 }
 
 /// True for `try:` blocks whose body is nothing but imports, the guarded-import
