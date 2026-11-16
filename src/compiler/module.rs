@@ -2926,11 +2926,13 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
             ir_type_to_wasm_type(&info.return_type),
         ))
     };
+    // A column per name and per group of classes that share it: two
+    // hierarchies that each define a method of one name (unrelated classes
+    // both having `json`) are dispatched apart, each by its own root's
+    // signature. Classes are grouped when one's MRO holds the other.
     let mut virtual_slots: Vec<(String, u32)> = Vec::new();
+    let mut slot_of_class: Vec<(String, String, usize)> = Vec::new();
     for name in &virtual_names {
-        // The root of the hierarchy that introduced the name fixes the
-        // signature, and its function index doubles as the type index: the type
-        // section emits one type per defined function, in function order.
         let mut owners: Vec<(String, u32)> = Vec::new();
         for cls in &ir_module.classes {
             let Some(ci) = ctx.get_class_info(&cls.name) else {
@@ -2942,25 +2944,79 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
                 }
             }
         }
-        let Some((root_owner, root_idx)) = owners.first().cloned() else {
-            continue;
-        };
-        let Some(root_sig) = signature_of(&root_owner, name) else {
-            continue;
-        };
-        let mut agreed = true;
-        for (owner, _) in owners.iter().skip(1) {
-            if signature_of(owner, name).as_ref() != Some(&root_sig) {
-                ctx.report(format!(
-                    "'{owner}.{name}' overrides '{root_owner}.{name}' with a different \
-                     signature, so a call through a '{root_owner}' cannot reach both. \
-                     Hint: give the override the same parameter and return types"
-                ));
-                agreed = false;
+        // Union the owners that appear together in some class's MRO.
+        let mut group: Vec<usize> = (0..owners.len()).collect();
+        fn find(group: &mut [usize], i: usize) -> usize {
+            let mut i = i;
+            while group[i] != i {
+                group[i] = group[group[i]];
+                i = group[i];
+            }
+            i
+        }
+        let classes_mro: Vec<(String, Vec<String>)> = ir_module
+            .classes
+            .iter()
+            .filter_map(|c| {
+                ctx.get_class_info(&c.name)
+                    .map(|ci| (c.name.clone(), ci.mro.clone()))
+            })
+            .collect();
+        for (_, mro) in &classes_mro {
+            let present: Vec<usize> = owners
+                .iter()
+                .enumerate()
+                .filter(|(_, (o, _))| mro.contains(o))
+                .map(|(i, _)| i)
+                .collect();
+            for w in present.windows(2) {
+                let (a, b) = (find(&mut group, w[0]), find(&mut group, w[1]));
+                if a != b {
+                    group[b] = a;
+                }
             }
         }
-        if agreed {
-            virtual_slots.push((name.clone(), root_idx - import_count));
+        let mut roots: Vec<usize> = Vec::new();
+        for i in 0..owners.len() {
+            let r = find(&mut group, i);
+            if !roots.contains(&r) {
+                roots.push(r);
+            }
+        }
+        for root in roots {
+            let members: Vec<usize> = (0..owners.len())
+                .filter(|&i| find(&mut group, i) == root)
+                .collect();
+            // A group whose one owner nothing overrides needs no column.
+            if members.len() < 2 {
+                continue;
+            }
+            let first = members[0];
+            let (root_owner, root_idx) = owners[first].clone();
+            let Some(root_sig) = signature_of(&root_owner, name) else {
+                continue;
+            };
+            let mut agreed = true;
+            for &m in members.iter().skip(1) {
+                let owner = &owners[m].0;
+                if signature_of(owner, name).as_ref() != Some(&root_sig) {
+                    ctx.report(format!(
+                        "'{owner}.{name}' overrides '{root_owner}.{name}' with a different \
+                         signature, so a call through a '{root_owner}' cannot reach both. \
+                         Hint: give the override the same parameter and return types"
+                    ));
+                    agreed = false;
+                }
+            }
+            if agreed {
+                let column = virtual_slots.len();
+                virtual_slots.push((name.clone(), root_idx - import_count));
+                for (class, mro) in &classes_mro {
+                    if members.iter().any(|&m| mro.contains(&owners[m].0)) {
+                        slot_of_class.push((class.clone(), name.clone(), column));
+                    }
+                }
+            }
         }
     }
 
@@ -2977,9 +3033,10 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
     // compiled rather than when the table is finally written out.
     ctx.vtable_base = lambda_functions.len() as u32;
     if vtable_stride > 0 {
-        for (column, (name, type_index)) in virtual_slots.iter().enumerate() {
+        for (class, name, column) in &slot_of_class {
+            let type_index = virtual_slots[*column].1;
             ctx.virtual_slots
-                .insert(name.clone(), (column as u32, *type_index));
+                .insert(format!("{class}::{name}"), (*column as u32, type_index));
         }
         // Row per class id, column per virtual name, holding that class's
         // resolved implementation. `ClassInfo::methods` already carries every

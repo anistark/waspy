@@ -28,6 +28,7 @@ pub(crate) mod program;
 pub(crate) mod pyodide_http;
 pub(crate) mod pystdlib;
 pub(crate) mod re;
+mod shims;
 mod str_methods;
 pub(crate) mod toplevel;
 mod types;

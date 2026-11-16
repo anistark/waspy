@@ -2215,13 +2215,30 @@ fn emit_dynamic_dumps(
     memory_layout: &MemoryLayout,
 ) -> IRType {
     let mut indent = IRExpr::Const(IRConstant::Int(-1));
+    let mut indented = false;
     let mut sort_keys = IRExpr::Const(IRConstant::Bool(false));
+    let mut ensure_ascii = IRExpr::Const(IRConstant::Bool(true));
+    let mut separators: Option<(IRExpr, IRExpr)> = None;
     for a in arguments {
         if let IRExpr::Keyword { name, value } = a {
             match name.as_str() {
                 "indent" if matches!(**value, IRExpr::Const(IRConstant::None)) => {}
-                "indent" => indent = (**value).clone(),
+                "indent" => {
+                    indent = (**value).clone();
+                    indented = true;
+                }
                 "sort_keys" => sort_keys = (**value).clone(),
+                "ensure_ascii" => ensure_ascii = (**value).clone(),
+                "separators" => match &**value {
+                    IRExpr::TupleLiteral(items) if items.len() == 2 => {
+                        separators = Some((items[0].clone(), items[1].clone()));
+                    }
+                    IRExpr::Const(IRConstant::None) => {}
+                    _ => ctx.report(
+                        "json.dumps()'s 'separators' is written as a tuple of two strs here"
+                            .to_string(),
+                    ),
+                },
                 other => ctx.report(format!(
                     "json.dumps()'s '{other}' argument is not supported for a value holding Any \
                      values"
@@ -2229,10 +2246,26 @@ fn emit_dynamic_dumps(
             }
         }
     }
+    // CPython's defaults: ", " between items on one line, "," before a new
+    // line when indenting.
+    let (item_sep, key_sep) = separators.unwrap_or_else(|| {
+        let item = if indented { "," } else { ", " };
+        (
+            IRExpr::Const(IRConstant::String(item.to_string())),
+            IRExpr::Const(IRConstant::String(": ".to_string())),
+        )
+    });
     emit_expr(
         &IRExpr::FunctionCall {
             function_name: "__any_dumps".to_string(),
-            arguments: vec![value.clone(), indent, sort_keys],
+            arguments: vec![
+                value.clone(),
+                indent,
+                sort_keys,
+                item_sep,
+                key_sep,
+                ensure_ascii,
+            ],
         },
         func,
         ctx,

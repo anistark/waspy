@@ -62,6 +62,13 @@ pub fn box_fn(ty: &IRType) -> Option<&'static str> {
         IRType::Int => "__any_of_int",
         IRType::Float => "__any_of_float",
         IRType::String => "__any_of_str",
+        IRType::Optional(inner) => match **inner {
+            IRType::String => "__any_of_opt_str",
+            IRType::Int => "__any_of_opt_int",
+            IRType::Float => "__any_of_opt_float",
+            IRType::Bool => "__any_of_opt_bool",
+            _ => return None,
+        },
         IRType::List(e) if is_any(e) => "__any_of_list",
         IRType::Dict(k, v) if **k == IRType::String && is_any(v) => "__any_of_dict",
         _ => return None,

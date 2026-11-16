@@ -147,6 +147,13 @@ fn order_free(expr: &IRExpr) -> bool {
             operand,
             op: IRUnaryOp::Neg | IRUnaryOp::UAdd,
         } => matches!(operand.as_ref(), IRExpr::Const(_)),
+        // A literal of such values only allocates, which nothing can see
+        // happen earlier (`messages=[{"role": "user", "content": text}]`);
+        // a dict's keys are constants, so hashing them runs no code.
+        IRExpr::ListLiteral(items) | IRExpr::TupleLiteral(items) => items.iter().all(order_free),
+        IRExpr::DictLiteral(entries) => entries
+            .iter()
+            .all(|(k, v)| matches!(k, IRExpr::Const(_)) && order_free(v)),
         _ => false,
     }
 }

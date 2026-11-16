@@ -2061,5 +2061,35 @@
         "test": "graphics::bytearray_pixels"
       }
     ]
+  },
+  "packages": {
+    "title": "THIRD-PARTY PACKAGES",
+    "status": "done",
+    "features": [
+      {
+        "name": "pydantic models: typed fields, lax validation of dicts and JSON text, model_dump and model_dump_json, and ValidationError as pydantic 2.14 prints it",
+        "status": "done",
+        "version": "upcoming",
+        "test": "packages::pydantic_models"
+      },
+      {
+        "name": "FastAPI routes on the module's functions: path, query, and JSON body parameters read by their annotations, HTTPException, FastAPI's 404, 405, and 422 bodies, and TestClient",
+        "status": "done",
+        "version": "upcoming",
+        "test": "packages::fastapi_routes"
+      },
+      {
+        "name": "httpx's AsyncClient over the host's fetch (a program run in JavaScript)",
+        "status": "done",
+        "version": "upcoming",
+        "test": "packages::httpx_async_client"
+      },
+      {
+        "name": "A client for Anthropic's Messages API in the SDK's shape (AsyncAnthropic().messages.create)",
+        "status": "done",
+        "version": "upcoming",
+        "test": "packages::anthropic_messages"
+      }
+    ]
   }
 }

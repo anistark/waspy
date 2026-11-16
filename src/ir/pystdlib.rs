@@ -243,6 +243,7 @@ pub(crate) fn with_instances(
 
 /// The modules, by their dotted names, and their sources.
 const MODULES: &[(&str, &str)] = &[
+    ("anthropic", include_str!("pystdlib/anthropic.py")),
     ("base64", include_str!("pystdlib/base64.py")),
     ("bisect", include_str!("pystdlib/bisect.py")),
     ("builtins", include_str!("pystdlib/builtins.py")),
@@ -251,11 +252,18 @@ const MODULES: &[(&str, &str)] = &[
     ("copy", include_str!("pystdlib/copy.py")),
     ("csv", include_str!("pystdlib/csv.py")),
     ("enum", include_str!("pystdlib/enum.py")),
+    ("fastapi", include_str!("pystdlib/fastapi.py")),
+    (
+        "fastapi.testclient",
+        include_str!("pystdlib/fastapi_testclient.py"),
+    ),
     ("hashlib", include_str!("pystdlib/hashlib.py")),
     ("heapq", include_str!("pystdlib/heapq.py")),
+    ("httpx", include_str!("pystdlib/httpx.py")),
     ("io", include_str!("pystdlib/io.py")),
     ("operator", include_str!("pystdlib/operator.py")),
     ("pathlib", include_str!("pystdlib/pathlib.py")),
+    ("pydantic", include_str!("pystdlib/pydantic.py")),
     ("string", include_str!("pystdlib/string.py")),
     ("textwrap", include_str!("pystdlib/textwrap.py")),
     ("time", include_str!("pystdlib/time.py")),
@@ -296,6 +304,9 @@ pub fn display_name(name: &str) -> Option<String> {
                 ("base64", "Error") => "binascii.Error".to_string(),
                 ("pathlib", "Path") => "pathlib._local.PosixPath".to_string(),
                 ("hashlib", "_Hash") => "_hashlib.HASH".to_string(),
+                ("pydantic", "ValidationError") => {
+                    "pydantic_core._pydantic_core.ValidationError".to_string()
+                }
                 _ => format!("{module}.{class}"),
             };
             return Some(qualified);
@@ -1623,6 +1634,45 @@ impl ast::fold::Fold<ast::text_size::TextRange> for Renamer<'_> {
                 def.body = body;
                 Ok(Stmt::FunctionDef(def))
             }
+            Stmt::AsyncFunctionDef(mut def) => {
+                if self.depth == 0 {
+                    if let Some(to) = self.renames.names.get(def.name.as_str()) {
+                        def.name = to.as_str().into();
+                    }
+                }
+                // The parameters' defaults and annotations are read outside.
+                let mut args = self.fold_arguments(*def.args)?;
+                for a in args
+                    .posonlyargs
+                    .iter_mut()
+                    .chain(args.args.iter_mut())
+                    .chain(args.kwonlyargs.iter_mut())
+                {
+                    if let Some(ann) = a.def.annotation.take() {
+                        a.def.annotation = Some(Box::new(self.annotation(*ann)));
+                    }
+                }
+                let returns = def.returns.map(|r| Box::new(self.annotation(*r)));
+                let decorators = def
+                    .decorator_list
+                    .into_iter()
+                    .map(|d| self.fold_expr(d))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                self.shadowed.push(params_of(&args));
+                self.depth += 1;
+                let body = def
+                    .body
+                    .into_iter()
+                    .map(|s| self.fold_stmt(s))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                self.depth -= 1;
+                self.shadowed.pop();
+                def.args = Box::new(args);
+                def.returns = returns;
+                def.decorator_list = decorators;
+                def.body = body;
+                Ok(Stmt::AsyncFunctionDef(def))
+            }
             Stmt::ClassDef(mut def) => {
                 if self.depth == 0 {
                     if let Some(to) = self.renames.names.get(def.name.as_str()) {
@@ -1755,6 +1805,22 @@ pub(crate) fn embed(body: &[Stmt], hoisted: usize) -> Result<Option<(Suite, usiz
     } else {
         None
     };
+    // FastAPI needs pydantic's validation, and a test client its app.
+    if wanted.iter().any(|m| m == "fastapi.testclient") && !wanted.iter().any(|m| m == "fastapi") {
+        wanted.push("fastapi".to_string());
+    }
+    if wanted.iter().any(|m| m == "fastapi") && !wanted.iter().any(|m| m == "pydantic") {
+        wanted.push("pydantic".to_string());
+    }
+    // The program's pydantic models and FastAPI routes, written out.
+    let models = if wanted.iter().any(|m| m == "pydantic") {
+        crate::ir::shims::write_models(&mut body)?
+    } else {
+        Vec::new()
+    };
+    if wanted.iter().any(|m| m == "fastapi") {
+        crate::ir::shims::write_routes(&mut body, &models)?;
+    }
     // The program's Enum classes, written out, and its reads of them.
     if wanted.iter().any(|m| m == "enum") {
         let enums = write_enums(&mut body)?;

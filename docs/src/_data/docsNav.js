@@ -13,6 +13,7 @@ export default [
         items: [
             { label: "The Python subset", href: "/docs/python-subset/" },
             { label: "Numbers", href: "/docs/numbers/" },
+            { label: "Third-party packages", href: "/docs/packages/" },
             { label: "Limitations", href: "/docs/limitations/" },
             { label: "Not supported", href: "/docs/not-supported/" },
         ],

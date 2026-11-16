@@ -274,3 +274,68 @@ fn what_a_dynamic_value_cannot_hold_is_refused() {
     .expect_err("an instance cannot be held as Any");
     assert!(err.contains("is used where Any is declared"), "{err}");
 }
+
+/// `json.dumps()` of dynamic values with `separators` and `ensure_ascii`
+/// (and CPython's "," before each new line when indenting), empty literals
+/// inside a record, optional scalars held as dynamic values, and an
+/// unannotated function returning a record whose values it reads from its
+/// arguments.
+#[test]
+fn records_of_optionals_and_json_options() {
+    let src = dedent(
+        r#"
+        import json
+        from typing import Any, Optional
+
+
+        def find(items: dict[str, int], name: str, note: Optional[str]):
+            return {"name": name, "count": items[name] if name in items else 0, "note": note}
+
+
+        def main() -> None:
+            v: Any = {"a": 1, "b": [1.5, "xé", None, True], "c": [], "d": {}}
+            print(json.dumps(v, separators=(",", ":"), ensure_ascii=False))
+            print(json.dumps(v, indent=2, separators=(",", ": ")))
+            print(json.dumps(v, indent=1))
+            print(find({"x": 3}, "x", None), find({}, "y", "n"))
+            left: Optional[int] = 4
+            flag: Optional[bool] = None
+            print({"left": left, "flag": flag, "ok": True})
+
+
+        if __name__ == "__main__":
+            main()
+"#,
+    );
+    let run = run_main(&src, "", &[]);
+    assert_eq!(run.stderr, "");
+    assert_eq!(
+        run.stdout,
+        r#"{"a":1,"b":[1.5,"xé",null,true],"c":[],"d":{}}
+{
+  "a": 1,
+  "b": [
+    1.5,
+    "x\u00e9",
+    null,
+    true
+  ],
+  "c": [],
+  "d": {}
+}
+{
+ "a": 1,
+ "b": [
+  1.5,
+  "x\u00e9",
+  null,
+  true
+ ],
+ "c": [],
+ "d": {}
+}
+{'name': 'x', 'count': 3, 'note': None} {'name': 'y', 'count': 0, 'note': 'n'}
+{'left': 4, 'flag': None, 'ok': True}
+"#
+    );
+}

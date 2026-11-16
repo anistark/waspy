@@ -1203,6 +1203,17 @@ pub(crate) fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRTy
                 lt
             } else if matches!(op, IROp::Mul) && matches!(rt, IRType::String | IRType::Bytes) {
                 rt
+            } else if matches!(op, IROp::Mul)
+                && matches!(lt, IRType::List(_))
+                && matches!(rt, IRType::Int | IRType::Bool | IRType::Unknown)
+            {
+                // Repetition of a list is a list of its elements.
+                lt
+            } else if matches!(op, IROp::Mul)
+                && matches!(rt, IRType::List(_))
+                && matches!(lt, IRType::Int | IRType::Bool | IRType::Unknown)
+            {
+                rt
             } else {
                 IRType::Unknown
             }
@@ -1830,7 +1841,10 @@ fn literal_elem_type(elems: &[IRExpr], ctx: &CompilationContext) -> IRType {
 
 /// Whether the dynamic-value runtime (`ir::dynamic`) is in this module.
 pub(crate) fn has_any_runtime(ctx: &CompilationContext) -> bool {
+    // A scratch context (return inference) has the runtime's functions but
+    // not yet its classes.
     ctx.get_class_info(crate::ir::dynamic::ANY_CLASS).is_some()
+        || ctx.get_function_info("__any_of_int").is_some()
 }
 
 /// Whether the elements of a collection literal have no one type the scan
@@ -2001,7 +2015,43 @@ pub(crate) fn resolve_return_type(
 
     let mut inferred = IRType::Unknown;
     collect_return_type(&ir_func.body, &ctx, &mut inferred);
+    // A record returned as a dict literal whose values the scan cannot type
+    // here (they read module globals or instances' fields): its values are
+    // held as dynamic values (`return {"id": n, "name": item.name}`).
+    if inferred == IRType::Unknown && returns_str_keyed_record(&ir_func.body) {
+        return IRType::Dict(
+            Box::new(IRType::String),
+            Box::new(crate::ir::dynamic::any_type()),
+        );
+    }
     inferred
+}
+
+/// Whether a body returns a non-empty dict literal whose keys are all str
+/// constants.
+fn returns_str_keyed_record(body: &IRBody) -> bool {
+    body.statements.iter().any(|stmt| match stmt {
+        IRStatement::Return(Some(IRExpr::DictLiteral(entries))) => {
+            !entries.is_empty()
+                && entries
+                    .iter()
+                    .all(|(k, _)| matches!(k, IRExpr::Const(IRConstant::String(_))))
+        }
+        IRStatement::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            returns_str_keyed_record(then_body)
+                || else_body
+                    .as_ref()
+                    .is_some_and(|b| returns_str_keyed_record(b))
+        }
+        IRStatement::While { body, .. } | IRStatement::For { body, .. } => {
+            returns_str_keyed_record(body)
+        }
+        _ => false,
+    })
 }
 
 /// Fold the inferred types of a body's `return` expressions into `out`. A float

@@ -1963,3 +1963,52 @@ fn a_top_level_statement_cannot_reach_below_it() {
         assert!(err.contains(needle), "{source}: {err}");
     }
 }
+
+/// Two unrelated class hierarchies that each override a method of the same
+/// name, with different signatures: each is dispatched by its own root's
+/// signature (they were once compared as one hierarchy and refused).
+#[test]
+fn unrelated_hierarchies_override_one_method_name_apart() {
+    let run = run_main(
+        &dedent(
+            r#"
+            class Shape:
+                def area(self) -> float:
+                    return 0.0
+
+
+            class Square(Shape):
+                def __init__(self, s: float) -> None:
+                    self.s = s
+
+                def area(self) -> float:
+                    return self.s * self.s
+
+
+            class Plot:
+                def area(self, scale: int) -> int:
+                    return scale * 2
+
+
+            class Field(Plot):
+                def area(self, scale: int) -> int:
+                    return scale * 3
+
+
+            def main() -> None:
+                shapes: list[Shape] = [Shape(), Square(2.0)]
+                print([s.area() for s in shapes])
+                plots: list[Plot] = [Plot(), Field()]
+                print([p.area(5) for p in plots])
+
+
+            if __name__ == "__main__":
+                main()
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(run.stderr, "");
+    assert_eq!(run.stdout, "[0.0, 4.0]\n[10, 15]\n");
+}

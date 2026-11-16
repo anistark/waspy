@@ -146,6 +146,10 @@ name = "unit_stdlib"
 path = "tests/unit/stdlib.rs"
 
 [[test]]
+name = "unit_packages"
+path = "tests/unit/packages.rs"
+
+[[test]]
 name = "unit_coroutines"
 path = "tests/unit/coroutines.rs"
 

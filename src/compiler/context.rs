@@ -349,11 +349,11 @@ pub struct CompilationContext {
     /// `from <stdlib module> import name [as alias]`: alias -> (module, name),
     /// so the name reads and calls through the module.
     pub stdlib_imports: HashMap<String, (String, String)>,
-    /// Virtual method dispatch: the column each overridden method name takes in
-    /// the vtable, and the `call_indirect` type index its implementations share.
-    /// A method name is here only when some class overrides an ancestor's
-    /// definition of it, so a program with no overrides emits no table and
-    /// every call stays direct.
+    /// Virtual method dispatch, by `Class::method`: the column the method takes
+    /// in the vtable for that class's hierarchy, and the `call_indirect` type
+    /// index its implementations share. A method is here only when some class
+    /// of the hierarchy overrides another's definition of it, so a program with
+    /// no overrides emits no table and every call stays direct.
     pub virtual_slots: HashMap<String, (u32, u32)>,
     /// Table index of vtable row 0. The rows share table 0 with the closure
     /// dispatch slots, which occupy the indices below this.
@@ -1015,7 +1015,9 @@ impl CompilationContext {
     ///
     /// Returns the vtable column and the `call_indirect` type index.
     pub fn virtual_call(&self, class_name: &str, method_name: &str) -> Option<(u32, u32)> {
-        let &(column, type_index) = self.virtual_slots.get(method_name)?;
+        let &(column, type_index) = self
+            .virtual_slots
+            .get(&format!("{class_name}::{method_name}"))?;
         let own = self.get_class_info(class_name)?.methods.get(method_name)?;
         let overridden = self
             .class_map

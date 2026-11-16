@@ -886,7 +886,7 @@ class _AnyDict(_Any):
         keys: list[str] = [k for k in self.entries]
         if sort_keys:
             keys = sorted(keys)
-        separator = ": "
+        separator = _AnyJsonStyle.key_sep
         parts: list[str] = []
         for k in keys:
             parts.append(_any_json_quote(k) + separator + self.entries[k].json(indent, level + 1, sort_keys))
@@ -994,7 +994,7 @@ def _any_json_quote(text: str) -> str:
             out += "\\b"
         elif c == "\f":
             out += "\\f"
-        elif code < 32 or code > 126:
+        elif code < 32 or (code > 126 and _AnyJsonStyle.ascii):
             if code > 0xFFFF:
                 code -= 0x10000
                 out += "\\u" + _any_hex4(0xD800 + (code >> 10)) + "\\u" + _any_hex4(0xDC00 + (code & 0x3FF))
@@ -1010,12 +1010,22 @@ def _any_hex4(n: int) -> str:
     return digits[(n >> 12) & 15] + digits[(n >> 8) & 15] + digits[(n >> 4) & 15] + digits[n & 15]
 
 
+class _AnyJsonStyle:
+    # The separators and escaping of the `json.dumps` call being written.
+    item_sep = ", "
+    key_sep = ": "
+    ascii = True
+    # CPython's item separator before a new line, which code generation
+    # passes when indenting (and so needs this literal in memory).
+    line_sep = ","
+
+
 def _any_json_join(open_: str, close: str, parts: list[str], indent: int, level: int) -> str:
     if indent < 0:
-        return open_ + ", ".join(parts) + close
+        return open_ + _AnyJsonStyle.item_sep.join(parts) + close
     inner = "\n" + " " * (indent * (level + 1))
     outer = "\n" + " " * (indent * level)
-    return open_ + inner + ("," + inner).join(parts) + outer + close
+    return open_ + inner + (_AnyJsonStyle.item_sep + inner).join(parts) + outer + close
 
 
 def __any_none() -> _Any:
@@ -1036,6 +1046,32 @@ def __any_of_float(value: float) -> _Any:
 
 def __any_of_str(value: str) -> _Any:
     return _AnyStr(value)
+
+
+def __any_of_opt_str(value: Optional[str]) -> _Any:
+    if value is None:
+        return _Any()
+    return _AnyStr(str(value))
+
+
+def __any_of_opt_int(value: Optional[int]) -> _Any:
+    if value is None:
+        return _Any()
+    whole: int = value
+    return _AnyInt(whole)
+
+
+def __any_of_opt_float(value: Optional[float]) -> _Any:
+    if value is None:
+        return _Any()
+    real: float = value
+    return _AnyFloat(real)
+
+
+def __any_of_opt_bool(value: Optional[bool]) -> _Any:
+    if value is None:
+        return _Any()
+    return _AnyBool(value == True)
 
 
 def __any_of_list(items: list[_Any]) -> _Any:
@@ -1090,8 +1126,16 @@ def __any_isa(value: _Any, name: str) -> bool:
     return value.isa(name)
 
 
-def __any_dumps(value: _Any, indent: int, sort_keys: bool) -> str:
-    return value.json(indent, 0, sort_keys)
+def __any_dumps(value: _Any, indent: int, sort_keys: bool, item_sep: str, key_sep: str, ensure_ascii: bool) -> str:
+    _AnyJsonStyle.item_sep = item_sep
+    _AnyJsonStyle.key_sep = key_sep
+    _AnyJsonStyle.ascii = ensure_ascii
+    try:
+        return value.json(indent, 0, sort_keys)
+    finally:
+        _AnyJsonStyle.item_sep = ", "
+        _AnyJsonStyle.key_sep = ": "
+        _AnyJsonStyle.ascii = True
 
 
 def __any_sum(items: list[_Any], start: _Any) -> _Any:

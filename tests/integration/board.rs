@@ -8252,3 +8252,172 @@ mod graphics {
         );
     }
 }
+
+mod packages {
+    use super::*;
+
+    fn prints(source: &str, want: &str) {
+        let run = run_main(&dedent(source), "", &[]);
+        assert_eq!(run.stderr, "", "stderr");
+        assert_eq!(run.stdout, want);
+    }
+
+    /// A model validated from a dict with a lax conversion, dumped as JSON, and JSON text that fails with pydantic 2.14's ValidationError (its JSON-mode messages).
+    #[test]
+    fn pydantic_models() {
+        prints(
+            r#"
+            from typing import Optional
+
+            from pydantic import BaseModel, ValidationError
+
+
+            class Item(BaseModel):
+                name: str
+                price: float
+                tags: list[str] = []
+                note: Optional[str] = None
+
+
+            def main() -> None:
+                item = Item.model_validate({"name": "pen", "price": "2.5", "tags": ["office"]})
+                print(item)
+                print(item.model_dump_json())
+                try:
+                    Item.model_validate_json('{"name": 3, "tags": "x"}')
+                except ValidationError as e:
+                    print(e)
+
+
+            if __name__ == "__main__":
+                main()
+"#,
+            r#"name='pen' price=2.5 tags=['office'] note=None
+{"name":"pen","price":2.5,"tags":["office"],"note":null}
+3 validation errors for Item
+name
+  Input should be a valid string [type=string_type, input_value=3, input_type=int]
+    For further information visit https://errors.pydantic.dev/2.14/v/string_type
+price
+  Field required [type=missing, input_value={'name': 3, 'tags': 'x'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.14/v/missing
+tags
+  Input should be a valid array [type=list_type, input_value='x', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.14/v/list_type
+"#,
+        );
+    }
+
+    /// Routes driven through TestClient: a body model, a path and a query parameter by annotation, an HTTPException, and FastAPI 0.163's 422 bodies.
+    #[test]
+    fn fastapi_routes() {
+        prints(
+            r#"
+            from fastapi import FastAPI, HTTPException
+            from fastapi.testclient import TestClient
+            from pydantic import BaseModel
+
+            app = FastAPI()
+
+
+            class Note(BaseModel):
+                text: str
+
+
+            notes: dict[int, Note] = {}
+
+
+            @app.post("/notes/{note_id}", status_code=201)
+            def add(note_id: int, note: Note) -> Note:
+                notes[note_id] = note
+                return note
+
+
+            @app.get("/notes/{note_id}")
+            def read(note_id: int, upper: bool = False):
+                if note_id not in notes:
+                    raise HTTPException(status_code=404, detail="no such note")
+                text = notes[note_id].text
+                return {"id": note_id, "text": text.upper() if upper else text}
+
+
+            def main() -> None:
+                client = TestClient(app)
+                for r in [client.post("/notes/1", json={"text": "hi"}), client.get("/notes/1?upper=true"), client.get("/notes/2"), client.get("/notes/x"), client.post("/notes/3", json={})]:
+                    print(r.status_code, r.text)
+
+
+            if __name__ == "__main__":
+                main()
+"#,
+            r#"201 {"text":"hi"}
+200 {"id":1,"text":"HI"}
+404 {"detail":"no such note"}
+422 {"detail":[{"type":"int_parsing","loc":["path","note_id"],"msg":"Input should be a valid integer, unable to parse string as an integer","input":"x"}]}
+422 {"detail":[{"type":"missing","loc":["body","text"],"msg":"Field required","input":{}}]}
+"#,
+        );
+    }
+
+    /// httpx's AsyncClient over the host's fetch: a GET read as JSON and a
+    /// 404 whose raise_for_status() raises HTTPStatusError with httpx 0.28's
+    /// message.
+    #[test]
+    fn httpx_async_client() {
+        prints(
+            r##"
+            import asyncio
+
+            import httpx
+
+
+            async def main() -> None:
+                async with httpx.AsyncClient(base_url="https://api.test") as client:
+                    r = await client.get("/scores")
+                    print(r.status_code, r.json())
+                    try:
+                        (await client.get("/missing")).raise_for_status()
+                    except httpx.HTTPStatusError as e:
+                        print(e.response.status_code, str(e).splitlines()[0])
+
+
+            if __name__ == "__main__":
+                asyncio.run(main())
+            "##,
+            "200 {'ada': 7, 'bo': 12}
+404 Client error '404 Not Found' for url 'https://api.test/missing'
+",
+        );
+    }
+
+    /// The Messages API client: POST /v1/messages with the API's headers and
+    /// body, answered by the harness's stand-in with what it was sent, and the
+    /// text block and usage read back.
+    #[test]
+    fn anthropic_messages() {
+        prints(
+            r##"
+            import asyncio
+
+            import anthropic
+
+
+            async def main() -> None:
+                client = anthropic.AsyncAnthropic(api_key="test-key", base_url="https://api.test")
+                message = await client.messages.create(
+                    model="claude-opus-5-5",
+                    max_tokens=256,
+                    messages=[{"role": "user", "content": "ping"}],
+                )
+                text = [b.text for b in message.content if b.type == "text"]
+                print(text[0], message.stop_reason, message.usage.output_tokens)
+
+
+            if __name__ == "__main__":
+                asyncio.run(main())
+            "##,
+            "heard: ping (system: none, max_tokens: 256) end_turn 7
+",
+        );
+    }
+}

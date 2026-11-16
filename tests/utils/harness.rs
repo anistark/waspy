@@ -2238,6 +2238,8 @@ fn js_globals() -> Js {
                 "type": header.unwrap_or_default(),
             });
             (200, "OK", echoed.to_string(), "application/json")
+        } else if url == "https://api.test/v1/messages" {
+            messages_route(&init)
         } else {
             match fetch_route(&url) {
                 Some(route) => route,
@@ -2309,6 +2311,52 @@ fn js_globals() -> Js {
     }
     globals.set("globalThis", globals.clone()).unwrap();
     globals
+}
+
+/// A stand-in for Anthropic's Messages API: a request with the key
+/// `test-key` and the `anthropic-version` header is answered with a message
+/// naming the model and repeating the last user message's text; any other
+/// key is answered 401 with the API's error body.
+fn messages_route(init: &Js) -> (u16, &'static str, String, &'static str) {
+    let header = |name: &str| match init.get("headers") {
+        Some(h @ Js::Obj(..)) => h.get(name).map(|v| v.text()),
+        _ => None,
+    };
+    if header("x-api-key").as_deref() != Some("test-key") || header("anthropic-version").is_none() {
+        let body = serde_json::json!({
+            "type": "error",
+            "error": {"type": "authentication_error", "message": "invalid x-api-key"},
+        });
+        return (401, "Unauthorized", body.to_string(), "application/json");
+    }
+    let sent: serde_json::Value = init
+        .get("body")
+        .and_then(|b| serde_json::from_str(&b.text()).ok())
+        .unwrap_or_default();
+    let model = sent["model"].as_str().unwrap_or("").to_string();
+    let last = sent["messages"]
+        .as_array()
+        .and_then(|m| m.last())
+        .map(|m| match &m["content"] {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        })
+        .unwrap_or_default();
+    let system = sent["system"].as_str().unwrap_or("none").to_string();
+    let body = serde_json::json!({
+        "id": "msg_test",
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": [
+            {"type": "thinking", "thinking": "", "signature": "sig"},
+            {"type": "text", "text": format!("heard: {last} (system: {system}, max_tokens: {})", sent["max_tokens"])},
+        ],
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "usage": {"input_tokens": last.len(), "output_tokens": 7},
+    });
+    (200, "OK", body.to_string(), "application/json")
 }
 
 /// The responses the tests' `fetch` knows: (status, status text, body,

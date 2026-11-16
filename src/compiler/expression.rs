@@ -9024,7 +9024,18 @@ fn convert_dynamic(
         }
     };
     if is_any(expected) && !is_any(ty) {
-        let Some(name) = box_fn(ty) else {
+        // An empty literal holds nothing to type: it is a list or dict of Any
+        // values as it is (`{"tags": [], "meta": {}}`).
+        let empty = match (expr, ty) {
+            (IRExpr::ListLiteral(items), IRType::List(_)) if items.is_empty() => {
+                Some("__any_of_list")
+            }
+            (IRExpr::DictLiteral(entries), IRType::Dict(..)) if entries.is_empty() => {
+                Some("__any_of_dict")
+            }
+            _ => None,
+        };
+        let Some(name) = empty.or_else(|| box_fn(ty)) else {
             if matches!(ty, IRType::Unknown | IRType::Any) {
                 return None;
             }
