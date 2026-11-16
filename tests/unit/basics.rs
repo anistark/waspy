@@ -298,14 +298,12 @@ fn str_of_an_int_renders_its_digits() {
     );
 }
 
-/// `int` is a 32-bit two's-complement integer, so arithmetic that leaves its
-/// range wraps rather than growing the way CPython's arbitrary-precision `int`
-/// does. This is the one documented place where a compiled program answers
-/// differently without saying so (see `docs/src/docs/numbers.md`), and
-/// these assertions are here to keep it deliberate: if the representation
-/// ever changes, they should be updated on purpose, not discovered.
+/// `int` is a 32-bit two's-complement integer, and arithmetic that leaves its
+/// range raises `OverflowError` rather than wrapping (CPython's int grows, so
+/// it answers the number). Wrapping was a quietly different answer; the error
+/// is the documented difference (`docs/src/docs/numbers.md`).
 #[test]
-fn integers_are_32_bit_and_wrap() {
+fn integers_are_32_bit_and_overflow_raises() {
     // Inside the range, Python's answers.
     assert_eq!(
         call_i32(
@@ -318,26 +316,127 @@ fn integers_are_32_bit_and_wrap() {
         call_i32("def f() -> int:\n    return 2147483647\n", "f"),
         i32::MAX
     );
-
-    // Outside it, two's-complement wraparound. CPython answers 1000000000000,
-    // 2147483648, and 1099511627776 for these three.
     assert_eq!(
-        call_i32(
-            "def f() -> int:\n    a = 1000000\n    b = 1000000\n    return a * b\n",
-            "f"
-        ),
-        1_000_000_000_000i64 as i32
-    );
-    assert_eq!(
-        call_i32(
-            "def f() -> int:\n    a = 2147483647\n    return a + 1\n",
-            "f"
-        ),
+        call_i32("def f() -> int:\n    return -2147483648\n", "f"),
         i32::MIN
     );
+
+    // Outside it, OverflowError, which the program can catch: from the
+    // operation itself, from a function that only computes, and from the
+    // builtins that add or convert.
+    let run = run_main(
+        &dedent(
+            r#"
+            def square(n: int) -> int:
+                return n * n
+
+            def fact(n: int) -> int:
+                r = 1
+                for i in range(2, n + 1):
+                    r *= i
+                return r
+
+            def main() -> None:
+                a = 1000000
+                big = 2147483647
+                least = -big - 1
+                n = 40
+                cases = ["mul", "add", "sub", "pow", "shl", "neg", "abs", "floordiv",
+                         "sum", "int", "square", "fact"]
+                for case in cases:
+                    try:
+                        if case == "mul":
+                            print(a * a)
+                        elif case == "add":
+                            print(big + 1)
+                        elif case == "sub":
+                            print(least - 1)
+                        elif case == "pow":
+                            print(2 ** n)
+                        elif case == "shl":
+                            print(1 << 31)
+                        elif case == "neg":
+                            print(-least)
+                        elif case == "abs":
+                            print(abs(least))
+                        elif case == "floordiv":
+                            print(least // -1)
+                        elif case == "sum":
+                            print(sum([big, 1]))
+                        elif case == "int":
+                            print(int("9999999999"))
+                        elif case == "square":
+                            print(square(100000))
+                        else:
+                            print(fact(13))
+                    except OverflowError:
+                        print(case, "overflows")
+                print(fact(12), square(46340), big - 1 + 1, least + 0)
+
+            if __name__ == "__main__":
+                main()
+            "#,
+        ),
+        "",
+        &[],
+    );
+    let want: String = [
+        "mul", "add", "sub", "pow", "shl", "neg", "abs", "floordiv", "sum", "int", "square", "fact",
+    ]
+    .iter()
+    .map(|c| format!("{c} overflows\n"))
+    .collect::<String>()
+        + "479001600 2147395600 2147483647 -2147483648\n";
+    assert_eq!(run.stdout, want);
+
+    // Uncaught, it ends the program as CPython's uncaught exceptions do.
+    let run = run_main(
+        &dedent(
+            r#"
+            if __name__ == "__main__":
+                total = 0
+                for i in range(100000):
+                    total += i
+                print(total)
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(run.exit, 1);
+    assert!(run.stderr.starts_with("OverflowError: "), "{}", run.stderr);
+}
+
+/// Shifts give CPython's answers, which WebAssembly's shifts (counting modulo
+/// 32) did not: a count past 31 leaves the sign, and a negative count is a
+/// `ValueError`.
+#[test]
+fn shifts_follow_cpython() {
+    let run = run_main(
+        &dedent(
+            r#"
+            def shr(x: int, n: int) -> int:
+                return x >> n
+
+            def shl(x: int, n: int) -> int:
+                return x << n
+
+            if __name__ == "__main__":
+                print(shr(5, 40), shr(-5, 40), shr(-5, 31), shr(1024, 3), shl(1, 30), shl(0, 99))
+                for n in [-1, 2]:
+                    try:
+                        print(shr(8, n), shl(8, n))
+                    except ValueError as e:
+                        print("ValueError:", e)
+            "#,
+        ),
+        "",
+        &[],
+    );
+    // CPython 3.13's output for the same source.
     assert_eq!(
-        call_i32("def f() -> int:\n    n = 40\n    return 2 ** n\n", "f"),
-        0
+        run.stdout,
+        "0 -1 -1 128 1073741824 0\nValueError: negative shift count\n2 32\n"
     );
 }
 

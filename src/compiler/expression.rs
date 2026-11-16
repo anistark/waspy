@@ -4218,8 +4218,8 @@ pub(crate) fn emit_char_at(
 /// (`"1_000"`). Anything else raises `ValueError`, which is catchable. A byte at
 /// or above 0x80 traps instead: CPython accepts every Unicode decimal digit
 /// (`int("١٢")` is 12), and raising where it answers would be a divergence a
-/// handler could silently act on. Values past 32 bits wrap, as all `int`
-/// arithmetic here does.
+/// handler could silently act on. A value past 32 bits raises `OverflowError`
+/// rather than wrapping, since this compiler's int is 32 bits.
 fn emit_parse_int(func: &mut Function, ctx: &CompilationContext) {
     let off = ctx.temp_local;
     let end = ctx.temp_local + 1;
@@ -4230,6 +4230,7 @@ fn emit_parse_int(func: &mut Function, ctx: &CompilationContext) {
     let digits = ctx.temp_local + 6;
     let last_us = ctx.temp_local + 7;
     let bad = ctx.temp_local + 8;
+    let acc64 = ctx.hold_i64();
     // Push `byte[at]`.
     let byte = |func: &mut Function, at: u32| {
         func.instruction(&Instruction::LocalGet(off));
@@ -4342,6 +4343,8 @@ fn emit_parse_int(func: &mut Function, ctx: &CompilationContext) {
         func.instruction(&Instruction::I32Const(0));
         func.instruction(&Instruction::LocalSet(local));
     }
+    func.instruction(&Instruction::I64Const(0));
+    func.instruction(&Instruction::LocalSet(acc64));
     func.instruction(&Instruction::Block(BlockType::Empty));
     func.instruction(&Instruction::Loop(BlockType::Empty));
     func.instruction(&Instruction::LocalGet(i));
@@ -4378,14 +4381,23 @@ fn emit_parse_int(func: &mut Function, ctx: &CompilationContext) {
     func.instruction(&Instruction::I32Const(10));
     func.instruction(&Instruction::I32LtU);
     func.instruction(&Instruction::If(BlockType::Empty));
-    func.instruction(&Instruction::LocalGet(acc));
-    func.instruction(&Instruction::I32Const(10));
-    func.instruction(&Instruction::I32Mul);
+    // acc64 = min(acc64 * 10 + digit, 2**31 + 1): saturated past what an
+    // int holds, so a long string cannot overflow the accumulator.
+    func.instruction(&Instruction::LocalGet(acc64));
+    func.instruction(&Instruction::I64Const(10));
+    func.instruction(&Instruction::I64Mul);
     func.instruction(&Instruction::LocalGet(c));
     func.instruction(&Instruction::I32Const(b'0' as i32));
     func.instruction(&Instruction::I32Sub);
-    func.instruction(&Instruction::I32Add);
-    func.instruction(&Instruction::LocalSet(acc));
+    func.instruction(&Instruction::I64ExtendI32U);
+    func.instruction(&Instruction::I64Add);
+    func.instruction(&Instruction::LocalTee(acc64));
+    func.instruction(&Instruction::I64Const(2_147_483_649));
+    func.instruction(&Instruction::I64GtS);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    func.instruction(&Instruction::I64Const(2_147_483_649));
+    func.instruction(&Instruction::LocalSet(acc64));
+    func.instruction(&Instruction::End);
     func.instruction(&Instruction::LocalGet(digits));
     func.instruction(&Instruction::I32Const(1));
     func.instruction(&Instruction::I32Add);
@@ -4427,9 +4439,29 @@ fn emit_parse_int(func: &mut Function, ctx: &CompilationContext) {
     );
     func.instruction(&Instruction::End);
 
-    func.instruction(&Instruction::LocalGet(acc));
+    // The signed value, which has to fit in 32 bits.
+    func.instruction(&Instruction::LocalGet(acc64));
     func.instruction(&Instruction::LocalGet(sign));
-    func.instruction(&Instruction::I32Mul);
+    func.instruction(&Instruction::I64ExtendI32S);
+    func.instruction(&Instruction::I64Mul);
+    func.instruction(&Instruction::LocalTee(acc64));
+    func.instruction(&Instruction::LocalGet(acc64));
+    func.instruction(&Instruction::I32WrapI64);
+    func.instruction(&Instruction::I64ExtendI32S);
+    func.instruction(&Instruction::I64Ne);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    emit_raise(
+        func,
+        ctx,
+        "OverflowError",
+        crate::compiler::exceptions::ExcArg::Text(OVERFLOW_MESSAGE),
+        1,
+    );
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::LocalGet(acc64));
+    func.instruction(&Instruction::I32WrapI64);
+    let _ = acc;
+    ctx.release_held_i64();
 }
 
 /// Allocate a string block of `len_local` bytes and leave its data pointer in
@@ -7301,6 +7333,169 @@ pub(crate) fn divisor_is_never_zero(expr: &IRExpr) -> bool {
 /// Integer division by zero used to trap, which is loud but uncatchable and
 /// not what Python does, and float division by zero produced inf silently.
 /// Both raise now, so `except ZeroDivisionError:` works.
+/// What `OverflowError` says when an int result does not fit: CPython's int
+/// grows, and this compiler's is 32 bits.
+pub(crate) const OVERFLOW_MESSAGE: &str =
+    "int result does not fit in 32 bits (this compiler's int is 32-bit)";
+
+/// An int operation whose result is checked.
+#[derive(Clone, Copy)]
+pub(crate) enum CheckedOp {
+    Add,
+    Sub,
+    Mul,
+}
+
+/// Raise `OverflowError` for an int result past 32 bits. In a function no
+/// caller looks for an exception from, it traps instead, which nothing could
+/// have caught either, as a walk over a changed collection does: either way the
+/// program stops rather than going on with a wrapped number, which is what
+/// CPython's growing int never gives. `extra_depth` counts the blocks the
+/// caller opened around this.
+pub(crate) fn emit_overflow(func: &mut Function, ctx: &CompilationContext, extra_depth: u32) {
+    if ctx.current_raises || !ctx.try_stack.is_empty() {
+        emit_raise(
+            func,
+            ctx,
+            "OverflowError",
+            crate::compiler::exceptions::ExcArg::Text(OVERFLOW_MESSAGE),
+            extra_depth,
+        );
+    } else {
+        func.instruction(&Instruction::Unreachable);
+    }
+}
+
+/// `a OP b` for the two ints on the stack, computed in 64 bits, where it is
+/// exact, and checked to fit in 32. It wrapped, so `2147483647 + 1` answered
+/// -2147483648 where CPython answers 2147483648. `extra_depth` counts the
+/// blocks the caller has open around the operation.
+pub(crate) fn emit_checked_int(
+    func: &mut Function,
+    ctx: &CompilationContext,
+    op: CheckedOp,
+    extra_depth: u32,
+) {
+    let b = ctx.temp_local + 46;
+    let r = ctx.hold_i64();
+    func.instruction(&Instruction::LocalSet(b));
+    func.instruction(&Instruction::I64ExtendI32S);
+    func.instruction(&Instruction::LocalGet(b));
+    func.instruction(&Instruction::I64ExtendI32S);
+    func.instruction(&match op {
+        CheckedOp::Add => Instruction::I64Add,
+        CheckedOp::Sub => Instruction::I64Sub,
+        CheckedOp::Mul => Instruction::I64Mul,
+    });
+    emit_fits_i32(func, ctx, r, extra_depth);
+    ctx.release_held_i64();
+}
+
+/// Check the i64 on the stack fits in 32 bits (`r` holds it), raising if not,
+/// and leave it as an i32.
+fn emit_fits_i32(func: &mut Function, ctx: &CompilationContext, r: u32, extra_depth: u32) {
+    func.instruction(&Instruction::LocalTee(r));
+    func.instruction(&Instruction::LocalGet(r));
+    func.instruction(&Instruction::I32WrapI64);
+    func.instruction(&Instruction::I64ExtendI32S);
+    func.instruction(&Instruction::I64Ne);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    emit_overflow(func, ctx, extra_depth + 1);
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::LocalGet(r));
+    func.instruction(&Instruction::I32WrapI64);
+}
+
+/// `a << b` for the two ints on the stack. A negative count is CPython's
+/// `ValueError`; a result past 32 bits raises `OverflowError`. WebAssembly's
+/// shift takes the count modulo 32, so `1 << 32` answered 1.
+fn emit_checked_shl(func: &mut Function, ctx: &CompilationContext) {
+    let a = ctx.temp_local + 46;
+    let b = ctx.temp_local + 47;
+    let r = ctx.hold_i64();
+    func.instruction(&Instruction::LocalSet(b));
+    func.instruction(&Instruction::LocalSet(a));
+    func.instruction(&Instruction::LocalGet(b));
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::I32LtS);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    emit_raise(
+        func,
+        ctx,
+        "ValueError",
+        crate::compiler::exceptions::ExcArg::Text("negative shift count"),
+        1,
+    );
+    func.instruction(&Instruction::End);
+    // A count of 32 or more leaves nothing but 0 in 32 bits.
+    func.instruction(&Instruction::LocalGet(b));
+    func.instruction(&Instruction::I32Const(31));
+    func.instruction(&Instruction::I32GtS);
+    func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+    func.instruction(&Instruction::LocalGet(a));
+    func.instruction(&Instruction::If(BlockType::Empty));
+    emit_overflow(func, ctx, 2);
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::Else);
+    func.instruction(&Instruction::LocalGet(a));
+    func.instruction(&Instruction::I64ExtendI32S);
+    func.instruction(&Instruction::LocalGet(b));
+    func.instruction(&Instruction::I64ExtendI32U);
+    func.instruction(&Instruction::I64Shl);
+    emit_fits_i32(func, ctx, r, 1);
+    func.instruction(&Instruction::End);
+    ctx.release_held_i64();
+}
+
+/// `a >> b` for the two ints on the stack. A negative count is CPython's
+/// `ValueError`. WebAssembly's shift takes the count modulo 32, so `x >> 32`
+/// answered `x` where CPython answers 0 (or -1 for a negative `x`): a count
+/// past 31 shifts by 31, which leaves just the sign.
+fn emit_checked_shr(func: &mut Function, ctx: &CompilationContext) {
+    let b = ctx.temp_local + 47;
+    func.instruction(&Instruction::LocalTee(b));
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::I32LtS);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    emit_raise(
+        func,
+        ctx,
+        "ValueError",
+        crate::compiler::exceptions::ExcArg::Text("negative shift count"),
+        1,
+    );
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::LocalGet(b));
+    func.instruction(&Instruction::I32Const(31));
+    func.instruction(&Instruction::LocalGet(b));
+    func.instruction(&Instruction::I32Const(31));
+    func.instruction(&Instruction::I32LtS);
+    func.instruction(&Instruction::Select);
+    func.instruction(&Instruction::I32ShrS);
+}
+
+/// Check `a // b` for the two ints on the stack, leaving them there: the least
+/// int divided by -1 is 2147483648, past 32 bits, which WebAssembly's divide
+/// traps on.
+fn emit_floor_div_overflow_check(func: &mut Function, ctx: &CompilationContext) {
+    let a = ctx.temp_local + 46;
+    let b = ctx.temp_local + 47;
+    func.instruction(&Instruction::LocalSet(b));
+    func.instruction(&Instruction::LocalTee(a));
+    func.instruction(&Instruction::I32Const(i32::MIN));
+    func.instruction(&Instruction::I32Eq);
+    func.instruction(&Instruction::LocalGet(b));
+    func.instruction(&Instruction::I32Const(-1));
+    func.instruction(&Instruction::I32Eq);
+    func.instruction(&Instruction::I32And);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    emit_overflow(func, ctx, 1);
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::LocalGet(a));
+    func.instruction(&Instruction::LocalGet(b));
+}
+
 fn emit_zero_division_guard(
     func: &mut Function,
     ctx: &CompilationContext,
@@ -9537,14 +9732,16 @@ fn emit_expr_inner(
             } else {
                 // Integer operations
                 match op {
+                    // A result past 32 bits raises `OverflowError` rather
+                    // than wrapping (`emit_checked_int`).
                     IROp::Add => {
-                        func.instruction(&Instruction::I32Add);
+                        emit_checked_int(func, ctx, CheckedOp::Add, 0);
                     }
                     IROp::Sub => {
-                        func.instruction(&Instruction::I32Sub);
+                        emit_checked_int(func, ctx, CheckedOp::Sub, 0);
                     }
                     IROp::Mul => {
-                        func.instruction(&Instruction::I32Mul);
+                        emit_checked_int(func, ctx, CheckedOp::Mul, 0);
                     }
                     IROp::Div => {
                         // Python 3's `/` is true division: `7 / 2` is 3.5, not
@@ -9584,6 +9781,7 @@ fn emit_expr_inner(
                                 "integer division or modulo by zero",
                             );
                         }
+                        emit_floor_div_overflow_check(func, ctx);
                         emit_floor_div_i32(func, ctx);
                     }
                     IROp::Pow => {
@@ -9598,10 +9796,10 @@ fn emit_expr_inner(
                         func.instruction(&Instruction::I32Const(0));
                     }
                     IROp::LShift => {
-                        func.instruction(&Instruction::I32Shl);
+                        emit_checked_shl(func, ctx);
                     }
                     IROp::RShift => {
-                        func.instruction(&Instruction::I32ShrS);
+                        emit_checked_shr(func, ctx);
                     }
                     IROp::BitOr => {
                         func.instruction(&Instruction::I32Or);
@@ -9711,9 +9909,10 @@ fn emit_expr_inner(
                             // Negate: -x. The operand is already on the stack, so
                             // multiply by -1 (mirroring the float path). Emitting
                             // `i32.const 0; i32.sub` here would instead compute
-                            // `operand - 0`, leaving the value unchanged.
+                            // `operand - 0`, leaving the value unchanged. Only
+                            // the smallest int overflows.
                             func.instruction(&Instruction::I32Const(-1));
-                            func.instruction(&Instruction::I32Mul);
+                            emit_checked_int(func, ctx, CheckedOp::Mul, 0);
                             IRType::Int
                         }
                         IRUnaryOp::Not => {
@@ -12213,8 +12412,9 @@ fn emit_function_call_expr(
                         IRType::Float
                     }
                     (1, Some(IRType::Int | IRType::Bool | IRType::Unknown)) => {
-                        // |x| = (x ^ s) - s with s = x >> 31. Wraps for
-                        // i32::MIN, as all int arithmetic here does.
+                        // |x| = (x ^ s) - s with s = x >> 31. Only the
+                        // smallest int has no 32-bit absolute value, and the
+                        // formula leaves it negative, which raises.
                         let x = ctx.temp_local;
                         func.instruction(&Instruction::LocalTee(x));
                         func.instruction(&Instruction::LocalGet(x));
@@ -12225,6 +12425,13 @@ fn emit_function_call_expr(
                         func.instruction(&Instruction::I32Const(31));
                         func.instruction(&Instruction::I32ShrS);
                         func.instruction(&Instruction::I32Sub);
+                        func.instruction(&Instruction::LocalTee(x));
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::I32LtS);
+                        func.instruction(&Instruction::If(BlockType::Empty));
+                        emit_overflow(func, ctx, 1);
+                        func.instruction(&Instruction::End);
+                        func.instruction(&Instruction::LocalGet(x));
                         IRType::Int
                     }
                     _ => {
@@ -12926,7 +13133,7 @@ fn emit_function_call_expr(
                         func.instruction(&Instruction::LocalSet(acc_f64));
                     } else {
                         func.instruction(&Instruction::LocalGet(acc_i32));
-                        func.instruction(&Instruction::I32Add);
+                        emit_checked_int(func, ctx, CheckedOp::Add, 2);
                         func.instruction(&Instruction::LocalSet(acc_i32));
                     }
                 };
@@ -15239,7 +15446,8 @@ pub fn emit_integer_power_operation(func: &mut Function, ctx: &CompilationContex
     func.instruction(&Instruction::Unreachable);
     func.instruction(&Instruction::End);
 
-    // while exp > 0 { result *= base; exp -= 1 }
+    // while exp > 0 { result *= base; exp -= 1 }, each product checked to
+    // fit in 32 bits: `2 ** 40` wrapped to 0.
     func.instruction(&Instruction::Block(BlockType::Empty));
     func.instruction(&Instruction::Loop(BlockType::Empty));
     func.instruction(&Instruction::LocalGet(exp));
@@ -15247,7 +15455,7 @@ pub fn emit_integer_power_operation(func: &mut Function, ctx: &CompilationContex
     func.instruction(&Instruction::BrIf(1));
     func.instruction(&Instruction::LocalGet(result));
     func.instruction(&Instruction::LocalGet(base));
-    func.instruction(&Instruction::I32Mul);
+    emit_checked_int(func, ctx, CheckedOp::Mul, 2);
     func.instruction(&Instruction::LocalSet(result));
     func.instruction(&Instruction::LocalGet(exp));
     func.instruction(&Instruction::I32Const(1));

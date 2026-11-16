@@ -195,7 +195,7 @@
     "version": "0.1.0",
     "features": [
       {
-        "name": "Basic types: int (32-bit two's complement, wraps on overflow rather than growing like CPython's), float (IEEE-754 double), bool",
+        "name": "Basic types: int (32-bit two's complement, OverflowError past 32 bits rather than growing like CPython's), float (IEEE-754 double), bool",
         "status": "done",
         "version": "0.1.0",
         "test": "type_system::basic_types_and_int_width"

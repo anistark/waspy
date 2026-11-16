@@ -589,6 +589,11 @@ fn scan_raise_and_calls(body: &IRBody, raises: &mut bool, calls: &mut HashSet<St
         match stmt {
             IRStatement::If { .. } | IRStatement::While { .. } => truth_calls(calls),
             IRStatement::AugAssign { op, .. } | IRStatement::AttributeAugAssign { op, .. } => {
+                // As the binary operator does: an int result past 32 bits,
+                // a division by zero, a negative shift count.
+                if !matches!(op, IROp::BitAnd | IROp::BitOr | IROp::BitXor) {
+                    *raises = true;
+                }
                 let (own, reflected, inplace) = crate::compiler::dunders::binary_methods(op);
                 for name in [own, reflected, inplace] {
                     calls.insert(name.to_string());
@@ -859,9 +864,12 @@ fn scan_expr_calls(expr: &IRExpr, raises: &mut bool, calls: &mut HashSet<String>
             // `input()` and `open()` (a missing file is FileNotFoundError).
             // `next()` raises StopIteration on an exhausted iterator.
             // `bytes(ints)` raises ValueError for one out of range(0, 256).
+            // `abs()` and `sum()` of ints raise OverflowError past 32 bits.
             if function_name == "input"
                 || function_name == "open"
                 || function_name == "bytes"
+                || function_name == "abs"
+                || function_name == "sum"
                 || function_name == crate::ir::NEXT_FN
             {
                 *raises = true;
@@ -938,6 +946,20 @@ fn scan_expr_calls(expr: &IRExpr, raises: &mut bool, calls: &mut HashSet<String>
             let (own, reflected, _) = crate::compiler::dunders::binary_methods(op);
             calls.insert(own.to_string());
             calls.insert(reflected.to_string());
+            // An int result past 32 bits raises OverflowError. Types are not
+            // known yet here, so a float or str operation counts too: an extra
+            // check after a call costs a load and a branch, and a missing one
+            // would turn the error into a trap. So does the least int `// -1`.
+            if matches!(op, IROp::Add | IROp::Sub | IROp::Mul | IROp::LShift)
+                || (matches!(op, IROp::FloorDiv)
+                    && matches!(**right, IRExpr::Const(IRConstant::Int(n)) if n < 0))
+            {
+                *raises = true;
+            }
+            // A negative shift count raises ValueError.
+            if matches!(op, IROp::RShift) && !matches!(**right, IRExpr::Const(_)) {
+                *raises = true;
+            }
             // Division by zero raises ZeroDivisionError, unless the divisor is
             // a nonzero literal and cannot be zero.
             if matches!(op, IROp::Div | IROp::Mod | IROp::FloorDiv)
@@ -967,7 +989,13 @@ fn scan_expr_calls(expr: &IRExpr, raises: &mut bool, calls: &mut HashSet<String>
         }
         IRExpr::UnaryOp { operand, op } => {
             match op {
-                IRUnaryOp::Neg => calls.insert("__neg__".to_string()),
+                IRUnaryOp::Neg => {
+                    // `-x` of the least int overflows; a literal's sign is not.
+                    if !matches!(**operand, IRExpr::Const(_)) {
+                        *raises = true;
+                    }
+                    calls.insert("__neg__".to_string())
+                }
                 IRUnaryOp::UAdd => calls.insert("__pos__".to_string()),
                 IRUnaryOp::Invert => calls.insert("__invert__".to_string()),
                 IRUnaryOp::Not => {

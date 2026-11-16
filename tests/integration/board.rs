@@ -7,7 +7,7 @@
 //! board-check` fails the moment such a test starts passing, so the board is
 //! moved in the same change. Expected values are CPython's for the same
 //! source, except where the board documents the difference (an `int` is 32
-//! bits and wraps).
+//! bits, and a result past them raises `OverflowError`).
 
 #[path = "../utils/harness.rs"]
 mod harness;
@@ -668,14 +668,17 @@ mod type_system {
         );
     }
 
-    /// Basic types: int (32-bit two's complement, wraps on overflow rather than growing like CPython's), float (IEEE-754 double), bool
+    /// Basic types: int (32-bit two's complement, OverflowError past 32 bits rather than growing like CPython's), float (IEEE-754 double), bool
     #[test]
     fn basic_types_and_int_width() {
         check(
             r#"
             def big() -> int:
                 n = 2147483647
-                return n + 1
+                try:
+                    return n + 1
+                except OverflowError:
+                    return -1
 
             def fl() -> float:
                 return 0.1 + 0.2
@@ -684,7 +687,7 @@ mod type_system {
                 return 3 > 2
         "#,
             &[
-                ("big", Want::Int(-2147483648)),
+                ("big", Want::Int(-1)),
                 ("fl", Want::Float(0.30000000000000004)),
                 ("bo", Want::Int(1)),
             ],

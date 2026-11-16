@@ -4842,6 +4842,20 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
             })
         }
         Expr::UnaryOp(unaryop) => {
+            // `-2147483648`, the smallest int, is a literal whose operand
+            // alone does not fit in 32 bits.
+            if let (
+                rustpython_parser::ast::UnaryOp::USub,
+                Expr::Constant(rustpython_parser::ast::ExprConstant {
+                    value: rustpython_parser::ast::Constant::Int(i),
+                    ..
+                }),
+            ) = (&unaryop.op, &*unaryop.operand)
+            {
+                if i.to_string() == "2147483648" {
+                    return Ok(IRExpr::Const(IRConstant::Int(i32::MIN)));
+                }
+            }
             let op = match &unaryop.op {
                 rustpython_parser::ast::UnaryOp::USub => IRUnaryOp::Neg,
                 rustpython_parser::ast::UnaryOp::Not => IRUnaryOp::Not,
@@ -4927,10 +4941,15 @@ pub fn lower_expr(expr: &Expr, memory_layout: &mut MemoryLayout) -> Result<IRExp
             match &c.value {
                 rustpython_parser::ast::Constant::Int(i) => {
                     // Convert to i32 more safely
-                    let i32_value = i
-                        .to_string()
-                        .parse::<i32>()
-                        .context("Integer too large for i32")?;
+                    let i32_value = i.to_string().parse::<i32>().map_err(|_| {
+                        anyhow::Error::from(crate::core::errors::unsupported_feature(
+                            format!(
+                                "the int {i} does not fit in 32 bits (this compiler's int is \
+                                 32-bit), where CPython's int grows to hold it"
+                            ),
+                            None,
+                        ))
+                    })?;
                     Ok(IRExpr::Const(IRConstant::Int(i32_value)))
                 }
                 rustpython_parser::ast::Constant::Float(f) => {
