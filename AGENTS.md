@@ -6,7 +6,7 @@
 
 ## Project Overview
 
-**Waspy** is a Python-to-WebAssembly compiler written in Rust. It parses Python source, lowers it to an intermediate representation (IR), generates a WebAssembly binary, and optimizes it. It is shipped as a **Rust library**, a thin **`waspy` command line** over it (`src/bin/waspy.rs`: `build`, `check`, `run`; also installable with `pip` through `pyproject.toml`), and an optional [wasmrun](https://github.com/anistark/wasmrun) compilation plugin.
+**Waspy** is a Python-to-WebAssembly compiler written in Rust. It parses Python source, lowers it to an intermediate representation (IR), generates a WebAssembly binary, and optimizes it. It is shipped as a **Rust library**, a thin **`waspy` command line** over it (`src/bin/waspy.rs`: `build`, `check`, `run`), and an optional [wasmrun](https://github.com/anistark/wasmrun) compilation plugin.
 
 - **Repository:** https://github.com/anistark/waspy
 - **Crate:** https://crates.io/crates/waspy
@@ -168,7 +168,7 @@ Waspy is a single Rust library crate (`crate-type = ["cdylib", "rlib"]`) with a 
 | Component | Language | Location | Purpose |
 |-----------|----------|----------|---------|
 | **Compiler library** | Rust | `src/` | Parser, IR, codegen, optimizer, stdlib shims |
-| **Command line** | Rust | `src/bin/waspy.rs` | The `waspy` binary: `build`, `check`, `run` over the public API, errors as `file:line:column: error:`; `pyproject.toml` builds it as a pip package with maturin |
+| **Command line** | Rust | `src/bin/waspy.rs` | The `waspy` binary: `build`, `check`, `run` over the public API, errors as `file:line:column: error:`; installed with `cargo install waspy` |
 | **Wasmrun plugin** | Rust | `src/wasmrun.rs` | Optional `wasm-plugin` feature — integrates Waspy into wasmrun |
 | **Examples** | Rust + Python | `examples/` | Runnable compiler drivers (`.rs`) + Python test inputs (`.py`) |
 | **Website** | Eleventy + Tailwind CSS | `docs/` | Landing page, documentation, modules board, paper, and playground (GitHub Pages) |
@@ -341,7 +341,6 @@ docs/
 | **log** | Logging facade | Wrapped by `utils/logging.rs` macros |
 | **wit-component** / **wit-parser** | Components | `wasi-http` feature: a program making HTTP requests made a component (`compiler/component.rs`) |
 | **wasi-preview1-component-adapter-provider** | Preview 1 adapter | Pinned `=40.0.0`: serves a component's `wasi_snapshot_preview1` imports through preview 2 |
-| **maturin** | pip packaging | `pyproject.toml` (`bindings = "bin"`): `pip install waspy` installs the command line |
 | **clippy** | Linting | Enforced: `-D warnings` (zero-warnings policy); see `clippy.toml` |
 | **cargo fmt** | Formatting | See `rustfmt.toml` |
 
