@@ -7,7 +7,7 @@
 //! board-check` fails the moment such a test starts passing, so the board is
 //! moved in the same change. Expected values are CPython's for the same
 //! source, except where the board documents the difference (an `int` is 32
-//! bits and wraps).
+//! bits, and a result past them raises `OverflowError`).
 
 #[path = "../utils/harness.rs"]
 mod harness;
@@ -609,15 +609,21 @@ mod functions {
     /// An unannotated parameter or return takes ints, bools, and None; a string, float, collection, or instance through one is refused
     #[test]
     fn untyped_parameters_take_words() {
-        refused(
+        check(
             r#"
             def ln(s):
                 return len(s)
 
+            def show(label, value):
+                return label + "=" + str(value)
+
             def f() -> int:
                 return ln("abc")
+
+            def g() -> str:
+                return show("n", 3) + " " + show("s", "x")
         "#,
-            "argument 1 of ln()",
+            &[("f", Want::Int(3)), ("g", Want::Str("n=3 s=x"))],
         );
     }
 }
@@ -625,14 +631,54 @@ mod functions {
 mod type_system {
     use super::*;
 
-    /// Basic types: int (32-bit two's complement, wraps on overflow rather than growing like CPython's), float (IEEE-754 double), bool
+    /// Dynamic values (typing.Any): mixed literals, json.loads with no declared type, and Any annotations hold values that answer as CPython's built-in types do (operators, indexing, iteration, printing, json.dumps), raising CPython's errors
+    #[test]
+    fn dynamic_values() {
+        check(
+            r#"
+            import json
+            from typing import Any
+
+            def parsed() -> str:
+                data = json.loads('{"name": "bob", "age": 30, "tags": ["a", 1]}')
+                return str(data["age"] + 1) + " " + str(data["tags"]) + " " + json.dumps(data, sort_keys=True)
+
+            def record() -> str:
+                row = {"id": 7, "name": "ada", "score": 1.5}
+                return f"{row['name']}:{row['id'] * 2}:{row['score'] + 1}"
+
+            def mismatch() -> str:
+                v: Any = "x"
+                try:
+                    return v + 1
+                except TypeError as e:
+                    return str(e)
+        "#,
+            &[
+                (
+                    "parsed",
+                    Want::Str("31 ['a', 1] {\"age\": 30, \"name\": \"bob\", \"tags\": [\"a\", 1]}"),
+                ),
+                ("record", Want::Str("ada:14:2.5")),
+                (
+                    "mismatch",
+                    Want::Str("can only concatenate str (not \"int\") to str"),
+                ),
+            ],
+        );
+    }
+
+    /// Basic types: int (32-bit two's complement, OverflowError past 32 bits rather than growing like CPython's), float (IEEE-754 double), bool
     #[test]
     fn basic_types_and_int_width() {
         check(
             r#"
             def big() -> int:
                 n = 2147483647
-                return n + 1
+                try:
+                    return n + 1
+                except OverflowError:
+                    return -1
 
             def fl() -> float:
                 return 0.1 + 0.2
@@ -641,7 +687,7 @@ mod type_system {
                 return 3 > 2
         "#,
             &[
-                ("big", Want::Int(-2147483648)),
+                ("big", Want::Int(-1)),
                 ("fl", Want::Float(0.30000000000000004)),
                 ("bo", Want::Int(1)),
             ],
@@ -1044,19 +1090,23 @@ mod variables {
         );
     }
 
-    /// A module-level statement that would not run (a loop, a call, an augmented assignment) is refused
+    /// Module-level statements (a loop, a call, an if, an augmented assignment) run where they stand, in source order with the definitions, as a script's do
     #[test]
-    fn module_statements_that_would_not_run() {
-        refused(
+    fn module_statements_run_where_they_stand() {
+        check(
             r#"
             n = 0
             for i in range(3):
                 n += i
+            names = []
+            names.append("a")
+            if n > 2:
+                names.append("b")
 
             def f() -> int:
-                return n
+                return n * 10 + len(names)
         "#,
-            "at module level",
+            &[("f", Want::Int(32))],
         );
     }
 }
@@ -1802,25 +1852,26 @@ mod collections {
         );
     }
 
-    /// A literal mixing element types no one type holds ([1, "a"], {"n": "bob", "age": 30}) is refused instead of reading the others back as the first; [[], [1]] and tuples of one shape unify
+    /// A literal mixing element types ([1, "a"], {"n": "bob", "age": 30}) holds Any values, as CPython's does; [[], [1]] and tuples of one shape unify
     #[test]
-    fn mixed_literals_refused() {
+    fn mixed_literals_hold_any() {
         check(
             r#"
             def g() -> str:
                 xs = [[], [1, 2]]
                 ys = [(1, "a"), (2, "b")]
                 return str(xs) + str(ys)
+
+            def h() -> str:
+                xs = [1, "a"]
+                d = {"n": "bob", "age": 30}
+                return str(xs[1]) + " " + str(d["age"] + 1) + " " + str(xs)
         "#,
-            &[("g", Want::Str("[[], [1, 2]][(1, 'a'), (2, 'b')]"))],
+            &[
+                ("g", Want::Str("[[], [1, 2]][(1, 'a'), (2, 'b')]")),
+                ("h", Want::Str("a 31 [1, 'a']")),
+            ],
         );
-        for src in [
-            "def g() -> str:\n    xs = [1, \"a\"]\n    return str(xs[1])\n",
-            "def g() -> str:\n    d = {\"n\": \"bob\", \"age\": 30}\n    return str(d[\"age\"])\n",
-        ] {
-            let err = try_compile(src).expect_err("a mixed literal is refused");
-            assert!(err.contains("mixing"), "{err}");
-        }
     }
 
     /// List literals with memory allocation [1, 2, 3]
@@ -4295,6 +4346,226 @@ app.audit|ERROR|an error flushes
                 ("domain", Want::Str("math domain error")),
             ],
         );
+    }
+
+    /// heapq and bisect: heappush, heappop, heapify, heappushpop, heapreplace, nlargest, nsmallest, bisect_left / bisect_right / insort, on any element type that orders, CPython's algorithms
+    #[test]
+    fn heapq_and_bisect() {
+        let run = run_main(
+            r#"import heapq
+import bisect
+h: list[tuple[int, str]] = []
+heapq.heappush(h, (2, "b"))
+heapq.heappush(h, (1, "a"))
+s = [1, 3, 5]
+bisect.insort(s, 4)
+print(heapq.heappop(h), s, bisect.bisect_left(s, 4))
+"#,
+            "",
+            &[],
+        );
+        assert_eq!(run.stdout, "(1, 'a') [1, 3, 4, 5] 2\n");
+    }
+
+    /// string's constants and capwords; textwrap: wrap, fill, shorten, dedent, indent, with CPython's TextWrapper options and its word splitting
+    #[test]
+    fn string_and_textwrap() {
+        let run = run_main(
+            r#"import string
+import textwrap
+print(string.ascii_uppercase[:3], string.capwords("a b"), textwrap.wrap("a well-known fox jumps far", 9))
+"#,
+            "",
+            &[],
+        );
+        assert_eq!(
+            run.stdout,
+            "ABC A B ['a well-', 'known fox', 'jumps far']\n"
+        );
+    }
+
+    /// io.StringIO: write, getvalue, read, readline, readlines, seek, tell, iteration, and with
+    #[test]
+    fn io_stringio() {
+        let run = run_main(
+            r#"import io
+s = io.StringIO("x\ny")
+print(s.readline(), s.read(), s.write("!"), s.getvalue())
+"#,
+            "",
+            &[],
+        );
+        assert_eq!(run.stdout, "x\n y 1 x\ny!\n");
+    }
+
+    /// operator: the operator functions, and itemgetter, attrgetter, and methodcaller as the functions they make
+    #[test]
+    fn operator_module() {
+        let run = run_main(
+            r#"import operator
+print(operator.add(1, 2), sorted([(1, "b"), (0, "a")], key=operator.itemgetter(1)))
+"#,
+            "",
+            &[],
+        );
+        assert_eq!(run.stdout, "3 [(0, 'a'), (1, 'b')]\n");
+    }
+
+    /// base64 (b64, urlsafe, b16, with binascii's errors), hashlib (md5, sha1, sha224, sha256), uuid (UUID, uuid3, uuid4, uuid5)
+    #[test]
+    fn base64_hashlib_uuid() {
+        let run = run_main(
+            r#"import base64
+import hashlib
+import uuid
+print(base64.b64encode(b"hi"), hashlib.sha256(b"").hexdigest()[:16], uuid.uuid5(uuid.NAMESPACE_DNS, "a"))
+"#,
+            "",
+            &[],
+        );
+        assert_eq!(
+            run.stdout,
+            "b'aGk=' e3b0c44298fc1c14 4f3f2898-69e3-5a0d-820a-c4e87987dbce\n"
+        );
+    }
+
+    /// urllib.parse: quote, quote_plus, unquote, urlencode, urlparse / urlsplit (with hostname, port, username, password, geturl), urljoin, parse_qs / parse_qsl
+    #[test]
+    fn urllib_parse() {
+        let run = run_main(
+            r#"from urllib.parse import urlparse, quote, urljoin
+u = urlparse("http://h:80/p?q=1")
+print(u.hostname, u.port, quote("a b"), urljoin("http://a/b/c", "d"))
+"#,
+            "",
+            &[],
+        );
+        assert_eq!(run.stdout, "h 80 a%20b http://a/b/d\n");
+    }
+
+    /// csv: reader, writer, DictReader, DictWriter over files and StringIO, with the excel dialect's quoting and CPython's parser
+    #[test]
+    fn csv_module() {
+        let run = run_main(
+            r#"import csv
+import io
+o = io.StringIO()
+csv.writer(o).writerow(["a", "b,c"])
+print(repr(o.getvalue()), list(csv.reader(io.StringIO(o.getvalue()))))
+"#,
+            "",
+            &[],
+        );
+        assert_eq!(run.stdout, "'a,\"b,c\"\\r\\n' [['a', 'b,c']]\n");
+    }
+
+    /// pathlib.Path: joining with /, name, suffix, suffixes, stem, parent, parts, with_name / with_suffix / with_stem, relative_to, and exists, read_text, write_text, iterdir, unlink, rename
+    #[test]
+    fn pathlib_module() {
+        let run = run_main(
+            r#"from pathlib import Path
+p = Path("a") / "b.txt"
+print(p, p.suffix, p.parent, p.with_suffix(".md"))
+"#,
+            "",
+            &[],
+        );
+        assert_eq!(run.stdout, "a/b.txt .txt a a/b.md\n");
+    }
+
+    /// time: time, monotonic, perf_counter, sleep, gmtime / localtime (UTC on WASI), strftime
+    #[test]
+    fn time_module() {
+        let run = run_main(
+            r#"import time
+t = time.monotonic()
+time.sleep(0.001)
+print(time.monotonic() >= t, time.time() > 1e9)
+"#,
+            "",
+            &[],
+        );
+        assert_eq!(run.stdout, "True True\n");
+    }
+
+    /// argparse: positional and optional arguments, store / store_true / store_false / count / append, nargs, choices, required, help and usage, and CPython's errors with exit status 2; the Namespace typed from the program's add_argument calls
+    #[test]
+    fn argparse_module() {
+        let run = run_main(
+            r#"import argparse
+p = argparse.ArgumentParser(prog="t")
+p.add_argument("n", type=int)
+p.add_argument("-q", action="store_true")
+a = p.parse_args(["3", "-q"])
+print(a.n + 1, a.q, a)
+"#,
+            "",
+            &[],
+        );
+        assert_eq!(run.stdout, "4 True Namespace(n=3, q=True)\n");
+    }
+
+    /// enum: Enum (members with name and value, lookup by value and by name, iteration, auto, methods), IntEnum and StrEnum (members as their values)
+    #[test]
+    fn enum_module() {
+        let run = run_main(
+            r#"from enum import Enum, auto
+class C(Enum):
+    A = auto()
+    B = auto()
+print(C.A, C(2), C["A"].value, list(C))
+"#,
+            "",
+            &[],
+        );
+        assert_eq!(run.stdout, "C.A C.B 1 [<C.A: 1>, <C.B: 2>]\n");
+    }
+
+    /// contextlib.suppress; copy.copy and copy.deepcopy of lists, sets, and dicts
+    #[test]
+    fn contextlib_and_copy() {
+        let run = run_main(
+            r#"import copy
+from contextlib import suppress
+with suppress(ZeroDivisionError):
+    print(1 // 0)
+a = [[1]]
+b = copy.deepcopy(a)
+b[0].append(2)
+print(a, b)
+"#,
+            "",
+            &[],
+        );
+        assert_eq!(run.stdout, "[[1]] [[1, 2]]\n");
+    }
+
+    /// typing.TypedDict (a dict of dynamic values, made by its call) and Literal (the type its values share)
+    #[test]
+    fn typing_typeddict_literal() {
+        let run = run_main(
+            r#"from typing import TypedDict, Literal
+class P(TypedDict):
+    x: int
+m: Literal["a", "b"] = "a"
+print(P(x=1)["x"], m)
+"#,
+            "",
+            &[],
+        );
+        assert_eq!(run.stdout, "1 a\n");
+    }
+
+    /// Builtins hex, oct, bin, divmod, pow(a, b, m), int(s, base), filter, next(it, default), hash; str.split(sep, maxsplit) and find / rfind / index / rindex / count with start and end
+    #[test]
+    fn python_builtins() {
+        let run = run_main(
+            r#"print(hex(255), divmod(7, 2), pow(3, -1, 7), int("ff", 16), list(filter(None, [0, 1])), "a,b,c".split(",", 1), "abcab".find("b", 2))
+"#,
+            "",
+            &[],
+        );
+        assert_eq!(run.stdout, "0xff (3, 1) 5 255 [1] ['a', 'b,c'] 4\n");
     }
 }
 
@@ -7978,6 +8249,249 @@ mod graphics {
             run.stdout,
             "16 8 35633 4\njsnull True\ncompiled True ''\n0.10000000149011612 -0.5 3 12\n\
              buffers 12 6\ncleared [51, 102, 153, 255] [51, 102, 153, 255] True\n"
+        );
+    }
+}
+
+mod packages {
+    use super::*;
+
+    fn prints(source: &str, want: &str) {
+        let run = run_main(&dedent(source), "", &[]);
+        assert_eq!(run.stderr, "", "stderr");
+        assert_eq!(run.stdout, want);
+    }
+
+    /// A model validated from a dict with a lax conversion, dumped as JSON, and JSON text that fails with pydantic 2.14's ValidationError (its JSON-mode messages).
+    #[test]
+    fn pydantic_models() {
+        prints(
+            r#"
+            from typing import Optional
+
+            from pydantic import BaseModel, ValidationError
+
+
+            class Item(BaseModel):
+                name: str
+                price: float
+                tags: list[str] = []
+                note: Optional[str] = None
+
+
+            def main() -> None:
+                item = Item.model_validate({"name": "pen", "price": "2.5", "tags": ["office"]})
+                print(item)
+                print(item.model_dump_json())
+                try:
+                    Item.model_validate_json('{"name": 3, "tags": "x"}')
+                except ValidationError as e:
+                    print(e)
+
+
+            if __name__ == "__main__":
+                main()
+"#,
+            r#"name='pen' price=2.5 tags=['office'] note=None
+{"name":"pen","price":2.5,"tags":["office"],"note":null}
+3 validation errors for Item
+name
+  Input should be a valid string [type=string_type, input_value=3, input_type=int]
+    For further information visit https://errors.pydantic.dev/2.14/v/string_type
+price
+  Field required [type=missing, input_value={'name': 3, 'tags': 'x'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.14/v/missing
+tags
+  Input should be a valid array [type=list_type, input_value='x', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.14/v/list_type
+"#,
+        );
+    }
+
+    /// Routes driven through TestClient: a body model, a path and a query parameter by annotation, an HTTPException, and FastAPI 0.163's 422 bodies.
+    #[test]
+    fn fastapi_routes() {
+        prints(
+            r#"
+            from fastapi import FastAPI, HTTPException
+            from fastapi.testclient import TestClient
+            from pydantic import BaseModel
+
+            app = FastAPI()
+
+
+            class Note(BaseModel):
+                text: str
+
+
+            notes: dict[int, Note] = {}
+
+
+            @app.post("/notes/{note_id}", status_code=201)
+            def add(note_id: int, note: Note) -> Note:
+                notes[note_id] = note
+                return note
+
+
+            @app.get("/notes/{note_id}")
+            def read(note_id: int, upper: bool = False):
+                if note_id not in notes:
+                    raise HTTPException(status_code=404, detail="no such note")
+                text = notes[note_id].text
+                return {"id": note_id, "text": text.upper() if upper else text}
+
+
+            def main() -> None:
+                client = TestClient(app)
+                for r in [client.post("/notes/1", json={"text": "hi"}), client.get("/notes/1?upper=true"), client.get("/notes/2"), client.get("/notes/x"), client.post("/notes/3", json={})]:
+                    print(r.status_code, r.text)
+
+
+            if __name__ == "__main__":
+                main()
+"#,
+            r#"201 {"text":"hi"}
+200 {"id":1,"text":"HI"}
+404 {"detail":"no such note"}
+422 {"detail":[{"type":"int_parsing","loc":["path","note_id"],"msg":"Input should be a valid integer, unable to parse string as an integer","input":"x"}]}
+422 {"detail":[{"type":"missing","loc":["body","text"],"msg":"Field required","input":{}}]}
+"#,
+        );
+    }
+
+    /// httpx's AsyncClient over the host's fetch: a GET read as JSON and a
+    /// 404 whose raise_for_status() raises HTTPStatusError with httpx 0.28's
+    /// message.
+    #[test]
+    fn httpx_async_client() {
+        prints(
+            r##"
+            import asyncio
+
+            import httpx
+
+
+            async def main() -> None:
+                async with httpx.AsyncClient(base_url="https://api.test") as client:
+                    r = await client.get("/scores")
+                    print(r.status_code, r.json())
+                    try:
+                        (await client.get("/missing")).raise_for_status()
+                    except httpx.HTTPStatusError as e:
+                        print(e.response.status_code, str(e).splitlines()[0])
+
+
+            if __name__ == "__main__":
+                asyncio.run(main())
+            "##,
+            "200 {'ada': 7, 'bo': 12}
+404 Client error '404 Not Found' for url 'https://api.test/missing'
+",
+        );
+    }
+
+    /// The Messages API client: POST /v1/messages with the API's headers and
+    /// body, answered by the harness's stand-in with what it was sent, and the
+    /// text block and usage read back.
+    #[test]
+    fn anthropic_messages() {
+        prints(
+            r##"
+            import asyncio
+
+            import anthropic
+
+
+            async def main() -> None:
+                client = anthropic.AsyncAnthropic(api_key="test-key", base_url="https://api.test")
+                message = await client.messages.create(
+                    model="claude-opus-5-5",
+                    max_tokens=256,
+                    messages=[{"role": "user", "content": "ping"}],
+                )
+                text = [b.text for b in message.content if b.type == "text"]
+                print(text[0], message.stop_reason, message.usage.output_tokens)
+
+
+            if __name__ == "__main__":
+                asyncio.run(main())
+            "##,
+            "heard: ping (system: none, max_tokens: 256) end_turn 7
+",
+        );
+    }
+
+    /// requests over WASI preview 2: the program is a component, run with
+    /// `wasmtime run -S http` against a server in the test; a GET read as
+    /// JSON and a 404's raise_for_status(), as requests 2.34 answers them.
+    /// Skipped without wasmtime (CI's runtime job runs the full set in
+    /// `tests/integration/http.rs`).
+    #[test]
+    fn requests_over_wasi_http() {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                loop {
+                    let mut h = String::new();
+                    reader.read_line(&mut h).unwrap();
+                    if h.trim().is_empty() {
+                        break;
+                    }
+                }
+                let (status, body) = if line.contains("/missing") {
+                    ("404 Not Found", "nothing".to_string())
+                } else {
+                    ("200 OK", r#"{"ok": true, "n": 3}"#.to_string())
+                };
+                let mut out = stream;
+                let _ = write!(
+                    out,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        let source = dedent(
+            r#"
+            import requests
+
+
+            def main() -> None:
+                r = requests.get("http://127.0.0.1:PORT/data")
+                print(r.status_code, r.json())
+                try:
+                    requests.get("http://127.0.0.1:PORT/missing").raise_for_status()
+                except requests.HTTPError as e:
+                    print(e.response.status_code, str(e).split(" for url")[0])
+
+
+            if __name__ == "__main__":
+                main()
+            "#,
+        )
+        .replace("PORT", &port.to_string());
+        let wasm = waspy::compile_python_to_wasm(&source).expect("compiles");
+        let path =
+            std::env::temp_dir().join(format!("waspy-board-http-{}.wasm", std::process::id()));
+        std::fs::write(&path, &wasm).unwrap();
+        let out = std::process::Command::new("wasmtime")
+            .args(["run", "-S", "http"])
+            .arg(&path)
+            .output();
+        let _ = std::fs::remove_file(&path);
+        let Ok(out) = out else {
+            eprintln!("wasmtime not found; skipped");
+            return;
+        };
+        assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "200 {'ok': True, 'n': 3}\n404 404 Client Error: Not Found\n"
         );
     }
 }

@@ -547,58 +547,50 @@ fn field_element_types_from_literals_and_direct_appends() {
     assert_eq!(call_f64(src, "preset"), 4.0);
 }
 
-/// Module-level statements the compiler cannot execute are rejected up front
-/// instead of being silently dropped. Each of these compiled "successfully"
-/// and then returned the pre-statement value (or, for tuple unpacking,
-/// garbage), which is exactly what the correctness rule forbids.
+/// Module-level statements run where they stand, as CPython runs them when
+/// it imports the module. Each of these used to compile "successfully" and
+/// then return the pre-statement value, and was refused after that; a
+/// function the host calls first starts the module, so it reads what the
+/// statements left, CPython's answer for each.
 #[test]
-fn silently_dropped_module_level_statements_are_rejected() {
-    let cases: &[(&str, &str)] = &[
+fn module_level_statements_run_in_order() {
+    let cases: &[(&str, i32)] = &[
         (
             "TOTAL = 0\nfor i in range(4):\n    TOTAL = TOTAL + i\n\ndef get() -> int:\n    return TOTAL\n",
-            "'for' loops at module level",
+            6,
         ),
         (
             "N = 0\nwhile N < 3:\n    N = N + 1\n\ndef get() -> int:\n    return N\n",
-            "'while' loops at module level",
+            3,
         ),
         (
             "FLAG = 1\nVALUE = 0\nif FLAG:\n    VALUE = 10\n\ndef get() -> int:\n    return VALUE\n",
-            "'if' statements at module level",
+            10,
         ),
         (
             "V = 0\ntry:\n    V = 5\nexcept ValueError:\n    V = 1\n\ndef get() -> int:\n    return V\n",
-            "'try' blocks at module level",
+            5,
         ),
         (
             "ITEMS = [1, 2]\nITEMS.append(3)\n\ndef get() -> int:\n    return len(ITEMS)\n",
-            "call statements at module level",
+            3,
         ),
         (
             "TOTAL = 1\nTOTAL += 2\n\ndef get() -> int:\n    return TOTAL\n",
-            "augmented assignments at module level",
+            3,
         ),
         (
             "D = {1: 0}\nD[1] = 9\n\ndef get() -> int:\n    return D[1]\n",
-            "assignments to anything but a plain name at module level",
+            9,
         ),
         (
             "A, B = 1, 2\n\ndef get() -> int:\n    return A + B\n",
-            "assignments to anything but a plain name at module level",
+            3,
         ),
     ];
 
     for (source, expected) in cases {
-        let err = try_compile(source).expect_err("must be rejected, not silently dropped");
-        assert!(
-            err.contains(expected),
-            "expected {expected:?} in the error, got: {err}"
-        );
-        assert!(err.contains("line"), "the error must be located: {err}");
-        assert!(
-            err.contains("Hint:"),
-            "the error must say what to do instead: {err}"
-        );
+        assert_eq!(call_i32(source, "get"), *expected, "{source}");
     }
 }
 
@@ -667,15 +659,24 @@ fn guarded_imports_stay_allowed_at_module_level() {
 /// kind, naming the function it appears in.
 #[test]
 fn mixed_width_literals_are_a_compile_error() {
-    let cases: &[(&str, &str)] = &[
-        (
+    // A list or a dict's values mixing ints and floats hold dynamic values,
+    // each read back as what it is, as CPython's are.
+    assert_eq!(
+        call_f64(
             "def f() -> float:\n    xs = [1, 2.5]\n    return xs[1]\n",
-            "list literal mixing float and int",
+            "f"
         ),
-        (
+        2.5
+    );
+    assert_eq!(
+        call_f64(
             "def f() -> float:\n    d = {1: 1.5, 2: 2}\n    return d[1]\n",
-            "dict literal's values mixing float and int",
+            "f"
         ),
+        1.5
+    );
+    // Keys and set members cannot be dynamic values, so those stay refused.
+    let cases: &[(&str, &str)] = &[
         (
             "def f() -> int:\n    d = {1: 5, 2.5: 6}\n    return d[1]\n",
             "dict literal's keys mixing float and int",
@@ -717,10 +718,15 @@ fn mixed_width_literals_are_a_compile_error() {
         2.5
     );
     // A bool beside an int is refused too: both fit the slot, but the list
-    // holds one element type, so `str([1, True])` would print `[1, 1]`.
-    let err = try_compile("def f() -> int:\n    xs = [1, True]\n    return xs[0] + xs[1]\n")
-        .expect_err("a list of ints and bools must be rejected");
-    assert!(err.contains("mixing int and bool"), "{err}");
+    // holds one element type, so `str([1, True])` would print `[1, 1]`. It
+    // holds dynamic values now, each its own kind.
+    assert_eq!(
+        call_i32(
+            "def f() -> int:\n    xs = [1, True]\n    return xs[0] + xs[1]\n",
+            "f"
+        ),
+        2
+    );
 }
 
 // ---------------------------------------------------------------------------

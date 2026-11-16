@@ -1821,6 +1821,88 @@ pub(crate) fn emit_value(
 /// The type `arm` emits, found by emitting it into a scratch function and
 /// discarding the code and anything it reported. The flag says whether it
 /// reported anything.
+/// The type `expr` emits, found by a dry run that writes nothing.
+/// The parameter types of a template's instance for a call: each declared
+/// type, and where a parameter is untyped, the type of the argument passed.
+fn template_argument_types(
+    declared: &[IRType],
+    arguments: &[IRExpr],
+    ctx: &CompilationContext,
+    memory_layout: &MemoryLayout,
+) -> Vec<IRType> {
+    arguments
+        .iter()
+        .enumerate()
+        .map(|(i, arg)| match declared.get(i) {
+            Some(t) if !matches!(t, IRType::Unknown) => t.clone(),
+            _ => probe_value_type(arg, ctx, memory_layout),
+        })
+        .collect()
+}
+
+/// The type a call of a template answers, where its instance for the
+/// arguments' types (as the scan infers them) exists: the scan's typing of a
+/// local that holds it.
+pub(crate) fn template_call_type(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRType> {
+    let types = |declared: &[IRType], arguments: &[IRExpr]| -> Option<Vec<IRType>> {
+        arguments
+            .iter()
+            .enumerate()
+            .map(|(i, arg)| match declared.get(i) {
+                Some(t) if !matches!(t, IRType::Unknown) => Some(t.clone()),
+                _ => match crate::compiler::function::infer_value_type(arg, ctx) {
+                    IRType::Unknown => None,
+                    t => Some(t),
+                },
+            })
+            .collect()
+    };
+    match expr {
+        IRExpr::FunctionCall {
+            function_name,
+            arguments,
+        } => {
+            if let Some(declared) = ctx.generic_functions.get(function_name.as_str()) {
+                let name =
+                    crate::ir::pystdlib::instance_name(function_name, &types(declared, arguments)?);
+                return ctx.get_function_info(&name).map(|f| f.return_type.clone());
+            }
+            if let Some(declared) = ctx.generic_classes.get(function_name.as_str()) {
+                let name =
+                    crate::ir::pystdlib::instance_name(function_name, &types(declared, arguments)?);
+                return ctx.get_class_info(&name).map(|_| IRType::Class(name));
+            }
+            None
+        }
+        IRExpr::MethodCall {
+            object,
+            method_name,
+            arguments,
+        } if !ctx.generic_methods.is_empty() => {
+            let IRType::Class(class) = crate::compiler::function::infer_value_type(object, ctx)
+            else {
+                return None;
+            };
+            let declared = ctx
+                .generic_methods
+                .get(&(class.clone(), method_name.clone()))?;
+            let name =
+                crate::ir::pystdlib::instance_name(method_name, &types(declared, arguments)?);
+            ctx.get_function_info(&format!("{class}::{name}"))
+                .map(|f| f.return_type.clone())
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn probe_value_type(
+    expr: &IRExpr,
+    ctx: &CompilationContext,
+    memory_layout: &MemoryLayout,
+) -> IRType {
+    probe_type(expr, ctx, memory_layout, None).0
+}
+
 fn probe_type(
     arm: &IRExpr,
     ctx: &CompilationContext,
@@ -3321,6 +3403,16 @@ pub(crate) fn emit_collection_element(
     // meant to refuse.
     let hint = match declared {
         Some(IRType::Float) => declared,
+        // A value stored into a collection of dynamic values is boxed, and a
+        // dynamic value stored into a typed one unboxed (`ir::dynamic`).
+        Some(slot) if crate::ir::dynamic::is_any(slot) => declared,
+        Some(_)
+            if crate::ir::dynamic::is_any(&crate::compiler::function::infer_value_type(
+                value, ctx,
+            )) =>
+        {
+            declared
+        }
         _ => None,
     };
     let actual = emit_expr(value, func, ctx, memory_layout, hint);
@@ -4199,8 +4291,8 @@ pub(crate) fn emit_char_at(
 /// (`"1_000"`). Anything else raises `ValueError`, which is catchable. A byte at
 /// or above 0x80 traps instead: CPython accepts every Unicode decimal digit
 /// (`int("١٢")` is 12), and raising where it answers would be a divergence a
-/// handler could silently act on. Values past 32 bits wrap, as all `int`
-/// arithmetic here does.
+/// handler could silently act on. A value past 32 bits raises `OverflowError`
+/// rather than wrapping, since this compiler's int is 32 bits.
 fn emit_parse_int(func: &mut Function, ctx: &CompilationContext) {
     let off = ctx.temp_local;
     let end = ctx.temp_local + 1;
@@ -4211,6 +4303,7 @@ fn emit_parse_int(func: &mut Function, ctx: &CompilationContext) {
     let digits = ctx.temp_local + 6;
     let last_us = ctx.temp_local + 7;
     let bad = ctx.temp_local + 8;
+    let acc64 = ctx.hold_i64();
     // Push `byte[at]`.
     let byte = |func: &mut Function, at: u32| {
         func.instruction(&Instruction::LocalGet(off));
@@ -4323,6 +4416,8 @@ fn emit_parse_int(func: &mut Function, ctx: &CompilationContext) {
         func.instruction(&Instruction::I32Const(0));
         func.instruction(&Instruction::LocalSet(local));
     }
+    func.instruction(&Instruction::I64Const(0));
+    func.instruction(&Instruction::LocalSet(acc64));
     func.instruction(&Instruction::Block(BlockType::Empty));
     func.instruction(&Instruction::Loop(BlockType::Empty));
     func.instruction(&Instruction::LocalGet(i));
@@ -4359,14 +4454,23 @@ fn emit_parse_int(func: &mut Function, ctx: &CompilationContext) {
     func.instruction(&Instruction::I32Const(10));
     func.instruction(&Instruction::I32LtU);
     func.instruction(&Instruction::If(BlockType::Empty));
-    func.instruction(&Instruction::LocalGet(acc));
-    func.instruction(&Instruction::I32Const(10));
-    func.instruction(&Instruction::I32Mul);
+    // acc64 = min(acc64 * 10 + digit, 2**31 + 1): saturated past what an
+    // int holds, so a long string cannot overflow the accumulator.
+    func.instruction(&Instruction::LocalGet(acc64));
+    func.instruction(&Instruction::I64Const(10));
+    func.instruction(&Instruction::I64Mul);
     func.instruction(&Instruction::LocalGet(c));
     func.instruction(&Instruction::I32Const(b'0' as i32));
     func.instruction(&Instruction::I32Sub);
-    func.instruction(&Instruction::I32Add);
-    func.instruction(&Instruction::LocalSet(acc));
+    func.instruction(&Instruction::I64ExtendI32U);
+    func.instruction(&Instruction::I64Add);
+    func.instruction(&Instruction::LocalTee(acc64));
+    func.instruction(&Instruction::I64Const(2_147_483_649));
+    func.instruction(&Instruction::I64GtS);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    func.instruction(&Instruction::I64Const(2_147_483_649));
+    func.instruction(&Instruction::LocalSet(acc64));
+    func.instruction(&Instruction::End);
     func.instruction(&Instruction::LocalGet(digits));
     func.instruction(&Instruction::I32Const(1));
     func.instruction(&Instruction::I32Add);
@@ -4408,9 +4512,29 @@ fn emit_parse_int(func: &mut Function, ctx: &CompilationContext) {
     );
     func.instruction(&Instruction::End);
 
-    func.instruction(&Instruction::LocalGet(acc));
+    // The signed value, which has to fit in 32 bits.
+    func.instruction(&Instruction::LocalGet(acc64));
     func.instruction(&Instruction::LocalGet(sign));
-    func.instruction(&Instruction::I32Mul);
+    func.instruction(&Instruction::I64ExtendI32S);
+    func.instruction(&Instruction::I64Mul);
+    func.instruction(&Instruction::LocalTee(acc64));
+    func.instruction(&Instruction::LocalGet(acc64));
+    func.instruction(&Instruction::I32WrapI64);
+    func.instruction(&Instruction::I64ExtendI32S);
+    func.instruction(&Instruction::I64Ne);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    emit_raise(
+        func,
+        ctx,
+        "OverflowError",
+        crate::compiler::exceptions::ExcArg::Text(OVERFLOW_MESSAGE),
+        1,
+    );
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::LocalGet(acc64));
+    func.instruction(&Instruction::I32WrapI64);
+    let _ = acc;
+    ctx.release_held_i64();
 }
 
 /// Allocate a string block of `len_local` bytes and leave its data pointer in
@@ -7282,6 +7406,169 @@ pub(crate) fn divisor_is_never_zero(expr: &IRExpr) -> bool {
 /// Integer division by zero used to trap, which is loud but uncatchable and
 /// not what Python does, and float division by zero produced inf silently.
 /// Both raise now, so `except ZeroDivisionError:` works.
+/// What `OverflowError` says when an int result does not fit: CPython's int
+/// grows, and this compiler's is 32 bits.
+pub(crate) const OVERFLOW_MESSAGE: &str =
+    "int result does not fit in 32 bits (this compiler's int is 32-bit)";
+
+/// An int operation whose result is checked.
+#[derive(Clone, Copy)]
+pub(crate) enum CheckedOp {
+    Add,
+    Sub,
+    Mul,
+}
+
+/// Raise `OverflowError` for an int result past 32 bits. In a function no
+/// caller looks for an exception from, it traps instead, which nothing could
+/// have caught either, as a walk over a changed collection does: either way the
+/// program stops rather than going on with a wrapped number, which is what
+/// CPython's growing int never gives. `extra_depth` counts the blocks the
+/// caller opened around this.
+pub(crate) fn emit_overflow(func: &mut Function, ctx: &CompilationContext, extra_depth: u32) {
+    if ctx.current_raises || !ctx.try_stack.is_empty() {
+        emit_raise(
+            func,
+            ctx,
+            "OverflowError",
+            crate::compiler::exceptions::ExcArg::Text(OVERFLOW_MESSAGE),
+            extra_depth,
+        );
+    } else {
+        func.instruction(&Instruction::Unreachable);
+    }
+}
+
+/// `a OP b` for the two ints on the stack, computed in 64 bits, where it is
+/// exact, and checked to fit in 32. It wrapped, so `2147483647 + 1` answered
+/// -2147483648 where CPython answers 2147483648. `extra_depth` counts the
+/// blocks the caller has open around the operation.
+pub(crate) fn emit_checked_int(
+    func: &mut Function,
+    ctx: &CompilationContext,
+    op: CheckedOp,
+    extra_depth: u32,
+) {
+    let b = ctx.temp_local + 46;
+    let r = ctx.hold_i64();
+    func.instruction(&Instruction::LocalSet(b));
+    func.instruction(&Instruction::I64ExtendI32S);
+    func.instruction(&Instruction::LocalGet(b));
+    func.instruction(&Instruction::I64ExtendI32S);
+    func.instruction(&match op {
+        CheckedOp::Add => Instruction::I64Add,
+        CheckedOp::Sub => Instruction::I64Sub,
+        CheckedOp::Mul => Instruction::I64Mul,
+    });
+    emit_fits_i32(func, ctx, r, extra_depth);
+    ctx.release_held_i64();
+}
+
+/// Check the i64 on the stack fits in 32 bits (`r` holds it), raising if not,
+/// and leave it as an i32.
+fn emit_fits_i32(func: &mut Function, ctx: &CompilationContext, r: u32, extra_depth: u32) {
+    func.instruction(&Instruction::LocalTee(r));
+    func.instruction(&Instruction::LocalGet(r));
+    func.instruction(&Instruction::I32WrapI64);
+    func.instruction(&Instruction::I64ExtendI32S);
+    func.instruction(&Instruction::I64Ne);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    emit_overflow(func, ctx, extra_depth + 1);
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::LocalGet(r));
+    func.instruction(&Instruction::I32WrapI64);
+}
+
+/// `a << b` for the two ints on the stack. A negative count is CPython's
+/// `ValueError`; a result past 32 bits raises `OverflowError`. WebAssembly's
+/// shift takes the count modulo 32, so `1 << 32` answered 1.
+fn emit_checked_shl(func: &mut Function, ctx: &CompilationContext) {
+    let a = ctx.temp_local + 46;
+    let b = ctx.temp_local + 47;
+    let r = ctx.hold_i64();
+    func.instruction(&Instruction::LocalSet(b));
+    func.instruction(&Instruction::LocalSet(a));
+    func.instruction(&Instruction::LocalGet(b));
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::I32LtS);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    emit_raise(
+        func,
+        ctx,
+        "ValueError",
+        crate::compiler::exceptions::ExcArg::Text("negative shift count"),
+        1,
+    );
+    func.instruction(&Instruction::End);
+    // A count of 32 or more leaves nothing but 0 in 32 bits.
+    func.instruction(&Instruction::LocalGet(b));
+    func.instruction(&Instruction::I32Const(31));
+    func.instruction(&Instruction::I32GtS);
+    func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+    func.instruction(&Instruction::LocalGet(a));
+    func.instruction(&Instruction::If(BlockType::Empty));
+    emit_overflow(func, ctx, 2);
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::Else);
+    func.instruction(&Instruction::LocalGet(a));
+    func.instruction(&Instruction::I64ExtendI32S);
+    func.instruction(&Instruction::LocalGet(b));
+    func.instruction(&Instruction::I64ExtendI32U);
+    func.instruction(&Instruction::I64Shl);
+    emit_fits_i32(func, ctx, r, 1);
+    func.instruction(&Instruction::End);
+    ctx.release_held_i64();
+}
+
+/// `a >> b` for the two ints on the stack. A negative count is CPython's
+/// `ValueError`. WebAssembly's shift takes the count modulo 32, so `x >> 32`
+/// answered `x` where CPython answers 0 (or -1 for a negative `x`): a count
+/// past 31 shifts by 31, which leaves just the sign.
+fn emit_checked_shr(func: &mut Function, ctx: &CompilationContext) {
+    let b = ctx.temp_local + 47;
+    func.instruction(&Instruction::LocalTee(b));
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::I32LtS);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    emit_raise(
+        func,
+        ctx,
+        "ValueError",
+        crate::compiler::exceptions::ExcArg::Text("negative shift count"),
+        1,
+    );
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::LocalGet(b));
+    func.instruction(&Instruction::I32Const(31));
+    func.instruction(&Instruction::LocalGet(b));
+    func.instruction(&Instruction::I32Const(31));
+    func.instruction(&Instruction::I32LtS);
+    func.instruction(&Instruction::Select);
+    func.instruction(&Instruction::I32ShrS);
+}
+
+/// Check `a // b` for the two ints on the stack, leaving them there: the least
+/// int divided by -1 is 2147483648, past 32 bits, which WebAssembly's divide
+/// traps on.
+fn emit_floor_div_overflow_check(func: &mut Function, ctx: &CompilationContext) {
+    let a = ctx.temp_local + 46;
+    let b = ctx.temp_local + 47;
+    func.instruction(&Instruction::LocalSet(b));
+    func.instruction(&Instruction::LocalTee(a));
+    func.instruction(&Instruction::I32Const(i32::MIN));
+    func.instruction(&Instruction::I32Eq);
+    func.instruction(&Instruction::LocalGet(b));
+    func.instruction(&Instruction::I32Const(-1));
+    func.instruction(&Instruction::I32Eq);
+    func.instruction(&Instruction::I32And);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    emit_overflow(func, ctx, 1);
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::LocalGet(a));
+    func.instruction(&Instruction::LocalGet(b));
+}
+
 fn emit_zero_division_guard(
     func: &mut Function,
     ctx: &CompilationContext,
@@ -7371,6 +7658,9 @@ fn check_uniform_slot_width(ctx: &CompilationContext, what: &str, types: &[IRTyp
         .iter()
         .any(|t| matches!(t, IRType::Int | IRType::Bool));
     if floats && words {
+        if !crate::compiler::function::has_any_runtime(ctx) {
+            crate::ir::dynamic::NEEDS_RUNTIME.with(|n| n.set(true));
+        }
         ctx.report(format!(
             "a {what} mixing float and int elements is not supported: every element \
              occupies one slot and the collection reads them all at one width, so the \
@@ -7471,21 +7761,21 @@ fn emit_user_argument(
     func: &mut Function,
     ctx: &CompilationContext,
     memory_layout: &MemoryLayout,
-) {
+) -> IRType {
     let callee = &crate::compiler::function::display_function_name(callee);
     // The tuple a call's surplus positional arguments are bound into, built
     // at the member type, each member checked as an argument is.
     if let (Some(IRType::VarTuple(member)), IRExpr::TupleLiteral(items)) = (param, arg) {
         let built = emit_sequence_of(items, member, func, ctx, memory_layout, callee);
         check_class_arg(ctx, &built, param, position, callee);
-        return;
+        return built;
     }
     // The dict `**kwargs` collects, built at the parameter's value type.
     if let (Some(IRType::Dict(key, value)), IRExpr::DictLiteral(pairs)) = (param, arg) {
         if matches!(key.as_ref(), IRType::String) {
             let built = emit_dict_literal(pairs, Some(value), func, ctx, memory_layout);
             check_class_arg(ctx, &built, param, position, callee);
-            return;
+            return built;
         }
     }
     // A standard-library class or function takes either kind of number.
@@ -7533,6 +7823,7 @@ fn emit_user_argument(
         check_var_tuple_arg(ctx, &arg_type, member, position, callee);
     }
     check_class_arg(ctx, &arg_type, param, position, callee);
+    arg_type
 }
 
 /// A value passed where a `tuple[T, ...]` is taken must already be laid out as
@@ -7661,6 +7952,10 @@ fn literal_element_type(ctx: &CompilationContext, what: &str, types: &[IRType]) 
     let Some(first) = types.first() else {
         return IRType::Unknown;
     };
+    // Elements boxed as dynamic values (`ir::dynamic`).
+    if types.iter().all(crate::ir::dynamic::is_any) {
+        return crate::ir::dynamic::any_type();
+    }
     if types.iter().any(|t| matches!(t, IRType::Class(_))) {
         let mut base: Option<String> = None;
         for ty in types {
@@ -7753,10 +8048,14 @@ fn unify_open(a: &IRType, b: &IRType) -> Option<IRType> {
 /// collection is read as one type here, so a str beside an int read back as
 /// its address.
 fn refuse_mixed_literal(ctx: &CompilationContext, what: &str, a: &IRType, b: &IRType) -> IRType {
+    // Without the dynamic-value runtime the module is compiled again with
+    // it, and the literal holds `Any` values there.
+    if !crate::compiler::function::has_any_runtime(ctx) {
+        crate::ir::dynamic::NEEDS_RUNTIME.with(|n| n.set(true));
+    }
     ctx.report(format!(
-        "a {what} mixing {} and {} elements is not supported: a collection holds one \
-         element type here, and the others would be read back as it. \
-         Hint: keep each collection to one type, or use a class or a tuple for a record",
+        "a {what} mixing {} and {} elements whose types could not be told apart when \
+         compiling. Hint: annotate it as list[Any] or dict[str, Any]",
         crate::type_to_string(a),
         crate::type_to_string(b)
     ));
@@ -8400,6 +8699,7 @@ fn is_stdlib_code(name: &str, ctx: &CompilationContext) -> bool {
             crate::ir::RE_FN_PREFIX,
             crate::ir::ASYNCIO_FN_PREFIX,
             "__Coro___asyncio_",
+            crate::ir::PY_PREFIX,
         ]
         .iter()
         .any(|prefix| name.starts_with(prefix))
@@ -8585,6 +8885,14 @@ pub fn emit_expr(
             ctx.note_drop(&ty);
         }
     }
+    // A value stored where `Any` is declared is boxed, and a dynamic value
+    // stored where a type is declared is unboxed (`ir::dynamic`). A dynamic
+    // value tested for truth asks its own `__bool__`.
+    if !(truth && expected_type == Some(&IRType::Bool)) {
+        if let Some(converted) = convert_dynamic(expr, &ty, expected_type, func, ctx) {
+            return converted;
+        }
+    }
     if !numeric {
         check_widening(expr, &ty, expected_type, ctx);
     }
@@ -8661,6 +8969,135 @@ pub fn emit_expr(
         }
         _ => ty,
     }
+}
+
+/// Whether a list literal holds dynamic values (`ir::dynamic`): where
+/// `list[Any]` or `Any` is declared, or where its elements have no one type.
+/// Without the runtime, the second asks for the module to be compiled again
+/// with it.
+fn holds_any_elements(
+    elements: &[IRExpr],
+    expected: Option<&IRType>,
+    ctx: &CompilationContext,
+) -> bool {
+    let declared = match expected {
+        Some(IRType::List(e)) => crate::ir::dynamic::is_any(e),
+        Some(t) => crate::ir::dynamic::is_any(t),
+        None => false,
+    };
+    let wanted = declared
+        || (elements.len() > 1 && crate::compiler::function::literal_mixes_types(elements, ctx));
+    if !wanted {
+        return false;
+    }
+    if crate::compiler::function::has_any_runtime(ctx) {
+        return true;
+    }
+    crate::ir::dynamic::NEEDS_RUNTIME.with(|n| n.set(true));
+    false
+}
+
+/// Box a value of type `ty` (on the stack) stored where `Any` is declared, or
+/// unbox a dynamic value stored where a type is declared, by calling the
+/// runtime's function (`ir::dynamic`). Answers the type now on the stack, or
+/// `None` when neither applies.
+fn convert_dynamic(
+    expr: &IRExpr,
+    ty: &IRType,
+    expected: Option<&IRType>,
+    func: &mut Function,
+    ctx: &CompilationContext,
+) -> Option<IRType> {
+    use crate::ir::dynamic::{any_type, box_fn, is_any, unbox_fn};
+    let expected = expected?;
+    let call = |func: &mut Function, name: &str, ret: &IRType| -> bool {
+        match ctx.get_function_info(name).map(|f| f.index) {
+            Some(index) => {
+                emit_user_call(func, ctx, index);
+                finish_user_call(func, ctx, ret);
+                true
+            }
+            None => {
+                crate::ir::dynamic::NEEDS_RUNTIME.with(|n| n.set(true));
+                false
+            }
+        }
+    };
+    if is_any(expected) && !is_any(ty) {
+        // An empty literal holds nothing to type: it is a list or dict of Any
+        // values as it is (`{"tags": [], "meta": {}}`).
+        let empty = match (expr, ty) {
+            (IRExpr::ListLiteral(items), IRType::List(_)) if items.is_empty() => {
+                Some("__any_of_list")
+            }
+            (IRExpr::DictLiteral(entries), IRType::Dict(..)) if entries.is_empty() => {
+                Some("__any_of_dict")
+            }
+            _ => None,
+        };
+        let Some(name) = empty.or_else(|| box_fn(ty)) else {
+            if matches!(ty, IRType::Unknown | IRType::Any) {
+                return None;
+            }
+            ctx.report(format!(
+                "a {} is used where Any is declared, which holds it as a dynamic value; only \
+                 None, bool, int, float, str, and a list or dict of Any values are held so \
+                 here. Hint: build it as a list[Any] or dict[str, Any]",
+                crate::type_to_string(ty)
+            ));
+            return None;
+        };
+        match ty {
+            // The string's offset alone, as an argument is passed.
+            IRType::String => {
+                func.instruction(&Instruction::Drop);
+            }
+            // A None value is the word 0; a call that answers None pushes nothing.
+            IRType::None
+                if !matches!(
+                    expr,
+                    IRExpr::FunctionCall { .. } | IRExpr::MethodCall { .. }
+                ) =>
+            {
+                func.instruction(&Instruction::Drop);
+            }
+            _ => {}
+        }
+        let boxed = any_type();
+        if !call(func, name, &boxed) {
+            ctx.report("dynamic values need the runtime, which is not in this module");
+            func.instruction(&Instruction::I32Const(0));
+        }
+        return Some(boxed);
+    }
+    if is_any(ty) && !is_any(expected) {
+        match expected {
+            // Passed on as it is: an untyped place holds a word.
+            IRType::Unknown | IRType::Any => return None,
+            IRType::Class(other) => {
+                ctx.report(format!(
+                    "an Any value is used where an instance of '{other}' is declared, which this \
+                     compiler cannot check as it runs. Hint: annotate the value as the class"
+                ));
+                return None;
+            }
+            _ => {}
+        }
+        let Some(name) = unbox_fn(expected) else {
+            ctx.report(format!(
+                "an Any value is used where '{}' is declared, which it is not converted to here. \
+                 Hint: declare the place Any, list[Any], or dict[str, Any], or convert the \
+                 value (int(x), str(x))",
+                crate::type_to_string(expected)
+            ));
+            return None;
+        };
+        if !call(func, name, expected) {
+            ctx.report("dynamic values need the runtime, which is not in this module");
+        }
+        return Some(expected.clone());
+    }
+    None
 }
 
 /// The number an `Optional[int]` / `Optional[bool]` / `Optional[float]`
@@ -9381,14 +9818,16 @@ fn emit_expr_inner(
             } else {
                 // Integer operations
                 match op {
+                    // A result past 32 bits raises `OverflowError` rather
+                    // than wrapping (`emit_checked_int`).
                     IROp::Add => {
-                        func.instruction(&Instruction::I32Add);
+                        emit_checked_int(func, ctx, CheckedOp::Add, 0);
                     }
                     IROp::Sub => {
-                        func.instruction(&Instruction::I32Sub);
+                        emit_checked_int(func, ctx, CheckedOp::Sub, 0);
                     }
                     IROp::Mul => {
-                        func.instruction(&Instruction::I32Mul);
+                        emit_checked_int(func, ctx, CheckedOp::Mul, 0);
                     }
                     IROp::Div => {
                         // Python 3's `/` is true division: `7 / 2` is 3.5, not
@@ -9428,6 +9867,7 @@ fn emit_expr_inner(
                                 "integer division or modulo by zero",
                             );
                         }
+                        emit_floor_div_overflow_check(func, ctx);
                         emit_floor_div_i32(func, ctx);
                     }
                     IROp::Pow => {
@@ -9442,10 +9882,10 @@ fn emit_expr_inner(
                         func.instruction(&Instruction::I32Const(0));
                     }
                     IROp::LShift => {
-                        func.instruction(&Instruction::I32Shl);
+                        emit_checked_shl(func, ctx);
                     }
                     IROp::RShift => {
-                        func.instruction(&Instruction::I32ShrS);
+                        emit_checked_shr(func, ctx);
                     }
                     IROp::BitOr => {
                         func.instruction(&Instruction::I32Or);
@@ -9555,9 +9995,10 @@ fn emit_expr_inner(
                             // Negate: -x. The operand is already on the stack, so
                             // multiply by -1 (mirroring the float path). Emitting
                             // `i32.const 0; i32.sub` here would instead compute
-                            // `operand - 0`, leaving the value unchanged.
+                            // `operand - 0`, leaving the value unchanged. Only
+                            // the smallest int overflows.
                             func.instruction(&Instruction::I32Const(-1));
-                            func.instruction(&Instruction::I32Mul);
+                            emit_checked_int(func, ctx, CheckedOp::Mul, 0);
                             IRType::Int
                         }
                         IRUnaryOp::Not => {
@@ -9647,12 +10088,16 @@ fn emit_expr_inner(
             emit_literal_block(func, ctx, blk, list_size);
             emit_literal_header(func, blk, elements.len() as u32);
 
+            // Dynamic values (`ir::dynamic`) where `list[Any]` or `Any` is
+            // declared, or where the elements have no one type.
+            let any_elements = holds_any_elements(elements, expected_type, ctx);
+            let element_expected = any_elements.then(crate::ir::dynamic::any_type);
             let mut element_types = Vec::with_capacity(elements.len());
             for (i, elem) in elements.iter().enumerate() {
                 // A store pops the value, then the address, so the block pointer
                 // goes first and the slot offset rides in the store's offset.
                 func.instruction(&Instruction::LocalGet(blk));
-                let ty = emit_expr(elem, func, ctx, memory_layout, None);
+                let ty = emit_expr(elem, func, ctx, memory_layout, element_expected.as_ref());
                 narrow_element_to_word(func, &ty);
                 store_collection_word_at(func, &ty, COLLECTION_HEADER + i as u32 * COLLECTION_SLOT);
                 element_types.push(ty);
@@ -9682,6 +10127,23 @@ fn emit_expr_inner(
             }
             crate::compiler::sets::emit_display(func, ctx, memory_layout, elements, &member);
             IRType::Set(Box::new(member))
+        }
+        // A tuple held as a dynamic value: its members boxed into a list the
+        // runtime's tuple holds.
+        IRExpr::TupleLiteral(elements)
+            if expected_type.is_some_and(crate::ir::dynamic::is_any)
+                && crate::compiler::function::has_any_runtime(ctx) =>
+        {
+            emit_expr(
+                &IRExpr::FunctionCall {
+                    function_name: "__any_of_tuple".to_string(),
+                    arguments: vec![IRExpr::ListLiteral(elements.clone())],
+                },
+                func,
+                ctx,
+                memory_layout,
+                None,
+            )
         }
         IRExpr::TupleLiteral(elements) => {
             // Tuple layout in memory: [length:i32][elem0][elem1]... One
@@ -9715,7 +10177,24 @@ fn emit_expr_inner(
             func.instruction(&Instruction::LocalGet(blk));
             IRType::Tuple(element_types)
         }
-        IRExpr::DictLiteral(pairs) => emit_dict_literal(pairs, None, func, ctx, memory_layout),
+        IRExpr::DictLiteral(pairs) => {
+            // Dynamic values where `dict[str, Any]` or `Any` is declared, or
+            // where the values have no one type (a record).
+            let values: Vec<IRExpr> = pairs.iter().map(|(_, v)| v.clone()).collect();
+            let declared_any = match expected_type {
+                Some(IRType::Dict(_, v)) => crate::ir::dynamic::is_any(v),
+                Some(t) => crate::ir::dynamic::is_any(t),
+                None => false,
+            };
+            let any_values = !pairs.is_empty()
+                && (declared_any || crate::compiler::function::literal_mixes_types(&values, ctx));
+            if any_values && !crate::compiler::function::has_any_runtime(ctx) {
+                crate::ir::dynamic::NEEDS_RUNTIME.with(|n| n.set(true));
+            }
+            let value_type = (any_values && crate::compiler::function::has_any_runtime(ctx))
+                .then(crate::ir::dynamic::any_type);
+            emit_dict_literal(pairs, value_type.as_ref(), func, ctx, memory_layout)
+        }
         IRExpr::CellNew => {
             // One slot, wide enough for any captured value.
             func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));
@@ -10784,6 +11263,32 @@ fn emit_function_call_expr(
 ) -> IRType {
     let _ = expr;
     let _ = expected_type;
+    // A class of a module written in Python whose `__init__` takes untyped
+    // parameters: the instance of the class for these arguments' types
+    // (`ir::pystdlib`).
+    if let Some(declared) = ctx.generic_classes.get(function_name.as_str()) {
+        let types = template_argument_types(declared, arguments, ctx, memory_layout);
+        let instance = crate::ir::pystdlib::instance_name(function_name, &types);
+        if ctx.get_class_info(&instance).is_some() {
+            return emit_expr(
+                &IRExpr::FunctionCall {
+                    function_name: instance,
+                    arguments: arguments.clone(),
+                },
+                func,
+                ctx,
+                memory_layout,
+                expected_type,
+            );
+        }
+        crate::ir::pystdlib::need(crate::ir::pystdlib::Instance::Class(
+            function_name.clone(),
+            types,
+        ));
+        ctx.report(crate::ir::pystdlib::PENDING_INSTANCE);
+        func.instruction(&Instruction::I32Const(0));
+        return IRType::Unknown;
+    }
     // `from mod import f as g` on a user-written module (#41): calls
     // to `g` resolve to the merged `f` — the imported module's
     // definitions are statically linked into this single WASM module.
@@ -10891,6 +11396,32 @@ fn emit_function_call_expr(
             recover_str_pair(func, ctx);
         }
         return *inner;
+    }
+    // Wrapping 32-bit arithmetic, for the standard-library code that computes
+    // on words (`hashlib`): an int holding 32 bits as two's complement, which
+    // the checked operators would refuse past 32 bits.
+    let wrapping = match function_name.as_str() {
+        "__waspy_u32_add" => Some(Instruction::I32Add),
+        "__waspy_u32_shl" => Some(Instruction::I32Shl),
+        "__waspy_u32_shr" => Some(Instruction::I32ShrU),
+        "__waspy_u32_rotr" => Some(Instruction::I32Rotr),
+        "__waspy_u32_rotl" => Some(Instruction::I32Rotl),
+        _ => None,
+    };
+    if let Some(op) = wrapping {
+        if arguments.len() == 2 && ctx.get_function_info(function_name).is_none() {
+            for arg in arguments {
+                emit_expr(arg, func, ctx, memory_layout, Some(&IRType::Int));
+            }
+            func.instruction(&op);
+            return IRType::Int;
+        }
+    }
+    // An HTTP request through `wasi:http` (`compiler::http`).
+    if function_name == crate::compiler::http::HTTP_FN
+        && ctx.get_function_info(function_name).is_none()
+    {
+        return crate::compiler::http::emit_call(arguments, func, ctx, memory_layout);
     }
     // The host's clock, in microseconds since the epoch (an exact integer
     // as a float until long after 2038), for `datetime.now()`.
@@ -11123,6 +11654,53 @@ fn emit_function_call_expr(
             return IRType::Unknown;
         };
         let ty = emit_expr(pull, func, ctx, memory_layout, None);
+        // `next(it, default)`: the default where the iterator is exhausted,
+        // the StopIteration flag cleared.
+        if let Some(default) = arguments.get(1) {
+            let float = matches!(ty, IRType::Float);
+            let text = matches!(ty, IRType::String | IRType::Bytes);
+            if text {
+                func.instruction(&Instruction::Drop);
+            }
+            let slot = if float { ctx.hold_f64() } else { ctx.hold() };
+            let Some(slot) = slot else {
+                ctx.report(
+                    "a next() with a default nests more deeply than the compiler reserves room for",
+                );
+                return ty;
+            };
+            func.instruction(&Instruction::LocalSet(slot));
+            func.instruction(&Instruction::GlobalGet(1));
+            func.instruction(&Instruction::If(BlockType::Empty));
+            func.instruction(&Instruction::I32Const(0));
+            func.instruction(&Instruction::GlobalSet(1));
+            ctx.enter_expr_blocks(1);
+            let given = emit_expr(default, func, ctx, memory_layout, Some(&ty));
+            ctx.exit_expr_blocks(1);
+            if matches!(given, IRType::String | IRType::Bytes) {
+                func.instruction(&Instruction::Drop);
+            }
+            if !matches!(ty, IRType::Unknown) && given != ty && !matches!(given, IRType::None) {
+                ctx.report(format!(
+                    "next()'s default is a '{}', where the iterator yields '{}', which can only \
+                     be read as one type",
+                    crate::type_to_string(&given),
+                    crate::type_to_string(&ty)
+                ));
+            }
+            func.instruction(&Instruction::LocalSet(slot));
+            func.instruction(&Instruction::End);
+            func.instruction(&Instruction::LocalGet(slot));
+            if float {
+                ctx.release_held_f64();
+            } else {
+                ctx.release_held();
+            }
+            if text {
+                recover_str_pair(func, ctx);
+            }
+            return ty;
+        }
         let in_try = !ctx.try_stack.is_empty();
         let in_generator = ctx
             .current_class
@@ -11566,6 +12144,41 @@ fn emit_function_call_expr(
         return return_type;
     }
 
+    // A standard-library function written in Python whose parameters take
+    // each call's types: the instance for these arguments (`ir::pystdlib`).
+    if let Some(declared) = ctx.generic_functions.get(function_name.as_str()) {
+        let declared = declared.clone();
+        let mark = begin_call_arguments(func, ctx);
+        let mut types = Vec::with_capacity(arguments.len());
+        for (i, arg) in arguments.iter().enumerate() {
+            let param = declared.get(i).filter(|t| !matches!(t, IRType::Unknown));
+            let t = emit_user_argument(arg, param, i, function_name, func, ctx, memory_layout);
+            types.push(param.cloned().unwrap_or(t));
+        }
+        let instance = crate::ir::pystdlib::instance_name(function_name, &types);
+        if let Some(info) = ctx.get_function_info(&instance) {
+            let (index, return_type) = (info.index, info.return_type.clone());
+            emit_user_call_with(func, ctx, index, mark);
+            finish_user_call(func, ctx, &return_type);
+            return return_type;
+        }
+        // Not made yet: the module is compiled again with it.
+        crate::ir::pystdlib::need_instance(function_name, types);
+        for _ in arguments {
+            func.instruction(&Instruction::Drop);
+        }
+        if let Some(mark) = mark {
+            func.instruction(&Instruction::LocalGet(mark));
+            func.instruction(&Instruction::GlobalSet(
+                crate::compiler::gc::ARGS_BASE_GLOBAL,
+            ));
+            ctx.release_held();
+        }
+        ctx.report(crate::ir::pystdlib::PENDING_INSTANCE);
+        func.instruction(&Instruction::I32Const(0));
+        return IRType::Unknown;
+    }
+
     // Push arguments onto the stack in order. For a call to a known user
     // function, a string/bytes argument must be narrowed to its single
     // offset word: each parameter is one i32 slot, so the callee recovers
@@ -11974,6 +12587,36 @@ fn emit_function_call_expr(
                 IRType::None
             }
             "min" | "max" => emit_min_max(func, ctx, function_name == "min", &arg_types),
+            // `hash(x)`: CPython's 64-bit hash (an int's, a bool's, a
+            // float's, a tuple's, as the sets compute it), its low 32 bits
+            // where it does not fit an int here. CPython's own hash values
+            // differ between 32- and 64-bit builds, and a str's or bytes'
+            // between runs, so what holds is that equal values hash equal.
+            "hash" if arg_types.len() == 1 => {
+                let ty = arg_types[0].clone();
+                if let Some(why) = crate::compiler::equality::hash_unsupported(ctx, &ty) {
+                    ctx.report(why);
+                    if matches!(ty, IRType::String | IRType::Bytes) {
+                        func.instruction(&Instruction::Drop);
+                    }
+                    func.instruction(&Instruction::Drop);
+                    func.instruction(&Instruction::I32Const(0));
+                    return IRType::Int;
+                }
+                if matches!(ty, IRType::String | IRType::Bytes) {
+                    func.instruction(&Instruction::Drop);
+                }
+                let held = crate::compiler::sets::Held::of(ctx, &ty);
+                match held {
+                    crate::compiler::sets::Held::Word(l) | crate::compiler::sets::Held::F64(l) => {
+                        func.instruction(&Instruction::LocalSet(l));
+                    }
+                }
+                crate::compiler::sets::emit_hash(func, ctx, &ty, held);
+                held.release(ctx);
+                func.instruction(&Instruction::I32WrapI64);
+                IRType::Int
+            }
             // `set(iterable)`; `set()` is lowered to an empty display.
             "set" if arg_types.len() == 1 => {
                 crate::compiler::sets::emit_set_from(func, ctx, &arg_types[0])
@@ -12019,8 +12662,9 @@ fn emit_function_call_expr(
                         IRType::Float
                     }
                     (1, Some(IRType::Int | IRType::Bool | IRType::Unknown)) => {
-                        // |x| = (x ^ s) - s with s = x >> 31. Wraps for
-                        // i32::MIN, as all int arithmetic here does.
+                        // |x| = (x ^ s) - s with s = x >> 31. Only the
+                        // smallest int has no 32-bit absolute value, and the
+                        // formula leaves it negative, which raises.
                         let x = ctx.temp_local;
                         func.instruction(&Instruction::LocalTee(x));
                         func.instruction(&Instruction::LocalGet(x));
@@ -12031,6 +12675,13 @@ fn emit_function_call_expr(
                         func.instruction(&Instruction::I32Const(31));
                         func.instruction(&Instruction::I32ShrS);
                         func.instruction(&Instruction::I32Sub);
+                        func.instruction(&Instruction::LocalTee(x));
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::I32LtS);
+                        func.instruction(&Instruction::If(BlockType::Empty));
+                        emit_overflow(func, ctx, 1);
+                        func.instruction(&Instruction::End);
+                        func.instruction(&Instruction::LocalGet(x));
                         IRType::Int
                     }
                     _ => {
@@ -12732,7 +13383,7 @@ fn emit_function_call_expr(
                         func.instruction(&Instruction::LocalSet(acc_f64));
                     } else {
                         func.instruction(&Instruction::LocalGet(acc_i32));
-                        func.instruction(&Instruction::I32Add);
+                        emit_checked_int(func, ctx, CheckedOp::Add, 2);
                         func.instruction(&Instruction::LocalSet(acc_i32));
                     }
                 };
@@ -13932,6 +14583,64 @@ fn emit_method_call_expr(
     expected_type: Option<&IRType>,
 ) -> IRType {
     let _ = expr;
+    // A method of a class of a module written in Python that takes untyped
+    // parameters: the instance of the method for these arguments' types
+    // (`ir::pystdlib`).
+    if !ctx.generic_methods.is_empty() {
+        // A receiver that is a class template's call is its instance for the
+        // arguments' types (`csv.writer(f).writerow(row)`).
+        let receiver = match object.as_ref() {
+            IRExpr::FunctionCall {
+                function_name: class,
+                arguments: args,
+            } if ctx.generic_classes.contains_key(class.as_str()) => {
+                let declared = ctx.generic_classes[class.as_str()].clone();
+                let types = template_argument_types(&declared, args, ctx, memory_layout);
+                IRType::Class(crate::ir::pystdlib::instance_name(class, &types))
+            }
+            _ => crate::compiler::function::infer_value_type(object, ctx),
+        };
+        if let IRType::Class(class) = receiver {
+            let key = (class.clone(), method_name.clone());
+            if let Some(declared) = ctx.generic_methods.get(&key) {
+                let types = template_argument_types(declared, arguments, ctx, memory_layout);
+                let instance = crate::ir::pystdlib::instance_name(method_name, &types);
+                // The class's own instance of the method, not one inherited.
+                let has = ctx.get_class_info(&class).is_some_and(|c| {
+                    c.methods.contains_key(&instance)
+                        && c.method_owner
+                            .get(&instance)
+                            .map_or(true, |owner| *owner == class)
+                });
+                if has {
+                    return emit_expr(
+                        &IRExpr::MethodCall {
+                            object: object.clone(),
+                            method_name: instance,
+                            arguments: arguments.clone(),
+                        },
+                        func,
+                        ctx,
+                        memory_layout,
+                        expected_type,
+                    );
+                }
+                // A receiver typed as a class template is one whose instance
+                // the next round types it as; its method's instance belongs
+                // to that class.
+                if !ctx.generic_classes.contains_key(&class) {
+                    crate::ir::pystdlib::need(crate::ir::pystdlib::Instance::Method(
+                        class,
+                        method_name.clone(),
+                        types,
+                    ));
+                }
+                ctx.report(crate::ir::pystdlib::PENDING_INSTANCE);
+                func.instruction(&Instruction::I32Const(0));
+                return IRType::Unknown;
+            }
+        }
+    }
     // `encoder.encode(o)` and `decoder.decode(s)`, through `dumps` and
     // `loads` with the instance's options.
     if let Some(t) = crate::compiler::stdlib::json::emit_instance_call(
@@ -15045,7 +15754,8 @@ pub fn emit_integer_power_operation(func: &mut Function, ctx: &CompilationContex
     func.instruction(&Instruction::Unreachable);
     func.instruction(&Instruction::End);
 
-    // while exp > 0 { result *= base; exp -= 1 }
+    // while exp > 0 { result *= base; exp -= 1 }, each product checked to
+    // fit in 32 bits: `2 ** 40` wrapped to 0.
     func.instruction(&Instruction::Block(BlockType::Empty));
     func.instruction(&Instruction::Loop(BlockType::Empty));
     func.instruction(&Instruction::LocalGet(exp));
@@ -15053,7 +15763,7 @@ pub fn emit_integer_power_operation(func: &mut Function, ctx: &CompilationContex
     func.instruction(&Instruction::BrIf(1));
     func.instruction(&Instruction::LocalGet(result));
     func.instruction(&Instruction::LocalGet(base));
-    func.instruction(&Instruction::I32Mul);
+    emit_checked_int(func, ctx, CheckedOp::Mul, 2);
     func.instruction(&Instruction::LocalSet(result));
     func.instruction(&Instruction::LocalGet(exp));
     func.instruction(&Instruction::I32Const(1));
@@ -15341,8 +16051,27 @@ fn emit_file_method_call(
             func.instruction(&Instruction::Drop); // fd
             IRType::None
         }
+        // `readlines()`: its `read()`, split after each `\n`.
+        "readlines"
+            if arguments.is_empty() && ctx.get_function_info("__str_file_lines").is_some() =>
+        {
+            let read = emit_file_method_call(func, ctx, memory_layout, "read", &[]);
+            let _ = read;
+            func.instruction(&Instruction::Drop); // the length; the offset carries it
+            let lines = ctx
+                .get_function_info("__str_file_lines")
+                .map(|f| f.index)
+                .expect("checked");
+            emit_user_call(func, ctx, lines);
+            IRType::List(Box::new(IRType::String))
+        }
         _ => {
-            // Unknown file method: consume everything, yield 0.
+            // A file method this compiler does not implement is refused: it
+            // answered 0, so `f.readline()` printed 0.
+            ctx.report(format!(
+                "the file method '{method_name}()' is not supported. Hint: read() the file \
+                 and split it, or use readlines()"
+            ));
             func.instruction(&Instruction::Drop); // fd
             for arg in arguments {
                 let t = emit_expr(arg, func, ctx, memory_layout, None);

@@ -764,7 +764,7 @@ fn environ(a: &mut Asm, ctx: &CompilationContext) {
 
 /// Emit a string argument, leaving its offset word; `false` (with a
 /// placeholder) for anything else.
-fn emit_str_word(
+pub(crate) fn emit_str_word(
     what: &str,
     arg: &IRExpr,
     func: &mut Function,

@@ -457,15 +457,16 @@ fn one_bad_function_does_not_drop_its_whole_module() {
 #[test]
 fn a_file_that_cannot_be_lowered_reports_why() {
     let src = "X = 1\n\
-               for i in range(3):\n\
-               \x20   X = X + i\n\
+               if X:\n\
+               \x20   def g() -> int:\n\
+               \x20       return 1\n\
                \n\
                def f() -> int:\n\
                \x20   return X\n";
     let err = try_compile_multi(&[("only.py", src)])
-        .expect_err("a module-level loop must fail the build");
+        .expect_err("a def inside a module-level if must fail the build");
     assert!(
-        err.contains("only.py") && err.contains("module level"),
+        err.contains("only.py") && err.contains("module-level"),
         "expected the file and the real cause, got: {err}"
     );
     assert!(
@@ -542,8 +543,13 @@ fn an_untyped_value_that_needs_a_type_is_refused() {
                \n\
                def f() -> int:\n\
                \x20   return g(5)\n";
-    let err = try_compile(def).expect_err("indexing an untyped parameter must be rejected");
-    assert!(err.contains("cannot be indexed"), "got: {err}");
+    // The parameter takes the int its call passes, which CPython cannot
+    // index either.
+    let err = try_compile(def).expect_err("indexing an int parameter must be rejected");
+    assert!(
+        err.contains("'int' object is not subscriptable"),
+        "got: {err}"
+    );
 }
 
 /// The refusal above must stay narrow. Arithmetic and comparison on an untyped
@@ -1280,9 +1286,9 @@ fn unimplemented_decorators_are_refused_and_caching_ones_accepted() {
              \x20   @contextlib.contextmanager\n\
              \x20   def d(self) -> int:\n\
              \x20       return self.v * 2\n",
-            // `contextlib` is no module the compiler supports, so the
-            // program is refused at its import, before the decorator.
-            "cannot import 'contextlib'",
+            // `contextlib.contextmanager` is not implemented, so the
+            // decorator is refused by name.
+            "decorator '@contextlib.contextmanager' on method 'N.d' is not supported",
         ),
         (
             "def deco(cls):\n\
@@ -1317,18 +1323,18 @@ fn a_call_to_an_unknown_function_is_refused() {
          def f() -> int:\n\
          \x20   return choices([1, 2, 3])[0]\n",
         "def f() -> int:\n\
-         \x20   return divmod(7, 2)[0]\n",
+         \x20   return len(memoryview(b\"ab\"))\n",
         "def total(a: int) -> int:\n\
          \x20   return a\n\
          \n\
          def f() -> int:\n\
          \x20   return totl(3)\n",
     ];
-    for (src, name) in
-        cases
-            .iter()
-            .zip(["'random.choices()'", "call to 'divmod'", "call to 'totl'"])
-    {
+    for (src, name) in cases.iter().zip([
+        "'random.choices()'",
+        "call to 'memoryview'",
+        "call to 'totl'",
+    ]) {
         let err = try_compile(src).expect_err("an unknown callee must be refused");
         assert!(
             err.contains(name),
@@ -1366,11 +1372,9 @@ fn attribute_reads_through_untyped_values_are_refused() {
                    \n\
                    def f() -> int:\n\
                    \x20   return val(N(5))\n";
-    let err = try_compile(untyped).expect_err("a read through an untyped value must be refused");
-    assert!(
-        err.contains("attribute 'v'") && err.contains("annotate"),
-        "expected the attribute and a hint, got: {err}"
-    );
+    // The parameter takes the class its one call passes, as CPython reads
+    // the instance it is given.
+    assert_eq!(call_i32(untyped, "f"), 5);
 
     let missing = "class N:\n\
                    \x20   def __init__(self, v: int):\n\
@@ -3781,33 +3785,29 @@ fn else_clauses_of_try_and_loops() {
 }
 
 /// Module-level and class-body statements other than definitions were
-/// skipped, so a top-level loop or call silently never ran.
+/// skipped, so a top-level loop or call silently never ran. At module level
+/// they run now, where they stand (a chained assignment too); in a class body
+/// they are still refused.
 #[test]
 fn statements_that_would_not_run_are_refused() {
-    for (source, needle) in [
+    for (source, want) in [
         (
-            "xs = []\nxs.append(1)\n\ndef f() -> int:\n    return 1\n",
-            "at module level",
+            "xs = []\nxs.append(1)\n\ndef f() -> int:\n    return len(xs)\n",
+            1,
         ),
         (
             "n = 0\nfor i in range(3):\n    n += i\n\ndef f() -> int:\n    return n\n",
-            "at module level",
+            3,
         ),
-        (
-            "n = 0\nn += 1\n\ndef f() -> int:\n    return n\n",
-            "at module level",
-        ),
-        (
-            "a = b = 0\n\ndef f() -> int:\n    return a\n",
-            "one plain name",
-        ),
-        (
-            "class C:\n    for i in range(2):\n        pass\n\ndef f() -> int:\n    return 1\n",
-            "body of class 'C'",
-        ),
+        ("n = 0\nn += 1\n\ndef f() -> int:\n    return n\n", 1),
+        ("a = b = 2\n\ndef f() -> int:\n    return a + b\n", 4),
     ] {
-        refused(source, needle);
+        assert_eq!(call_i32(source, "f"), want, "{source}");
     }
+    refused(
+        "class C:\n    for i in range(2):\n        pass\n\ndef f() -> int:\n    return 1\n",
+        "body of class 'C'",
+    );
     // The `__main__` block runs only when the file is a script; a compiled
     // module is instantiated, as an import is.
     let guarded = "def f() -> int:\n    return 4\n\nif __name__ == \"__main__\":\n    f()\n";
@@ -3819,13 +3819,21 @@ fn statements_that_would_not_run_are_refused() {
 /// word-shaped values pass through an untyped place now.
 #[test]
 fn untyped_parameters_take_only_words() {
-    refused(
-        "def ln(s):\n    return len(s)\n\ndef f() -> int:\n    return ln(\"abc\")\n",
-        "argument 1 of ln()",
+    // An unannotated parameter takes the type its calls pass, so a str or a
+    // list reaches it whole, as in CPython.
+    assert_eq!(
+        call_i32(
+            "def ln(s):\n    return len(s)\n\ndef f() -> int:\n    return ln(\"abc\")\n",
+            "f"
+        ),
+        3
     );
-    refused(
-        "def first(xs):\n    return xs[0]\n\ndef f() -> int:\n    return first([7, 8])\n",
-        "argument 1 of first()",
+    assert_eq!(
+        call_i32(
+            "def first(xs):\n    return xs[0]\n\ndef f() -> int:\n    return first([7, 8])\n",
+            "f"
+        ),
+        7
     );
     let ints = "def add(a, b):\n    return a + b\n\ndef f() -> int:\n    return add(2, 3)\n";
     assert_eq!(call_i32(ints, "f"), 5);
@@ -7786,22 +7794,12 @@ fn unpacking_a_str_or_bytes_binds_its_characters() {
 
 /// A search method on a literal folded with its first argument alone, so a
 /// start or end was dropped: `"banana".find("a", 2)` answered 1, where
-/// CPython answers 3. It is refused, as the same call on a variable is.
+/// CPython answers 3. A search with bounds is computed with them, on a
+/// literal as on a variable; `startswith` and `endswith` with bounds are
+/// still refused.
 #[test]
-fn a_search_on_a_literal_with_a_start_is_refused_not_folded() {
+fn a_search_on_a_literal_with_a_start_is_not_folded() {
     for (call, needle) in [
-        (
-            r#""banana".find("a", 2)"#,
-            "str.find() takes exactly one argument",
-        ),
-        (
-            r#""banana".index("a", 2, 4)"#,
-            "str.index() takes exactly one argument",
-        ),
-        (
-            r#""banana".count("a", 2)"#,
-            "str.count() takes exactly one argument",
-        ),
         (
             r#""banana".startswith("an", 1)"#,
             "str.startswith() takes exactly one argument",
@@ -7813,6 +7811,11 @@ fn a_search_on_a_literal_with_a_start_is_refused_not_folded() {
     ] {
         refused(&format!("def main() -> None:\n    print({call})\n"), needle);
     }
+    // CPython 3.13's answers.
+    let src = "def main() -> None:\n    print(\"banana\".find(\"a\", 2), \"banana\".index(\"a\", 2, 4), \
+               \"banana\".count(\"a\", 2), \"abcabc\".rfind(\"b\", 0, 3), \"a b c d\".split(\" \", 2))\n\n\
+               if __name__ == \"__main__\":\n    main()\n";
+    assert_eq!(run_main(src, "", &[]).stdout, "3 3 2 1 ['a', 'b', 'c d']\n");
     // With one argument the fold stands.
     let src =
         "def main() -> None:\n    print(\"banana\".find(\"an\"), \"banana\".count(\"a\"))\n\n\
@@ -8054,11 +8057,8 @@ fn an_import_of_a_module_the_program_cannot_have_is_refused() {
             "numpy",
         ),
         ("from pandas import DataFrame\n", "pandas"),
-        ("import os\nimport heapq\n", "heapq"),
-        (
-            "def f() -> int:\n    import requests\n    return 1\n",
-            "requests",
-        ),
+        ("import os\nimport sqlite3\n", "sqlite3"),
+        ("def f() -> int:\n    import boto3\n    return 1\n", "boto3"),
     ] {
         let err = try_compile(source).expect_err("an unknown module must be refused");
         assert!(err.contains(&format!("cannot import '{module}'")), "{err}");

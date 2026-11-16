@@ -494,19 +494,21 @@ fn functions_that_can_raise(ir_module: &IRModule) -> HashSet<String> {
 
 /// Whether any body in the module has a `try` or a `raise`.
 fn module_handles_exceptions(ir_module: &IRModule) -> bool {
-    fn body_has(body: &IRBody) -> bool {
-        body.statements.iter().any(|stmt| {
-            matches!(
-                stmt,
-                IRStatement::TryExcept { .. } | IRStatement::Raise { .. }
-            ) || nested_bodies(stmt).into_iter().any(body_has)
-        })
-    }
     ir_module
         .functions
         .iter()
         .chain(ir_module.classes.iter().flat_map(|c| c.methods.iter()))
-        .any(|f| body_has(&f.body))
+        .any(|f| body_handles_exceptions(&f.body))
+}
+
+/// Whether `body` has a `try` or a `raise`, at any depth.
+fn body_handles_exceptions(body: &IRBody) -> bool {
+    body.statements.iter().any(|stmt| {
+        matches!(
+            stmt,
+            IRStatement::TryExcept { .. } | IRStatement::Raise { .. }
+        ) || nested_bodies(stmt).into_iter().any(body_handles_exceptions)
+    })
 }
 
 /// The positions of the module's lifted closures, each after the closure
@@ -589,6 +591,11 @@ fn scan_raise_and_calls(body: &IRBody, raises: &mut bool, calls: &mut HashSet<St
         match stmt {
             IRStatement::If { .. } | IRStatement::While { .. } => truth_calls(calls),
             IRStatement::AugAssign { op, .. } | IRStatement::AttributeAugAssign { op, .. } => {
+                // As the binary operator does: an int result past 32 bits,
+                // a division by zero, a negative shift count.
+                if !matches!(op, IROp::BitAnd | IROp::BitOr | IROp::BitXor) {
+                    *raises = true;
+                }
                 let (own, reflected, inplace) = crate::compiler::dunders::binary_methods(op);
                 for name in [own, reflected, inplace] {
                     calls.insert(name.to_string());
@@ -859,9 +866,12 @@ fn scan_expr_calls(expr: &IRExpr, raises: &mut bool, calls: &mut HashSet<String>
             // `input()` and `open()` (a missing file is FileNotFoundError).
             // `next()` raises StopIteration on an exhausted iterator.
             // `bytes(ints)` raises ValueError for one out of range(0, 256).
+            // `abs()` and `sum()` of ints raise OverflowError past 32 bits.
             if function_name == "input"
                 || function_name == "open"
                 || function_name == "bytes"
+                || function_name == "abs"
+                || function_name == "sum"
                 || function_name == crate::ir::NEXT_FN
             {
                 *raises = true;
@@ -938,6 +948,20 @@ fn scan_expr_calls(expr: &IRExpr, raises: &mut bool, calls: &mut HashSet<String>
             let (own, reflected, _) = crate::compiler::dunders::binary_methods(op);
             calls.insert(own.to_string());
             calls.insert(reflected.to_string());
+            // An int result past 32 bits raises OverflowError. Types are not
+            // known yet here, so a float or str operation counts too: an extra
+            // check after a call costs a load and a branch, and a missing one
+            // would turn the error into a trap. So does the least int `// -1`.
+            if matches!(op, IROp::Add | IROp::Sub | IROp::Mul | IROp::LShift)
+                || (matches!(op, IROp::FloorDiv)
+                    && matches!(**right, IRExpr::Const(IRConstant::Int(n)) if n < 0))
+            {
+                *raises = true;
+            }
+            // A negative shift count raises ValueError.
+            if matches!(op, IROp::RShift) && !matches!(**right, IRExpr::Const(_)) {
+                *raises = true;
+            }
             // Division by zero raises ZeroDivisionError, unless the divisor is
             // a nonzero literal and cannot be zero.
             if matches!(op, IROp::Div | IROp::Mod | IROp::FloorDiv)
@@ -967,7 +991,13 @@ fn scan_expr_calls(expr: &IRExpr, raises: &mut bool, calls: &mut HashSet<String>
         }
         IRExpr::UnaryOp { operand, op } => {
             match op {
-                IRUnaryOp::Neg => calls.insert("__neg__".to_string()),
+                IRUnaryOp::Neg => {
+                    // `-x` of the least int overflows; a literal's sign is not.
+                    if !matches!(**operand, IRExpr::Const(_)) {
+                        *raises = true;
+                    }
+                    calls.insert("__neg__".to_string())
+                }
                 IRUnaryOp::UAdd => calls.insert("__pos__".to_string()),
                 IRUnaryOp::Invert => calls.insert("__invert__".to_string()),
                 IRUnaryOp::Not => {
@@ -1661,10 +1691,69 @@ pub(crate) fn is_pure_constant(
 /// an imported module at its first import, and a module first imported in a
 /// function when that import runs.
 pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, WaspyError> {
+    // A standard-library function written in Python is compiled once per set
+    // of argument types its calls pass (`ir::pystdlib`): code generation asks
+    // for an instance it does not find, and the module is compiled again with
+    // it, until every call has its own. An instance calling another template
+    // asks for that one on the next round.
+    crate::ir::pystdlib::take_instances();
+    let mut current: Option<IRModule> = None;
+    for _ in 0..16 {
+        let module = current.as_ref().unwrap_or(ir_module);
+        let result = compile_with_runtime(module);
+        let wanted = crate::ir::pystdlib::take_instances();
+        match crate::ir::pystdlib::with_instances(module, &wanted) {
+            Some(next) => current = Some(next),
+            None => return result,
+        }
+    }
+    compile_with_runtime(current.as_ref().unwrap_or(ir_module))
+}
+
+fn compile_with_runtime(ir_module: &IRModule) -> Result<Vec<u8>, WaspyError> {
+    // The dynamic-value runtime (`ir::dynamic`), when the module names `Any`.
+    let runtime = |force: bool| {
+        crate::ir::dynamic::with_any_runtime(ir_module, force)
+            .map_err(|e| crate::core::errors::other_error(format!("{e:#}")))
+    };
+    let with_any = runtime(false)?;
+    crate::ir::dynamic::NEEDS_RUNTIME.with(|n| n.set(false));
+    let first = compile_staged(with_any.as_ref().unwrap_or(ir_module));
+    // A literal mixing types holds dynamic values, which code generation
+    // found without the runtime: compile again with it.
+    if first.is_err() && with_any.is_none() && crate::ir::dynamic::NEEDS_RUNTIME.with(|n| n.get()) {
+        if let Some(module) = runtime(true)? {
+            return compile_staged(&module);
+        }
+    }
+    first
+}
+
+fn compile_staged(ir_module: &IRModule) -> Result<Vec<u8>, WaspyError> {
     // Each top level placed where CPython runs it, a module first imported in
     // a function given a start of its own.
     let staged = crate::compiler::start::stage(ir_module)?;
-    let ir_module = &staged.module;
+    // Top-level statements stand in the start, not in a function yet: a
+    // function holding them while the module is scanned for the helpers and
+    // runtimes its code needs, removed before the start is made.
+    let probe_name = format!("{}probe", crate::ir::TOPLEVEL_FN_PREFIX);
+    let probed;
+    let ir_module = if staged.runs {
+        let mut module = staged.module.clone();
+        module.functions.push(crate::ir::IRFunction {
+            name: probe_name.clone(),
+            params: Vec::new(),
+            body: IRBody {
+                statements: staged.start.clone(),
+            },
+            return_type: IRType::None,
+            decorators: Vec::new(),
+        });
+        probed = module;
+        &probed
+    } else {
+        &staged.module
+    };
     // The `str` methods written in IR that the program calls (`ir::str_methods`).
     let with_strs;
     let helped = crate::ir::with_str_helpers(ir_module)
@@ -1700,10 +1789,25 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, WaspyError> {
     };
     // A module that can raise carries the builtin exception classes, ahead of
     // its own, so every exception is an object of one.
+    // Top-level statements (`ir::toplevel`) stand in the start, which is not
+    // a function yet: what they raise or catch counts too.
+    let start_raises = staged.runs && {
+        let start = IRBody {
+            statements: staged.start.clone(),
+        };
+        let (mut raises, mut calls) = (false, HashSet::new());
+        scan_raise_and_calls(&start, &mut raises, &mut calls);
+        raises || body_handles_exceptions(&start) || {
+            let raisers = functions_that_can_raise(ir_module);
+            calls.iter().any(|c| raisers.contains(c))
+        }
+    };
     let with_exceptions;
     let ir_module = if crate::compiler::exceptions::module_needs_exceptions(
         ir_module,
-        !functions_that_can_raise(ir_module).is_empty() || module_handles_exceptions(ir_module),
+        start_raises
+            || !functions_that_can_raise(ir_module).is_empty()
+            || module_handles_exceptions(ir_module),
     ) {
         with_exceptions = crate::compiler::exceptions::with_builtin_exceptions(ir_module);
         &with_exceptions
@@ -1769,7 +1873,11 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, WaspyError> {
     // reaches JavaScript (`canvas = document.createElement("canvas")`) needs
     // the loader. It runs once, behind a flag it sets first.
     let bridge = crate::compiler::js::uses_bridge(ir_module);
-    if bridge {
+    // So does a module whose top level has statements (`ir::toplevel`): they
+    // print, read input, and raise, which a WASI host serves only once the
+    // instance exists, and an exception they raise is reported as the
+    // program's own (by `_start`) rather than failing instantiation.
+    if bridge || staged.runs {
         statements.insert(
             0,
             IRStatement::Assign {
@@ -1781,6 +1889,7 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, WaspyError> {
         names.insert(0, crate::compiler::js::STARTED_FLAG.to_string());
     }
     let mut with_init = ir_module.clone();
+    with_init.functions.retain(|f| f.name != probe_name);
     with_init.functions.push(crate::ir::IRFunction {
         name: MODULE_INIT_FN.to_string(),
         params: Vec::new(),
@@ -1790,6 +1899,8 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, WaspyError> {
     });
     if bridge {
         crate::compiler::js::start_on_first_use(&mut with_init);
+    } else if staged.runs {
+        crate::compiler::start::start_on_first_use(&mut with_init);
     }
     compile_module(&with_init, &names)
 }
@@ -1797,11 +1908,119 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, WaspyError> {
 fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec<u8>, WaspyError> {
     // Unannotated closure parameters are typed from their calls, and captured
     // cells from their stores, before any signature is fixed.
-    let (typed, capture_types) = crate::compiler::closures::type_closures(ir_module);
+    // So are the unannotated parameters of the program's own functions.
+    // A template is compiled only as its instances (`ir::pystdlib`): its own
+    // body, untyped, stands empty.
+    let templates: HashMap<String, Vec<IRType>> = ir_module
+        .functions
+        .iter()
+        .filter(|f| crate::ir::pystdlib::is_template(f))
+        .map(|f| {
+            (
+                f.name.clone(),
+                f.params.iter().map(|p| p.param_type.clone()).collect(),
+            )
+        })
+        .collect();
+    let class_templates: HashMap<String, Vec<IRType>> = ir_module
+        .classes
+        .iter()
+        .filter(|c| crate::ir::pystdlib::is_class_template(c))
+        .filter_map(|c| {
+            let init = c.methods.iter().find(|m| m.name == "__init__")?;
+            Some((
+                c.name.clone(),
+                init.params
+                    .iter()
+                    .skip(1)
+                    .map(|p| p.param_type.clone())
+                    .collect(),
+            ))
+        })
+        .collect();
+    let method_templates: HashMap<(String, String), Vec<IRType>> = ir_module
+        .classes
+        .iter()
+        .flat_map(|c| {
+            c.methods
+                .iter()
+                .filter(|m| crate::ir::pystdlib::is_method_template(c, m))
+                .map(|m| {
+                    (
+                        (c.name.clone(), m.name.clone()),
+                        m.params
+                            .iter()
+                            .skip(1)
+                            .map(|p| p.param_type.clone())
+                            .collect(),
+                    )
+                })
+        })
+        .collect();
+    let stubbed;
+    let ir_module =
+        if templates.is_empty() && class_templates.is_empty() && method_templates.is_empty() {
+            ir_module
+        } else {
+            let mut module = ir_module.clone();
+            // A template keeps its signature (a function's instances are called
+            // instead, a class's override it as subclasses); its body never runs.
+            let stub_method = |f: &mut crate::ir::IRFunction| {
+                f.body = crate::ir::IRBody {
+                    statements: vec![IRStatement::Raise {
+                        exception: Some(IRExpr::FunctionCall {
+                            function_name: "NotImplementedError".to_string(),
+                            arguments: vec![IRExpr::Const(crate::ir::IRConstant::String(
+                                f.name.clone(),
+                            ))],
+                        }),
+                        cause: None,
+                    }],
+                };
+                if matches!(f.return_type, IRType::Unknown) {
+                    f.return_type = IRType::None;
+                }
+                for p in &mut f.params {
+                    if matches!(p.param_type, IRType::Unknown) && p.name != "self" {
+                        p.param_type = IRType::Int;
+                    }
+                }
+            };
+            for f in &mut module.functions {
+                if templates.contains_key(&f.name) {
+                    stub_method(f);
+                }
+            }
+            let mut names: Vec<String> = templates.keys().cloned().collect();
+            for c in &mut module.classes {
+                let whole = class_templates.contains_key(&c.name);
+                let name = c.name.clone();
+                for m in &mut c.methods {
+                    if whole || method_templates.contains_key(&(name.clone(), m.name.clone())) {
+                        stub_method(m);
+                        names.push(m.name.clone());
+                    }
+                }
+            }
+            for n in names {
+                module.memory_layout.add_string(&n);
+            }
+            stubbed = module;
+            &stubbed
+        };
+    let untyped = crate::compiler::closures::type_untyped_functions(ir_module);
+    let (typed, capture_types) = crate::compiler::closures::type_closures(&untyped);
     let ir_module = &typed;
     let mut module = Module::new();
     let mut ctx = CompilationContext::new();
     ctx.capture_types = capture_types.clone();
+    ctx.start_runs = ir_module
+        .functions
+        .iter()
+        .any(|f| f.name.starts_with(crate::ir::TOPLEVEL_FN_PREFIX));
+    ctx.generic_functions = templates;
+    ctx.generic_classes = class_templates;
+    ctx.generic_methods = method_templates;
     for (i, name) in module_globals.iter().enumerate() {
         ctx.module_global_index
             .insert(name.clone(), FIRST_MODULE_GLOBAL + i as u32);
@@ -1912,7 +2131,21 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
     for (k, import) in js_imports.iter().enumerate() {
         ctx.js.insert(*import, (wasi_imports.len() + k) as u32);
     }
-    let import_count: u32 = (wasi_imports.len() + js_imports.len()) as u32;
+    // `wasi:http`'s imports, after the bridge's, when the module makes
+    // requests (a module using the bridge sends them through fetch instead).
+    let http_imports: Vec<crate::compiler::http::HttpImport> = if cfg!(feature = "wasi-http")
+        && crate::compiler::http::uses_http(ir_module)
+        && js_imports.is_empty()
+    {
+        crate::compiler::http::HttpImport::ALL.to_vec()
+    } else {
+        Vec::new()
+    };
+    for (k, import) in http_imports.iter().enumerate() {
+        ctx.http
+            .insert(*import, (wasi_imports.len() + js_imports.len() + k) as u32);
+    }
+    let import_count: u32 = (wasi_imports.len() + js_imports.len() + http_imports.len()) as u32;
 
     // Resolve each function's (and method's) return type up front, inferring
     // unannotated ones from their bodies, so the type section, the registered
@@ -2084,16 +2317,25 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
             EntityType::Function(type_index),
         );
     }
+    for import in &http_imports {
+        let (params, results) = import.signature();
+        let type_index = types.len();
+        types.ty().function(params, results);
+        host_imports.import(
+            &import.module(),
+            import.name(),
+            EntityType::Function(type_index),
+        );
+    }
 
     // The start function's `() -> ()` type, after every other type so the
     // existing "defined function i has type i" mapping is untouched.
     // A module using the bridge has no start section: its top level runs on
     // first use (`js::start_on_first_use`).
     let start_type_index = if module_globals.is_empty()
-        || ir_module
-            .functions
+        || module_globals
             .iter()
-            .any(|f| f.name == crate::compiler::js::INIT_FN)
+            .any(|g| g == crate::compiler::js::STARTED_FLAG)
     {
         None
     } else {
@@ -2633,7 +2875,11 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
 
             // Export method with qualified name; a builtin exception's are
             // the runtime's own.
-            if !crate::compiler::exceptions::is_builtin_exception(&cls.name) {
+            // A builtin exception's and a standard-library class's (`ir::pystdlib`)
+            // are the runtime's own.
+            if !crate::compiler::exceptions::is_builtin_exception(&cls.name)
+                && !cls.name.starts_with(crate::ir::PY_PREFIX)
+            {
                 exports.export(&qualified_name, wasm_encoder::ExportKind::Func, func_idx);
             }
             func_idx += 1;
@@ -2704,11 +2950,13 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
             ir_type_to_wasm_type(&info.return_type),
         ))
     };
+    // A column per name and per group of classes that share it: two
+    // hierarchies that each define a method of one name (unrelated classes
+    // both having `json`) are dispatched apart, each by its own root's
+    // signature. Classes are grouped when one's MRO holds the other.
     let mut virtual_slots: Vec<(String, u32)> = Vec::new();
+    let mut slot_of_class: Vec<(String, String, usize)> = Vec::new();
     for name in &virtual_names {
-        // The root of the hierarchy that introduced the name fixes the
-        // signature, and its function index doubles as the type index: the type
-        // section emits one type per defined function, in function order.
         let mut owners: Vec<(String, u32)> = Vec::new();
         for cls in &ir_module.classes {
             let Some(ci) = ctx.get_class_info(&cls.name) else {
@@ -2720,25 +2968,79 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
                 }
             }
         }
-        let Some((root_owner, root_idx)) = owners.first().cloned() else {
-            continue;
-        };
-        let Some(root_sig) = signature_of(&root_owner, name) else {
-            continue;
-        };
-        let mut agreed = true;
-        for (owner, _) in owners.iter().skip(1) {
-            if signature_of(owner, name).as_ref() != Some(&root_sig) {
-                ctx.report(format!(
-                    "'{owner}.{name}' overrides '{root_owner}.{name}' with a different \
-                     signature, so a call through a '{root_owner}' cannot reach both. \
-                     Hint: give the override the same parameter and return types"
-                ));
-                agreed = false;
+        // Union the owners that appear together in some class's MRO.
+        let mut group: Vec<usize> = (0..owners.len()).collect();
+        fn find(group: &mut [usize], i: usize) -> usize {
+            let mut i = i;
+            while group[i] != i {
+                group[i] = group[group[i]];
+                i = group[i];
+            }
+            i
+        }
+        let classes_mro: Vec<(String, Vec<String>)> = ir_module
+            .classes
+            .iter()
+            .filter_map(|c| {
+                ctx.get_class_info(&c.name)
+                    .map(|ci| (c.name.clone(), ci.mro.clone()))
+            })
+            .collect();
+        for (_, mro) in &classes_mro {
+            let present: Vec<usize> = owners
+                .iter()
+                .enumerate()
+                .filter(|(_, (o, _))| mro.contains(o))
+                .map(|(i, _)| i)
+                .collect();
+            for w in present.windows(2) {
+                let (a, b) = (find(&mut group, w[0]), find(&mut group, w[1]));
+                if a != b {
+                    group[b] = a;
+                }
             }
         }
-        if agreed {
-            virtual_slots.push((name.clone(), root_idx - import_count));
+        let mut roots: Vec<usize> = Vec::new();
+        for i in 0..owners.len() {
+            let r = find(&mut group, i);
+            if !roots.contains(&r) {
+                roots.push(r);
+            }
+        }
+        for root in roots {
+            let members: Vec<usize> = (0..owners.len())
+                .filter(|&i| find(&mut group, i) == root)
+                .collect();
+            // A group whose one owner nothing overrides needs no column.
+            if members.len() < 2 {
+                continue;
+            }
+            let first = members[0];
+            let (root_owner, root_idx) = owners[first].clone();
+            let Some(root_sig) = signature_of(&root_owner, name) else {
+                continue;
+            };
+            let mut agreed = true;
+            for &m in members.iter().skip(1) {
+                let owner = &owners[m].0;
+                if signature_of(owner, name).as_ref() != Some(&root_sig) {
+                    ctx.report(format!(
+                        "'{owner}.{name}' overrides '{root_owner}.{name}' with a different \
+                         signature, so a call through a '{root_owner}' cannot reach both. \
+                         Hint: give the override the same parameter and return types"
+                    ));
+                    agreed = false;
+                }
+            }
+            if agreed {
+                let column = virtual_slots.len();
+                virtual_slots.push((name.clone(), root_idx - import_count));
+                for (class, mro) in &classes_mro {
+                    if members.iter().any(|&m| mro.contains(&owners[m].0)) {
+                        slot_of_class.push((class.clone(), name.clone(), column));
+                    }
+                }
+            }
         }
     }
 
@@ -2755,9 +3057,10 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
     // compiled rather than when the table is finally written out.
     ctx.vtable_base = lambda_functions.len() as u32;
     if vtable_stride > 0 {
-        for (column, (name, type_index)) in virtual_slots.iter().enumerate() {
+        for (class, name, column) in &slot_of_class {
+            let type_index = virtual_slots[*column].1;
             ctx.virtual_slots
-                .insert(name.clone(), (column as u32, *type_index));
+                .insert(format!("{class}::{name}"), (*column as u32, type_index));
         }
         // Row per class id, column per virtual name, holding that class's
         // resolved implementation. `ClassInfo::methods` already carries every
@@ -2794,6 +3097,23 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
     {
         let start = ctx.helper(crate::compiler::runtime::Helper::Start);
         exports.export("_start", wasm_encoder::ExportKind::Func, start);
+    }
+
+    // A module importing `wasi:http` answers the host's lists into blocks
+    // its `cabi_realloc` takes.
+    if !ctx.http.is_empty() {
+        let realloc = ctx.helper(crate::compiler::runtime::Helper::Http(
+            crate::compiler::http::HttpFn::Realloc,
+        ));
+        exports.export("cabi_realloc", wasm_encoder::ExportKind::Func, realloc);
+        let adapter = ctx.helper(crate::compiler::runtime::Helper::Http(
+            crate::compiler::http::HttpFn::AdapterRealloc,
+        ));
+        exports.export(
+            "cabi_realloc_adapter",
+            wasm_encoder::ExportKind::Func,
+            adapter,
+        );
     }
 
     // Export memory

@@ -46,7 +46,7 @@ permalink: /docs/programs/
             <span class="hex grid size-8 shrink-0 place-items-center bg-red/15 font-mono text-sm font-bold text-red" aria-hidden="true">&ne;</span>
             <h3 class="font-display text-base font-semibold">Answers differently</h3>
         </div>
-        <p class="mt-3 text-sm leading-relaxed text-ink-1">A short documented list, led by <code>int</code>, which is 32 bits and wraps instead of growing, and a NaN inside a collection, which does not equal itself: see <a href="/docs/limitations/#where-the-answer-differs">Where the answer differs</a>. Everywhere else the rule is Python's answer or a loud failure.</p>
+        <p class="mt-3 text-sm leading-relaxed text-ink-1">A short documented list, led by a NaN inside a collection, which does not equal itself, and a temporary that lives to the end of its statement: see <a href="/docs/limitations/#where-the-answer-differs">Where the answer differs</a>. Everywhere else the rule is Python's answer or a loud failure.</p>
     </div>
 </div>
 
@@ -132,7 +132,7 @@ def empty_cart_total() -> float:
         <dd class="-mt-3.5 text-[0.94rem] leading-relaxed text-ink-1 sm:mt-0">Parameter and return annotations pick the WebAssembly value types. A collection passed into or out of a function needs the parameterised form, <code>List[str]</code> rather than a bare <code>list</code>: the parameterised form is what gives the compiler an element type. Calls may pass arguments by keyword, and functions and <code>__init__</code> collect extras with <code>*args: T</code> and <code>**kwargs: T</code>.</dd>
 
         <dt class="font-mono text-xs font-semibold tracking-wider text-amber uppercase sm:pt-0.5">Entry points</dt>
-        <dd class="-mt-3.5 text-[0.94rem] leading-relaxed text-ink-1 sm:mt-0">Every module-level <code>def</code> is exported. Only definitions run at module level; put the code that runs in a function, or under <code>if __name__ == "__main__":</code>, which makes the module a WASI command that <code>wasmtime run</code> runs like <code>python3</code>.</dd>
+        <dd class="-mt-3.5 text-[0.94rem] leading-relaxed text-ink-1 sm:mt-0">Every module-level <code>def</code> is exported. Statements at the top level run where they stand, as a script's do, and they or an <code>if __name__ == "__main__":</code> block make the module a WASI command that <code>wasmtime run</code> runs like <code>python3</code>.</dd>
 
         <dt class="font-mono text-xs font-semibold tracking-wider text-amber uppercase sm:pt-0.5">Imports</dt>
         <dd class="-mt-3.5 text-[0.94rem] leading-relaxed text-ink-1 sm:mt-0"><code>import mod</code> and <code>from mod import f</code> resolve sibling <code>.py</code> files (and <code>pkg/mod.py</code> packages) from disk and link them into the one output module, each compiled once. No PyPI packages: beyond your own modules, the supported subset is standard-library only.</dd>
@@ -171,7 +171,7 @@ def empty_cart_total() -> float:
 
 <div class="callout">
     <p><strong>The rule the compiler holds itself to:</strong> a construct either produces Python's answer or fails loudly. It never quietly produces a different one.</p>
-    <p>There are a few documented exceptions. Integer width is the first: <code>int</code> is a 32-bit two's-complement value, so <code>1000000 * 1000000</code> wraps to <code>-727379968</code> where CPython answers <code>1000000000000</code>. If your arithmetic can exceed 32 bits, your program is not in the supported subset. Another is a NaN inside a collection, which does not equal itself. Both are explained under <a href="/docs/numbers/">Numbers</a>, and <a href="/docs/limitations/#where-the-answer-differs">Limitations</a> has the full list.</p>
+    <p>There are a few documented exceptions, such as a NaN inside a collection, which does not equal itself (see <a href="/docs/numbers/">Numbers</a>); <a href="/docs/limitations/#where-the-answer-differs">Limitations</a> has the full list. Integer width is not one of them: <code>int</code> is 32 bits, and <code>1000000 * 1000000</code> raises <code>OverflowError</code> where CPython answers <code>1000000000000</code>, so a program whose arithmetic can exceed 32 bits stops with an error rather than going on with a wrong number.</p>
 </div>
 
 <h2 id="shapes">Shapes that do not compile</h2>
@@ -181,8 +181,8 @@ def empty_cart_total() -> float:
 <div class="not-prose my-6 {{ codecls }}">
 <ul class="divide-y divide-line">
 
-{% call shape("Module-level statements other than definitions", ["refused", "workaround"]) %}
-A loop, <code>if</code>, <code>try</code>, bare call, augmented assignment, tuple unpacking, or write through a subscript or attribute at module level. Only definitions run when a module starts, so the statement would be compiled away. <code>X = 1</code>, <code>X = helper()</code>, <code>X = ClassName()</code>, <code>def</code>, <code>class</code>, and imports (a <code>try</code>/<code>except ImportError</code> guarded import included) do work, and a definition that is not a plain constant is evaluated once, at instantiation, in source order, so every function shares the same list or instance. Move the rest into a function, or under <code>if __name__ == "__main__":</code>.
+{% call shape("A <code>def</code> or <code>class</code> inside a module-level <code>if</code>, loop, or <code>try</code>", ["refused", "workaround"]) %}
+Statements at module level run where they stand, in source order with the definitions around them, as CPython runs a script. A function or class made inside one of them would exist only once it ran, and the module's functions and classes are made when it is compiled, so define it at module level. A statement that uses a function defined below it, or a name assigned below it, is refused, as it is a <code>NameError</code> in CPython.
 {% endcall %}
 
 {% call shape("Asynchronous generators and comprehensions", ["refused"]) %}

@@ -147,6 +147,13 @@ fn order_free(expr: &IRExpr) -> bool {
             operand,
             op: IRUnaryOp::Neg | IRUnaryOp::UAdd,
         } => matches!(operand.as_ref(), IRExpr::Const(_)),
+        // A literal of such values only allocates, which nothing can see
+        // happen earlier (`messages=[{"role": "user", "content": text}]`);
+        // a dict's keys are constants, so hashing them runs no code.
+        IRExpr::ListLiteral(items) | IRExpr::TupleLiteral(items) => items.iter().all(order_free),
+        IRExpr::DictLiteral(entries) => entries
+            .iter()
+            .all(|(k, v)| matches!(k, IRExpr::Const(_)) && order_free(v)),
         _ => false,
     }
 }
@@ -1132,6 +1139,13 @@ pub(crate) fn rewrite(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr>
     if let Some(bridged) = crate::compiler::js::rewrite(expr, ctx) {
         return Some(bridged);
     }
+    if let Some(copied) = rewrite_copy(expr, ctx) {
+        return Some(copied);
+    }
+    // A builtin given a dynamic value is the runtime's (`ir::dynamic`).
+    if let Some(dynamic) = rewrite_any_builtin(expr, ctx) {
+        return Some(dynamic);
+    }
     if let Some(logged) = rewrite_log_expr(expr, ctx) {
         return Some(logged);
     }
@@ -1730,11 +1744,142 @@ fn enumerate_walk(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
 }
 
 /// A walked iterator builtin as the list it yields: `reversed()`, `zip()`,
-/// `enumerate()`.
+/// `enumerate()`, and a dynamic value's elements.
 fn iterator_walk(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
     reversed_walk(expr, ctx)
         .or_else(|| zip_walk(expr, ctx))
         .or_else(|| enumerate_walk(expr, ctx))
+        .or_else(|| any_walk(expr, ctx))
+}
+
+/// A builtin given a dynamic value (`ir::dynamic`), as the runtime's
+/// function: `sum()`, `int()`, `float()`, `abs()`, `format()` with a spec (an
+/// f-string's `{x:>5}`), `isinstance()` against builtin types, and `is None`.
+fn rewrite_any_builtin(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
+    use crate::ir::dynamic::is_any;
+    let runtime_fn = |name: &str, arguments: Vec<IRExpr>| IRExpr::FunctionCall {
+        function_name: name.to_string(),
+        arguments,
+    };
+    match expr {
+        IRExpr::FunctionCall {
+            function_name,
+            arguments,
+        } if ctx.get_function_info(function_name).is_none() => {
+            let first = arguments.first()?;
+            let first_ty = infer_value_type(first, ctx);
+            match (function_name.as_str(), arguments.as_slice()) {
+                ("sum", [items, rest @ ..]) => {
+                    let items_ty = infer_value_type(items, ctx);
+                    let walked = match &items_ty {
+                        IRType::List(e) if is_any(e) => items.clone(),
+                        t if is_any(t) => call(items, "iter_items", Vec::new()),
+                        _ => return None,
+                    };
+                    let start = match rest {
+                        [] => IRExpr::Const(crate::ir::IRConstant::Int(0)),
+                        [IRExpr::Keyword { name, value }] if name == "start" => (**value).clone(),
+                        [value] if !matches!(value, IRExpr::Keyword { .. }) => value.clone(),
+                        _ => return None,
+                    };
+                    Some(runtime_fn("__any_sum", vec![walked, start]))
+                }
+                // `max(xs)` of dynamic values, or `max(a, b)` with one among them.
+                ("max" | "min", _)
+                    if !arguments
+                        .iter()
+                        .any(|a| matches!(a, IRExpr::Keyword { .. })) =>
+                {
+                    let walked = match arguments.as_slice() {
+                        [items] => match infer_value_type(items, ctx) {
+                            IRType::List(e) if is_any(&e) => items.clone(),
+                            t if is_any(&t) => call(items, "iter_items", Vec::new()),
+                            _ => return None,
+                        },
+                        several if several.iter().any(|a| is_any(&infer_value_type(a, ctx))) => {
+                            IRExpr::ListLiteral(several.to_vec())
+                        }
+                        _ => return None,
+                    };
+                    Some(runtime_fn(&format!("__any_{function_name}"), vec![walked]))
+                }
+                ("int", [value]) if is_any(&first_ty) => {
+                    Some(runtime_fn("__any_int", vec![value.clone()]))
+                }
+                ("float", [value]) if is_any(&first_ty) => {
+                    Some(runtime_fn("__any_float", vec![value.clone()]))
+                }
+                ("abs", [value]) if is_any(&first_ty) => Some(call(value, "__abs__", Vec::new())),
+                ("format", [value, spec]) if is_any(&first_ty) => Some(runtime_fn(
+                    "__any_format",
+                    vec![value.clone(), spec.clone()],
+                )),
+                ("isinstance", [value, types]) if is_any(&first_ty) => {
+                    let names: Vec<String> = match types {
+                        IRExpr::Variable(name) => vec![name.clone()],
+                        IRExpr::TupleLiteral(items) => items
+                            .iter()
+                            .map(|i| match i {
+                                IRExpr::Variable(name) => Some(name.clone()),
+                                _ => None,
+                            })
+                            .collect::<Option<Vec<_>>>()?,
+                        _ => return None,
+                    };
+                    let builtin = |n: &str| {
+                        matches!(
+                            n,
+                            "int" | "float" | "str" | "bool" | "list" | "dict" | "tuple"
+                        )
+                    };
+                    if !names.iter().all(|n| builtin(n)) {
+                        return None;
+                    }
+                    let test = |n: &String| {
+                        runtime_fn(
+                            "__any_isa",
+                            vec![
+                                value.clone(),
+                                IRExpr::Const(crate::ir::IRConstant::String(n.clone())),
+                            ],
+                        )
+                    };
+                    let mut tests = names.iter().map(test);
+                    let first = tests.next()?;
+                    Some(tests.fold(first, |acc, t| IRExpr::BoolOp {
+                        left: Box::new(acc),
+                        right: Box::new(t),
+                        op: crate::ir::IRBoolOp::Or,
+                    }))
+                }
+                _ => None,
+            }
+        }
+        // `x is None` of a dynamic value: whether it holds None.
+        IRExpr::CompareOp { left, right, op }
+            if matches!(op, IRCompareOp::Is | IRCompareOp::IsNot)
+                && matches!(**right, IRExpr::Const(crate::ir::IRConstant::None))
+                && is_any(&infer_value_type(left, ctx)) =>
+        {
+            let test = runtime_fn("__any_is_none", vec![(**left).clone()]);
+            Some(match op {
+                IRCompareOp::Is => test,
+                _ => IRExpr::UnaryOp {
+                    op: crate::ir::IRUnaryOp::Not,
+                    operand: Box::new(test),
+                },
+            })
+        }
+        _ => None,
+    }
+}
+
+/// A dynamic value (`ir::dynamic`) where it is walked: what iterating it
+/// yields, as a list of dynamic values (a list's own elements, a dict's keys,
+/// a str's characters).
+fn any_walk(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
+    crate::ir::dynamic::is_any(&infer_value_type(expr, ctx))
+        .then(|| call(expr, "iter_items", Vec::new()))
 }
 
 /// `reversed(x)` where it is walked (a loop, a comprehension, a builtin that
@@ -2102,6 +2247,61 @@ fn rewrite_python_str_method(expr: &IRExpr, ctx: &CompilationContext) -> Option<
     if !matches!(infer_value_type(object, ctx), IRType::String) {
         return None;
     }
+    // `split(sep, maxsplit)`, and a search bounded by `start` and `end`: the
+    // helpers in Python (`ir::str_methods`), with the arguments placed.
+    let range = match method_name.as_str() {
+        "split" => Some((
+            "split_max",
+            &["sep", "maxsplit"][..],
+            vec![
+                IRExpr::Const(IRConstant::None),
+                IRExpr::Const(IRConstant::Int(-1)),
+            ],
+        )),
+        "find" | "rfind" | "index" | "rindex" | "count" => Some((
+            match method_name.as_str() {
+                "find" => "find_range",
+                "rfind" => "rfind_range",
+                "index" => "index_range",
+                "rindex" => "rindex_range",
+                _ => "count_range",
+            },
+            &["sub", "start", "end"][..],
+            vec![
+                IRExpr::Const(IRConstant::String(String::new())),
+                IRExpr::Const(IRConstant::Int(0)),
+                IRExpr::Const(IRConstant::Int(i32::MAX)),
+            ],
+        )),
+        _ => None,
+    };
+    if let Some((name, params, defaults)) = range {
+        if arguments.len() < 2 {
+            return None;
+        }
+        let mut slots: Vec<Option<IRExpr>> = vec![None; params.len()];
+        let mut next = 0;
+        for arg in arguments {
+            match arg {
+                IRExpr::Keyword { name: key, value } => {
+                    let at = params.iter().position(|p| p == key)?;
+                    slots[at] = Some((**value).clone());
+                }
+                other => {
+                    if next >= slots.len() {
+                        return None;
+                    }
+                    slots[next] = Some(other.clone());
+                    next += 1;
+                }
+            }
+        }
+        let mut placed = vec![(**object).clone()];
+        for (slot, default) in slots.into_iter().zip(defaults) {
+            placed.push(slot.unwrap_or(default));
+        }
+        return helper(name, placed);
+    }
     match method_name.as_str() {
         "translate" => {
             let [table] = arguments.as_slice() else {
@@ -2294,12 +2494,42 @@ pub(crate) fn rewrite_statement(
         else_body,
     } = stmt
     {
-        if let Some(walk) = reversed_walk(iterable, ctx) {
+        // A file's lines, from its `readlines()`.
+        if matches!(infer_value_type(iterable, ctx), IRType::File)
+            && ctx.get_function_info("__str_file_lines").is_some()
+        {
+            return Some(IRStatement::For {
+                target: target.clone(),
+                iterable: IRExpr::MethodCall {
+                    object: Box::new(iterable.clone()),
+                    method_name: "readlines".to_string(),
+                    arguments: Vec::new(),
+                },
+                body: body.clone(),
+                else_body: else_body.clone(),
+            });
+        }
+        if let Some(walk) = reversed_walk(iterable, ctx).or_else(|| any_walk(iterable, ctx)) {
             return Some(IRStatement::For {
                 target: target.clone(),
                 iterable: walk,
                 body: body.clone(),
                 else_body: else_body.clone(),
+            });
+        }
+    }
+    // `a, b = value` of a dynamic value unpacks what iterating it yields.
+    if let IRStatement::TupleUnpack {
+        targets,
+        value,
+        starred,
+    } = stmt
+    {
+        if let Some(walk) = any_walk(value, ctx) {
+            return Some(IRStatement::TupleUnpack {
+                targets: targets.clone(),
+                value: walk,
+                starred: *starred,
             });
         }
     }
@@ -3093,3 +3323,92 @@ fn rewrite_optional_text_compare(expr: &IRExpr, ctx: &CompilationContext) -> Opt
 /// `__optional_text_eq(x, s, x_first)`: an optional string equal to a
 /// string, evaluated in the order written.
 pub(crate) const OPTIONAL_TEXT_EQ_FN: &str = "__optional_text_eq";
+
+/// `copy.copy(x)` and `copy.deepcopy(x)`, by the type of `x`: a list's slice,
+/// a dict's or set's `copy()`, and for a deep copy a comprehension copying
+/// each element that is itself mutable. An immutable value is itself, as in
+/// CPython. An instance is refused (its class would need `__copy__`).
+fn rewrite_copy(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
+    let IRExpr::FunctionCall {
+        function_name,
+        arguments,
+    } = expr
+    else {
+        return None;
+    };
+    let prefix = format!("{}copy_", crate::ir::PY_PREFIX);
+    let kind = function_name.strip_prefix(&prefix)?;
+    if !matches!(kind, "copy" | "deepcopy") || arguments.len() != 1 {
+        return None;
+    }
+    let value = &arguments[0];
+    let ty = infer_value_type(value, ctx);
+    fn immutable(ty: &IRType) -> bool {
+        match ty {
+            IRType::Int
+            | IRType::Float
+            | IRType::Bool
+            | IRType::String
+            | IRType::Bytes
+            | IRType::None => true,
+            IRType::Tuple(ts) => ts.iter().all(immutable),
+            IRType::VarTuple(t) => immutable(t),
+            _ => false,
+        }
+    }
+    fn shallow(value: &IRExpr, ty: &IRType) -> Option<IRExpr> {
+        Some(match ty {
+            t if immutable(t) => value.clone(),
+            IRType::List(_) => IRExpr::Slicing {
+                container: Box::new(value.clone()),
+                start: None,
+                end: None,
+                step: None,
+            },
+            IRType::Dict(..) | IRType::Set(_) => IRExpr::MethodCall {
+                object: Box::new(value.clone()),
+                method_name: "copy".to_string(),
+                arguments: Vec::new(),
+            },
+            _ => return None,
+        })
+    }
+    fn deep(value: &IRExpr, ty: &IRType, depth: usize) -> Option<IRExpr> {
+        let var = |n: &str| format!("__deepcopy_{n}{depth}");
+        Some(match ty {
+            t if immutable(t) => value.clone(),
+            IRType::List(inner) if immutable(inner) => shallow(value, ty)?,
+            IRType::List(inner) => IRExpr::Comprehension {
+                kind: crate::ir::IRComprehensionKind::List,
+                element: Box::new(deep(&IRExpr::Variable(var("v")), inner, depth + 1)?),
+                value: None,
+                generators: vec![crate::ir::IRGenerator {
+                    targets: vec![var("v")],
+                    iterable: value.clone(),
+                    conditions: Vec::new(),
+                }],
+            },
+            IRType::Set(_) => shallow(value, ty)?,
+            IRType::Dict(_, v) if immutable(v) => shallow(value, ty)?,
+            _ => return None,
+        })
+    }
+    let made = if kind == "copy" {
+        shallow(value, &ty)
+    } else {
+        deep(value, &ty, 0)
+    };
+    match made {
+        Some(e) => Some(e),
+        None => {
+            if !ctx.scanning.get() && !matches!(ty, IRType::Unknown) {
+                ctx.report(format!(
+                    "copy.{kind}() of a '{}' is not supported: it copies lists (nested ones \
+                     too), sets, dicts whose values are immutable, and immutable values",
+                    crate::type_to_string(&ty)
+                ));
+            }
+            None
+        }
+    }
+}

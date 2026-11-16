@@ -220,7 +220,7 @@ pub fn compile_python_to_wasm_with_options(
     compiler::validate_wasm(&raw_wasm)?;
 
     // Optimize the WASM binary if requested
-    if options.optimize {
+    let wasm = if options.optimize {
         log_verbose!("Optimizing WebAssembly binary...");
         let optimized =
             optimize::optimize_wasm(&raw_wasm).context("Failed to optimize WebAssembly binary")?;
@@ -229,11 +229,24 @@ pub fn compile_python_to_wasm_with_options(
             optimized.len(),
             raw_wasm.len() as i64 - optimized.len() as i64
         );
-        Ok(optimized)
+        optimized
     } else {
         log_debug!("Skipping optimization");
-        Ok(raw_wasm)
+        raw_wasm
+    };
+    as_component_if_needed(wasm)
+}
+
+/// A module importing WASI preview 2 interfaces (a program making HTTP
+/// requests) made into a component, which is the only thing that can import
+/// them; any other module as it is.
+fn as_component_if_needed(wasm: Vec<u8>) -> Result<Vec<u8>> {
+    #[cfg(feature = "wasi-http")]
+    if compiler::component::imports_preview2(&wasm) {
+        log_verbose!("Wrapping the module as a component...");
+        return compiler::component::componentize(&wasm);
     }
+    Ok(wasm)
 }
 
 /// Compile multiple Python source files into a single WASM binary.
@@ -621,11 +634,12 @@ fn compile_merged_sources(
     compiler::validate_wasm(&raw_wasm)?;
 
     // Optimize the WASM binary
-    if options.optimize {
-        optimize::optimize_wasm(&raw_wasm).context("Failed to optimize WebAssembly binary")
+    let wasm = if options.optimize {
+        optimize::optimize_wasm(&raw_wasm).context("Failed to optimize WebAssembly binary")?
     } else {
-        Ok(raw_wasm)
-    }
+        raw_wasm
+    };
+    as_component_if_needed(wasm)
 }
 
 /// Compile multiple Python source files into a single WASM binary with config awareness.
@@ -1239,6 +1253,8 @@ pub fn type_to_string(ir_type: &IRType) -> String {
                 .join(" | ");
             format!("Union[{inner}]")
         }
+        // A dynamic value (`ir::dynamic`) is `Any`, whichever kind it holds.
+        IRType::Class(name) if ir::dynamic::is_any_class(name) => "Any".to_string(),
         IRType::Class(name) => name.clone(),
         IRType::ClassRef(name) => format!("type[{name}]"),
         IRType::Module(name) => format!("Module[{name}]"),

@@ -1148,6 +1148,11 @@ fn ensure_local(ctx: &mut CompilationContext, name: &str, var_type: IRType) {
 /// anything else is left `Unknown` (an i32 slot, which collections and pointers
 /// also use).
 pub(crate) fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRType {
+    // A call of a standard-library template answers what its instance for
+    // the arguments' types does (`ir::pystdlib`).
+    if let Some(ty) = crate::compiler::expression::template_call_type(value, ctx) {
+        return ty;
+    }
     // An operator on an instance answers what its special method does. A
     // binary operator is one only when an operand is an instance, which its
     // arm below checks first: asking the rewrite of every operator in a chain
@@ -1197,6 +1202,17 @@ pub(crate) fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRTy
                 // Two lists of one element type join into another.
                 lt
             } else if matches!(op, IROp::Mul) && matches!(rt, IRType::String | IRType::Bytes) {
+                rt
+            } else if matches!(op, IROp::Mul)
+                && matches!(lt, IRType::List(_))
+                && matches!(rt, IRType::Int | IRType::Bool | IRType::Unknown)
+            {
+                // Repetition of a list is a list of its elements.
+                lt
+            } else if matches!(op, IROp::Mul)
+                && matches!(rt, IRType::List(_))
+                && matches!(lt, IRType::Int | IRType::Bool | IRType::Unknown)
+            {
                 rt
             } else {
                 IRType::Unknown
@@ -1386,13 +1402,20 @@ pub(crate) fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRTy
             let (k, v) = (of(&keys), of(&values));
             if scalar(&k) && scalar(&v) {
                 IRType::Dict(Box::new(k), Box::new(v))
+            } else if k == IRType::String
+                && has_any_runtime(ctx)
+                && literal_mixes_types(&values, ctx)
+            {
+                // A record of values of several types: `dict[str, Any]`.
+                IRType::Dict(Box::new(k), Box::new(crate::ir::dynamic::any_type()))
             } else {
                 IRType::Unknown
             }
         }
         IRExpr::FunctionCall { function_name, .. } if function_name == "float" => IRType::Float,
         IRExpr::FunctionCall { function_name, .. }
-            if function_name == "ord" && ctx.get_function_info("ord").is_none() =>
+            if matches!(function_name.as_str(), "ord" | "hash")
+                && ctx.get_function_info(function_name).is_none() =>
         {
             IRType::Int
         }
@@ -1803,9 +1826,37 @@ fn literal_elem_type(elems: &[IRExpr], ctx: &CompilationContext) -> IRType {
     // unifies instances to their common base: an unknown taken up again by
     // a later element typed `[Sq(), Tri(), Sq()]` as a list of `Sq`, and
     // `Tri`'s method was dispatched as `Sq`'s.
+    // With the dynamic-value runtime, a literal mixing types holds `Any`
+    // values (`ir::dynamic`), as code generation builds it.
     types
         .try_fold(first, |acc, t| unify_scanned(&acc, &t, ctx))
-        .unwrap_or(IRType::Unknown)
+        .unwrap_or_else(|| {
+            if has_any_runtime(ctx) {
+                crate::ir::dynamic::any_type()
+            } else {
+                IRType::Unknown
+            }
+        })
+}
+
+/// Whether the dynamic-value runtime (`ir::dynamic`) is in this module.
+pub(crate) fn has_any_runtime(ctx: &CompilationContext) -> bool {
+    // A scratch context (return inference) has the runtime's functions but
+    // not yet its classes.
+    ctx.get_class_info(crate::ir::dynamic::ANY_CLASS).is_some()
+        || ctx.get_function_info("__any_of_int").is_some()
+}
+
+/// Whether the elements of a collection literal have no one type the scan
+/// can see, so the literal holds dynamic values (`[1, "a"]`).
+pub(crate) fn literal_mixes_types(elems: &[IRExpr], ctx: &CompilationContext) -> bool {
+    let mut types = elems.iter().map(|e| literal_member_type(e, ctx));
+    let Some(first) = types.next() else {
+        return false;
+    };
+    types
+        .try_fold(first, |acc, t| unify_scanned(&acc, &t, ctx))
+        .is_none()
 }
 
 /// The one type two elements of a literal share, where a part one does not
@@ -1854,7 +1905,12 @@ fn infer_iterable_elem_type(iterable: &IRExpr, ctx: &CompilationContext) -> IRTy
         IRExpr::ListLiteral(elems) | IRExpr::SetLiteral(elems) | IRExpr::TupleLiteral(elems) => {
             literal_elem_type(elems, ctx)
         }
-        IRExpr::Variable(name) => match ctx.get_local_info(name).map(|i| i.var_type.clone()) {
+        // A local, else a module global (as a start with statements reads one).
+        IRExpr::Variable(name) => match ctx
+            .get_local_info(name)
+            .map(|i| i.var_type.clone())
+            .or_else(|| ctx.module_global_types.get(name).cloned())
+        {
             Some(IRType::List(t)) | Some(IRType::Set(t)) | Some(IRType::VarTuple(t)) => *t,
             Some(IRType::Tuple(members)) => tuple_member(&members),
             // A str's characters are strs.
@@ -1959,7 +2015,43 @@ pub(crate) fn resolve_return_type(
 
     let mut inferred = IRType::Unknown;
     collect_return_type(&ir_func.body, &ctx, &mut inferred);
+    // A record returned as a dict literal whose values the scan cannot type
+    // here (they read module globals or instances' fields): its values are
+    // held as dynamic values (`return {"id": n, "name": item.name}`).
+    if inferred == IRType::Unknown && returns_str_keyed_record(&ir_func.body) {
+        return IRType::Dict(
+            Box::new(IRType::String),
+            Box::new(crate::ir::dynamic::any_type()),
+        );
+    }
     inferred
+}
+
+/// Whether a body returns a non-empty dict literal whose keys are all str
+/// constants.
+fn returns_str_keyed_record(body: &IRBody) -> bool {
+    body.statements.iter().any(|stmt| match stmt {
+        IRStatement::Return(Some(IRExpr::DictLiteral(entries))) => {
+            !entries.is_empty()
+                && entries
+                    .iter()
+                    .all(|(k, _)| matches!(k, IRExpr::Const(IRConstant::String(_))))
+        }
+        IRStatement::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            returns_str_keyed_record(then_body)
+                || else_body
+                    .as_ref()
+                    .is_some_and(|b| returns_str_keyed_record(b))
+        }
+        IRStatement::While { body, .. } | IRStatement::For { body, .. } => {
+            returns_str_keyed_record(body)
+        }
+        _ => false,
+    })
 }
 
 /// Fold the inferred types of a body's `return` expressions into `out`. A float
@@ -2284,10 +2376,18 @@ fn adopt_element(
     ctx: &mut CompilationContext,
 ) {
     let known = |t: &IRType| !matches!(t, IRType::Unknown | IRType::Any | IRType::None);
-    let Some(info) = ctx.locals_map.get_mut(target) else {
-        return;
+    // A global of a start with statements takes them as a local does.
+    let slot = match ctx.locals_map.get_mut(target) {
+        Some(info) => &mut info.var_type,
+        None if ctx.in_module_init && ctx.start_runs => {
+            match ctx.module_global_types.get_mut(target) {
+                Some(ty) => ty,
+                None => return,
+            }
+        }
+        None => return,
     };
-    match &mut info.var_type {
+    match slot {
         IRType::List(e) | IRType::Set(e) if matches!(**e, IRType::Unknown) && known(assigned) => {
             **e = assigned.clone();
         }
@@ -2383,6 +2483,20 @@ pub(crate) fn global_declarations(body: &IRBody) -> Vec<String> {
     names
 }
 
+/// Whether `ty` leaves a part of itself unknown (an empty collection's
+/// elements).
+fn has_unknown(ty: &IRType) -> bool {
+    match ty {
+        IRType::Unknown => true,
+        IRType::List(e) | IRType::Set(e) | IRType::VarTuple(e) | IRType::Optional(e) => {
+            has_unknown(e)
+        }
+        IRType::Dict(k, v) => has_unknown(k) || has_unknown(v),
+        IRType::Tuple(ts) => ts.iter().any(has_unknown),
+        _ => false,
+    }
+}
+
 /// Whether an assignment to `target` stores into its module global.
 fn assigns_module_global(ctx: &CompilationContext, target: &str) -> bool {
     (ctx.in_module_init || ctx.declared_globals.contains(target))
@@ -2427,7 +2541,36 @@ pub fn scan_and_allocate_locals(body: &IRBody, ctx: &mut CompilationContext) {
             }
         }
         match stmt {
-            IRStatement::Assign { target, .. } if assigns_module_global(ctx, target) => {}
+            IRStatement::Assign {
+                target,
+                var_type,
+                value,
+            } if assigns_module_global(ctx, target) => {
+                // In a start with statements, what follows reads the global at
+                // the type its first assignment gives it: a loop over it types
+                // its variable here, before code generation records the type.
+                if ctx.in_module_init
+                    && ctx.start_runs
+                    && !ctx.module_global_types.contains_key(target)
+                {
+                    // An empty dict takes the types of what is stored in
+                    // it, as a local does (`adopt_element`).
+                    let inferred = match value {
+                        IRExpr::DictLiteral(entries) if entries.is_empty() => {
+                            IRType::Dict(Box::new(IRType::Unknown), Box::new(IRType::Unknown))
+                        }
+                        _ => infer_value_type(value, ctx),
+                    };
+                    let ty = var_type
+                        .clone()
+                        .filter(|t| !matches!(t, IRType::Unknown))
+                        .map(|annotated| refine_annotation(annotated, &inferred))
+                        .unwrap_or(inferred);
+                    if !matches!(ty, IRType::Unknown) {
+                        ctx.module_global_types.insert(target.clone(), ty);
+                    }
+                }
+            }
             IRStatement::Assign {
                 target,
                 var_type,
@@ -2904,12 +3047,20 @@ fn compile_statement(
                 // definition records the type every reader will see, and a
                 // rebinding has to keep it.
                 let global = ctx.module_global_index[target];
-                let recorded = if ctx.in_module_init {
+                // A start with statements can assign a global again, which
+                // keeps the type it was first given, as a function's
+                // rebinding does.
+                let recorded = if ctx.in_module_init && !ctx.start_runs {
                     None
                 } else {
                     ctx.module_global_types.get(target).cloned()
                 };
-                let expected = recorded.as_ref().or(var_type.as_ref());
+                // A type the scan only partly knew (a list of what it could
+                // not tell) is not what the value is built as.
+                let expected = recorded
+                    .as_ref()
+                    .filter(|t| !(ctx.in_module_init && has_unknown(t)))
+                    .or(var_type.as_ref());
                 let emitted = crate::compiler::expression::emit_value(
                     value,
                     func,
@@ -2942,7 +3093,12 @@ fn compile_statement(
                                 crate::type_to_string(&emitted)
                             ));
                         }
-                        recorded.clone()
+                        // What the scan recorded may not know the elements yet.
+                        if fits && has_unknown(recorded) && !has_unknown(&emitted) {
+                            emitted.clone()
+                        } else {
+                            recorded.clone()
+                        }
                     }
                     (None, Some(declared)) if !matches!(declared, IRType::Unknown) => {
                         declared.clone()
@@ -5040,6 +5196,24 @@ fn compile_statement(
                     {
                         ctx.report(format!("{why} cannot be a dict key"));
                     }
+                }
+                // A dict whose key type was never learned (an empty literal
+                // nothing typed where it was made: a module-level `d = {}`
+                // filled by a function) reads every key back as an int word,
+                // so a str key printed as its address.
+                if matches!(&container_type, IRType::Dict(k, _) if matches!(**k, IRType::Unknown))
+                    && !matches!(
+                        key_type,
+                        IRType::Int | IRType::Bool | IRType::None | IRType::Unknown | IRType::Any
+                    )
+                {
+                    ctx.report(format!(
+                        "a '{}' key is stored into a dict whose key type was not learned where \
+                         it was made, which would read it back as an int. Hint: annotate the \
+                         dict where it is made (`d: dict[{}, ...] = {{}}`)",
+                        crate::compiler::operators::python_type_name(&key_type),
+                        crate::type_to_string(&key_type)
+                    ));
                 }
                 match container_type {
                     IRType::List(_) => {

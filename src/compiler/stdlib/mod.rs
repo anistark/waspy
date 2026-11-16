@@ -11,7 +11,7 @@ mod math;
 mod os;
 mod random;
 
-pub(crate) use os::{emit_environ, OsFn, STATE as OS_STATE};
+pub(crate) use os::{emit_environ, emit_str_word, OsFn, STATE as OS_STATE};
 
 pub(crate) use random::RandomFn;
 

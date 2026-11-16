@@ -2195,6 +2195,85 @@ fn emit_dumped(
 }
 
 /// Emit `json.<name>(...)`, or `None` when it is not implemented.
+/// Whether `json.dumps(value)` holds dynamic values somewhere (`ir::dynamic`),
+/// which the runtime writes.
+fn dumps_dynamic(value: &IRExpr, ctx: &CompilationContext, memory_layout: &MemoryLayout) -> bool {
+    if !crate::compiler::function::has_any_runtime(ctx) {
+        return false;
+    }
+    let ty = crate::compiler::expression::probe_value_type(value, ctx, memory_layout);
+    crate::ir::dynamic::mentions_any(&ty)
+}
+
+/// `json.dumps(value, indent=..., sort_keys=...)` of a value holding dynamic
+/// values: the value boxed whole and written by the runtime.
+fn emit_dynamic_dumps(
+    value: &IRExpr,
+    arguments: &[IRExpr],
+    func: &mut Function,
+    ctx: &CompilationContext,
+    memory_layout: &MemoryLayout,
+) -> IRType {
+    let mut indent = IRExpr::Const(IRConstant::Int(-1));
+    let mut indented = false;
+    let mut sort_keys = IRExpr::Const(IRConstant::Bool(false));
+    let mut ensure_ascii = IRExpr::Const(IRConstant::Bool(true));
+    let mut separators: Option<(IRExpr, IRExpr)> = None;
+    for a in arguments {
+        if let IRExpr::Keyword { name, value } = a {
+            match name.as_str() {
+                "indent" if matches!(**value, IRExpr::Const(IRConstant::None)) => {}
+                "indent" => {
+                    indent = (**value).clone();
+                    indented = true;
+                }
+                "sort_keys" => sort_keys = (**value).clone(),
+                "ensure_ascii" => ensure_ascii = (**value).clone(),
+                "separators" => match &**value {
+                    IRExpr::TupleLiteral(items) if items.len() == 2 => {
+                        separators = Some((items[0].clone(), items[1].clone()));
+                    }
+                    IRExpr::Const(IRConstant::None) => {}
+                    _ => ctx.report(
+                        "json.dumps()'s 'separators' is written as a tuple of two strs here"
+                            .to_string(),
+                    ),
+                },
+                other => ctx.report(format!(
+                    "json.dumps()'s '{other}' argument is not supported for a value holding Any \
+                     values"
+                )),
+            }
+        }
+    }
+    // CPython's defaults: ", " between items on one line, "," before a new
+    // line when indenting.
+    let (item_sep, key_sep) = separators.unwrap_or_else(|| {
+        let item = if indented { "," } else { ", " };
+        (
+            IRExpr::Const(IRConstant::String(item.to_string())),
+            IRExpr::Const(IRConstant::String(": ".to_string())),
+        )
+    });
+    emit_expr(
+        &IRExpr::FunctionCall {
+            function_name: "__any_dumps".to_string(),
+            arguments: vec![
+                value.clone(),
+                indent,
+                sort_keys,
+                item_sep,
+                key_sep,
+                ensure_ascii,
+            ],
+        },
+        func,
+        ctx,
+        memory_layout,
+        None,
+    )
+}
+
 pub(crate) fn emit_call(
     name: &str,
     arguments: &[IRExpr],
@@ -2223,6 +2302,17 @@ pub(crate) fn emit_call(
                     } else {
                         &IRType::String
                     },
+                ));
+            }
+            // A value holding dynamic values is written by the runtime
+            // (`ir::dynamic`), which reads each value's kind as it goes.
+            if name == "dumps" && dumps_dynamic(positional[0], ctx, memory_layout) {
+                return Some(emit_dynamic_dumps(
+                    positional[0],
+                    arguments,
+                    func,
+                    ctx,
+                    memory_layout,
                 ));
             }
             let opts = dump_opts(arguments, ctx)?;
@@ -2277,6 +2367,43 @@ pub(crate) fn emit_call(
         }
         "loads" | "load" => {
             let target = expected.cloned().unwrap_or(IRType::Unknown);
+            // Into `Any` (or a list or dict of it), or into a place with no
+            // declared type: parsed into dynamic values (`ir::dynamic`), as
+            // CPython builds whatever the document holds.
+            let dynamic = crate::ir::dynamic::mentions_any(&target)
+                || matches!(target, IRType::Unknown | IRType::Any);
+            if dynamic
+                && !arguments
+                    .iter()
+                    .any(|a| matches!(a, IRExpr::Keyword { .. }))
+            {
+                if !crate::compiler::function::has_any_runtime(ctx) {
+                    crate::ir::dynamic::NEEDS_RUNTIME.with(|n| n.set(true));
+                    ctx.report("json.loads() into Any needs the dynamic-value runtime");
+                    return Some(abandon(func, 0, &target));
+                }
+                let source = if name == "load" {
+                    IRExpr::MethodCall {
+                        object: Box::new(positional[0].clone()),
+                        method_name: "read".to_string(),
+                        arguments: Vec::new(),
+                    }
+                } else {
+                    positional
+                        .first()
+                        .map(|p| (*p).clone())
+                        .unwrap_or(IRExpr::Const(IRConstant::None))
+                };
+                let parsed = IRExpr::FunctionCall {
+                    function_name: "__any_loads".to_string(),
+                    arguments: vec![source],
+                };
+                let want = match target {
+                    IRType::Unknown | IRType::Any => crate::ir::dynamic::any_type(),
+                    other => other,
+                };
+                return Some(emit_expr(&parsed, func, ctx, memory_layout, Some(&want)));
+            }
             let mut object_hook = None;
             for a in arguments {
                 if let IRExpr::Keyword { name: k, value } = a {

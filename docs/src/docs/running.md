@@ -40,9 +40,19 @@ A program that imports `js` or `pyodide` (or loads a module by a name computed a
 
 ## Running a program
 
-A program with an `if __name__ == "__main__":` block is a WASI command: it exports `_start`, which runs the block, so `wasmtime run program.wasm args...` runs it like `python3 program.py args...`. The block runs as module code once every module definition is made: a module variable it assigns is rebound for every function, and it may not reach a definition that comes after it in the file, which CPython would not have made yet. An exception the block does not catch makes it exit with status 1. Only the program's own block runs, never an imported module's. Every other function is exported too and can be called directly; an exception escaping one traps.
+A program with an `if __name__ == "__main__":` block, or with statements at its top level (a script), is a WASI command: it exports `_start`, which runs the top level and then the block, so `wasmtime run program.wasm args...` runs it like `python3 program.py args...`. A module whose top level has statements starts on first use rather than inside instantiation: `_start`, or the first exported function the host calls, runs the top level once, so its output, input, and exceptions happen once the host can serve them, and a function called directly sees what the statements left. The block runs as module code once every module definition is made: a module variable it assigns is rebound for every function, and it may not reach a definition that comes after it in the file, which CPython would not have made yet. An exception the block does not catch makes it exit with status 1. Only the program's own block runs, never an imported module's. Every other function is exported too and can be called directly; an exception escaping one traps.
 
 Writes are unbuffered, one `fd_write` per `print` or `write`, so standard output and standard error come out in the order the program wrote them. Standard input is read in UTF-8, as CPython's is on POSIX: lines end at `\n` alone (a `\r` is kept, as CPython keeps it there), and bytes that are not UTF-8 raise `UnicodeDecodeError`. `input()` at the end of input raises `EOFError`. `sys.argv[0]` is whatever the host passes first (`wasmtime` passes the module's path). `sys.stdout` and the other streams are used through their methods; one passed around as a value is refused.
+
+## HTTP requests
+
+A program that makes HTTP requests (through `requests`, or the Anthropic client's `Anthropic`, see [Third-party packages](/docs/packages/)) imports [`wasi:http`](https://github.com/WebAssembly/wasi-http), WASI preview 2's outgoing HTTP, which only a component can import. So the compiler answers a component for it rather than a core module: the module importing `wasi:http/types` and `wasi:http/outgoing-handler` (version 0.2.12), with its preview 1 imports served by the preview 1 adapter, exporting `wasi:cli/run` when it has a `_start` (a reactor otherwise). A runtime runs it with HTTP turned on:
+
+```sh
+wasmtime run -S http program.wasm
+```
+
+`waspy run` passes `-S http` for such a program. A component starts with the bytes `00 61 73 6d 0d 00 01 00` where a core module's version is `01 00 00 00`, so a host can tell which it was handed. Every other program is the core module it always was. Making a component takes the default `wasi-http` feature; a build without it (the playground's) refuses a program that makes requests, and so does a program using the JavaScript bridge, whose requests go through `fetch` (`httpx.AsyncClient`).
 
 ## File I/O
 

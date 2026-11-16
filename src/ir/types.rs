@@ -43,6 +43,10 @@ pub enum IRInitItem {
     /// An `import` of the module of this dotted name, which runs that
     /// module's top level here the first time.
     Import(String),
+    /// A run of top-level statements (a loop, a call, an `if`), held by the
+    /// function of this name (`ir::toplevel`) until the module's start is
+    /// written, where its body runs here.
+    Run(String),
 }
 
 /// A call standing where an `import` of a user module was written in a
@@ -452,27 +456,16 @@ pub enum IRConstant {
 pub enum IRType {
     /// Python's `int`, represented as a 32-bit two's-complement integer.
     ///
-    /// This is a deliberate narrowing of Python's semantics, and it is part of
-    /// the definition of the subset this compiler accepts rather than an
-    /// accident of the backend. CPython's `int` is arbitrary precision: it
-    /// grows to hold whatever it is given, so `1000000 * 1000000` is
-    /// 1000000000000 and `2 ** 40` is 1099511627776. Here both operands and the
-    /// result are i32, so arithmetic that leaves the range
-    /// -2147483648..=2147483647 wraps around, giving -727379968 and 0 for those
-    /// two expressions.
-    ///
-    /// The alternative was to check every add, subtract, multiply, and power
-    /// for overflow and trap, which costs instructions on the hottest path in
-    /// any program and rejects code that deliberately relies on wrapping. A
-    /// 64-bit integer would only move the boundary rather than remove it, since
-    /// arbitrary precision needs heap-allocated digits and an allocator call on
-    /// every operation.
-    ///
-    /// So the rule is documented instead of enforced: a program whose values
-    /// stay inside the i32 range gets Python's answers, and one that leaves it
-    /// gets two's-complement wraparound. The website's Numbers page
+    /// CPython's `int` is arbitrary precision: it grows to hold whatever it is
+    /// given, so `1000000 * 1000000` is 1000000000000. Here an int is an i32,
+    /// and an operation whose result leaves -2147483648..=2147483647 raises
+    /// `OverflowError` (`compiler::expression::emit_checked_int`: the operation
+    /// done in 64 bits and checked to fit) instead of wrapping, which would be
+    /// a quietly different answer. A 64-bit integer would only move the
+    /// boundary, since arbitrary precision needs heap-allocated digits and an
+    /// allocator call on every operation. The website's Numbers page
     /// (`docs/src/docs/numbers.md`) states this, and `tests/unit/basics.rs`
-    /// pins the behaviour so it stays deliberate.
+    /// pins it.
     Int,
     Float,
     Bool,

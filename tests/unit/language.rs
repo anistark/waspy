@@ -310,8 +310,8 @@ fn nested_function_refusals() {
         "#,
         "a closure reads it at one type",
     );
-    // A str-returning function through an untyped parameter would come back
-    // as an int.
+    // The parameter takes the function its call passes, whose str parameter
+    // an int cannot be given here.
     refused(
         r#"
         def h(cb) -> int:
@@ -322,7 +322,7 @@ fn nested_function_refusals() {
                 return s
             return h(g)
         "#,
-        "a function is passed through a place with no type",
+        "where 'str' is declared",
     );
     refused(
         r#"
@@ -1820,4 +1820,195 @@ fn imports_that_cannot_be_compiled_are_refused() {
         "#,
         "an import in a class body is not supported",
     );
+}
+
+/// A program file with statements at its top level and no `__main__` block
+/// is a script: `_start` runs it top to bottom, its loops, calls, `if`s,
+/// `try`s, and unpacking interleaved with the definitions, and every name it
+/// binds is a module global a function reads. Expected output is CPython
+/// 3.13's for the same source.
+#[test]
+fn a_script_runs_top_to_bottom() {
+    let run = run_main(
+        &dedent(
+            r#"
+            import sys
+
+            names = ["ada", "bob", "cy"]
+            total = 0
+            for i, n in enumerate(names):
+                total += len(n)
+                print(i, n.upper())
+
+            def shout(who: str) -> str:
+                return who.upper() + "!"
+
+            print(shout("hi"), total, i, n)
+            if total > 5:
+                verdict = "long"
+            else:
+                verdict = "short"
+
+            def report() -> str:
+                return verdict + " " + str(total)
+
+            print(report())
+            counts: dict[str, int] = {}
+            for n in names:
+                counts[n[0]] = counts.get(n[0], 0) + 1
+            print(counts)
+            try:
+                x = int("zz")
+            except ValueError as e:
+                print("bad:", e)
+            a, b = 3, 4
+            a, b = b, a
+            print(a, b)
+            seen = []
+            seen.append(total)
+            seen.append(a * b)
+            print(seen, len(sys.argv) > 0)
+            while total > 0:
+                total -= 4
+            print(total)
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(
+        run.stdout,
+        "0 ADA\n1 BOB\n2 CY\nHI! 8 2 cy\nlong 8\n{'a': 1, 'b': 1, 'c': 1}\n\
+         bad: invalid literal for int() with base 10: 'zz'\n4 3\n[8, 12] True\n0\n"
+    );
+    assert_eq!(run.exit, 0);
+}
+
+/// The top level runs before the `__main__` block, which sees what it left.
+#[test]
+fn top_level_statements_run_before_the_main_block() {
+    let run = run_main(
+        &dedent(
+            r#"
+            LIMIT = 3
+            calls = 0
+
+            def tick() -> int:
+                global calls
+                calls += 1
+                return calls
+
+            for _ in range(LIMIT):
+                tick()
+            print("before main:", calls)
+
+            if __name__ == "__main__":
+                tick()
+                print("in main:", calls)
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(run.stdout, "before main: 3\nin main: 4\n");
+}
+
+/// An exception a top-level statement does not catch ends the program as
+/// CPython's does: what was printed stays printed, the last line of the
+/// report goes to standard error, and the status is 1.
+#[test]
+fn an_uncaught_exception_at_top_level_ends_the_script() {
+    let run = run_main(
+        &dedent(
+            r#"
+            print("start")
+            values = [1, 2, 0]
+            for v in values:
+                print(10 // v)
+            print("never")
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(run.stdout, "start\n10\n5\n");
+    assert_eq!(
+        run.stderr,
+        "ZeroDivisionError: integer division or modulo by zero\n"
+    );
+    assert_eq!(run.exit, 1);
+}
+
+/// What CPython raises `NameError` for at the top level is refused: a
+/// statement calling a function defined below it, or reading a name first
+/// assigned below it, through a function too.
+#[test]
+fn a_top_level_statement_cannot_reach_below_it() {
+    for (source, needle) in [
+        (
+            "print(later())\n\ndef later() -> int:\n    return 1\n",
+            "'later', which is defined below it",
+        ),
+        (
+            "def get() -> int:\n    return LIMIT\n\nprint(get())\nfor i in range(2):\n    LIMIT = i\n",
+            "uses 'LIMIT' before it is assigned",
+        ),
+        (
+            "if True:\n    def f() -> int:\n        return 1\n",
+            "defined inside a module-level",
+        ),
+        ("for i in range(2):\n    return\n", "'return' outside a function"),
+    ] {
+        let err = try_compile(source).expect_err(source);
+        assert!(err.contains(needle), "{source}: {err}");
+    }
+}
+
+/// Two unrelated class hierarchies that each override a method of the same
+/// name, with different signatures: each is dispatched by its own root's
+/// signature (they were once compared as one hierarchy and refused).
+#[test]
+fn unrelated_hierarchies_override_one_method_name_apart() {
+    let run = run_main(
+        &dedent(
+            r#"
+            class Shape:
+                def area(self) -> float:
+                    return 0.0
+
+
+            class Square(Shape):
+                def __init__(self, s: float) -> None:
+                    self.s = s
+
+                def area(self) -> float:
+                    return self.s * self.s
+
+
+            class Plot:
+                def area(self, scale: int) -> int:
+                    return scale * 2
+
+
+            class Field(Plot):
+                def area(self, scale: int) -> int:
+                    return scale * 3
+
+
+            def main() -> None:
+                shapes: list[Shape] = [Shape(), Square(2.0)]
+                print([s.area() for s in shapes])
+                plots: list[Plot] = [Plot(), Field()]
+                print([p.area(5) for p in plots])
+
+
+            if __name__ == "__main__":
+                main()
+            "#,
+        ),
+        "",
+        &[],
+    );
+    assert_eq!(run.stderr, "");
+    assert_eq!(run.stdout, "[0.0, 4.0]\n[10, 15]\n");
 }

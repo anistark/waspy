@@ -4,6 +4,7 @@ export default [
         title: "Start here",
         items: [
             { label: "Getting started", href: "/docs/" },
+            { label: "The command line", href: "/docs/cli/" },
             { label: "Using the library", href: "/docs/library/" },
         ],
     },
@@ -12,6 +13,7 @@ export default [
         items: [
             { label: "The Python subset", href: "/docs/python-subset/" },
             { label: "Numbers", href: "/docs/numbers/" },
+            { label: "Third-party packages", href: "/docs/packages/" },
             { label: "Limitations", href: "/docs/limitations/" },
             { label: "Not supported", href: "/docs/not-supported/" },
         ],

@@ -13,6 +13,17 @@ Try it without installing anything in the [playground](https://anistark.github.i
 
 ## Installation
 
+The `waspy` command line compiles, checks, and runs Python files:
+
+```sh
+cargo install waspy   # or: pip install waspy
+waspy run app.py
+waspy build app.py -o app.wasm
+waspy check app.py
+```
+
+As a library:
+
 ```sh
 cargo add waspy
 ```

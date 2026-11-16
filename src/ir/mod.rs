@@ -10,6 +10,7 @@ pub(crate) mod datetime;
 pub(crate) mod decorate;
 mod decorators;
 mod dict_views;
+pub(crate) mod dynamic;
 pub(crate) mod embedded;
 mod entry_points;
 mod finalize;
@@ -25,8 +26,11 @@ mod metaclasses;
 mod partials;
 pub(crate) mod program;
 pub(crate) mod pyodide_http;
+pub(crate) mod pystdlib;
 pub(crate) mod re;
+mod shims;
 mod str_methods;
+pub(crate) mod toplevel;
 mod types;
 
 pub use asyncio::ASYNCIO_FN_PREFIX;
@@ -62,6 +66,7 @@ pub use logging::{
 };
 pub use metaclasses::{apply_metaclasses, METACLASS_FN_PREFIX};
 pub use partials::{lower_partials, CMP_KEY_PREFIX, PARTIAL_FN_PREFIX};
+pub use pystdlib::PY_PREFIX;
 pub use re::{lower_re, RE_FN_PREFIX};
 pub(crate) use re::{
     pattern_argument_hint as re_pattern_argument_hint, with_runtime as with_re_runtime,
@@ -69,4 +74,5 @@ pub(crate) use re::{
 pub use str_methods::{
     helper_name as str_helper_name, with_str_helpers, STR_FN_PREFIX, STR_METHODS,
 };
+pub use toplevel::TOPLEVEL_FN_PREFIX;
 pub use types::*;

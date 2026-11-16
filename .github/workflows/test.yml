@@ -110,6 +110,14 @@ jobs:
       - name: Whole programs under Node and wasmtime (required gate)
         run: just verify-examples
 
+      # Programs making HTTP requests are components importing `wasi:http`,
+      # which only wasmtime runs here: each is run against a server in the
+      # test, and a missing wasmtime fails the step instead of skipping.
+      - name: HTTP requests under wasmtime (required gate)
+        env:
+          WASPY_REQUIRE_WASMTIME: "1"
+        run: cargo test --test integration_http
+
   browser:
     name: Whole programs in a browser, against Pyodide
     runs-on: ubuntu-latest

@@ -349,11 +349,11 @@ pub struct CompilationContext {
     /// `from <stdlib module> import name [as alias]`: alias -> (module, name),
     /// so the name reads and calls through the module.
     pub stdlib_imports: HashMap<String, (String, String)>,
-    /// Virtual method dispatch: the column each overridden method name takes in
-    /// the vtable, and the `call_indirect` type index its implementations share.
-    /// A method name is here only when some class overrides an ancestor's
-    /// definition of it, so a program with no overrides emits no table and
-    /// every call stays direct.
+    /// Virtual method dispatch, by `Class::method`: the column the method takes
+    /// in the vtable for that class's hierarchy, and the `call_indirect` type
+    /// index its implementations share. A method is here only when some class
+    /// of the hierarchy overrides another's definition of it, so a program with
+    /// no overrides emits no table and every call stays direct.
     pub virtual_slots: HashMap<String, (u32, u32)>,
     /// Table index of vtable row 0. The rows share table 0 with the closure
     /// dispatch slots, which occupy the indices below this.
@@ -399,6 +399,21 @@ pub struct CompilationContext {
     /// True while `__module_init` is being compiled: an assignment to a module
     /// global there stores the global instead of creating a local.
     pub in_module_init: bool,
+    /// Whether a module's start runs top-level statements (`ir::toplevel`):
+    /// there a global can be assigned more than once, and a statement reads
+    /// one at the type its first assignment gave it, so the scan records each
+    /// global's type as it goes and a later assignment keeps it.
+    pub start_runs: bool,
+    /// The standard-library functions written in Python whose untyped
+    /// parameters take each call's types (`ir::pystdlib`), with their
+    /// declared parameter types (`Unknown` where a call decides). A call is
+    /// compiled as a call of the instance for its arguments' types.
+    pub generic_functions: HashMap<String, Vec<IRType>>,
+    /// Likewise the classes whose `__init__` takes untyped parameters, with
+    /// `__init__`'s parameter types after `self`, and the methods that take
+    /// untyped parameters, keyed `(class, method)`.
+    pub generic_classes: HashMap<String, Vec<IRType>>,
+    pub generic_methods: HashMap<(String, String), Vec<IRType>>,
     /// The names the function being compiled declares `global`: assigning one
     /// stores into its module global instead of making a local.
     pub declared_globals: HashSet<String>,
@@ -551,6 +566,8 @@ pub struct CompilationContext {
     /// The function index of each JavaScript bridge import, when the module
     /// uses the bridge (`compiler::js`).
     pub js: HashMap<crate::compiler::js::JsImport, u32>,
+    /// The `wasi:http` imports (`compiler::http`), when the module makes requests.
+    pub http: HashMap<crate::compiler::http::HttpImport, u32>,
     pub helper_base: u32,
     /// True while compiling an `__init__` method. Its `return` paths (explicit
     /// bare `return` and the implicit fall-through) yield `self` (local 0)
@@ -642,6 +659,10 @@ impl CompilationContext {
             module_global_index: HashMap::new(),
             module_global_types: HashMap::new(),
             in_module_init: false,
+            start_runs: false,
+            generic_functions: HashMap::new(),
+            generic_classes: HashMap::new(),
+            generic_methods: HashMap::new(),
             declared_globals: HashSet::new(),
             temp_local: 0,
             temp_local_f64: 0,
@@ -673,6 +694,7 @@ impl CompilationContext {
             signature_types: HashMap::new(),
             wasi: HashMap::new(),
             js: HashMap::new(),
+            http: HashMap::new(),
             cell_types: RefCell::new(HashMap::new()),
             pending_captures: RefCell::new(Vec::new()),
             capture_types: HashMap::new(),
@@ -996,7 +1018,9 @@ impl CompilationContext {
     ///
     /// Returns the vtable column and the `call_indirect` type index.
     pub fn virtual_call(&self, class_name: &str, method_name: &str) -> Option<(u32, u32)> {
-        let &(column, type_index) = self.virtual_slots.get(method_name)?;
+        let &(column, type_index) = self
+            .virtual_slots
+            .get(&format!("{class_name}::{method_name}"))?;
         let own = self.get_class_info(class_name)?.methods.get(method_name)?;
         let overridden = self
             .class_map

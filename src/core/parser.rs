@@ -111,8 +111,7 @@ fn line_col(source: &str, offset: usize) -> (usize, usize) {
 /// front door, with an actionable message.
 pub fn validate_supported(ast: &Suite, source: &str) -> Result<()> {
     validate_body(ast, source, None)?;
-    validate_generator_expressions(ast, source)?;
-    validate_module_level(ast, source)
+    validate_generator_expressions(ast, source)
 }
 
 /// The builtins that would show a generator expression for what it is: its
@@ -429,87 +428,6 @@ fn validate_generator_expressions(ast: &Suite, source: &str) -> Result<()> {
     Ok(())
 }
 
-/// Reject module-level statements whose effects the compiler silently drops.
-///
-/// A WebAssembly module has no implicit "run the file top to bottom" step:
-/// the host calls exported functions. Waspy compiles module-level variable
-/// definitions by inlining their initializers into the functions that read
-/// them, so `X = 1`, `X = helper()`, and `X = ClassName()` all work. Anything
-/// else written at module level, a loop, a bare call, an augmented or
-/// unpacking assignment, a write through a subscript or attribute, used to
-/// compile "successfully" and then do nothing at all, so the program read the
-/// pre-statement value and got a silently wrong answer.
-///
-/// Those shapes are rejected here with a hint pointing at the two things that
-/// do work: move the code into a function, or drive it from an
-/// `if __name__ == "__main__":` entry point.
-fn validate_module_level(body: &[Stmt], source: &str) -> Result<()> {
-    for stmt in body {
-        let (what, offset) = match stmt {
-            Stmt::For(stmt) => ("'for' loops", stmt.range.start()),
-            Stmt::While(stmt) => ("'while' loops", stmt.range.start()),
-            Stmt::With(stmt) => ("'with' blocks", stmt.range.start()),
-            Stmt::Try(stmt) => {
-                // An import guarded by try/except ImportError is a supported
-                // and common shape; it carries no runtime effect to drop.
-                if is_import_guard(stmt) {
-                    continue;
-                }
-                ("'try' blocks", stmt.range.start())
-            }
-            Stmt::If(stmt) => {
-                // `if __name__ == "__main__":` is the entry-point marker, not
-                // executable module-level code, so it stays allowed.
-                if mentions_dunder_name(&stmt.test) {
-                    continue;
-                }
-                ("'if' statements", stmt.range.start())
-            }
-            Stmt::AugAssign(stmt) => ("augmented assignments", stmt.range.start()),
-            Stmt::Expr(stmt) => {
-                // Docstrings and other bare constants have no effect to drop.
-                if matches!(stmt.value.as_ref(), Expr::Constant(_)) {
-                    continue;
-                }
-                ("call statements", stmt.range.start())
-            }
-            Stmt::Assign(stmt) => {
-                if stmt.targets.iter().all(|t| matches!(t, Expr::Name(_))) {
-                    continue;
-                }
-                (
-                    "assignments to anything but a plain name",
-                    stmt.range.start(),
-                )
-            }
-            Stmt::AnnAssign(stmt) => {
-                if matches!(stmt.target.as_ref(), Expr::Name(_)) {
-                    continue;
-                }
-                (
-                    "assignments to anything but a plain name",
-                    stmt.range.start(),
-                )
-            }
-            _ => continue,
-        };
-
-        return Err(unsupported(
-            format!(
-                "{what} at module level are not supported: only definitions run when a module \
-                 starts, so the statement would be compiled away and later reads \
-                 would silently see the value from before it. Hint: move this into a function \
-                 and call it, or drive it from 'if __name__ == \"__main__\":'. \
-                 Module-level definitions (X = 1, X = helper(), X = ClassName()) do work"
-            ),
-            source,
-            offset.into(),
-            None,
-        ));
-    }
-    Ok(())
-}
-
 /// Modules a program may import for its annotations alone: nothing of them
 /// runs, and their names are read only where types are written.
 const ANNOTATION_MODULES: &[&str] = &[
@@ -522,8 +440,9 @@ const ANNOTATION_MODULES: &[&str] = &[
 /// What a program can import, for the refusal of anything else.
 const IMPORTABLE: &str = "its own modules, the standard-library modules sys, os, math, random, \
                           json, re, datetime, collections, itertools, functools, logging, \
-                          asyncio, abc, dataclasses, importlib, and typing, and js and pyodide \
-                          for the JavaScript bridge";
+                          asyncio, abc, dataclasses, importlib, typing, base64, bisect, csv, \
+                          hashlib, heapq, io, operator, pathlib, string, textwrap, time, \
+                          urllib.parse, and uuid, and js and pyodide for the JavaScript bridge";
 
 /// Refuse an import of a module the program cannot have: neither a module the
 /// compiler supports nor one of the program's own (`provides`). A
@@ -637,21 +556,6 @@ fn is_import_guard(stmt: &rustpython_parser::ast::StmtTry) -> bool {
             let rustpython_parser::ast::ExceptHandler::ExceptHandler(h) = handler;
             is_imports(&h.body)
         })
-}
-
-/// True when the expression reads `__name__`, which marks the entry-point
-/// guard rather than ordinary module-level code.
-fn mentions_dunder_name(test: &Expr) -> bool {
-    match test {
-        Expr::Name(name) => name.id.as_str() == "__name__",
-        Expr::Compare(compare) => {
-            mentions_dunder_name(&compare.left)
-                || compare.comparators.iter().any(mentions_dunder_name)
-        }
-        Expr::BoolOp(op) => op.values.iter().any(mentions_dunder_name),
-        Expr::UnaryOp(op) => mentions_dunder_name(&op.operand),
-        _ => false,
-    }
 }
 
 /// Build the located `UnsupportedFeature` error for a node.

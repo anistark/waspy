@@ -903,3 +903,16 @@ fn logging_refuses_what_it_cannot_do() {
         assert!(message.contains(needle), "{source}\n{message}");
     }
 }
+
+/// A refusal found while a statement is lowered carries that statement's
+/// line and column, where it carried none.
+#[test]
+fn a_refusal_while_lowering_names_its_statement() {
+    let err = try_compile("x = 1\nif x:\n    def g() -> int:\n        return 1\n")
+        .expect_err("a def inside a module-level if is refused");
+    assert!(err.contains("at line 3, column 5"), "{err}");
+    let err =
+        try_compile("def f() -> int:\n    x = 1\n    return [y for y in range(3)][x:9:0:1]\n")
+            .expect_err("a malformed slice is refused");
+    assert!(err.contains("at line"), "{err}");
+}

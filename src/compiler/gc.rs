@@ -1005,10 +1005,11 @@ fn build_collect(ctx: &CompilationContext) -> Function {
 
 /// The words of static state that hold objects: standard input's buffer,
 /// `sys.argv` and `sys.path` once built, and `os.environ`.
-fn static_roots() -> [(i32, i32); 2] {
+fn static_roots() -> [(i32, i32); 3] {
     [
         crate::compiler::host::STATE,
         crate::compiler::stdlib::OS_STATE,
+        crate::compiler::http::PINS,
     ]
 }
 

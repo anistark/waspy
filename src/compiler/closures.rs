@@ -555,3 +555,262 @@ fn element_type(ty: &IRType) -> IRType {
         _ => IRType::Unknown,
     }
 }
+
+/// What the calls of an unannotated parameter of one of the program's own
+/// functions pass it, for [`type_untyped_functions`]. An argument whose type
+/// is not known tells nothing (a recursive call passing the parameter on).
+#[derive(Clone, Debug, PartialEq)]
+enum Passed {
+    Nothing,
+    One(IRType),
+    Several,
+}
+
+impl Passed {
+    fn record(&mut self, ty: IRType) {
+        if matches!(ty, IRType::Unknown | IRType::Any) {
+            return;
+        }
+        *self = match std::mem::replace(self, Passed::Nothing) {
+            Passed::Nothing => Passed::One(ty),
+            Passed::One(seen) if seen == ty => Passed::One(seen),
+            _ => Passed::Several,
+        };
+    }
+}
+
+/// Type the unannotated parameters of the program's own functions from the
+/// calls the program makes of them: the type every call agrees on, or `Any`
+/// (a dynamic value, `ir::dynamic`) where they pass values of several types,
+/// so `def show(x): print("value", x)` takes `show(3)` and `show("a")` alike.
+/// An untyped parameter held only a word, and refused a str or a list. A
+/// function the program uses as a value keeps its parameters as they are,
+/// since a call through a value passes words.
+pub(crate) fn type_untyped_functions(module: &IRModule) -> IRModule {
+    let mut typed = module.clone();
+    let candidates: Vec<usize> = module
+        .functions
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| {
+            !f.name.starts_with("__lambda_")
+                && !crate::ir::is_internal_function(&f.name)
+                && f.params.iter().any(|p| {
+                    matches!(p.param_type, IRType::Unknown)
+                        && matches!(p.star, crate::ir::ParamStar::None)
+                        && !p.name.starts_with("__")
+                })
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if candidates.is_empty() {
+        return typed;
+    }
+    let names: Vec<String> = candidates
+        .iter()
+        .map(|&i| module.functions[i].name.clone())
+        .collect();
+    // A function named anywhere but a call's callee is used as a value,
+    // unless a local of the function reading the name shadows it.
+    let mut as_value: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut readers: Vec<&IRFunction> = module.functions.iter().collect();
+    readers.extend(module.classes.iter().flat_map(|c| c.methods.iter()));
+    for reader in readers {
+        let mut bound: std::collections::HashSet<String> =
+            reader.params.iter().map(|p| p.name.clone()).collect();
+        bound_names(&reader.body, &mut bound);
+        let mut body = reader.body.clone();
+        let _ = crate::ir::visit_body(&mut body, &mut |e: &mut IRExpr| {
+            if let IRExpr::Variable(name) = e {
+                if names.contains(name) && !bound.contains(name) {
+                    as_value.insert(name.clone());
+                }
+            }
+            Ok(())
+        });
+    }
+
+    for _ in 0..3 {
+        let params: HashMap<String, Vec<IRType>> = typed
+            .functions
+            .iter()
+            .map(|f| {
+                (
+                    f.name.clone(),
+                    f.params.iter().map(|p| p.param_type.clone()).collect(),
+                )
+            })
+            .collect();
+        let mut returns: HashMap<String, IRType> = HashMap::new();
+        for _ in 0..2 {
+            for f in &typed.functions {
+                let rt = resolve_return_type(f, &returns, &params, &CaptureTypes::new());
+                returns.insert(f.name.clone(), rt);
+            }
+        }
+        let mut passed: HashMap<String, Vec<Passed>> = candidates
+            .iter()
+            .map(|&i| {
+                let f = &typed.functions[i];
+                (f.name.clone(), vec![Passed::Nothing; f.params.len()])
+            })
+            .collect();
+        let mut bodies: Vec<&IRFunction> = typed.functions.iter().collect();
+        bodies.extend(typed.classes.iter().flat_map(|c| c.methods.iter()));
+        for func in bodies {
+            let mut ctx = CompilationContext::new();
+            for class in &typed.classes {
+                ctx.add_class(crate::compiler::context::ClassInfo {
+                    name: class.name.clone(),
+                    base: None,
+                    class_id: 0,
+                    mro: vec![class.name.clone()],
+                    methods: HashMap::new(),
+                    method_owner: HashMap::new(),
+                    method_kinds: HashMap::new(),
+                    property_setters: HashMap::new(),
+                    field_offsets: HashMap::new(),
+                    field_types: HashMap::new(),
+                    class_var_values: HashMap::new(),
+                    class_var_owner: HashMap::new(),
+                    instance_size: 0,
+                });
+            }
+            for (name, ret) in &returns {
+                let p = params.get(name).cloned().unwrap_or_default();
+                ctx.add_function(name, 0, p, ret.clone());
+            }
+            for param in &func.params {
+                ctx.add_local(&param.name, param.param_type.clone());
+            }
+            ctx.for_loop_seq = 0;
+            scan_and_allocate_locals(&func.body, &mut ctx);
+            let mut body = func.body.clone();
+            let _ = crate::ir::visit_body(&mut body, &mut |expr: &mut IRExpr| {
+                if let IRExpr::FunctionCall {
+                    function_name,
+                    arguments,
+                } = expr
+                {
+                    if let Some(slots) = passed.get_mut(function_name.as_str()) {
+                        for (slot, arg) in slots.iter_mut().zip(arguments.iter()) {
+                            if !matches!(arg, IRExpr::Keyword { .. }) {
+                                slot.record(argument_type(arg, &ctx));
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            });
+        }
+        let mut changed = false;
+        for &i in &candidates {
+            let f = &mut typed.functions[i];
+            if as_value.contains(&f.name) {
+                continue;
+            }
+            let Some(slots) = passed.get(&f.name) else {
+                continue;
+            };
+            for (param, slot) in f.params.iter_mut().zip(slots) {
+                if !matches!(module_param(module, i, &param.name), IRType::Unknown) {
+                    continue;
+                }
+                // A default value is passed too, where a call leaves it off.
+                let mut slot = slot.clone();
+                if let Some(default) = &param.default_value {
+                    if !matches!(default, IRExpr::Const(IRConstant::None)) {
+                        slot.record(argument_type(default, &CompilationContext::new()));
+                    }
+                }
+                let ty = match slot {
+                    Passed::One(t) if !matches!(t, IRType::None) => t,
+                    Passed::Several | Passed::One(_) => crate::ir::dynamic::any_type(),
+                    Passed::Nothing => continue,
+                };
+                if param.param_type != ty {
+                    param.param_type = ty;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    typed
+}
+
+/// The declared type of parameter `name` of the module's function `index`,
+/// before this pass typed it.
+fn module_param(module: &IRModule, index: usize, name: &str) -> IRType {
+    module.functions[index]
+        .params
+        .iter()
+        .find(|p| p.name == name)
+        .map(|p| p.param_type.clone())
+        .unwrap_or(IRType::Unknown)
+}
+
+/// The names a body binds: assignments, loop targets, unpacking targets,
+/// handlers, and `with` targets, at any depth.
+fn bound_names(body: &crate::ir::IRBody, out: &mut std::collections::HashSet<String>) {
+    for stmt in &body.statements {
+        match stmt {
+            IRStatement::Assign { target, .. } | IRStatement::AugAssign { target, .. } => {
+                out.insert(target.clone());
+            }
+            IRStatement::TupleUnpack { targets, .. } => out.extend(targets.iter().cloned()),
+            IRStatement::For {
+                target,
+                body,
+                else_body,
+                ..
+            } => {
+                out.insert(target.clone());
+                bound_names(body, out);
+                if let Some(e) = else_body {
+                    bound_names(e, out);
+                }
+            }
+            IRStatement::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                bound_names(then_body, out);
+                if let Some(e) = else_body {
+                    bound_names(e, out);
+                }
+            }
+            IRStatement::While { body, .. } => bound_names(body, out),
+            IRStatement::TryExcept {
+                try_body,
+                except_handlers,
+                finally_body,
+            } => {
+                bound_names(try_body, out);
+                for h in except_handlers {
+                    if let Some(name) = &h.name {
+                        out.insert(name.clone());
+                    }
+                    bound_names(&h.body, out);
+                }
+                if let Some(f) = finally_body {
+                    bound_names(f, out);
+                }
+            }
+            IRStatement::With {
+                optional_vars,
+                body,
+                ..
+            } => {
+                if let Some(name) = optional_vars {
+                    out.insert(name.clone());
+                }
+                bound_names(body, out);
+            }
+            _ => {}
+        }
+    }
+}
