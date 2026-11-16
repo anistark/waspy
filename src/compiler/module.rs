@@ -494,19 +494,21 @@ fn functions_that_can_raise(ir_module: &IRModule) -> HashSet<String> {
 
 /// Whether any body in the module has a `try` or a `raise`.
 fn module_handles_exceptions(ir_module: &IRModule) -> bool {
-    fn body_has(body: &IRBody) -> bool {
-        body.statements.iter().any(|stmt| {
-            matches!(
-                stmt,
-                IRStatement::TryExcept { .. } | IRStatement::Raise { .. }
-            ) || nested_bodies(stmt).into_iter().any(body_has)
-        })
-    }
     ir_module
         .functions
         .iter()
         .chain(ir_module.classes.iter().flat_map(|c| c.methods.iter()))
-        .any(|f| body_has(&f.body))
+        .any(|f| body_handles_exceptions(&f.body))
+}
+
+/// Whether `body` has a `try` or a `raise`, at any depth.
+fn body_handles_exceptions(body: &IRBody) -> bool {
+    body.statements.iter().any(|stmt| {
+        matches!(
+            stmt,
+            IRStatement::TryExcept { .. } | IRStatement::Raise { .. }
+        ) || nested_bodies(stmt).into_iter().any(body_handles_exceptions)
+    })
 }
 
 /// The positions of the module's lifted closures, each after the closure
@@ -1747,10 +1749,25 @@ fn compile_staged(ir_module: &IRModule) -> Result<Vec<u8>, WaspyError> {
     };
     // A module that can raise carries the builtin exception classes, ahead of
     // its own, so every exception is an object of one.
+    // Top-level statements (`ir::toplevel`) stand in the start, which is not
+    // a function yet: what they raise or catch counts too.
+    let start_raises = staged.runs && {
+        let start = IRBody {
+            statements: staged.start.clone(),
+        };
+        let (mut raises, mut calls) = (false, HashSet::new());
+        scan_raise_and_calls(&start, &mut raises, &mut calls);
+        raises || body_handles_exceptions(&start) || {
+            let raisers = functions_that_can_raise(ir_module);
+            calls.iter().any(|c| raisers.contains(c))
+        }
+    };
     let with_exceptions;
     let ir_module = if crate::compiler::exceptions::module_needs_exceptions(
         ir_module,
-        !functions_that_can_raise(ir_module).is_empty() || module_handles_exceptions(ir_module),
+        start_raises
+            || !functions_that_can_raise(ir_module).is_empty()
+            || module_handles_exceptions(ir_module),
     ) {
         with_exceptions = crate::compiler::exceptions::with_builtin_exceptions(ir_module);
         &with_exceptions
@@ -1816,7 +1833,11 @@ fn compile_staged(ir_module: &IRModule) -> Result<Vec<u8>, WaspyError> {
     // reaches JavaScript (`canvas = document.createElement("canvas")`) needs
     // the loader. It runs once, behind a flag it sets first.
     let bridge = crate::compiler::js::uses_bridge(ir_module);
-    if bridge {
+    // So does a module whose top level has statements (`ir::toplevel`): they
+    // print, read input, and raise, which a WASI host serves only once the
+    // instance exists, and an exception they raise is reported as the
+    // program's own (by `_start`) rather than failing instantiation.
+    if bridge || staged.runs {
         statements.insert(
             0,
             IRStatement::Assign {
@@ -1837,6 +1858,8 @@ fn compile_staged(ir_module: &IRModule) -> Result<Vec<u8>, WaspyError> {
     });
     if bridge {
         crate::compiler::js::start_on_first_use(&mut with_init);
+    } else if staged.runs {
+        crate::compiler::start::start_on_first_use(&mut with_init);
     }
     compile_module(&with_init, &names)
 }
@@ -1851,6 +1874,10 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
     let mut module = Module::new();
     let mut ctx = CompilationContext::new();
     ctx.capture_types = capture_types.clone();
+    ctx.start_runs = ir_module
+        .functions
+        .iter()
+        .any(|f| f.name.starts_with(crate::ir::TOPLEVEL_FN_PREFIX));
     for (i, name) in module_globals.iter().enumerate() {
         ctx.module_global_index
             .insert(name.clone(), FIRST_MODULE_GLOBAL + i as u32);
@@ -2139,10 +2166,9 @@ fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec
     // A module using the bridge has no start section: its top level runs on
     // first use (`js::start_on_first_use`).
     let start_type_index = if module_globals.is_empty()
-        || ir_module
-            .functions
+        || module_globals
             .iter()
-            .any(|f| f.name == crate::compiler::js::INIT_FN)
+            .any(|g| g == crate::compiler::js::STARTED_FLAG)
     {
         None
     } else {

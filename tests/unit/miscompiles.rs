@@ -457,15 +457,16 @@ fn one_bad_function_does_not_drop_its_whole_module() {
 #[test]
 fn a_file_that_cannot_be_lowered_reports_why() {
     let src = "X = 1\n\
-               for i in range(3):\n\
-               \x20   X = X + i\n\
+               if X:\n\
+               \x20   def g() -> int:\n\
+               \x20       return 1\n\
                \n\
                def f() -> int:\n\
                \x20   return X\n";
     let err = try_compile_multi(&[("only.py", src)])
-        .expect_err("a module-level loop must fail the build");
+        .expect_err("a def inside a module-level if must fail the build");
     assert!(
-        err.contains("only.py") && err.contains("module level"),
+        err.contains("only.py") && err.contains("module-level"),
         "expected the file and the real cause, got: {err}"
     );
     assert!(
@@ -3784,33 +3785,29 @@ fn else_clauses_of_try_and_loops() {
 }
 
 /// Module-level and class-body statements other than definitions were
-/// skipped, so a top-level loop or call silently never ran.
+/// skipped, so a top-level loop or call silently never ran. At module level
+/// they run now, where they stand (a chained assignment too); in a class body
+/// they are still refused.
 #[test]
 fn statements_that_would_not_run_are_refused() {
-    for (source, needle) in [
+    for (source, want) in [
         (
-            "xs = []\nxs.append(1)\n\ndef f() -> int:\n    return 1\n",
-            "at module level",
+            "xs = []\nxs.append(1)\n\ndef f() -> int:\n    return len(xs)\n",
+            1,
         ),
         (
             "n = 0\nfor i in range(3):\n    n += i\n\ndef f() -> int:\n    return n\n",
-            "at module level",
+            3,
         ),
-        (
-            "n = 0\nn += 1\n\ndef f() -> int:\n    return n\n",
-            "at module level",
-        ),
-        (
-            "a = b = 0\n\ndef f() -> int:\n    return a\n",
-            "one plain name",
-        ),
-        (
-            "class C:\n    for i in range(2):\n        pass\n\ndef f() -> int:\n    return 1\n",
-            "body of class 'C'",
-        ),
+        ("n = 0\nn += 1\n\ndef f() -> int:\n    return n\n", 1),
+        ("a = b = 2\n\ndef f() -> int:\n    return a + b\n", 4),
     ] {
-        refused(source, needle);
+        assert_eq!(call_i32(source, "f"), want, "{source}");
     }
+    refused(
+        "class C:\n    for i in range(2):\n        pass\n\ndef f() -> int:\n    return 1\n",
+        "body of class 'C'",
+    );
     // The `__main__` block runs only when the file is a script; a compiled
     // module is instantiated, as an import is.
     let guarded = "def f() -> int:\n    return 4\n\nif __name__ == \"__main__\":\n    f()\n";

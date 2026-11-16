@@ -28,6 +28,7 @@ pub(crate) mod program;
 pub(crate) mod pyodide_http;
 pub(crate) mod re;
 mod str_methods;
+pub(crate) mod toplevel;
 mod types;
 
 pub use asyncio::ASYNCIO_FN_PREFIX;
@@ -70,4 +71,5 @@ pub(crate) use re::{
 pub use str_methods::{
     helper_name as str_helper_name, with_str_helpers, STR_FN_PREFIX, STR_METHODS,
 };
+pub use toplevel::TOPLEVEL_FN_PREFIX;
 pub use types::*;

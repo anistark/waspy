@@ -286,6 +286,28 @@ fn lower_module(ast: &Suite, hoisted: usize) -> Result<IRModule> {
     let mut defined_after: Vec<String> = Vec::new();
     // The top level in source order, for the order it runs in.
     let mut items: Vec<IRInitItem> = Vec::new();
+    // Top-level statements (a loop, a call, an `if`), each run of them
+    // between definitions held for a function of its own (`ir::toplevel`).
+    let mut run: Vec<Stmt> = Vec::new();
+    let mut runs: Vec<(String, Vec<Stmt>)> = Vec::new();
+    // Where each function and class is defined among the top-level items.
+    let mut def_positions: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let run_tag: String = LOWERING.with(|l| {
+        l.borrow()
+            .module_name
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect()
+    });
+    let flush =
+        |run: &mut Vec<Stmt>, runs: &mut Vec<(String, Vec<Stmt>)>, items: &mut Vec<IRInitItem>| {
+            if !run.is_empty() {
+                let name = format!("{}{run_tag}_{}", crate::ir::TOPLEVEL_FN_PREFIX, runs.len());
+                items.push(IRInitItem::Run(name.clone()));
+                runs.push((name, std::mem::take(run)));
+            }
+        };
     let import_items = |imports: &[IRImport], items: &mut Vec<IRInitItem>| {
         items.extend(imports.iter().map(|i| IRInitItem::Import(i.module.clone())));
     };
@@ -293,6 +315,38 @@ fn lower_module(ast: &Suite, hoisted: usize) -> Result<IRModule> {
     for (index, stmt) in ast.iter().enumerate() {
         if main_block.is_some() {
             module_statement_bindings(stmt, &mut defined_after);
+        }
+        // A statement runs where it stands, after the definitions above it
+        // and before the ones below, as CPython runs the top level.
+        let runs_here = match stmt {
+            Stmt::Expr(e) => {
+                !matches!(&*e.value, Expr::Constant(_))
+                    && process_dynamic_import(stmt, &mut memory_layout)?.is_none()
+            }
+            _ => is_top_level_statement(stmt),
+        };
+        if runs_here {
+            run.push(stmt.clone());
+            continue;
+        }
+        flush(&mut run, &mut runs, &mut items);
+        match stmt {
+            Stmt::FunctionDef(s) => {
+                def_positions
+                    .entry(s.name.to_string())
+                    .or_insert(items.len());
+            }
+            Stmt::AsyncFunctionDef(s) => {
+                def_positions
+                    .entry(s.name.to_string())
+                    .or_insert(items.len());
+            }
+            Stmt::ClassDef(s) => {
+                def_positions
+                    .entry(s.name.to_string())
+                    .or_insert(items.len());
+            }
+            _ => {}
         }
         let plain;
         let (stmt, is_async) = match stmt {
@@ -540,7 +594,7 @@ fn lower_module(ast: &Suite, hoisted: usize) -> Result<IRModule> {
                 // We're no longer in a try block after processing it
                 in_try_block = false;
             }
-            Stmt::Pass(_) => continue,
+            Stmt::Pass(_) | Stmt::Global(_) => continue,
             // The `__main__` block runs when the file is the program: its
             // body becomes the entry point. In an imported module it never
             // runs, and an `else` would run at import.
@@ -575,8 +629,41 @@ fn lower_module(ast: &Suite, hoisted: usize) -> Result<IRModule> {
         }
     }
 
+    flush(&mut run, &mut runs, &mut items);
+    let mut run_globals: Vec<String> = Vec::new();
+    let mut temps = 0;
+    let has_runs = !runs.is_empty();
+    // Each run's statements, one body per statement as written, for the order
+    // check.
+    let mut run_parts: std::collections::HashMap<String, Vec<IRBody>> =
+        std::collections::HashMap::new();
+    for (name, stmts) in runs {
+        let (body, globals, parts) =
+            top_level_run(&stmts, &module, &mut memory_layout, &mut temps)?;
+        run_parts.insert(name.clone(), parts);
+        for g in &globals {
+            if !run_globals.contains(g) {
+                run_globals.push(g.clone());
+            }
+        }
+        module
+            .functions
+            .push(crate::ir::toplevel::run_function(name, body, globals));
+    }
+    if has_runs {
+        check_top_level_order(&module, &items, &def_positions, &run_parts)?;
+    }
+    // A program whose file has statements and no `__main__` block runs them
+    // as it starts, and nothing after: `_start` runs an empty block (never an
+    // implicit `main()`, which a statement may call itself).
+    if has_runs && main_block.is_none() && LOWERING.with(|l| l.borrow().module_name == "__main__") {
+        main_block = Some(Vec::new());
+        module
+            .metadata
+            .insert("has_entry_point".to_string(), "true".to_string());
+    }
     if let Some(block) = main_block {
-        let entry = main_block_function(&block, &module, &mut memory_layout)?;
+        let entry = main_block_function(&block, &module, &run_globals, &mut memory_layout)?;
         check_main_block_order(&entry, &module, &defined_after)?;
         module.functions.push(entry);
     }
@@ -2431,31 +2518,12 @@ fn check_main_block_order(
 fn main_block_function(
     block: &[Stmt],
     module: &IRModule,
+    run_globals: &[String],
     memory_layout: &mut MemoryLayout,
 ) -> Result<IRFunction> {
+    refuse_outside_function(block)?;
     let mut bound = Vec::new();
-    let mut outside_function = None;
-    walk_block_statements(block, &mut |stmt| {
-        match stmt {
-            Stmt::Return(_) => outside_function = outside_function.or(Some("'return'")),
-            Stmt::Expr(e) if matches!(&*e.value, Expr::Yield(_) | Expr::YieldFrom(_)) => {
-                outside_function = outside_function.or(Some("'yield'"))
-            }
-            Stmt::Expr(e) if matches!(&*e.value, Expr::Await(_)) => {
-                outside_function = outside_function.or(Some("'await'"))
-            }
-            Stmt::Nonlocal(_) => outside_function = outside_function.or(Some("'nonlocal'")),
-            _ => {}
-        }
-        statement_bindings(stmt, &mut bound);
-    });
-    if let Some(what) = outside_function {
-        return Err(crate::core::errors::unsupported_feature(
-            format!("{what} outside a function is a SyntaxError in CPython"),
-            None,
-        )
-        .into());
-    }
+    walk_block_statements(block, &mut |stmt| statement_bindings(stmt, &mut bound));
     let mut globals = Vec::new();
     for name in bound {
         let defined = |n: &str| n == name.as_str();
@@ -2471,7 +2539,9 @@ fn main_block_function(
             )
             .into());
         }
-        if module.variables.iter().any(|v| defined(&v.name)) && !globals.contains(&name) {
+        if (module.variables.iter().any(|v| defined(&v.name)) || run_globals.contains(&name))
+            && !globals.contains(&name)
+        {
             globals.push(name);
         }
     }
@@ -2486,6 +2556,263 @@ fn main_block_function(
         return_type: IRType::None,
         decorators: Vec::new(),
     })
+}
+
+/// Refuse a top-level statement that reaches, directly or through the
+/// functions and classes it uses, a function or class defined below it, or a
+/// name first assigned below it: CPython raises `NameError` there, and here
+/// every function exists from the start and a module global reads as zero
+/// before its assignment.
+fn check_top_level_order(
+    module: &IRModule,
+    items: &[IRInitItem],
+    def_positions: &std::collections::HashMap<String, usize>,
+    run_parts: &std::collections::HashMap<String, Vec<IRBody>>,
+) -> Result<()> {
+    use std::collections::{HashMap, HashSet};
+    // Where each module global is first assigned: a definition, or a run of
+    // statements that binds it.
+    // (item, statement within a run) of the first assignment.
+    let mut first_bound: HashMap<String, (usize, usize)> = HashMap::new();
+    for (i, item) in items.iter().enumerate() {
+        match item {
+            IRInitItem::Variable(name) => {
+                first_bound.entry(name.clone()).or_insert((i, 0));
+            }
+            IRInitItem::Run(name) => {
+                for (j, part) in run_parts.get(name).into_iter().flatten().enumerate() {
+                    for g in crate::ir::toplevel::bound_names(part) {
+                        first_bound.entry(g).or_insert((i, j));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    // The names a body reads that are not its own locals, and through the
+    // module's functions and classes, the names those read.
+    let locals_of = |f: &IRFunction| -> HashSet<String> {
+        let mut locals: HashSet<String> = f.params.iter().map(|p| p.name.clone()).collect();
+        locals.extend(crate::ir::toplevel::bound_names(&f.body));
+        fn nested(body: &IRBody, out: &mut HashSet<String>) {
+            for stmt in &body.statements {
+                if let IRStatement::FunctionDef(def) = stmt {
+                    out.insert(def.name.clone());
+                    out.extend(def.params.iter().map(|p| p.name.clone()));
+                    out.extend(crate::ir::toplevel::bound_names(&def.body));
+                    nested(&def.body, out);
+                }
+            }
+        }
+        nested(&f.body, &mut locals);
+        for stmt in &f.body.statements {
+            if let IRStatement::Global(names) = stmt {
+                for n in names {
+                    locals.remove(n);
+                }
+            }
+        }
+        locals
+    };
+    let reads = |body: &IRBody| -> Result<HashSet<String>> {
+        let mut out = HashSet::new();
+        let mut followed: HashSet<String> = HashSet::new();
+        let mut pending = vec![(body.clone(), HashSet::new())];
+        while let Some((mut body, locals)) = pending.pop() {
+            let mut names = Vec::new();
+            let mut lambda_params: HashSet<String> = HashSet::new();
+            crate::ir::visit_body(&mut body, &mut |e: &mut IRExpr| {
+                match e {
+                    IRExpr::Variable(n) | IRExpr::Param(n) => names.push(n.clone()),
+                    IRExpr::FunctionCall { function_name, .. } => names.push(function_name.clone()),
+                    IRExpr::Lambda { params, .. } => {
+                        lambda_params.extend(params.iter().map(|p| p.name.clone()))
+                    }
+                    _ => {}
+                }
+                Ok(())
+            })?;
+            for name in names {
+                if name.starts_with("__") || locals.contains(&name) || lambda_params.contains(&name)
+                {
+                    continue;
+                }
+                out.insert(name.clone());
+                if !followed.insert(name.clone()) {
+                    continue;
+                }
+                if let Some(f) = module.functions.iter().find(|f| f.name == name) {
+                    pending.push((f.body.clone(), locals_of(f)));
+                }
+                if let Some(c) = module.classes.iter().find(|c| c.name == name) {
+                    for m in &c.methods {
+                        pending.push((m.body.clone(), locals_of(m)));
+                    }
+                }
+            }
+        }
+        Ok(out)
+    };
+    for (i, item) in items.iter().enumerate() {
+        let IRInitItem::Run(name) = item else {
+            continue;
+        };
+        for (j, part) in run_parts.get(name).into_iter().flatten().enumerate() {
+            let mut names: Vec<String> = reads(part)?.into_iter().collect();
+            names.sort();
+            for name in names {
+                if def_positions.get(&name).is_some_and(|&p| p > i) {
+                    return Err(crate::core::errors::unsupported_feature(
+                        format!(
+                            "a module-level statement uses '{name}', which is defined below it: \
+                         CPython runs the statement first and raises NameError. Hint: move \
+                         the definition above the statement"
+                        ),
+                        None,
+                    )
+                    .into());
+                }
+                if !def_positions.contains_key(&name)
+                    && first_bound.get(&name).is_some_and(|&p| p > (i, j))
+                {
+                    return Err(crate::core::errors::unsupported_feature(
+                        format!(
+                            "a module-level statement uses '{name}' before it is assigned below \
+                         it: CPython raises NameError there. Hint: assign '{name}' first"
+                        ),
+                        None,
+                    )
+                    .into());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Refuse what is a SyntaxError outside a function, in statements that run
+/// at module level.
+fn refuse_outside_function(block: &[Stmt]) -> Result<()> {
+    let mut outside_function = None;
+    walk_block_statements(block, &mut |stmt| match stmt {
+        Stmt::Return(_) => outside_function = outside_function.or(Some("'return'")),
+        Stmt::Expr(e) if matches!(&*e.value, Expr::Yield(_) | Expr::YieldFrom(_)) => {
+            outside_function = outside_function.or(Some("'yield'"))
+        }
+        Stmt::Expr(e) if matches!(&*e.value, Expr::Await(_)) => {
+            outside_function = outside_function.or(Some("'await'"))
+        }
+        Stmt::Nonlocal(_) => outside_function = outside_function.or(Some("'nonlocal'")),
+        _ => {}
+    });
+    match outside_function {
+        Some(what) => Err(crate::core::errors::unsupported_feature(
+            format!("{what} outside a function is a SyntaxError in CPython"),
+            None,
+        )
+        .into()),
+        None => Ok(()),
+    }
+}
+
+/// Whether a top-level statement runs where it stands rather than defining
+/// something: a loop, an `if` (other than the `__main__` block), a `try`
+/// holding more than imports, a `with`, an augmented assignment, an
+/// assignment to anything but one plain name, `del`, `assert`, `raise`.
+/// An expression statement is decided by its caller.
+pub(crate) fn is_top_level_statement(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::FunctionDef(_)
+        | Stmt::AsyncFunctionDef(_)
+        | Stmt::ClassDef(_)
+        | Stmt::Import(_)
+        | Stmt::ImportFrom(_)
+        | Stmt::Pass(_)
+        | Stmt::Global(_)
+        | Stmt::Expr(_) => false,
+        Stmt::Assign(a) => !matches!(a.targets.as_slice(), [Expr::Name(_)]),
+        Stmt::AnnAssign(a) => !matches!(&*a.target, Expr::Name(_)),
+        Stmt::If(s) => !is_main_guard(&s.test),
+        Stmt::Try(s) => {
+            let handler_bodies = s.handlers.iter().flat_map(|h| {
+                let ExceptHandler::ExceptHandler(h) = h;
+                h.body.iter()
+            });
+            !s.body
+                .iter()
+                .chain(handler_bodies)
+                .chain(&s.orelse)
+                .chain(&s.finalbody)
+                .all(|s| matches!(s, Stmt::Import(_) | Stmt::ImportFrom(_) | Stmt::Pass(_)))
+        }
+        _ => true,
+    }
+}
+
+/// One run of top-level statements, lowered as a function body, with the
+/// names it binds (which become module globals). A `def` or `class` among
+/// them (inside an `if` or a `try`) is refused, since the module's functions
+/// and classes are made when it is compiled.
+fn top_level_run(
+    stmts: &[Stmt],
+    module: &IRModule,
+    memory_layout: &mut MemoryLayout,
+    temps: &mut usize,
+) -> Result<(IRBody, Vec<String>, Vec<IRBody>)> {
+    refuse_outside_function(stmts)?;
+    let mut nested = None;
+    walk_block_statements(stmts, &mut |stmt| {
+        let what = match stmt {
+            Stmt::FunctionDef(s) => format!("function '{}'", s.name),
+            Stmt::AsyncFunctionDef(s) => format!("function '{}'", s.name),
+            Stmt::ClassDef(s) => format!("class '{}'", s.name),
+            _ => return,
+        };
+        nested.get_or_insert(what);
+    });
+    if let Some(what) = nested {
+        return Err(crate::core::errors::unsupported_feature(
+            format!(
+                "the {what} is defined inside a module-level 'if', loop, 'try', or 'with', \
+                 which is not supported: a module's functions and classes are made when it \
+                 is compiled. Hint: define it at module level"
+            ),
+            None,
+        )
+        .into());
+    }
+    // One statement at a time, so the order check sees where each binds.
+    let mut parts = Vec::with_capacity(stmts.len());
+    for stmt in stmts {
+        parts.push(lower_function_body(
+            std::slice::from_ref(stmt),
+            memory_layout,
+        )?);
+    }
+    let mut body = IRBody {
+        statements: parts.iter().flat_map(|p| p.statements.clone()).collect(),
+    };
+    // The compiler's own temporaries stay locals of the start.
+    let globals: Vec<String> = crate::ir::toplevel::bound_names(&body)
+        .into_iter()
+        .filter(|n| !n.starts_with("__"))
+        .collect();
+    for name in &globals {
+        if module.functions.iter().any(|f| f.name == *name)
+            || module.classes.iter().any(|c| c.name == *name)
+        {
+            return Err(crate::core::errors::unsupported_feature(
+                format!(
+                    "a module-level statement rebinds '{name}', which the module defines as a \
+                     function or class"
+                ),
+                None,
+            )
+            .into());
+        }
+    }
+    crate::ir::toplevel::assign_targets_through_temps(&mut body, &globals, temps);
+    Ok((body, globals, parts))
 }
 
 /// Visit `stmts` and the statements nested in them, not entering a `def` or
@@ -3144,9 +3471,34 @@ fn lower_function_body(stmts: &[Stmt], memory_layout: &mut MemoryLayout) -> Resu
                 ir_statements.push(IRStatement::Return(expr));
             }
             Stmt::Assign(assign) => {
-                // Handle assignment like "x = 5" or "self.width = width"
-                if assign.targets.len() != 1 {
-                    return Err(anyhow!("Only single target assignments supported"));
+                // `a = b = value`: the value once, then each target from left
+                // to right, as CPython assigns them.
+                if assign.targets.len() > 1 {
+                    let temp = format!("__chain_{}", memory_layout.comp_var_counter);
+                    memory_layout.comp_var_counter += 1;
+                    let name = |ctx| {
+                        Expr::Name(rustpython_parser::ast::ExprName {
+                            id: temp.as_str().into(),
+                            ctx,
+                            range: assign.range,
+                        })
+                    };
+                    let mut chain = vec![Stmt::Assign(rustpython_parser::ast::StmtAssign {
+                        targets: vec![name(rustpython_parser::ast::ExprContext::Store)],
+                        value: assign.value.clone(),
+                        type_comment: None,
+                        range: assign.range,
+                    })];
+                    for target in &assign.targets {
+                        chain.push(Stmt::Assign(rustpython_parser::ast::StmtAssign {
+                            targets: vec![target.clone()],
+                            value: Box::new(name(rustpython_parser::ast::ExprContext::Load)),
+                            type_comment: None,
+                            range: assign.range,
+                        }));
+                    }
+                    ir_statements.extend(lower_function_body(&chain, memory_layout)?.statements);
+                    continue;
                 }
 
                 match &assign.targets[0] {

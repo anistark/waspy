@@ -1090,19 +1090,23 @@ mod variables {
         );
     }
 
-    /// A module-level statement that would not run (a loop, a call, an augmented assignment) is refused
+    /// Module-level statements (a loop, a call, an if, an augmented assignment) run where they stand, in source order with the definitions, as a script's do
     #[test]
-    fn module_statements_that_would_not_run() {
-        refused(
+    fn module_statements_run_where_they_stand() {
+        check(
             r#"
             n = 0
             for i in range(3):
                 n += i
+            names = []
+            names.append("a")
+            if n > 2:
+                names.append("b")
 
             def f() -> int:
-                return n
+                return n * 10 + len(names)
         "#,
-            "at module level",
+            &[("f", Want::Int(32))],
         );
     }
 }

@@ -298,10 +298,10 @@
         "test": "variables::annotated_fields"
       },
       {
-        "name": "A module-level statement that would not run (a loop, a call, an augmented assignment) is refused",
+        "name": "Module-level statements (a loop, a call, an if, an augmented assignment) run where they stand, in source order with the definitions, as a script's do",
         "status": "done",
-        "version": "0.18.0",
-        "test": "variables::module_statements_that_would_not_run"
+        "version": "upcoming",
+        "test": "variables::module_statements_run_where_they_stand"
       },
       {
         "name": "global: a function rebinds a module-level name for every reader",

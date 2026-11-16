@@ -109,6 +109,9 @@ pub(crate) struct Staged {
     /// the rest go first (`compile_ir_module`).
     pub(crate) placed_classes: HashSet<String>,
     pub(crate) placed_vars: HashSet<usize>,
+    /// Whether a top level has statements (`ir::toplevel`), which makes the
+    /// module start on first use rather than inside instantiation.
+    pub(crate) runs: bool,
 }
 
 /// Place every top level of `module` (see the module documentation).
@@ -205,6 +208,8 @@ pub(crate) fn stage(module: &IRModule) -> Result<Staged, WaspyError> {
                             .iter()
                             .any(|v| evaluated.class_var(c, v).is_some())
                     }),
+                // Statements run there.
+                IRInitItem::Run(_) => true,
                 _ => false,
             })
     };
@@ -258,6 +263,10 @@ pub(crate) fn stage(module: &IRModule) -> Result<Staged, WaspyError> {
         globals: Vec<String>,
         placed_classes: HashSet<String>,
         placed_vars: HashSet<usize>,
+        /// Whether a file's top level has statements, and the names they
+        /// bind.
+        runs: bool,
+        run_globals: Vec<String>,
     }
     impl Emit<'_, '_> {
         fn assign(&mut self, var: IRVariable, out: &mut Vec<IRStatement>) {
@@ -306,6 +315,25 @@ pub(crate) fn stage(module: &IRModule) -> Result<Staged, WaspyError> {
                             import(j, self, out);
                         }
                     }
+                    IRInitItem::Run(name) => {
+                        let module = self.module;
+                        if let Some(run) = module.functions.iter().find(|f| f.name == *name) {
+                            for stmt in &run.body.statements {
+                                if let IRStatement::Global(names) = stmt {
+                                    for n in names {
+                                        if !self.globals.contains(n) {
+                                            self.globals.push(n.clone());
+                                        }
+                                        if !self.run_globals.contains(n) {
+                                            self.run_globals.push(n.clone());
+                                        }
+                                    }
+                                }
+                            }
+                            out.extend(crate::ir::toplevel::start_statements(run));
+                            self.runs = true;
+                        }
+                    }
                 }
             }
         }
@@ -324,6 +352,8 @@ pub(crate) fn stage(module: &IRModule) -> Result<Staged, WaspyError> {
         globals: Vec::new(),
         placed_classes: HashSet::new(),
         placed_vars: HashSet::new(),
+        runs: false,
+        run_globals: Vec::new(),
     };
 
     // The program's start: the entry, each module at its first import, then
@@ -418,6 +448,24 @@ pub(crate) fn stage(module: &IRModule) -> Result<Staged, WaspyError> {
     }
 
     let mut staged = module.clone();
+    // The statements now stand in the starts. What they declared `global`
+    // stays declared by one function that is never called, so every reader
+    // of those names reads the global (a constant definition among them
+    // is not inlined) as it would have.
+    staged
+        .functions
+        .retain(|f| !f.name.starts_with(crate::ir::TOPLEVEL_FN_PREFIX));
+    if emit.runs {
+        staged.functions.push(IRFunction {
+            name: format!("{}globals", crate::ir::TOPLEVEL_FN_PREFIX),
+            params: Vec::new(),
+            body: IRBody {
+                statements: vec![IRStatement::Global(emit.run_globals.clone())],
+            },
+            return_type: IRType::None,
+            decorators: Vec::new(),
+        });
+    }
     let targets: HashMap<String, Option<String>> = marked
         .iter()
         .map(|name| {
@@ -446,7 +494,36 @@ pub(crate) fn stage(module: &IRModule) -> Result<Staged, WaspyError> {
         globals: emit.globals,
         placed_classes: emit.placed_classes,
         placed_vars: emit.placed_vars,
+        runs: emit.runs,
     })
+}
+
+/// Start the module on first use: `_start`, and each function the host can
+/// call, runs `__module_init` first unless it has run (it sets the flag
+/// before anything else, so a call back into the module from its own top
+/// level finds it started).
+pub(crate) fn start_on_first_use(module: &mut IRModule) {
+    use crate::compiler::context::MODULE_INIT_FN;
+    use crate::ir::build::{call, cmp, expr_stmt, if_, int, v};
+    for f in &mut module.functions {
+        let entry = f.name == crate::ir::MAIN_BLOCK_FN
+            || !(f.name.starts_with("__lambda_")
+                || f.name.starts_with(MODULE_INIT_FN)
+                || crate::ir::is_internal_function(&f.name));
+        if entry {
+            f.body.statements.insert(
+                0,
+                if_(
+                    cmp(
+                        v(crate::compiler::js::STARTED_FLAG),
+                        crate::ir::IRCompareOp::Eq,
+                        int(0),
+                    ),
+                    vec![expr_stmt(call(MODULE_INIT_FN, vec![]))],
+                ),
+            );
+        }
+    }
 }
 
 /// Every function and method body.

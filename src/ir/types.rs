@@ -43,6 +43,10 @@ pub enum IRInitItem {
     /// An `import` of the module of this dotted name, which runs that
     /// module's top level here the first time.
     Import(String),
+    /// A run of top-level statements (a loop, a call, an `if`), held by the
+    /// function of this name (`ir::toplevel`) until the module's start is
+    /// written, where its body runs here.
+    Run(String),
 }
 
 /// A call standing where an `import` of a user module was written in a

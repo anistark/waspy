@@ -399,6 +399,11 @@ pub struct CompilationContext {
     /// True while `__module_init` is being compiled: an assignment to a module
     /// global there stores the global instead of creating a local.
     pub in_module_init: bool,
+    /// Whether a module's start runs top-level statements (`ir::toplevel`):
+    /// there a global can be assigned more than once, and a statement reads
+    /// one at the type its first assignment gave it, so the scan records each
+    /// global's type as it goes and a later assignment keeps it.
+    pub start_runs: bool,
     /// The names the function being compiled declares `global`: assigning one
     /// stores into its module global instead of making a local.
     pub declared_globals: HashSet<String>,
@@ -642,6 +647,7 @@ impl CompilationContext {
             module_global_index: HashMap::new(),
             module_global_types: HashMap::new(),
             in_module_init: false,
+            start_runs: false,
             declared_globals: HashSet::new(),
             temp_local: 0,
             temp_local_f64: 0,

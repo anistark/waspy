@@ -20,6 +20,7 @@ pub enum EntryPointType {
     MainPyFile,    // __main__.py file
     MainNameCheck, // if __name__ == "__main__"
     CliScript,     // Script with argparse/click/etc.
+    Script,        // Top-level statements, run as the program starts
     NoEntryPointDetected,
 }
 
@@ -89,8 +90,32 @@ pub fn detect_entry_points(
         }));
     }
 
+    // A file whose top level has statements (a loop, a call) is a program:
+    // they run as it starts.
+    if has_top_level_statements(source) {
+        return Ok(Some(EntryPointInfo {
+            main_function_name: MAIN_BLOCK_FN.to_string(),
+            detected_type: EntryPointType::Script,
+            contains_args_parsing: false,
+        }));
+    }
+
     // If no entry point patterns are found
     Ok(None)
+}
+
+/// Whether `source`'s top level has a statement other than a definition, an
+/// import, or a docstring (`ir::toplevel`).
+fn has_top_level_statements(source: &str) -> bool {
+    use rustpython_parser::ast::{Expr, Stmt, Suite};
+    use rustpython_parser::Parse;
+    let Ok(ast) = Suite::parse(source, "<entry>") else {
+        return false;
+    };
+    ast.iter().any(|stmt| match stmt {
+        Stmt::Expr(e) => !matches!(&*e.value, Expr::Constant(_)),
+        _ => super::converter::is_top_level_statement(stmt),
+    })
 }
 
 /// Generate a main function for WebAssembly from an entry point
