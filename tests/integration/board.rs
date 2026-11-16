@@ -609,21 +609,64 @@ mod functions {
     /// An unannotated parameter or return takes ints, bools, and None; a string, float, collection, or instance through one is refused
     #[test]
     fn untyped_parameters_take_words() {
-        refused(
+        check(
             r#"
             def ln(s):
                 return len(s)
 
+            def show(label, value):
+                return label + "=" + str(value)
+
             def f() -> int:
                 return ln("abc")
+
+            def g() -> str:
+                return show("n", 3) + " " + show("s", "x")
         "#,
-            "argument 1 of ln()",
+            &[("f", Want::Int(3)), ("g", Want::Str("n=3 s=x"))],
         );
     }
 }
 
 mod type_system {
     use super::*;
+
+    /// Dynamic values (typing.Any): mixed literals, json.loads with no declared type, and Any annotations hold values that answer as CPython's built-in types do (operators, indexing, iteration, printing, json.dumps), raising CPython's errors
+    #[test]
+    fn dynamic_values() {
+        check(
+            r#"
+            import json
+            from typing import Any
+
+            def parsed() -> str:
+                data = json.loads('{"name": "bob", "age": 30, "tags": ["a", 1]}')
+                return str(data["age"] + 1) + " " + str(data["tags"]) + " " + json.dumps(data, sort_keys=True)
+
+            def record() -> str:
+                row = {"id": 7, "name": "ada", "score": 1.5}
+                return f"{row['name']}:{row['id'] * 2}:{row['score'] + 1}"
+
+            def mismatch() -> str:
+                v: Any = "x"
+                try:
+                    return v + 1
+                except TypeError as e:
+                    return str(e)
+        "#,
+            &[
+                (
+                    "parsed",
+                    Want::Str("31 ['a', 1] {\"age\": 30, \"name\": \"bob\", \"tags\": [\"a\", 1]}"),
+                ),
+                ("record", Want::Str("ada:14:2.5")),
+                (
+                    "mismatch",
+                    Want::Str("can only concatenate str (not \"int\") to str"),
+                ),
+            ],
+        );
+    }
 
     /// Basic types: int (32-bit two's complement, wraps on overflow rather than growing like CPython's), float (IEEE-754 double), bool
     #[test]
@@ -1802,25 +1845,26 @@ mod collections {
         );
     }
 
-    /// A literal mixing element types no one type holds ([1, "a"], {"n": "bob", "age": 30}) is refused instead of reading the others back as the first; [[], [1]] and tuples of one shape unify
+    /// A literal mixing element types ([1, "a"], {"n": "bob", "age": 30}) holds Any values, as CPython's does; [[], [1]] and tuples of one shape unify
     #[test]
-    fn mixed_literals_refused() {
+    fn mixed_literals_hold_any() {
         check(
             r#"
             def g() -> str:
                 xs = [[], [1, 2]]
                 ys = [(1, "a"), (2, "b")]
                 return str(xs) + str(ys)
+
+            def h() -> str:
+                xs = [1, "a"]
+                d = {"n": "bob", "age": 30}
+                return str(xs[1]) + " " + str(d["age"] + 1) + " " + str(xs)
         "#,
-            &[("g", Want::Str("[[], [1, 2]][(1, 'a'), (2, 'b')]"))],
+            &[
+                ("g", Want::Str("[[], [1, 2]][(1, 'a'), (2, 'b')]")),
+                ("h", Want::Str("a 31 [1, 'a']")),
+            ],
         );
-        for src in [
-            "def g() -> str:\n    xs = [1, \"a\"]\n    return str(xs[1])\n",
-            "def g() -> str:\n    d = {\"n\": \"bob\", \"age\": 30}\n    return str(d[\"age\"])\n",
-        ] {
-            let err = try_compile(src).expect_err("a mixed literal is refused");
-            assert!(err.contains("mixing"), "{err}");
-        }
     }
 
     /// List literals with memory allocation [1, 2, 3]

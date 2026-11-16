@@ -1132,6 +1132,10 @@ pub(crate) fn rewrite(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr>
     if let Some(bridged) = crate::compiler::js::rewrite(expr, ctx) {
         return Some(bridged);
     }
+    // A builtin given a dynamic value is the runtime's (`ir::dynamic`).
+    if let Some(dynamic) = rewrite_any_builtin(expr, ctx) {
+        return Some(dynamic);
+    }
     if let Some(logged) = rewrite_log_expr(expr, ctx) {
         return Some(logged);
     }
@@ -1730,11 +1734,142 @@ fn enumerate_walk(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
 }
 
 /// A walked iterator builtin as the list it yields: `reversed()`, `zip()`,
-/// `enumerate()`.
+/// `enumerate()`, and a dynamic value's elements.
 fn iterator_walk(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
     reversed_walk(expr, ctx)
         .or_else(|| zip_walk(expr, ctx))
         .or_else(|| enumerate_walk(expr, ctx))
+        .or_else(|| any_walk(expr, ctx))
+}
+
+/// A builtin given a dynamic value (`ir::dynamic`), as the runtime's
+/// function: `sum()`, `int()`, `float()`, `abs()`, `format()` with a spec (an
+/// f-string's `{x:>5}`), `isinstance()` against builtin types, and `is None`.
+fn rewrite_any_builtin(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
+    use crate::ir::dynamic::is_any;
+    let runtime_fn = |name: &str, arguments: Vec<IRExpr>| IRExpr::FunctionCall {
+        function_name: name.to_string(),
+        arguments,
+    };
+    match expr {
+        IRExpr::FunctionCall {
+            function_name,
+            arguments,
+        } if ctx.get_function_info(function_name).is_none() => {
+            let first = arguments.first()?;
+            let first_ty = infer_value_type(first, ctx);
+            match (function_name.as_str(), arguments.as_slice()) {
+                ("sum", [items, rest @ ..]) => {
+                    let items_ty = infer_value_type(items, ctx);
+                    let walked = match &items_ty {
+                        IRType::List(e) if is_any(e) => items.clone(),
+                        t if is_any(t) => call(items, "iter_items", Vec::new()),
+                        _ => return None,
+                    };
+                    let start = match rest {
+                        [] => IRExpr::Const(crate::ir::IRConstant::Int(0)),
+                        [IRExpr::Keyword { name, value }] if name == "start" => (**value).clone(),
+                        [value] if !matches!(value, IRExpr::Keyword { .. }) => value.clone(),
+                        _ => return None,
+                    };
+                    Some(runtime_fn("__any_sum", vec![walked, start]))
+                }
+                // `max(xs)` of dynamic values, or `max(a, b)` with one among them.
+                ("max" | "min", _)
+                    if !arguments
+                        .iter()
+                        .any(|a| matches!(a, IRExpr::Keyword { .. })) =>
+                {
+                    let walked = match arguments.as_slice() {
+                        [items] => match infer_value_type(items, ctx) {
+                            IRType::List(e) if is_any(&e) => items.clone(),
+                            t if is_any(&t) => call(items, "iter_items", Vec::new()),
+                            _ => return None,
+                        },
+                        several if several.iter().any(|a| is_any(&infer_value_type(a, ctx))) => {
+                            IRExpr::ListLiteral(several.to_vec())
+                        }
+                        _ => return None,
+                    };
+                    Some(runtime_fn(&format!("__any_{function_name}"), vec![walked]))
+                }
+                ("int", [value]) if is_any(&first_ty) => {
+                    Some(runtime_fn("__any_int", vec![value.clone()]))
+                }
+                ("float", [value]) if is_any(&first_ty) => {
+                    Some(runtime_fn("__any_float", vec![value.clone()]))
+                }
+                ("abs", [value]) if is_any(&first_ty) => Some(call(value, "__abs__", Vec::new())),
+                ("format", [value, spec]) if is_any(&first_ty) => Some(runtime_fn(
+                    "__any_format",
+                    vec![value.clone(), spec.clone()],
+                )),
+                ("isinstance", [value, types]) if is_any(&first_ty) => {
+                    let names: Vec<String> = match types {
+                        IRExpr::Variable(name) => vec![name.clone()],
+                        IRExpr::TupleLiteral(items) => items
+                            .iter()
+                            .map(|i| match i {
+                                IRExpr::Variable(name) => Some(name.clone()),
+                                _ => None,
+                            })
+                            .collect::<Option<Vec<_>>>()?,
+                        _ => return None,
+                    };
+                    let builtin = |n: &str| {
+                        matches!(
+                            n,
+                            "int" | "float" | "str" | "bool" | "list" | "dict" | "tuple"
+                        )
+                    };
+                    if !names.iter().all(|n| builtin(n)) {
+                        return None;
+                    }
+                    let test = |n: &String| {
+                        runtime_fn(
+                            "__any_isa",
+                            vec![
+                                value.clone(),
+                                IRExpr::Const(crate::ir::IRConstant::String(n.clone())),
+                            ],
+                        )
+                    };
+                    let mut tests = names.iter().map(test);
+                    let first = tests.next()?;
+                    Some(tests.fold(first, |acc, t| IRExpr::BoolOp {
+                        left: Box::new(acc),
+                        right: Box::new(t),
+                        op: crate::ir::IRBoolOp::Or,
+                    }))
+                }
+                _ => None,
+            }
+        }
+        // `x is None` of a dynamic value: whether it holds None.
+        IRExpr::CompareOp { left, right, op }
+            if matches!(op, IRCompareOp::Is | IRCompareOp::IsNot)
+                && matches!(**right, IRExpr::Const(crate::ir::IRConstant::None))
+                && is_any(&infer_value_type(left, ctx)) =>
+        {
+            let test = runtime_fn("__any_is_none", vec![(**left).clone()]);
+            Some(match op {
+                IRCompareOp::Is => test,
+                _ => IRExpr::UnaryOp {
+                    op: crate::ir::IRUnaryOp::Not,
+                    operand: Box::new(test),
+                },
+            })
+        }
+        _ => None,
+    }
+}
+
+/// A dynamic value (`ir::dynamic`) where it is walked: what iterating it
+/// yields, as a list of dynamic values (a list's own elements, a dict's keys,
+/// a str's characters).
+fn any_walk(expr: &IRExpr, ctx: &CompilationContext) -> Option<IRExpr> {
+    crate::ir::dynamic::is_any(&infer_value_type(expr, ctx))
+        .then(|| call(expr, "iter_items", Vec::new()))
 }
 
 /// `reversed(x)` where it is walked (a loop, a comprehension, a builtin that
@@ -2294,12 +2429,27 @@ pub(crate) fn rewrite_statement(
         else_body,
     } = stmt
     {
-        if let Some(walk) = reversed_walk(iterable, ctx) {
+        if let Some(walk) = reversed_walk(iterable, ctx).or_else(|| any_walk(iterable, ctx)) {
             return Some(IRStatement::For {
                 target: target.clone(),
                 iterable: walk,
                 body: body.clone(),
                 else_body: else_body.clone(),
+            });
+        }
+    }
+    // `a, b = value` of a dynamic value unpacks what iterating it yields.
+    if let IRStatement::TupleUnpack {
+        targets,
+        value,
+        starred,
+    } = stmt
+    {
+        if let Some(walk) = any_walk(value, ctx) {
+            return Some(IRStatement::TupleUnpack {
+                targets: targets.clone(),
+                value: walk,
+                starred: *starred,
             });
         }
     }

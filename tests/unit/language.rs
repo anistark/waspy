@@ -310,8 +310,8 @@ fn nested_function_refusals() {
         "#,
         "a closure reads it at one type",
     );
-    // A str-returning function through an untyped parameter would come back
-    // as an int.
+    // The parameter takes the function its call passes, whose str parameter
+    // an int cannot be given here.
     refused(
         r#"
         def h(cb) -> int:
@@ -322,7 +322,7 @@ fn nested_function_refusals() {
                 return s
             return h(g)
         "#,
-        "a function is passed through a place with no type",
+        "where 'str' is declared",
     );
     refused(
         r#"

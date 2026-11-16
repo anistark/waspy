@@ -158,9 +158,9 @@
         "test": "functions::keyword_arguments"
       },
       {
-        "name": "An unannotated parameter or return takes ints, bools, and None; a string, float, collection, or instance through one is refused",
+        "name": "An unannotated parameter takes the type its calls pass, or Any where they pass values of several types (def show(label, value) called with an int and a str)",
         "status": "done",
-        "version": "0.18.0",
+        "version": "upcoming",
         "test": "functions::untyped_parameters_take_words"
       },
       {
@@ -229,6 +229,12 @@
         "status": "done",
         "version": "0.14.0",
         "test": "type_system::inferred_local_types"
+      },
+      {
+        "name": "Dynamic values (typing.Any): mixed literals, json.loads with no declared type, and Any annotations hold values that answer as CPython's built-in types do (operators, indexing, iteration, printing, json.dumps), raising CPython's errors",
+        "status": "done",
+        "version": "upcoming",
+        "test": "type_system::dynamic_values"
       }
     ]
   },
@@ -633,10 +639,10 @@
         "test": "collections::list_indexing"
       },
       {
-        "name": "A literal mixing element types no one type holds ([1, \"a\"], {\"n\": \"bob\", \"age\": 30}) is refused instead of reading the others back as the first; [[], [1]] and tuples of one shape unify",
+        "name": "A literal mixing element types ([1, \"a\"], {\"n\": \"bob\", \"age\": 30}) holds Any values, as CPython's does; [[], [1]] and tuples of one shape unify",
         "status": "done",
         "version": "upcoming",
-        "test": "collections::mixed_literals_refused"
+        "test": "collections::mixed_literals_hold_any"
       },
       {
         "name": "List methods .append(), .pop([i]), .clear(), .insert(i, v)",

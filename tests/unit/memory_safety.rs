@@ -667,15 +667,24 @@ fn guarded_imports_stay_allowed_at_module_level() {
 /// kind, naming the function it appears in.
 #[test]
 fn mixed_width_literals_are_a_compile_error() {
-    let cases: &[(&str, &str)] = &[
-        (
+    // A list or a dict's values mixing ints and floats hold dynamic values,
+    // each read back as what it is, as CPython's are.
+    assert_eq!(
+        call_f64(
             "def f() -> float:\n    xs = [1, 2.5]\n    return xs[1]\n",
-            "list literal mixing float and int",
+            "f"
         ),
-        (
+        2.5
+    );
+    assert_eq!(
+        call_f64(
             "def f() -> float:\n    d = {1: 1.5, 2: 2}\n    return d[1]\n",
-            "dict literal's values mixing float and int",
+            "f"
         ),
+        1.5
+    );
+    // Keys and set members cannot be dynamic values, so those stay refused.
+    let cases: &[(&str, &str)] = &[
         (
             "def f() -> int:\n    d = {1: 5, 2.5: 6}\n    return d[1]\n",
             "dict literal's keys mixing float and int",
@@ -717,10 +726,15 @@ fn mixed_width_literals_are_a_compile_error() {
         2.5
     );
     // A bool beside an int is refused too: both fit the slot, but the list
-    // holds one element type, so `str([1, True])` would print `[1, 1]`.
-    let err = try_compile("def f() -> int:\n    xs = [1, True]\n    return xs[0] + xs[1]\n")
-        .expect_err("a list of ints and bools must be rejected");
-    assert!(err.contains("mixing int and bool"), "{err}");
+    // holds one element type, so `str([1, True])` would print `[1, 1]`. It
+    // holds dynamic values now, each its own kind.
+    assert_eq!(
+        call_i32(
+            "def f() -> int:\n    xs = [1, True]\n    return xs[0] + xs[1]\n",
+            "f"
+        ),
+        2
+    );
 }
 
 // ---------------------------------------------------------------------------

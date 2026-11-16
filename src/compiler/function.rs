@@ -1386,6 +1386,12 @@ pub(crate) fn infer_value_type(value: &IRExpr, ctx: &CompilationContext) -> IRTy
             let (k, v) = (of(&keys), of(&values));
             if scalar(&k) && scalar(&v) {
                 IRType::Dict(Box::new(k), Box::new(v))
+            } else if k == IRType::String
+                && has_any_runtime(ctx)
+                && literal_mixes_types(&values, ctx)
+            {
+                // A record of values of several types: `dict[str, Any]`.
+                IRType::Dict(Box::new(k), Box::new(crate::ir::dynamic::any_type()))
             } else {
                 IRType::Unknown
             }
@@ -1803,9 +1809,34 @@ fn literal_elem_type(elems: &[IRExpr], ctx: &CompilationContext) -> IRType {
     // unifies instances to their common base: an unknown taken up again by
     // a later element typed `[Sq(), Tri(), Sq()]` as a list of `Sq`, and
     // `Tri`'s method was dispatched as `Sq`'s.
+    // With the dynamic-value runtime, a literal mixing types holds `Any`
+    // values (`ir::dynamic`), as code generation builds it.
     types
         .try_fold(first, |acc, t| unify_scanned(&acc, &t, ctx))
-        .unwrap_or(IRType::Unknown)
+        .unwrap_or_else(|| {
+            if has_any_runtime(ctx) {
+                crate::ir::dynamic::any_type()
+            } else {
+                IRType::Unknown
+            }
+        })
+}
+
+/// Whether the dynamic-value runtime (`ir::dynamic`) is in this module.
+pub(crate) fn has_any_runtime(ctx: &CompilationContext) -> bool {
+    ctx.get_class_info(crate::ir::dynamic::ANY_CLASS).is_some()
+}
+
+/// Whether the elements of a collection literal have no one type the scan
+/// can see, so the literal holds dynamic values (`[1, "a"]`).
+pub(crate) fn literal_mixes_types(elems: &[IRExpr], ctx: &CompilationContext) -> bool {
+    let mut types = elems.iter().map(|e| literal_member_type(e, ctx));
+    let Some(first) = types.next() else {
+        return false;
+    };
+    types
+        .try_fold(first, |acc, t| unify_scanned(&acc, &t, ctx))
+        .is_none()
 }
 
 /// The one type two elements of a literal share, where a part one does not

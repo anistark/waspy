@@ -1906,10 +1906,6 @@ fn json_loads_needs_its_type() {
     );
     for (source, needle) in [
         (
-            "import json\n\ndef f(s: str) -> int:\n    d = json.loads(s)\n    return len(d)\n",
-            "parses into the type the value is declared to have",
-        ),
-        (
             "import json\n\ndef f(s: str) -> int:\n    d: dict[int, int] = json.loads(s)\n    return len(d)\n",
             "a JSON object's keys are strs",
         ),
@@ -1921,6 +1917,15 @@ fn json_loads_needs_its_type() {
         let err = try_compile(source).expect_err("must be refused");
         assert!(err.contains(needle), "expected `{needle}` in: {err}");
     }
+    // With no declared type it parses into dynamic values, as CPython builds
+    // whatever the document holds.
+    assert_eq!(
+        call_i32(
+            "import json\n\ndef f() -> int:\n    d = json.loads('{\"a\": [1, 2, 3]}')\n    return len(d[\"a\"])\n",
+            "f"
+        ),
+        3
+    );
 }
 
 /// json's encoders: `dumps(default=...)` with a function of the program, `json.JSONEncoder` with its options as fields (held in a variable, passed as a parameter), a subclass's `default()`, `dumps(cls=...)`, `super().default(o)`'s TypeError, and an exception raised by a hook.

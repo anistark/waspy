@@ -1239,6 +1239,8 @@ pub fn type_to_string(ir_type: &IRType) -> String {
                 .join(" | ");
             format!("Union[{inner}]")
         }
+        // A dynamic value (`ir::dynamic`) is `Any`, whichever kind it holds.
+        IRType::Class(name) if ir::dynamic::is_any_class(name) => "Any".to_string(),
         IRType::Class(name) => name.clone(),
         IRType::ClassRef(name) => format!("type[{name}]"),
         IRType::Module(name) => format!("Module[{name}]"),

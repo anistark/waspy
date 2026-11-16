@@ -1661,6 +1661,25 @@ pub(crate) fn is_pure_constant(
 /// an imported module at its first import, and a module first imported in a
 /// function when that import runs.
 pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, WaspyError> {
+    // The dynamic-value runtime (`ir::dynamic`), when the module names `Any`.
+    let runtime = |force: bool| {
+        crate::ir::dynamic::with_any_runtime(ir_module, force)
+            .map_err(|e| crate::core::errors::other_error(format!("{e:#}")))
+    };
+    let with_any = runtime(false)?;
+    crate::ir::dynamic::NEEDS_RUNTIME.with(|n| n.set(false));
+    let first = compile_staged(with_any.as_ref().unwrap_or(ir_module));
+    // A literal mixing types holds dynamic values, which code generation
+    // found without the runtime: compile again with it.
+    if first.is_err() && with_any.is_none() && crate::ir::dynamic::NEEDS_RUNTIME.with(|n| n.get()) {
+        if let Some(module) = runtime(true)? {
+            return compile_staged(&module);
+        }
+    }
+    first
+}
+
+fn compile_staged(ir_module: &IRModule) -> Result<Vec<u8>, WaspyError> {
     // Each top level placed where CPython runs it, a module first imported in
     // a function given a start of its own.
     let staged = crate::compiler::start::stage(ir_module)?;
@@ -1797,7 +1816,9 @@ pub fn compile_ir_module(ir_module: &IRModule) -> Result<Vec<u8>, WaspyError> {
 fn compile_module(ir_module: &IRModule, module_globals: &[String]) -> Result<Vec<u8>, WaspyError> {
     // Unannotated closure parameters are typed from their calls, and captured
     // cells from their stores, before any signature is fixed.
-    let (typed, capture_types) = crate::compiler::closures::type_closures(ir_module);
+    // So are the unannotated parameters of the program's own functions.
+    let untyped = crate::compiler::closures::type_untyped_functions(ir_module);
+    let (typed, capture_types) = crate::compiler::closures::type_closures(&untyped);
     let ir_module = &typed;
     let mut module = Module::new();
     let mut ctx = CompilationContext::new();

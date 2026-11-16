@@ -10,6 +10,7 @@ pub(crate) mod datetime;
 pub(crate) mod decorate;
 mod decorators;
 mod dict_views;
+pub(crate) mod dynamic;
 pub(crate) mod embedded;
 mod entry_points;
 mod finalize;

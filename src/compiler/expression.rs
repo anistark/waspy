@@ -1821,6 +1821,15 @@ pub(crate) fn emit_value(
 /// The type `arm` emits, found by emitting it into a scratch function and
 /// discarding the code and anything it reported. The flag says whether it
 /// reported anything.
+/// The type `expr` emits, found by a dry run that writes nothing.
+pub(crate) fn probe_value_type(
+    expr: &IRExpr,
+    ctx: &CompilationContext,
+    memory_layout: &MemoryLayout,
+) -> IRType {
+    probe_type(expr, ctx, memory_layout, None).0
+}
+
 fn probe_type(
     arm: &IRExpr,
     ctx: &CompilationContext,
@@ -3321,6 +3330,16 @@ pub(crate) fn emit_collection_element(
     // meant to refuse.
     let hint = match declared {
         Some(IRType::Float) => declared,
+        // A value stored into a collection of dynamic values is boxed, and a
+        // dynamic value stored into a typed one unboxed (`ir::dynamic`).
+        Some(slot) if crate::ir::dynamic::is_any(slot) => declared,
+        Some(_)
+            if crate::ir::dynamic::is_any(&crate::compiler::function::infer_value_type(
+                value, ctx,
+            )) =>
+        {
+            declared
+        }
         _ => None,
     };
     let actual = emit_expr(value, func, ctx, memory_layout, hint);
@@ -7371,6 +7390,9 @@ fn check_uniform_slot_width(ctx: &CompilationContext, what: &str, types: &[IRTyp
         .iter()
         .any(|t| matches!(t, IRType::Int | IRType::Bool));
     if floats && words {
+        if !crate::compiler::function::has_any_runtime(ctx) {
+            crate::ir::dynamic::NEEDS_RUNTIME.with(|n| n.set(true));
+        }
         ctx.report(format!(
             "a {what} mixing float and int elements is not supported: every element \
              occupies one slot and the collection reads them all at one width, so the \
@@ -7661,6 +7683,10 @@ fn literal_element_type(ctx: &CompilationContext, what: &str, types: &[IRType]) 
     let Some(first) = types.first() else {
         return IRType::Unknown;
     };
+    // Elements boxed as dynamic values (`ir::dynamic`).
+    if types.iter().all(crate::ir::dynamic::is_any) {
+        return crate::ir::dynamic::any_type();
+    }
     if types.iter().any(|t| matches!(t, IRType::Class(_))) {
         let mut base: Option<String> = None;
         for ty in types {
@@ -7753,10 +7779,14 @@ fn unify_open(a: &IRType, b: &IRType) -> Option<IRType> {
 /// collection is read as one type here, so a str beside an int read back as
 /// its address.
 fn refuse_mixed_literal(ctx: &CompilationContext, what: &str, a: &IRType, b: &IRType) -> IRType {
+    // Without the dynamic-value runtime the module is compiled again with
+    // it, and the literal holds `Any` values there.
+    if !crate::compiler::function::has_any_runtime(ctx) {
+        crate::ir::dynamic::NEEDS_RUNTIME.with(|n| n.set(true));
+    }
     ctx.report(format!(
-        "a {what} mixing {} and {} elements is not supported: a collection holds one \
-         element type here, and the others would be read back as it. \
-         Hint: keep each collection to one type, or use a class or a tuple for a record",
+        "a {what} mixing {} and {} elements whose types could not be told apart when \
+         compiling. Hint: annotate it as list[Any] or dict[str, Any]",
         crate::type_to_string(a),
         crate::type_to_string(b)
     ));
@@ -8585,6 +8615,14 @@ pub fn emit_expr(
             ctx.note_drop(&ty);
         }
     }
+    // A value stored where `Any` is declared is boxed, and a dynamic value
+    // stored where a type is declared is unboxed (`ir::dynamic`). A dynamic
+    // value tested for truth asks its own `__bool__`.
+    if !(truth && expected_type == Some(&IRType::Bool)) {
+        if let Some(converted) = convert_dynamic(expr, &ty, expected_type, func, ctx) {
+            return converted;
+        }
+    }
     if !numeric {
         check_widening(expr, &ty, expected_type, ctx);
     }
@@ -8661,6 +8699,124 @@ pub fn emit_expr(
         }
         _ => ty,
     }
+}
+
+/// Whether a list literal holds dynamic values (`ir::dynamic`): where
+/// `list[Any]` or `Any` is declared, or where its elements have no one type.
+/// Without the runtime, the second asks for the module to be compiled again
+/// with it.
+fn holds_any_elements(
+    elements: &[IRExpr],
+    expected: Option<&IRType>,
+    ctx: &CompilationContext,
+) -> bool {
+    let declared = match expected {
+        Some(IRType::List(e)) => crate::ir::dynamic::is_any(e),
+        Some(t) => crate::ir::dynamic::is_any(t),
+        None => false,
+    };
+    let wanted = declared
+        || (elements.len() > 1 && crate::compiler::function::literal_mixes_types(elements, ctx));
+    if !wanted {
+        return false;
+    }
+    if crate::compiler::function::has_any_runtime(ctx) {
+        return true;
+    }
+    crate::ir::dynamic::NEEDS_RUNTIME.with(|n| n.set(true));
+    false
+}
+
+/// Box a value of type `ty` (on the stack) stored where `Any` is declared, or
+/// unbox a dynamic value stored where a type is declared, by calling the
+/// runtime's function (`ir::dynamic`). Answers the type now on the stack, or
+/// `None` when neither applies.
+fn convert_dynamic(
+    expr: &IRExpr,
+    ty: &IRType,
+    expected: Option<&IRType>,
+    func: &mut Function,
+    ctx: &CompilationContext,
+) -> Option<IRType> {
+    use crate::ir::dynamic::{any_type, box_fn, is_any, unbox_fn};
+    let expected = expected?;
+    let call = |func: &mut Function, name: &str, ret: &IRType| -> bool {
+        match ctx.get_function_info(name).map(|f| f.index) {
+            Some(index) => {
+                emit_user_call(func, ctx, index);
+                finish_user_call(func, ctx, ret);
+                true
+            }
+            None => {
+                crate::ir::dynamic::NEEDS_RUNTIME.with(|n| n.set(true));
+                false
+            }
+        }
+    };
+    if is_any(expected) && !is_any(ty) {
+        let Some(name) = box_fn(ty) else {
+            if matches!(ty, IRType::Unknown | IRType::Any) {
+                return None;
+            }
+            ctx.report(format!(
+                "a {} is used where Any is declared, which holds it as a dynamic value; only \
+                 None, bool, int, float, str, and a list or dict of Any values are held so \
+                 here. Hint: build it as a list[Any] or dict[str, Any]",
+                crate::type_to_string(ty)
+            ));
+            return None;
+        };
+        match ty {
+            // The string's offset alone, as an argument is passed.
+            IRType::String => {
+                func.instruction(&Instruction::Drop);
+            }
+            // A None value is the word 0; a call that answers None pushes nothing.
+            IRType::None
+                if !matches!(
+                    expr,
+                    IRExpr::FunctionCall { .. } | IRExpr::MethodCall { .. }
+                ) =>
+            {
+                func.instruction(&Instruction::Drop);
+            }
+            _ => {}
+        }
+        let boxed = any_type();
+        if !call(func, name, &boxed) {
+            ctx.report("dynamic values need the runtime, which is not in this module");
+            func.instruction(&Instruction::I32Const(0));
+        }
+        return Some(boxed);
+    }
+    if is_any(ty) && !is_any(expected) {
+        match expected {
+            // Passed on as it is: an untyped place holds a word.
+            IRType::Unknown | IRType::Any => return None,
+            IRType::Class(other) => {
+                ctx.report(format!(
+                    "an Any value is used where an instance of '{other}' is declared, which this \
+                     compiler cannot check as it runs. Hint: annotate the value as the class"
+                ));
+                return None;
+            }
+            _ => {}
+        }
+        let Some(name) = unbox_fn(expected) else {
+            ctx.report(format!(
+                "an Any value is used where '{}' is declared, which it is not converted to here. \
+                 Hint: declare the place Any, list[Any], or dict[str, Any], or convert the \
+                 value (int(x), str(x))",
+                crate::type_to_string(expected)
+            ));
+            return None;
+        };
+        if !call(func, name, expected) {
+            ctx.report("dynamic values need the runtime, which is not in this module");
+        }
+        return Some(expected.clone());
+    }
+    None
 }
 
 /// The number an `Optional[int]` / `Optional[bool]` / `Optional[float]`
@@ -9647,12 +9803,16 @@ fn emit_expr_inner(
             emit_literal_block(func, ctx, blk, list_size);
             emit_literal_header(func, blk, elements.len() as u32);
 
+            // Dynamic values (`ir::dynamic`) where `list[Any]` or `Any` is
+            // declared, or where the elements have no one type.
+            let any_elements = holds_any_elements(elements, expected_type, ctx);
+            let element_expected = any_elements.then(crate::ir::dynamic::any_type);
             let mut element_types = Vec::with_capacity(elements.len());
             for (i, elem) in elements.iter().enumerate() {
                 // A store pops the value, then the address, so the block pointer
                 // goes first and the slot offset rides in the store's offset.
                 func.instruction(&Instruction::LocalGet(blk));
-                let ty = emit_expr(elem, func, ctx, memory_layout, None);
+                let ty = emit_expr(elem, func, ctx, memory_layout, element_expected.as_ref());
                 narrow_element_to_word(func, &ty);
                 store_collection_word_at(func, &ty, COLLECTION_HEADER + i as u32 * COLLECTION_SLOT);
                 element_types.push(ty);
@@ -9682,6 +9842,23 @@ fn emit_expr_inner(
             }
             crate::compiler::sets::emit_display(func, ctx, memory_layout, elements, &member);
             IRType::Set(Box::new(member))
+        }
+        // A tuple held as a dynamic value: its members boxed into a list the
+        // runtime's tuple holds.
+        IRExpr::TupleLiteral(elements)
+            if expected_type.is_some_and(crate::ir::dynamic::is_any)
+                && crate::compiler::function::has_any_runtime(ctx) =>
+        {
+            emit_expr(
+                &IRExpr::FunctionCall {
+                    function_name: "__any_of_tuple".to_string(),
+                    arguments: vec![IRExpr::ListLiteral(elements.clone())],
+                },
+                func,
+                ctx,
+                memory_layout,
+                None,
+            )
         }
         IRExpr::TupleLiteral(elements) => {
             // Tuple layout in memory: [length:i32][elem0][elem1]... One
@@ -9715,7 +9892,24 @@ fn emit_expr_inner(
             func.instruction(&Instruction::LocalGet(blk));
             IRType::Tuple(element_types)
         }
-        IRExpr::DictLiteral(pairs) => emit_dict_literal(pairs, None, func, ctx, memory_layout),
+        IRExpr::DictLiteral(pairs) => {
+            // Dynamic values where `dict[str, Any]` or `Any` is declared, or
+            // where the values have no one type (a record).
+            let values: Vec<IRExpr> = pairs.iter().map(|(_, v)| v.clone()).collect();
+            let declared_any = match expected_type {
+                Some(IRType::Dict(_, v)) => crate::ir::dynamic::is_any(v),
+                Some(t) => crate::ir::dynamic::is_any(t),
+                None => false,
+            };
+            let any_values = !pairs.is_empty()
+                && (declared_any || crate::compiler::function::literal_mixes_types(&values, ctx));
+            if any_values && !crate::compiler::function::has_any_runtime(ctx) {
+                crate::ir::dynamic::NEEDS_RUNTIME.with(|n| n.set(true));
+            }
+            let value_type = (any_values && crate::compiler::function::has_any_runtime(ctx))
+                .then(crate::ir::dynamic::any_type);
+            emit_dict_literal(pairs, value_type.as_ref(), func, ctx, memory_layout)
+        }
         IRExpr::CellNew => {
             // One slot, wide enough for any captured value.
             func.instruction(&Instruction::I32Const(COLLECTION_SLOT as i32));

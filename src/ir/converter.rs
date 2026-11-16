@@ -2764,7 +2764,8 @@ fn type_annotation_to_ir_type(expr: &Expr) -> Result<IRType> {
             "str" => Ok(IRType::String),
             "bytes" => Ok(IRType::Bytes),
             "None" => Ok(IRType::None),
-            "Any" => Ok(IRType::Any),
+            // `typing.Any`: a dynamic value (`ir::dynamic`).
+            "Any" => Ok(crate::ir::dynamic::any_type()),
             // Bare builtin collection annotations say nothing about their
             // elements, which is `Any` (where an inferred-but-not-yet-known
             // element is `Unknown`), so only word-shaped values pass through.

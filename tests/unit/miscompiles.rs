@@ -542,8 +542,13 @@ fn an_untyped_value_that_needs_a_type_is_refused() {
                \n\
                def f() -> int:\n\
                \x20   return g(5)\n";
-    let err = try_compile(def).expect_err("indexing an untyped parameter must be rejected");
-    assert!(err.contains("cannot be indexed"), "got: {err}");
+    // The parameter takes the int its call passes, which CPython cannot
+    // index either.
+    let err = try_compile(def).expect_err("indexing an int parameter must be rejected");
+    assert!(
+        err.contains("'int' object is not subscriptable"),
+        "got: {err}"
+    );
 }
 
 /// The refusal above must stay narrow. Arithmetic and comparison on an untyped
@@ -1366,11 +1371,9 @@ fn attribute_reads_through_untyped_values_are_refused() {
                    \n\
                    def f() -> int:\n\
                    \x20   return val(N(5))\n";
-    let err = try_compile(untyped).expect_err("a read through an untyped value must be refused");
-    assert!(
-        err.contains("attribute 'v'") && err.contains("annotate"),
-        "expected the attribute and a hint, got: {err}"
-    );
+    // The parameter takes the class its one call passes, as CPython reads
+    // the instance it is given.
+    assert_eq!(call_i32(untyped, "f"), 5);
 
     let missing = "class N:\n\
                    \x20   def __init__(self, v: int):\n\
@@ -3819,13 +3822,21 @@ fn statements_that_would_not_run_are_refused() {
 /// word-shaped values pass through an untyped place now.
 #[test]
 fn untyped_parameters_take_only_words() {
-    refused(
-        "def ln(s):\n    return len(s)\n\ndef f() -> int:\n    return ln(\"abc\")\n",
-        "argument 1 of ln()",
+    // An unannotated parameter takes the type its calls pass, so a str or a
+    // list reaches it whole, as in CPython.
+    assert_eq!(
+        call_i32(
+            "def ln(s):\n    return len(s)\n\ndef f() -> int:\n    return ln(\"abc\")\n",
+            "f"
+        ),
+        3
     );
-    refused(
-        "def first(xs):\n    return xs[0]\n\ndef f() -> int:\n    return first([7, 8])\n",
-        "argument 1 of first()",
+    assert_eq!(
+        call_i32(
+            "def first(xs):\n    return xs[0]\n\ndef f() -> int:\n    return first([7, 8])\n",
+            "f"
+        ),
+        7
     );
     let ints = "def add(a, b):\n    return a + b\n\ndef f() -> int:\n    return add(2, 3)\n";
     assert_eq!(call_i32(ints, "f"), 5);

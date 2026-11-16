@@ -47,6 +47,17 @@ Waspy compiles a typed subset of Python ahead of time. The rule it holds to: a c
 - A walk over a collection visits what CPython's does: a str its characters, a dict its keys, a set its members in CPython's order, in a comprehension, `sum`, `sorted`, `min`, and `max` alike
 - Values compare by what they hold: `==`, `!=`, and the orderings on tuples, lists, and strings follow CPython, and so do `in`, `list.index`/`count`, set membership, and dict keys, so a tuple can be a set member or a dict key. Dicts compare by their entries, whatever their order. Sets compare as sets (`==`, and `<=`/`<` as subset tests). `is` compares identity: two instances, an instance and `None`, or a `str` against `None`
 
+## Dynamic values
+
+Where static types run out, a value is dynamic, as every value is in CPython: a `typing.Any` annotation, a literal mixing types (`{"name": "bob", "age": 30}`, `[1, "two", 3.0, None]`), `json.loads()` with no declared type, and an unannotated parameter whose calls pass values of several types (`def show(label, value)` called with an int and a str). A dynamic value holds None, a bool, an int, a float, a str, a tuple, or a list or dict of dynamic values, and answers as CPython's built-in type does:
+
+- Printing, `str()`, `repr()`, f-strings and their format specs, `==` and the orderings, truth tests, `len()`, `in`, indexing and item assignment, iteration (`for`, comprehensions, unpacking), and the operators, with CPython's results across kinds (`1 + 2.5`, `"a" * 3`, `[1] + [2]`) and its errors for what a kind does not do (`can only concatenate str (not "int") to str`, `'int' object is not subscriptable`, `KeyError`, `IndexError`)
+- `int()`, `float()`, `abs()`, `sum()`, `sorted()`, `isinstance()` against the builtin types, and `is None`
+- A dict's `get`, `keys`, `values`, `items`, and `setdefault`; a list's `append`, `extend`, and `pop`; a str's `upper`, `lower`, `strip`, `split`, `startswith`, `endswith`, `replace`, and `join`. Another method is CPython's `AttributeError`
+- `json.dumps()` (with `indent` and `sort_keys`) writes them, and `json.loads()` parses into them, with CPython's `JSONDecodeError` messages and positions
+
+A list or dict a dynamic value holds is the very object the program holds, so a change made through one name is seen through the other, as in CPython. What differs is on [Limitations](/docs/limitations/#types)
+
 ## Classes and objects
 
 - Module-level variables and class definitions. A module-level definition that is not a plain constant (a collection, an instance, a call) is evaluated once at instantiation, in source order, and shared by every function, so mutating it is seen everywhere

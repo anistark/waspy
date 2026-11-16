@@ -60,6 +60,8 @@ pub fn is_internal_function(name: &str) -> bool {
         || name.starts_with(crate::ir::CORO_METHOD_PREFIX)
         || name.starts_with("__jsbridge_")
         || name.starts_with("__pyodide_")
+        || name.starts_with(crate::ir::dynamic::ANY_FN_PREFIX)
+        || name.starts_with(crate::ir::dynamic::ANY_HELPER_PREFIX)
         || name == crate::ir::MAIN_BLOCK_FN
 }
 

@@ -146,6 +146,10 @@ name = "unit_coroutines"
 path = "tests/unit/coroutines.rs"
 
 [[test]]
+name = "unit_dynamic"
+path = "tests/unit/dynamic.rs"
+
+[[test]]
 name = "unit_bridge"
 path = "tests/unit/bridge.rs"
 
