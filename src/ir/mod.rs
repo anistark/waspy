@@ -20,10 +20,12 @@ mod itertools;
 pub(crate) mod js_proxies;
 pub(crate) mod json;
 mod logging;
+pub(crate) mod merge;
 mod metaclasses;
 mod partials;
+pub(crate) mod program;
 pub(crate) mod pyodide_http;
-mod re;
+pub(crate) mod re;
 mod str_methods;
 mod types;
 

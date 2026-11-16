@@ -7370,3 +7370,59 @@ fn a_parameter_named_as_a_pattern_constant_is_the_parameter() {
     );
     assert_eq!(call_i32(&src, "f"), 1101);
 }
+
+/// A module variable two files define: merged modules share one namespace,
+/// so both files read one of the two, and `NAME = "mod"` in one file and
+/// `NAME = "main"` in the other printed "mod" from both. It is an error now,
+/// as a function defined twice is. The same constant in both files is one
+/// constant.
+#[test]
+fn a_module_variable_two_files_define_is_refused() {
+    let module = "NAME = \"mod\"\n\ndef who() -> str:\n    return NAME\n";
+    let main =
+        "from mod import who\n\nNAME = \"main\"\n\ndef both() -> str:\n    return who() + NAME\n";
+    let err = try_compile_multi(&[("mod.py", module), ("main.py", main)])
+        .expect_err("two files defining NAME");
+    assert!(
+        err.contains("duplicate variable 'NAME' in main.py"),
+        "{err}"
+    );
+
+    // A list each file builds is two lists in CPython, so it is refused too.
+    let module = "items = [1, 2]\n\ndef first() -> int:\n    return items[0]\n";
+    let main = "from mod import first\n\nitems = [7]\n\ndef both() -> int:\n    return first() + items[0]\n";
+    let err = try_compile_multi(&[("mod.py", module), ("main.py", main)])
+        .expect_err("two files defining items");
+    assert!(err.contains("duplicate variable 'items'"), "{err}");
+
+    // The same constant in both is read alike by both.
+    let module = "LIMIT = 3\n\ndef limit() -> int:\n    return LIMIT\n";
+    let main = "from mod import limit\n\nLIMIT = 3\n\ndef both() -> int:\n    return limit() * 10 + LIMIT\n";
+    let wasm = try_compile_multi(&[("mod.py", module), ("main.py", main)])
+        .expect("the same constant in two files");
+    let (instance, mut store) = harness::instantiate_wasm(&wasm);
+    assert_eq!(
+        harness::call_instance_i32(&instance, &mut store, "both"),
+        33
+    );
+
+    // Unless a function rebinds it: each module has its own in CPython.
+    let module =
+        "COUNT = 0\n\ndef bump() -> int:\n    global COUNT\n    COUNT += 1\n    return COUNT\n";
+    let main =
+        "from mod import bump\n\nCOUNT = 0\n\ndef both() -> int:\n    return bump() + COUNT\n";
+    let err = try_compile_multi(&[("mod.py", module), ("main.py", main)])
+        .expect_err("a constant one file rebinds");
+    assert!(err.contains("duplicate variable 'COUNT'"), "{err}");
+}
+
+/// A class two files define: both were kept under one name, and which
+/// one a call made depended on the order the files were merged in.
+#[test]
+fn a_class_two_files_define_is_refused() {
+    let module = "class Point:\n    def show(self) -> str:\n        return \"mod\"\n\ndef make() -> str:\n    return Point().show()\n";
+    let main = "from mod import make\n\nclass Point:\n    def show(self) -> str:\n        return \"main\"\n\ndef both() -> str:\n    return make() + Point().show()\n";
+    let err = try_compile_multi(&[("mod.py", module), ("main.py", main)])
+        .expect_err("two files defining Point");
+    assert!(err.contains("duplicate class 'Point' in main.py"), "{err}");
+}

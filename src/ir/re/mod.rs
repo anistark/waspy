@@ -225,6 +225,90 @@ impl Cache {
     }
 }
 
+/// Number the patterns `file` compiled apart from the ones `program` holds.
+///
+/// Each file's pass numbers its patterns from zero, as class variables of
+/// `re._Cache` (`p0`, `p1`, ...), so two files of one program each have a
+/// `p0`, and they are different patterns. Before `file` is merged into
+/// `program` (`ir::merge`), each of its patterns takes the name of the one
+/// the program already compiled from the same text and flags (CPython's
+/// cache is the program's, so both files then hold one object), or the next
+/// free number, and what reads it in `file` follows.
+pub(crate) fn renumber_cache(program: &IRModule, file: &mut IRModule) {
+    let cache = class_name("_Cache");
+    let Some(kept) = program.classes.iter().find(|c| c.name == cache) else {
+        return;
+    };
+    let Some(index) = file.classes.iter().position(|c| c.name == cache) else {
+        return;
+    };
+    let number = |name: &str| -> Option<usize> { name.strip_prefix('p')?.parse().ok() };
+    let written = |var: &IRVariable| format!("{:?}", (&var.value, &var.var_type));
+    let mut next = kept
+        .class_vars
+        .iter()
+        .filter_map(|var| number(&var.name))
+        .max()
+        .map_or(0, |highest| highest + 1);
+    let mut renamed: HashMap<String, String> = HashMap::new();
+    for var in &mut file.classes[index].class_vars {
+        if number(&var.name).is_none() {
+            continue;
+        }
+        let twin = kept
+            .class_vars
+            .iter()
+            .find(|k| number(&k.name).is_some() && written(k) == written(var));
+        let name = match twin {
+            Some(twin) => twin.name.clone(),
+            None => {
+                next += 1;
+                format!("p{}", next - 1)
+            }
+        };
+        if name != var.name {
+            renamed.insert(std::mem::replace(&mut var.name, name.clone()), name);
+        }
+    }
+    if renamed.is_empty() {
+        return;
+    }
+    let mut follow = |e: &mut IRExpr| {
+        if let IRExpr::Attribute { object, attribute } = e {
+            if matches!(object.as_ref(), IRExpr::Variable(c) if *c == cache) {
+                if let Some(name) = renamed.get(attribute) {
+                    *attribute = name.clone();
+                }
+            }
+        }
+        Ok(())
+    };
+    let mut in_function = |f: &mut crate::ir::IRFunction| {
+        let _ = crate::ir::visit_body(&mut f.body, &mut follow);
+        for p in &mut f.params {
+            if let Some(default) = &mut p.default_value {
+                expr_body(default, |body| {
+                    let _ = crate::ir::visit_body(body, &mut follow);
+                });
+            }
+        }
+    };
+    file.functions.iter_mut().for_each(&mut in_function);
+    for class in &mut file.classes {
+        class.methods.iter_mut().for_each(&mut in_function);
+    }
+    let values = file
+        .classes
+        .iter_mut()
+        .flat_map(|class| class.class_vars.iter_mut())
+        .chain(file.variables.iter_mut());
+    for var in values {
+        expr_body(&mut var.value, |body| {
+            let _ = crate::ir::visit_body(body, &mut follow);
+        });
+    }
+}
+
 /// The call that compiles a pattern at run time, taken apart: the text it
 /// matches, the pattern, and the flags.
 fn runtime_parts(expr: &IRExpr) -> Option<(Text, IRExpr, IRExpr)> {

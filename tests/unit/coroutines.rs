@@ -9,7 +9,7 @@
 #[path = "../utils/harness.rs"]
 mod harness;
 
-use harness::{dedent, run_main, try_compile};
+use harness::{dedent, run_main, run_wasm_main, try_compile, try_compile_multi, Host};
 
 /// Run a program's `__main__` block and compare its standard output.
 fn prints(source: &str, want: &str) {
@@ -1430,5 +1430,119 @@ fn coroutine_misuse_is_refused() {
             print(rs)
         "#,
         "where every awaitable resolves to None",
+    );
+}
+
+/// Run a program of several files, the last the one run as `__main__`, and
+/// compare what it printed.
+fn files_print(files: &[(&str, &str)], want: &str) {
+    let sources: Vec<(&str, String)> = files.iter().map(|(name, s)| (*name, dedent(s))).collect();
+    let sources: Vec<(&str, &str)> = sources
+        .iter()
+        .map(|(name, s)| (*name, s.as_str()))
+        .collect();
+    let wasm = try_compile_multi(&sources).unwrap_or_else(|e| panic!("the files merge: {e}"));
+    let (run, _) = run_wasm_main(&wasm, Host::default());
+    assert_eq!(run.stderr, "", "stderr");
+    assert_eq!(run.stdout, want);
+}
+
+/// One event loop for the program: a coroutine defined in one file is awaited, gathered, and made a task in another (its result typed from the file that defines it), and a lock, a queue, a task group, and a timeout each used by one file run on the loop the other started.
+#[test]
+fn asyncio_in_several_files() {
+    files_print(
+        &[
+            (
+                "mod.py",
+                r#"
+            import asyncio
+
+
+            async def twice(n: int) -> int:
+                await asyncio.sleep(0)
+                return n * 2
+            "#,
+            ),
+            (
+                "main.py",
+                r#"
+            import asyncio
+            from mod import twice
+
+
+            async def main() -> None:
+                a, b = await asyncio.gather(twice(1), twice(2))
+                t = asyncio.create_task(twice(5))
+                print(a, b, await t)
+
+
+            if __name__ == "__main__":
+                asyncio.run(main())
+            "#,
+            ),
+        ],
+        r#"2 4 10
+"#,
+    );
+    files_print(
+        &[
+            (
+                "mod.py",
+                r#"
+            import asyncio
+
+
+            async def worker(q: asyncio.Queue[int], out: list[int]) -> None:
+                while True:
+                    n = await q.get()
+                    out.append(n * n)
+                    q.task_done()
+
+
+            async def guarded(lock: asyncio.Lock, n: int) -> int:
+                async with lock:
+                    await asyncio.sleep(0)
+                    return n + 1
+            "#,
+            ),
+            (
+                "main.py",
+                r#"
+            import asyncio
+            from mod import worker, guarded
+
+
+            async def name() -> str:
+                await asyncio.sleep(0)
+                return "done"
+
+
+            async def main() -> None:
+                q: asyncio.Queue[int] = asyncio.Queue()
+                out: list[int] = []
+                t = asyncio.create_task(worker(q, out))
+                for i in range(3):
+                    q.put_nowait(i)
+                await q.join()
+                t.cancel()
+                lock = asyncio.Lock()
+                a, b = await asyncio.gather(guarded(lock, 1), guarded(lock, 2))
+                try:
+                    await asyncio.wait_for(asyncio.sleep(1), 0.01)
+                except asyncio.TimeoutError:
+                    print("timeout")
+                async with asyncio.TaskGroup() as tg:
+                    r = tg.create_task(name())
+                print(out, a, b, r.result())
+
+
+            if __name__ == "__main__":
+                asyncio.run(main())
+            "#,
+            ),
+        ],
+        r#"timeout
+[0, 1, 4] 2 3 done
+"#,
     );
 }

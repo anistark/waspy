@@ -6723,6 +6723,22 @@ mod project_mgmt {
         .expect("two files merge into one module");
         let (instance, mut store) = instantiate_wasm(&wasm);
         assert_eq!(call_instance_i32(&instance, &mut store, "area"), 36);
+
+        // Two files that use the same standard-library module: its code is in
+        // the module once, and each file's patterns are its own.
+        let wasm = try_compile_multi(&[
+            (
+                "words.py",
+                "import re\n\ndef words(text: str) -> int:\n    return len(re.findall(r\"\\w+\", text))\n",
+            ),
+            (
+                "main.py",
+                "import re\nfrom words import words\n\ndef count() -> int:\n    return words(\"a b c\") * 10 + len(re.findall(r\"\\d\", \"a1b22\"))\n",
+            ),
+        ])
+        .expect("two files using re merge into one module");
+        let (instance, mut store) = instantiate_wasm(&wasm);
+        assert_eq!(call_instance_i32(&instance, &mut store, "count"), 33);
     }
 
     /// Dependency analysis & circular detection

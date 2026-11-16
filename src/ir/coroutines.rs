@@ -137,19 +137,35 @@ pub fn lower_coroutines(module: &mut IRModule) -> Result<()> {
     if results.is_empty() && !api.used() {
         return Ok(());
     }
+    // The coroutine functions of the program's other files, which this one
+    // may import and await: a call of one is typed as the coroutine it
+    // makes, though only this file's own are written out here.
+    let mut known = results.clone();
+    let shared = crate::ir::program::entries(
+        "asyncio.coroutines",
+        results
+            .iter()
+            .map(|(name, result)| (name.clone(), result.clone()))
+            .collect::<Vec<_>>(),
+    );
+    for (name, result) in shared {
+        known.entry(name).or_insert(result);
+    }
 
     // The runtime, specialized for every result a coroutine can have (and a
     // promise's, which settles with a JS value, in a module using the
     // JavaScript bridge).
-    let bridge = crate::ir::uses_js_bridge(module);
-    let mut kinds: Vec<IRType> = results.values().cloned().collect();
+    // One event loop serves every file of the program, so what shapes it is
+    // what any of them uses.
+    let bridge = crate::ir::program::flag("asyncio.bridge", crate::ir::uses_js_bridge(module));
+    let mut kinds: Vec<IRType> = known.values().cloned().collect();
     kinds.push(IRType::None);
     if bridge {
         kinds.push(IRType::JsProxy);
     }
     let mut seen = HashSet::new();
     kinds.retain(|t| seen.insert(crate::ir::collections::spec::encode(t)));
-    let finalize = sync.task_finalizer;
+    let finalize = crate::ir::program::flag("asyncio.finalize", sync.task_finalizer);
     let mut runtime = aio::runtime_classes(&kinds, bridge, finalize);
     let timeout = aio::name("_Timeout");
     if let Some(t) = runtime.iter_mut().find(|c| c.name == timeout) {
@@ -209,7 +225,7 @@ pub fn lower_coroutines(module: &mut IRModule) -> Result<()> {
         }
         api.rewrite_tree(&mut var.value, false)?;
     }
-    let types = coroutine_types(module, &results);
+    let types = coroutine_types(module, &known);
     let modules: HashSet<String> = module
         .imports
         .iter()
@@ -217,8 +233,12 @@ pub fn lower_coroutines(module: &mut IRModule) -> Result<()> {
         .map(|i| i.alias.clone().unwrap_or_else(|| i.module.clone()))
         .collect();
 
-    // Every body: the asyncio calls, and in a coroutine the awaits.
+    // Every body: the asyncio calls, and in a coroutine the awaits. The
+    // temporaries are a function's own, so each function numbers them from
+    // one: the runtime's coroutines are then written the same whatever the
+    // program's come to, in every file of a program (`ir::merge`).
     let mut counter = 0u32;
+    let mut numbered: HashMap<String, u32> = HashMap::new();
     let mut lowerer = Lowerer {
         api: &api,
         types: &types,
@@ -227,6 +247,7 @@ pub fn lower_coroutines(module: &mut IRModule) -> Result<()> {
         finalize,
     };
     for f in &mut module.functions {
+        *lowerer.counter = 0;
         let mut env = params_env(&f.params);
         let locals = local_names(f);
         if results.contains_key(&f.name) {
@@ -237,16 +258,18 @@ pub fn lower_coroutines(module: &mut IRModule) -> Result<()> {
         } else {
             lowerer.plain_body(&mut f.body, &mut env)?;
         }
+        numbered.insert(f.name.clone(), *lowerer.counter);
     }
     for class in &mut module.classes {
         for m in &mut class.methods {
+            *lowerer.counter = 0;
             let mut env = params_env(&m.params);
             lowerer.plain_body(&mut m.body, &mut env)?;
         }
     }
 
     // Each coroutine function becomes its state class's constructor.
-    let types = coroutine_types(module, &results);
+    let types = coroutine_types(module, &known);
     let mut state_classes = Vec::new();
     for f in &mut module.functions {
         let Some(result) = results.get(&f.name) else {
@@ -254,6 +277,9 @@ pub fn lower_coroutines(module: &mut IRModule) -> Result<()> {
         };
         let class_name = state_class(&f.name);
         f.return_type = IRType::Generator(Box::new(aio::waited_on()));
+        // Its state class goes on from where the function's own
+        // temporaries stopped.
+        counter = numbered.get(&f.name).copied().unwrap_or(0);
         let mut class =
             crate::ir::generators::build_state_class(f, &class_name, &mut counter, &types)?;
         finish_state_class(&mut class, result);

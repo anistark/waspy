@@ -3546,6 +3546,537 @@ fn re_run_time_patterns_raise_what_they_cannot_answer() {
     assert!(err.contains("call its own method"), "{err}");
 }
 
+/// Run a program of several files, the last the one run as `__main__`, and
+/// compare what it printed.
+fn files_print(files: &[(&str, &str)], want: &str) {
+    let sources: Vec<(&str, String)> = files.iter().map(|(name, s)| (*name, dedent(s))).collect();
+    let sources: Vec<(&str, &str)> = sources
+        .iter()
+        .map(|(name, s)| (*name, s.as_str()))
+        .collect();
+    let wasm = try_compile_multi(&sources).unwrap_or_else(|e| panic!("the files merge: {e}"));
+    let (run, _) = run_wasm_main(&wasm, Host::default());
+    assert_eq!(run.stderr, "", "stderr");
+    assert_eq!(run.stdout, want);
+}
+
+/// Two files that each compile patterns: each file's pass numbers its own from zero, so they are numbered apart when the files merge, one written in both files is one object, and a pattern computed at run time, a bytes pattern, and `sub` with a function each come from one file only.
+#[test]
+fn re_in_several_files() {
+    files_print(
+        &[
+            (
+                "mod.py",
+                r#"
+            import re
+
+            WORD = re.compile(r"\w+")
+
+
+            def words(text: str) -> list[str]:
+                return WORD.findall(text) + re.findall(r"[A-Z]", text)
+            "#,
+            ),
+            (
+                "main.py",
+                r#"
+            import re
+            from mod import words
+
+            DIGITS = re.compile(r"\d")
+
+            if __name__ == "__main__":
+                print(words("ab Cd 12"), DIGITS.findall("a1b22"), re.sub(r"\s+", "-", "a  b"), re.findall(r"\w+", "x y"))
+                print(re.compile(r"\w+") is re.compile(r"\w+"))
+            "#,
+            ),
+        ],
+        r#"['ab', 'Cd', '12', 'C'] ['1', '2', '2'] a-b ['x', 'y']
+True
+"#,
+    );
+    files_print(
+        &[
+            (
+                "mod.py",
+                r#"
+            import re
+
+            WORD = re.compile(r"\w+")
+            SAME = re.compile(r"\d+")
+
+
+            def shout(text: str) -> str:
+                return WORD.sub(lambda m: m.group(0).upper(), text)
+
+
+            def raw(data: bytes) -> list[bytes]:
+                return re.findall(rb"[a-z]+", data)
+            "#,
+            ),
+            (
+                "main.py",
+                r#"
+            import re
+            from mod import shout, raw, WORD, SAME
+
+            NUM = re.compile(r"\d+")
+
+
+            def dyn(p: str, s: str) -> list[str]:
+                return re.findall(p, s)
+
+
+            if __name__ == "__main__":
+                print(shout("ab cd"), raw(b"ab1cd"), WORD.findall("x y"), NUM.findall("a1b22"), NUM is SAME, re.compile(r"\d+") is SAME)
+                print(dyn("[a-c]", "abcd"), re.split(r",\s*", "a, b,c"), re.sub(r"(\w)(\w)", r"\2\1", "abcd"))
+            "#,
+            ),
+        ],
+        r#"AB CD [b'ab', b'cd'] ['x', 'y'] ['1', '22'] True True
+['a', 'b', 'c'] ['a', 'b', 'c'] badc
+"#,
+    );
+    files_print(
+        &[
+            (
+                "mod.py",
+                r#"
+            import re
+
+
+            def count(pattern: str, text: str) -> int:
+                return len(re.findall(pattern, text))
+            "#,
+            ),
+            (
+                "main.py",
+                r#"
+            import re
+            from mod import count
+
+
+            def first(pattern: str, text: str) -> str:
+                m = re.search(pattern, text)
+                return "" if m is None else m.group(0)
+
+
+            if __name__ == "__main__":
+                print(count("b+", "abb b"), first("a" + ".", "xab"), re.findall(r"\d", "a1"))
+            "#,
+            ),
+        ],
+        r#"2 ab ['1']
+"#,
+    );
+}
+
+/// One `logging` for the program: a format, a level, or a handler set in the file run as `__main__` reaches the loggers other files made, a `dictConfig()` in one file configures loggers named in others, and each file's formats are rendered by one table.
+#[test]
+fn logging_in_several_files() {
+    files_print(
+        &[
+            (
+                "mod.py",
+                r#"
+            import logging
+
+            log = logging.getLogger("app.mod")
+
+
+            def work(n: int) -> int:
+                log.info("working on %d", n)
+                log.debug("hidden %d", n)
+                return n * 2
+            "#,
+            ),
+            (
+                "main.py",
+                r#"
+            import logging
+            import sys
+            from mod import work
+
+            if __name__ == "__main__":
+                logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="%(levelname)s:%(name)s:%(message)s")
+                logging.getLogger("app").warning("start")
+                print(work(21))
+                logging.getLogger("app.mod").setLevel(logging.DEBUG)
+                print(work(1))
+            "#,
+            ),
+        ],
+        r#"WARNING:app:start
+INFO:app.mod:working on 21
+42
+INFO:app.mod:working on 1
+DEBUG:app.mod:hidden 1
+2
+"#,
+    );
+    files_print(
+        &[
+            (
+                "mod.py",
+                r#"
+            import logging
+
+            log = logging.getLogger(__name__)
+
+
+            def work() -> None:
+                log.debug("dbg")
+                log.warning("warn %s", "x")
+            "#,
+            ),
+            (
+                "other.py",
+                r#"
+            import logging
+
+
+            def other() -> None:
+                logging.getLogger("other.deep").error("deep %d", 7)
+                logging.info("root info")
+            "#,
+            ),
+            (
+                "main.py",
+                r#"
+            import logging
+            import logging.config
+            import sys
+            from mod import work
+            from other import other
+
+            if __name__ == "__main__":
+                logging.config.dictConfig({
+                    "version": 1,
+                    "formatters": {"f": {"format": "{levelname}:{name}:{message}", "style": "{"}},
+                    "handlers": {"o": {"class": "logging.StreamHandler", "stream": "ext://sys.stdout", "formatter": "f"}},
+                    "loggers": {"mod": {"level": "DEBUG"}},
+                    "root": {"level": "INFO", "handlers": ["o"]},
+                })
+                work()
+                other()
+                h = logging.StreamHandler(sys.stdout)
+                h.setFormatter(logging.Formatter("%(name)s -> %(message)s"))
+                logging.getLogger("other").addHandler(h)
+                other()
+            "#,
+            ),
+        ],
+        r#"DEBUG:mod:dbg
+WARNING:mod:warn x
+ERROR:other.deep:deep 7
+INFO:root:root info
+other.deep -> deep 7
+ERROR:other.deep:deep 7
+INFO:root:root info
+"#,
+    );
+    files_print(
+        &[
+            (
+                "a.py",
+                r#"
+            import re
+            import logging
+
+            alog = logging.getLogger("a")
+
+
+            def clean(s: str) -> str:
+                alog.info("clean %r", s)
+                return re.sub(r"\s+", " ", s).strip()
+            "#,
+            ),
+            (
+                "b.py",
+                r#"
+            import re
+            import logging
+            from collections import Counter
+            from a import clean
+
+            log = logging.getLogger("b")
+
+
+            def words(s: str) -> Counter[str]:
+                log.info("words")
+                return Counter(re.findall(r"[a-z]+", clean(s).lower()))
+            "#,
+            ),
+            (
+                "main.py",
+                r#"
+            import re
+            import logging
+            import sys
+            from datetime import date
+            from collections import Counter
+            from b import words
+
+            if __name__ == "__main__":
+                logging.basicConfig(stream=sys.stdout, level=logging.INFO, format="%(name)s: %(message)s")
+                c = words("  The cat   the HAT ")
+                print(c.most_common(1), re.match(r"(\d+)-(\d+)", "12-34").groups(), date(2024, 1, 1))
+                n: Counter[int] = Counter([len(w) for w in c])
+                print(sorted(n.items()))
+            "#,
+            ),
+        ],
+        r#"b: words
+a: clean '  The cat   the HAT '
+[('the', 2)] ('12', '34') 2024-01-01
+[(3, 3)]
+"#,
+    );
+}
+
+/// `datetime` and `collections` used by more than one file: the classes are the program's once, a specialization one file names (`Counter[int]`) is added to the ones another does, and an instance made in one file is used in another.
+#[test]
+fn datetime_and_collections_in_several_files() {
+    files_print(
+        &[
+            (
+                "mod.py",
+                r#"
+            from datetime import date, timedelta
+
+
+            def next_day(d: date) -> date:
+                return d + timedelta(days=1)
+            "#,
+            ),
+            (
+                "main.py",
+                r#"
+            from datetime import date, datetime
+            from mod import next_day
+
+            if __name__ == "__main__":
+                print(next_day(date(2024, 2, 28)), datetime(2024, 1, 2, 3, 4, 5).isoformat(), date(2024, 3, 1).weekday())
+            "#,
+            ),
+        ],
+        r#"2024-02-29 2024-01-02T03:04:05 4
+"#,
+    );
+    files_print(
+        &[
+            (
+                "mod.py",
+                r#"
+            from datetime import datetime, timedelta
+
+
+            def stamp(d: datetime) -> str:
+                return (d + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")
+            "#,
+            ),
+            (
+                "main.py",
+                r#"
+            import logging
+            import sys
+            from datetime import date, datetime
+            from mod import stamp
+
+            if __name__ == "__main__":
+                logging.basicConfig(stream=sys.stdout, level=logging.INFO, format="%(levelname)s %(message)s")
+                logging.info("at %s", stamp(datetime(2024, 5, 6, 23, 30)))
+                print(date(2024, 5, 6).isoformat(), datetime(2024, 5, 6).strftime("%A %d %B"), date.fromisoformat("2024-01-31").weekday())
+            "#,
+            ),
+        ],
+        r#"INFO at 2024-05-07 00:30
+2024-05-06 Monday 06 May 2
+"#,
+    );
+    files_print(
+        &[
+            (
+                "mod.py",
+                r#"
+            from collections import Counter, defaultdict
+
+
+            def tally(words: list[str]) -> Counter[str]:
+                return Counter(words)
+
+
+            def group(words: list[str]) -> dict[int, list[str]]:
+                d: defaultdict[int, list[str]] = defaultdict(list)
+                for w in words:
+                    d[len(w)].append(w)
+                return dict(d)
+            "#,
+            ),
+            (
+                "main.py",
+                r#"
+            from collections import Counter, deque
+            from mod import tally, group
+
+            if __name__ == "__main__":
+                c = tally(["a", "b", "a"])
+                print(c.most_common(1), group(["a", "bb", "c"]))
+                n: Counter[int] = Counter([1, 1, 2])
+                q: deque[int] = deque([1, 2, 3])
+                q.appendleft(0)
+                print(n[1], list(q), Counter("hello").most_common(2))
+            "#,
+            ),
+        ],
+        r#"[('a', 2)] {1: ['a', 'c'], 2: ['bb']}
+2 [0, 1, 2, 3] [('l', 2), ('h', 1)]
+"#,
+    );
+    files_print(
+        &[
+            (
+                "mod.py",
+                r#"
+            from collections import namedtuple, OrderedDict, Counter
+
+            Point = namedtuple("Point", ["x", "y"])
+
+
+            def origin() -> Point:
+                return Point(0, 0)
+
+
+            def order(keys: list[str]) -> OrderedDict[str, int]:
+                d: OrderedDict[str, int] = OrderedDict()
+                for i, k in enumerate(keys):
+                    d[k] = i
+                d.move_to_end(keys[0])
+                return d
+
+
+            def letters(s: str) -> Counter[str]:
+                return Counter(s)
+            "#,
+            ),
+            (
+                "main.py",
+                r#"
+            from collections import Counter, defaultdict, deque, ChainMap
+            from mod import Point, origin, order, letters
+
+            if __name__ == "__main__":
+                p = Point(3, 4)
+                print(p, origin(), p.x + p.y, p._replace(x=1))
+                print(order(["a", "b", "c"]), letters("banana").most_common(2))
+                c: Counter[str] = Counter(["x", "y", "x"])
+                c.update(letters("xyz"))
+                n: Counter[int] = Counter([1, 1])
+                d: defaultdict[str, int] = defaultdict(int)
+                d["k"] += 2
+                q: deque[str] = deque(["a"], maxlen=2)
+                q.append("b")
+                q.append("c")
+                m = ChainMap({"a": 1}, {"b": 2})
+                print(c, n, dict(d), q, m["b"], sorted(c.elements()))
+            "#,
+            ),
+        ],
+        r#"Point(x=3, y=4) Point(x=0, y=0) 7 Point(x=1, y=4)
+OrderedDict({'b': 1, 'c': 2, 'a': 0}) [('a', 3), ('n', 2)]
+Counter({'x': 3, 'y': 2, 'z': 1}) Counter({1: 2}) {'k': 2} deque(['b', 'c'], maxlen=2) 2 ['x', 'x', 'x', 'y', 'y', 'z']
+"#,
+    );
+}
+
+/// The modules that need no merging, used by two files each, and `bytearray`, whose class each file's pass makes.
+#[test]
+fn json_itertools_functools_and_bytearray_in_several_files() {
+    files_print(
+        &[
+            (
+                "mod.py",
+                r#"
+            import json
+            import itertools
+            from functools import partial, reduce
+
+
+            class Enc(json.JSONEncoder):
+                def default(self, o: object) -> object:
+                    return "?"
+
+
+            def dump(xs: list[int]) -> str:
+                return json.dumps(list(itertools.accumulate(xs)), cls=Enc)
+
+
+            def total(xs: list[int]) -> int:
+                return reduce(lambda a, b: a + b, list(itertools.chain(xs, [10])), 0)
+
+
+            def scale(a: int, b: int) -> int:
+                return a * b
+
+
+            triple = partial(scale, 3)
+            "#,
+            ),
+            (
+                "main.py",
+                r#"
+            import json
+            import itertools
+            from functools import partial
+            from mod import dump, total, triple
+
+
+            def add(a: int, b: int) -> int:
+                return a + b
+
+
+            if __name__ == "__main__":
+                plus2 = partial(add, 2)
+                print(dump([1, 2, 3]), total([1, 2]), triple(5), plus2(7))
+                print(list(itertools.chain([1], [2])), list(itertools.accumulate([1, 2, 3])), list(itertools.islice(itertools.count(5), 3)))
+                pairs: dict[str, list[int]] = json.loads('{"a": [1, 2]}')
+                print(pairs, json.dumps({"k": 1.5, "n": 2.5}, sort_keys=True), list(itertools.product([1, 2], repeat=2)))
+            "#,
+            ),
+        ],
+        r#"[1, 3, 6] 13 15 9
+[1, 2] [1, 3, 6] [5, 6, 7]
+{'a': [1, 2]} {"k": 1.5, "n": 2.5} [(1, 1), (1, 2), (2, 1), (2, 2)]
+"#,
+    );
+    files_print(
+        &[
+            (
+                "mod.py",
+                r#"
+            def fill(n: int) -> bytearray:
+                b = bytearray(n)
+                b[0] = 7
+                return b
+            "#,
+            ),
+            (
+                "main.py",
+                r#"
+            from mod import fill
+
+            if __name__ == "__main__":
+                b = bytearray(b"ab")
+                b.append(99)
+                print(fill(3), b, len(fill(2)))
+            "#,
+            ),
+        ],
+        r#"bytearray(b'\x07\x00\x00') bytearray(b'abc') 2
+"#,
+    );
+}
+
 /// `Pattern.groupindex`: a read-only mappingproxy of the group names' numbers, new at each read, that reads as its dict and prints as CPython's (`str` the dict's, `repr` the proxy's).
 #[test]
 fn re_groupindex() {
