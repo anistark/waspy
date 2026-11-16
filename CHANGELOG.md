@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.1](https://github.com/anistark/waspy/releases/tag/v1.0.0-rc.1) - 2026-11-17
+
 ### Added
 - **HTTP requests under WASI preview 2** (board: THIRD-PARTY PACKAGES): `requests` (`get`, `post`, and the rest, with `params=`, `headers=`, `json=`, `data=`, redirects followed as requests follows them, and its `Response` and exceptions) and the Anthropic client's synchronous `Anthropic` send through `wasi:http`, so a CLI tool or a service can call an API under wasmtime. A program that makes requests is compiled to a component (the preview 1 adapter serving its other imports) and runs with `wasmtime run -S http`, which `waspy run` passes; every other program is the core module it was. Behind the new default `wasi-http` feature
 - **Third-party packages in their own shape** (board: THIRD-PARTY PACKAGES), written in Python and compiled with the program, documented on a new Third-party packages page: `pydantic`'s `BaseModel` (typed fields, lax validation of dicts and JSON text, `model_dump()`, `model_dump_json()`, `==`, and `ValidationError` word for word as pydantic 2.14 prints it), `fastapi` routes on the module's functions (path, query, and JSON body parameters read by their annotations, `HTTPException`, FastAPI 0.163's 404, 405, and 422 bodies) with `fastapi.testclient.TestClient`, `httpx.AsyncClient` over the host's fetch, and `anthropic.AsyncAnthropic().messages.create(...)` for Anthropic's Messages API. Any other package stays refused
