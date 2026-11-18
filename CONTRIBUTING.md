@@ -315,6 +315,7 @@ Waspy follows Rust's standard coding conventions:
    - Add documentation comments to public APIs
    - Follow the [rustdoc conventions](https://doc.rust-lang.org/rustdoc/what-is-rustdoc.html)
    - If your change adds or completes a user-facing feature, update the development board (`docs/src/_data/modules.json`). Tag the feature's version as `upcoming`; version tags on the board only ever name published releases, and maintainers swap `upcoming` for the real version number at release time
+   - To track something a newer Python version adds or changes, add it to the card it belongs to as a `todo` feature with `python` (a version listed in `docs/src/_data/python.json`), `change` (`new` or `changed`), and `ref` (its PEP or What's New section, as a `label` and a `url`); it then shows on that version's board page and every later one
    - If it changes what compiles, a limitation, the library API, or the host interface, update the documentation pages (`docs/src/docs/`)
 
 4. **Commit Messages**

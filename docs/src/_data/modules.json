@@ -1,2101 +1,2512 @@
 {
-  "arithmetic": {
-    "title": "ARITHMETIC",
-    "status": "done",
-    "version": "0.1.0",
-    "features": [
-      {
-        "name": "All operators (+, -, *, /, %, //, **)",
-        "status": "done",
-        "version": "0.1.0",
-        "test": "arithmetic::all_operators"
-      },
-      {
-        "name": "/ is true division and yields a float, // is floor division (Python 3 semantics)",
-        "status": "done",
-        "version": "0.16.0",
-        "test": "arithmetic::true_and_floor_division"
-      },
-      {
-        "name": "Type coercion (int/float)",
-        "status": "done",
-        "version": "0.1.0",
-        "test": "arithmetic::int_float_coercion"
-      },
-      {
-        "name": "Bitwise operations (&, |, ^, <<, >>, ~)",
-        "status": "done",
-        "version": "0.1.0",
-        "test": "arithmetic::bitwise_operations"
-      },
-      {
-        "name": "Unary operations (-, +, not)",
-        "status": "done",
-        "version": "0.1.0",
-        "test": "arithmetic::unary_operations"
-      },
-      {
-        "name": "Integer // and % floor as Python does (they truncated for mixed-sign operands)",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "arithmetic::floored_division_and_modulo"
-      },
-      {
-        "name": "Augmented assignment shares the plain operators (string +=, /=, float %=, floored %= and //=)",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "arithmetic::augmented_assignment_operators"
-      }
-    ]
-  },
-  "controlFlow": {
-    "title": "CONTROL FLOW",
-    "status": "done",
-    "version": "0.14.0",
-    "features": [
-      {
-        "name": "if/elif/else statements",
-        "status": "done",
-        "version": "0.1.0",
-        "test": "control_flow::if_elif_else"
-      },
-      {
-        "name": "while loops",
-        "status": "done",
-        "version": "0.1.0",
-        "test": "control_flow::while_loops"
-      },
-      {
-        "name": "for loops with list/string iteration",
-        "status": "done",
-        "version": "0.7.0",
-        "test": "control_flow::for_over_lists_and_strings"
-      },
-      {
-        "name": "break and continue in loops",
-        "status": "done",
-        "version": "0.11.0",
-        "test": "control_flow::break_and_continue"
-      },
-      {
-        "name": "try/except/finally blocks with real exception propagation (see EXCEPTION HANDLING)",
-        "status": "done",
-        "version": "0.7.0",
-        "test": "control_flow::try_except_finally"
-      },
-      {
-        "name": "with statements over user context managers (__enter__/__exit__, nested, inherited, exit before return / break / continue)",
-        "status": "done",
-        "version": "0.14.0",
-        "issue": 5,
-        "test": "control_flow::with_context_managers"
-      },
-      {
-        "name": "Comparison operations (==, !=, <, <=, >, >=)",
-        "status": "done",
-        "version": "0.1.0",
-        "test": "control_flow::comparisons"
-      },
-      {
-        "name": "Chained comparisons (0 <= x <= 100, a < b > c), each operand read once",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "control_flow::chained_comparisons"
-      },
-      {
-        "name": "Boolean logic (and, or, not) with short-circuit",
-        "status": "done",
-        "version": "0.1.0",
-        "test": "control_flow::boolean_short_circuit"
-      },
-      {
-        "name": "else clauses on for, while, and try",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "control_flow::else_clauses"
-      },
-      {
-        "name": "Conditional expressions (a if cond else b), evaluating only the arm taken",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "control_flow::conditional_expressions"
-      }
-    ]
-  },
-  "functions": {
-    "title": "FUNCTIONS",
-    "status": "done",
-    "version": "0.1.0",
-    "features": [
-      {
-        "name": "Function definitions with parameters",
-        "status": "done",
-        "version": "0.1.0",
-        "test": "functions::definitions_with_parameters"
-      },
-      {
-        "name": "Type annotations (params & return types)",
-        "status": "done",
-        "version": "0.1.0",
-        "test": "functions::annotated_signatures"
-      },
-      {
-        "name": "Function calls between compiled functions",
-        "status": "done",
-        "version": "0.1.0",
-        "test": "functions::calls_between_functions"
-      },
-      {
-        "name": "Multiple functions per module",
-        "status": "done",
-        "version": "0.1.0",
-        "test": "functions::multiple_functions"
-      },
-      {
-        "name": "Keyword arguments in calls to functions and constructors, placed by name with defaults filled in",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "functions::keyword_arguments"
-      },
-      {
-        "name": "An unannotated parameter takes the type its calls pass, or Any where they pass values of several types (def show(label, value) called with an int and a str)",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "functions::untyped_parameters_take_words"
-      },
-      {
-        "name": "Nested function definitions (def inside def), typed by their annotations, closing over the enclosing variables, called directly or as values",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "functions::nested_functions"
-      },
-      {
-        "name": "*args collects extra positional arguments as a tuple, typed by its annotation; f(*xs) passes a sequence on",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "functions::star_args"
-      },
-      {
-        "name": "Keyword-only parameters, after *, passed by name with their defaults",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "functions::keyword_only_parameters"
-      },
-      {
-        "name": "**kwargs collects extra keyword arguments as a dict keyed by name",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "functions::star_star_kwargs"
-      }
-    ]
-  },
-  "typeSystem": {
-    "title": "TYPE SYSTEM",
-    "status": "done",
-    "version": "0.1.0",
-    "features": [
-      {
-        "name": "Basic types: int (32-bit two's complement, OverflowError past 32 bits rather than growing like CPython's), float (IEEE-754 double), bool",
-        "status": "done",
-        "version": "0.1.0",
-        "test": "type_system::basic_types_and_int_width"
-      },
-      {
-        "name": "Generic types (List[T], Dict[K,V], Tuple[T,...])",
-        "status": "done",
-        "version": "0.1.0",
-        "test": "type_system::generic_types"
-      },
-      {
-        "name": "Union/Optional types",
-        "status": "done",
-        "version": "0.1.0",
-        "test": "type_system::union_and_optional"
-      },
-      {
-        "name": "Optional numbers: None distinct from 0 (an Optional[int], Optional[bool], or Optional[float] is boxed), is None, arithmetic and ordering raising CPython's TypeError on None, ==, truthiness, str(), and dict.get(key) on number values",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "type_system::optional_numbers"
-      },
-      {
-        "name": "Custom class type annotations",
-        "status": "done",
-        "version": "0.1.0",
-        "test": "type_system::class_annotations"
-      },
-      {
-        "name": "Unannotated locals typed from the value: collection element types, c = C() as an instance, a method call's declared return type",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "type_system::inferred_local_types"
-      },
-      {
-        "name": "Dynamic values (typing.Any): mixed literals, json.loads with no declared type, and Any annotations hold values that answer as CPython's built-in types do (operators, indexing, iteration, printing, json.dumps), raising CPython's errors",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "type_system::dynamic_values"
-      }
-    ]
-  },
-  "variables": {
-    "title": "VARIABLES & ASSIGNMENT",
-    "status": "done",
-    "version": "0.1.0",
-    "features": [
-      {
-        "name": "Variable declarations and assignments",
-        "status": "done",
-        "version": "0.1.0",
-        "test": "variables::assignments"
-      },
-      {
-        "name": "Augmented assignment (+=, -=, *=, etc.)",
-        "status": "done",
-        "version": "0.1.0",
-        "test": "variables::augmented_assignment"
-      },
-      {
-        "name": "Attribute assignment (obj.attr = value)",
-        "status": "done",
-        "version": "0.1.0",
-        "test": "variables::attribute_assignment"
-      },
-      {
-        "name": "Type inference from usage",
-        "status": "done",
-        "version": "0.1.0",
-        "test": "variables::type_inference_from_usage"
-      },
-      {
-        "name": "Module-level definitions evaluated once at instantiation and shared (start function + globals)",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "variables::module_level_definitions"
-      },
-      {
-        "name": "Class-level variables shared by the class",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "variables::class_variables"
-      },
-      {
-        "name": "Tuple unpacking types its targets; a wrong-length value raises ValueError",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "variables::tuple_unpacking"
-      },
-      {
-        "name": "Augmented assignment through subscripts and computed objects, each target evaluated once",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "variables::augmented_assignment_targets"
-      },
-      {
-        "name": "Annotated fields: self.items: Dict[str, Item] = {}",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "variables::annotated_fields"
-      },
-      {
-        "name": "Module-level statements (a loop, a call, an if, an augmented assignment) run where they stand, in source order with the definitions, as a script's do",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "variables::module_statements_run_where_they_stand"
-      },
-      {
-        "name": "global: a function rebinds a module-level name for every reader",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "variables::global_statement"
-      },
-      {
-        "name": "del of a list index or slice and of a dict key (IndexError / KeyError when absent)",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "variables::del_statement"
-      },
-      {
-        "name": "nonlocal: a nested function rebinds a variable of the function enclosing it",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "variables::nonlocal_statement"
-      }
-    ]
-  },
-  "decorators": {
-    "title": "DECORATORS",
-    "status": "done",
-    "version": "0.6.0",
-    "features": [
-      {
-        "name": "Standard decorators applied: @staticmethod, @classmethod, @property / @x.setter, @abstractmethod, @dataclass, and the functools decorators (see their cards)",
-        "status": "done",
-        "version": "0.17.0",
-        "test": "decorators::standard_decorators"
-      },
-      {
-        "name": "Unimplemented decorators are refused (functions, methods, and classes) instead of being silently dropped",
-        "status": "done",
-        "version": "0.17.0",
-        "test": "decorators::unimplemented_decorators_refused"
-      },
-      {
-        "name": "Decorators CPython does not define (@memoize, @timer, @debug, @pure, @wasm_export, ...) are refused, as CPython raises NameError",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "decorators::undefined_decorators_refused"
-      },
-      {
-        "name": "User-written decorators applied at definition time: wrappers forwarding *args and **kwargs (with keyword arguments at the call), state the wrapper keeps through nonlocal (one per decorated function), decorator factories (@repeat(3)), stacked decorators, decorators that register and return the function, fn.__name__, and @functools.wraps",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "decorators::user_written_decorators"
-      }
-    ]
-  },
-  "projectMgmt": {
-    "title": "PROJECT MANAGEMENT",
-    "status": "done",
-    "version": "0.5.0",
-    "features": [
-      {
-        "name": "Multi-file compilation to single WASM",
-        "status": "done",
-        "version": "0.5.0",
-        "test": "project_mgmt::multi_file_compilation"
-      },
-      {
-        "name": "Dependency analysis & circular detection",
-        "status": "done",
-        "version": "0.5.0",
-        "test": "project_mgmt::dependency_order_and_cycles"
-      },
-      {
-        "name": "Entry point detection (__main__.py)",
-        "status": "done",
-        "version": "0.5.0",
-        "test": "project_mgmt::entry_point_detection"
-      },
-      {
-        "name": "Config parsing (setup.py, pyproject.toml)",
-        "status": "done",
-        "version": "0.5.0",
-        "test": "project_mgmt::config_parsing"
-      }
-    ]
-  },
-  "optimization": {
-    "title": "OPTIMIZATION",
-    "status": "done",
-    "version": "0.1.0",
-    "features": [
-      {
-        "name": "WebAssembly optimization (Binaryen)",
-        "status": "done",
-        "version": "0.1.0",
-        "test": "optimization::binaryen_optimization"
-      },
-      {
-        "name": "Compiler options & configuration (reviewed API: optimize + verbosity)",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "optimization::compiler_options"
-      },
-      {
-        "name": "Error handling with located messages (line/column, function, hints)",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "optimization::located_errors"
-      },
-      {
-        "name": "A call to an undefined function, or an attribute read through an untyped value, is a compile error instead of answering 0",
-        "status": "done",
-        "version": "0.17.0",
-        "test": "optimization::undefined_names_refused"
-      },
-      {
-        "name": "Early validation - unsupported syntax rejected before codegen",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "optimization::early_validation"
-      },
-      {
-        "name": "A parse or lowering failure fails the build naming the file, rather than skipping it with a warning",
-        "status": "done",
-        "version": "0.16.0",
-        "test": "optimization::failures_name_the_file"
-      },
-      {
-        "name": "Integration test suite - every example compiled, run, and asserted in CI",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "optimization::every_example_compiles"
-      },
-      {
-        "name": "End-to-end programs asserted under Node and wasmtime, optimized and unoptimized, as a CI gate",
-        "status": "done",
-        "version": "0.16.0",
-        "test": "optimization::end_to_end_programs_have_checkers"
-      },
-      {
-        "name": "Comment preservation - python.comments custom section, survives optimization",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "optimization::comment_preservation"
-      },
-      {
-        "name": "Memory layout: equal string and bytes literals share one blob in the data segment",
-        "status": "done",
-        "version": "0.1.0",
-        "test": "optimization::literals_share_one_blob"
-      }
-    ]
-  },
-  "strings": {
-    "title": "STRINGS",
-    "status": "done",
-    "version": "0.3.0",
-    "features": [
-      {
-        "name": "String literals, indexing, slicing, concatenation",
-        "status": "done",
-        "version": "0.3.0",
-        "test": "strings::literals_indexing_slicing"
-      },
-      {
-        "name": "Case conversion (upper, lower, capitalize, title)",
-        "status": "done",
-        "version": "0.3.0",
-        "test": "strings::case_conversion"
-      },
-      {
-        "name": "Case conversion, the is* predicates, strip, and split over the whole of Unicode, as CPython maps and classifies it (final sigma, titlecase, ß to SS, CPython's whitespace), on literals and runtime strings alike",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "strings::unicode_case_and_classes"
-      },
-      {
-        "name": "A str is a sequence of code points: len, indexing, slicing with any step, find and index, padding, iteration, and comprehensions count characters, not UTF-8 bytes",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "strings::code_points"
-      },
-      {
-        "name": "Test methods (isdigit, isalpha, isspace, etc.), folded at compile time on a literal receiver",
-        "status": "done",
-        "version": "0.3.0",
-        "test": "strings::predicates"
-      },
-      {
-        "name": "Search methods (.find, .count, .startswith, .endswith)",
-        "status": "done",
-        "version": "0.3.0",
-        "test": "strings::search_methods"
-      },
-      {
-        "name": "Transform methods (.split, .join, .replace)",
-        "status": "done",
-        "version": "0.3.0",
-        "test": "strings::split_join_replace"
-      },
-      {
-        "name": "A method on a literal receiver answers what the same method on a variable does, .split(sep) included",
-        "status": "done",
-        "version": "0.16.0",
-        "test": "strings::literal_receiver_matches_runtime"
-      },
-      {
-        "name": "Layout methods (.ljust, .rjust, .center)",
-        "status": "done",
-        "version": "0.3.0",
-        "test": "strings::layout_methods"
-      },
-      {
-        "name": "More str methods: removeprefix, removesuffix, partition, rpartition, rfind, rindex, rsplit with maxsplit, splitlines, expandtabs, zfill, swapcase, istitle, isascii, and replace with a count",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "strings::more_methods"
-      },
-      {
-        "name": "casefold(), isprintable(), and isidentifier() over the whole of Unicode, as CPython folds and classifies it, on literals and runtime strings alike",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "strings::casefold_and_unicode_predicates"
-      },
-      {
-        "name": "translate() with a dict[int, int] or dict[int, str] table, str.maketrans(x, y), and encode() to UTF-8, ASCII, or Latin-1 (errors strict, ignore, or replace), with CPython's UnicodeEncodeError",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "strings::translate_and_encode"
-      },
-      {
-        "name": "% formatting - compile-time for constants: %s %r %d %i %x %X %o %f with flags, width, and precision (rendered as written, or in decimal for %x, before; anything else is refused)",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "strings::constant_percent_formatting"
-      },
-      {
-        "name": "% formatting on runtime values (\"%d\" % n), every conversion, flags, width, precision, %(key) mappings, and a tuple operand",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "strings::runtime_percent_formatting"
-      },
-      {
-        "name": "Repetition: s * n and n * s",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "strings::repetition"
-      },
-      {
-        "name": "Every string method works on a runtime receiver, not only a literal (case, trim, search, split/join, replace, layout, predicates)",
-        "status": "done",
-        "version": "0.16.0",
-        "test": "strings::runtime_receivers"
-      },
-      {
-        "name": ".format() interpolates runtime values - automatic {} and positional {0} fields",
-        "status": "done",
-        "version": "0.16.0",
-        "test": "strings::format_method"
-      },
-      {
-        "name": ".format() named fields, attribute and index lookups ({0.x}, {1[2]}, {2[k]}), format specs with nested fields, and !r / !s / !a conversions",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "strings::format_method_fields"
-      },
-      {
-        "name": "Strings compare by content everywhere, so a key built at runtime matches an equal one (dict keys, in over lists and sets)",
-        "status": "done",
-        "version": "0.16.0",
-        "test": "strings::content_comparison"
-      },
-      {
-        "name": "sub in text searches the string",
-        "status": "done",
-        "version": "0.16.0",
-        "test": "strings::substring_in"
-      },
-      {
-        "name": "F-strings - constant placeholders folded into the literal",
-        "status": "done",
-        "version": "0.3.0",
-        "test": "strings::fstring_constants"
-      },
-      {
-        "name": "F-strings - dynamic interpolation (every placeholder rendered and concatenated)",
-        "status": "done",
-        "version": "0.15.0",
-        "test": "strings::fstring_runtime"
-      },
-      {
-        "name": "F-string fixed-point specifier f\"{value:.2f}\"",
-        "status": "done",
-        "version": "0.16.0",
-        "test": "strings::fstring_fixed_point"
-      },
-      {
-        "name": "F-strings: the full format spec (fill, alignment, sign, z, #, 0, width, grouping, precision, every type letter), nested {x:{w}.{p}f} specs, and !r / !s / !a conversions, digit for digit with CPython",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "strings::fstring_format_spec"
-      },
-      {
-        "name": "String ordering (<, <=, >, >=) and identity (is)",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "strings::string_ordering"
-      },
-      {
-        "name": "s[i] is a real one-character string wherever it goes",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "strings::indexed_character_is_a_string"
-      },
-      {
-        "name": "for ch in s iterates characters",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "strings::iterate_characters"
-      }
-    ]
-  },
-  "collections": {
-    "title": "COLLECTIONS",
-    "status": "done",
-    "version": "0.7.0",
-    "features": [
-      {
-        "name": "List literals with memory allocation [1, 2, 3]",
-        "status": "done",
-        "version": "0.7.0",
-        "test": "collections::list_literals"
-      },
-      {
-        "name": "List indexing (read & write) list[i] and list[i] = value",
-        "status": "done",
-        "version": "0.7.0",
-        "test": "collections::list_indexing"
-      },
-      {
-        "name": "A literal mixing element types ([1, \"a\"], {\"n\": \"bob\", \"age\": 30}) holds Any values, as CPython's does; [[], [1]] and tuples of one shape unify",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "collections::mixed_literals_hold_any"
-      },
-      {
-        "name": "List methods .append(), .pop([i]), .clear(), .insert(i, v)",
-        "status": "done",
-        "version": "0.7.0",
-        "test": "collections::list_methods"
-      },
-      {
-        "name": ".remove(v) drops the first equal element; a missing value raises a catchable ValueError",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "collections::list_remove"
-      },
-      {
-        "name": ".pop(i) removes the element at i and .index(v) answers its position; a missing value or position raises, as in Python (see EXCEPTION HANDLING)",
-        "status": "done",
-        "version": "0.16.0",
-        "test": "collections::pop_index_and_index_of"
-      },
-      {
-        "name": "A method called with the wrong number of arguments is a compile error, not a silently ignored one",
-        "status": "done",
-        "version": "0.16.0",
-        "test": "collections::method_arity_checked"
-      },
-      {
-        "name": "List search methods .index(v) & .count(v) with linear search",
-        "status": "done",
-        "version": "0.7.0",
-        "test": "collections::list_search"
-      },
-      {
-        "name": "Dict literals with memory allocation {'key': value}",
-        "status": "done",
-        "version": "0.7.0",
-        "test": "collections::dict_literals"
-      },
-      {
-        "name": "Dict indexing (read & write) dict[key] and dict[key] = value",
-        "status": "done",
-        "version": "0.7.0",
-        "test": "collections::dict_indexing"
-      },
-      {
-        "name": "Runtime growth: lists reallocate on append/extend/insert, dicts on a new key",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "collections::runtime_growth"
-      },
-      {
-        "name": "Iterating a list of instances binds a typed element (for it in items: it.field)",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "collections::iterate_instances"
-      },
-      {
-        "name": "Set mutation .add() / .remove() / .discard(), rehashing when the table fills",
-        "status": "done",
-        "version": "0.15.0",
-        "test": "collections::set_mutation"
-      },
-      {
-        "name": "List methods .sort([reverse]) and .reverse(), in place",
-        "status": "done",
-        "version": "0.16.0",
-        "test": "collections::sort_and_reverse"
-      },
-      {
-        "name": "list.sort() of strs, bytes, and tuples of them and numbers, in place and stable, in CPython's order",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "collections::sort_strs_and_tuples"
-      },
-      {
-        "name": "List slicing xs[a:b] returns a fresh list, negative indices and clamping included (a step other than 1 is rejected)",
-        "status": "done",
-        "version": "0.16.0",
-        "test": "collections::list_slicing"
-      },
-      {
-        "name": "Dict methods .get(key, default) (.get(key) on number and instance values, where None is distinct), .keys(), .values(), .items() - .items() as a value, not only a for iterable",
-        "status": "done",
-        "version": "0.16.0",
-        "test": "collections::dict_methods"
-      },
-      {
-        "name": "in searches dicts and tuples as well as lists and sets; anything unsearchable is a compile error",
-        "status": "done",
-        "version": "0.16.0",
-        "test": "collections::in_dicts_and_tuples"
-      },
-      {
-        "name": "Truthiness follows Python: an empty list, dict, set, or tuple is False",
-        "status": "done",
-        "version": "0.16.0",
-        "test": "collections::collection_truthiness"
-      },
-      {
-        "name": "A method the compiler does not implement is a compile error rather than a silent no-op",
-        "status": "done",
-        "version": "0.16.0",
-        "test": "collections::unknown_methods_refused"
-      },
-      {
-        "name": "Value equality and ordering for tuples and lists (==, !=, <, <=, >, >=)",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "collections::sequence_equality_and_ordering"
-      },
-      {
-        "name": "Tuples as set members and dict keys; sets hash strings by content",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "collections::tuples_as_keys"
-      },
-      {
-        "name": "Every evaluation of a collection literal is a new object",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "collections::fresh_literals"
-      },
-      {
-        "name": "A tuple subscript (d[(1, 2)]) is an index, not a slice",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "collections::tuple_subscript"
-      },
-      {
-        "name": "Collection writes store the element type's values and refuse others, an int in a float collection included (append, insert, item assignment, dict values, set.add)",
-        "status": "done",
-        "version": "0.17.0",
-        "test": "collections::collection_writes_convert"
-      },
-      {
-        "name": "Sequence repetition: [0] * n and (a,) * n (a tuple's count must be a constant, since its length is part of its type)",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "collections::sequence_repetition"
-      },
-      {
-        "name": "Concatenation: xs + ys for two lists or two tuples",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "collections::concatenation"
-      },
-      {
-        "name": "Dict merge: d1 | d2, in CPython's order",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "collections::dict_merge"
-      },
-      {
-        "name": "The rest of the dict API: |=, update, pop, popitem, setdefault, copy, clear, fromkeys",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "collections::rest_of_dict_api"
-      }
-    ]
-  },
-  "classes": {
-    "title": "CLASSES & OOP",
-    "status": "done",
-    "version": "0.7.0",
-    "features": [
-      {
-        "name": "Class definitions with full WASM compilation",
-        "status": "done",
-        "version": "0.7.0",
-        "test": "classes::class_definitions"
-      },
-      {
-        "name": "Instance method definitions with implicit self parameter",
-        "status": "done",
-        "version": "0.7.0",
-        "test": "classes::methods_with_self"
-      },
-      {
-        "name": "Object instantiation via constructor calls (ClassName(args))",
-        "status": "done",
-        "version": "0.7.0",
-        "test": "classes::instantiation"
-      },
-      {
-        "name": "Automatic __init__ method invocation during construction",
-        "status": "done",
-        "version": "0.7.0",
-        "test": "classes::init_runs"
-      },
-      {
-        "name": "Method calls with proper dispatch (obj.method())",
-        "status": "done",
-        "version": "0.7.0",
-        "test": "classes::method_dispatch"
-      },
-      {
-        "name": "Instance attribute access getter (obj.attr)",
-        "status": "done",
-        "version": "0.7.0",
-        "test": "classes::attribute_read"
-      },
-      {
-        "name": "Instance attribute assignment setter (obj.attr = value)",
-        "status": "done",
-        "version": "0.7.0",
-        "test": "classes::attribute_write"
-      },
-      {
-        "name": "Per-instance field storage with calculated memory offsets",
-        "status": "done",
-        "version": "0.7.0",
-        "test": "classes::field_layout"
-      },
-      {
-        "name": "Heap-allocated instances: a distinct pointer per instantiation",
-        "status": "done",
-        "version": "0.12.0",
-        "test": "classes::distinct_instances"
-      },
-      {
-        "name": "Multiple live instances of one class with independent state",
-        "status": "done",
-        "version": "0.12.0",
-        "test": "classes::independent_instances"
-      },
-      {
-        "name": "Instances as first-class values (arguments, factory returns)",
-        "status": "done",
-        "version": "0.12.0",
-        "test": "classes::instances_as_values"
-      },
-      {
-        "name": "Single inheritance with super().__init__ / super().method()",
-        "status": "done",
-        "version": "0.12.0",
-        "test": "classes::single_inheritance"
-      },
-      {
-        "name": "isinstance / issubclass over the class hierarchy",
-        "status": "done",
-        "version": "0.12.0",
-        "test": "classes::isinstance_hierarchy"
-      },
-      {
-        "name": "@dataclass with generated __init__ / __eq__ / __repr__",
-        "status": "done",
-        "version": "0.12.0",
-        "test": "classes::dataclasses"
-      },
-      {
-        "name": "Abstract base classes (abc.ABC + @abstractmethod)",
-        "status": "done",
-        "version": "0.12.0",
-        "test": "classes::abstract_base_classes"
-      },
-      {
-        "name": "Collection fields hold instances: self.items = [] filled by append keeps its element class",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "classes::collection_fields_hold_instances"
-      },
-      {
-        "name": "Collection fields grow through the field, so self.items.append(v) is visible to later reads",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "classes::collection_fields_grow"
-      },
-      {
-        "name": "Rich comparisons on instances: <, <=, >, >= call __lt__/__le__/__gt__/__ge__, with reflection",
-        "status": "done",
-        "version": "0.17.0",
-        "test": "classes::rich_comparisons"
-      },
-      {
-        "name": "Virtual dispatch: a base method calling self.method() reaches the subclass override (methods, @property getters, __eq__)",
-        "status": "done",
-        "version": "0.17.0",
-        "test": "classes::virtual_dispatch"
-      },
-      {
-        "name": "Instances of sibling classes in one list, dict, local, or field dispatch on their own class (typed as the nearest common base)",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "classes::sibling_instances"
-      },
-      {
-        "name": "A base that is not a class (a builtin such as list, an undefined name, a call) is refused instead of left out of the class",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "classes::bases_must_be_classes"
-      }
-    ]
-  },
-  "builtins": {
-    "title": "BUILT-IN FUNCTIONS",
-    "status": "done",
-    "version": "0.7.0",
-    "features": [
-      {
-        "name": "Type conversions (int(), float(), str(), bool())",
-        "status": "done",
-        "version": "0.4.0",
-        "test": "builtins::type_conversions"
-      },
-      {
-        "name": "str() and repr() of every type: floats (shortest round-trip digits), bools, None, quoted and escaped strings and bytes, ranges, nested collections, and instances through __str__ / __repr__",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "builtins::str_of_float_and_collections"
-      },
-      {
-        "name": "format() and ascii() builtins",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "builtins::format_and_ascii"
-      },
-      {
-        "name": "float() of a string, correctly rounded",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "builtins::float_of_string"
-      },
-      {
-        "name": "len() - strings, lists, and dicts",
-        "status": "done",
-        "version": "0.7.0",
-        "test": "builtins::len_of_collections"
-      },
-      {
-        "name": "len() of a range, and len() of anything without a length refused (TypeError in CPython)",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "builtins::len_of_range"
-      },
-      {
-        "name": "isinstance() against builtin types (int, float, str, bool, list, dict, set, tuple, bytes) and tuples of types",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "builtins::isinstance_builtin_types"
-      },
-      {
-        "name": "bool(x) is the truth value (it passed x through, so bool(2) + 1 was 3)",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "builtins::bool_truth_value"
-      },
-      {
-        "name": "print() writes to standard output through WASI: sep, end, file=sys.stderr, flush, every argument through str() after all are evaluated",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "builtins::print_output"
-      },
-      {
-        "name": "input([prompt]) reads a line of standard input, writing the prompt first; EOFError at the end of input",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "builtins::input_reads_a_line"
-      },
-      {
-        "name": "min() & max() - multiple arguments, all ints, all floats, or all strings, keeping the first of equals as CPython does",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "builtins::min_max_arguments"
-      },
-      {
-        "name": "min() & max() over a single iterable (a list, tuple, range, set, dict, or string), with key= (a lambda, a def, len, abs) and default=",
-        "status": "done",
-        "version": "1.0.0",
-        "issue": 118,
-        "test": "builtins::min_max_iterable"
-      },
-      {
-        "name": "sum() over lists/tuples with optional start value - real element loop",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "builtins::sum_with_start"
-      },
-      {
-        "name": "sorted(iterable[, key][, reverse]) - stable, over ints, floats, strings, and tuples (a sequence or key whose type cannot be determined is refused, not guessed)",
-        "status": "done",
-        "version": "0.16.0",
-        "test": "builtins::sorted_builtin"
-      },
-      {
-        "name": "int() parses a string, raising ValueError on bad input",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "builtins::int_parses_strings"
-      },
-      {
-        "name": "round(x[, ndigits]) exact, half-to-even, matching CPython",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "builtins::round_half_even"
-      },
-      {
-        "name": "abs()",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "builtins::abs_builtin"
-      }
-    ]
-  },
-  "runtimeFeatures": {
-    "title": "RUNTIME FEATURES",
-    "status": "done",
-    "version": "0.14.0",
-    "features": [
-      {
-        "name": "Set storage with de-duplication & membership (in / not in)",
-        "status": "done",
-        "version": "0.10.0",
-        "test": "runtime_features::set_dedup_and_membership"
-      },
-      {
-        "name": "Growable collections - lists and dicts reallocate instead of overflowing their region",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "runtime_features::growable_collections"
-      },
-      {
-        "name": "Dict index assignment with update or append (dict[key] = value)",
-        "status": "done",
-        "version": "0.10.0",
-        "test": "runtime_features::dict_update_or_append"
-      },
-      {
-        "name": "Generator State Management - execution context suspension/resumption",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "runtime_features::generator_state"
-      },
-      {
-        "name": "Dynamic Module Loading - a module named at run time, loaded through the host",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "runtime_features::dynamic_module_loading"
-      },
-      {
-        "name": "Closure Variable Capture Analysis - detecting and capturing closure variables",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "runtime_features::closure_capture"
-      },
-      {
-        "name": "String Transformation in WASM - full character-by-char transformations",
-        "status": "done",
-        "version": "0.16.0",
-        "test": "runtime_features::string_transformation"
-      }
-    ]
-  },
-  "webInterop": {
-    "title": "WEB INTEROP",
-    "status": "done",
-    "features": [
-      {
-        "name": "JavaScript bridge & value conversion",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "web_interop::javascript_bridge"
-      },
-      {
-        "name": "DOM manipulation APIs",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "web_interop::dom_manipulation"
-      },
-      {
-        "name": "Event handling system",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "web_interop::event_handling"
-      },
-      {
-        "name": "HTTP requests (fetch API)",
-        "status": "done",
-        "version": "1.0.0",
-        "issue": 35,
-        "test": "web_interop::fetch_api"
-      }
-    ]
-  },
-  "async": {
-    "title": "ASYNC/AWAIT",
-    "status": "done",
-    "features": [
-      {
-        "name": "Promise object representation",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "async_await::promise_representation"
-      },
-      {
-        "name": "async/await syntax support",
-        "status": "done",
-        "version": "1.0.0",
-        "issue": 7,
-        "test": "async_await::async_await_syntax"
-      },
-      {
-        "name": "Asynchronous function execution",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "async_await::asynchronous_execution"
-      },
-      {
-        "name": "Concurrent task management",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "async_await::concurrent_tasks"
-      }
-    ]
-  },
-  "stdlib": {
-    "title": "STANDARD LIBRARY",
-    "status": "done",
-    "version": "0.8.0",
-    "features": [
-      {
-        "name": "Module constants: math (pi, e, tau, inf, nan), os (name, which is posix as on every CPython WebAssembly host, sep, pathsep, linesep, devnull, curdir, pardir, extsep), re flags, sys.maxsize (2**31 - 1 under 32-bit int), logging levels, datetime.MINYEAR / MAXYEAR",
-        "status": "done",
-        "version": "0.8.0",
-        "test": "stdlib::module_constants"
-      },
-      {
-        "name": "sys.argv, and sys.stdin / sys.stdout / sys.stderr: write, flush, read, readline, readlines, and iterating lines, through WASI",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::sys_streams_and_argv"
-      },
-      {
-        "name": "sys.exit([status]) raises a catchable SystemExit; one nothing catches exits with its status (an int, 0 for none or None, 1 with the message printed to stderr for anything else)",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::sys_exit"
-      },
-      {
-        "name": "sys: platform (\"wasi\", as CPython on WASI reports), version (\"3.13.0 (waspy x.y.z)\"), path (an empty list: imports are linked at compile time)",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::sys_host_strings"
-      },
-      {
-        "name": "os functions on host values, through WASI: environ and getenv() from the host's environment, urandom() from its entropy, getcwd() \"/\" and getpid() 42 (WASI has neither; wasi-libc's answers, as CPython on WASI gives them)",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::os_host_values"
-      },
-      {
-        "name": "os.path functions: join(), basename(), dirname(), split(), splitext(), normpath(), abspath(), isabs() as posixpath computes them, and exists(), isfile(), isdir() through the host",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::os_path_functions"
-      },
-      {
-        "name": "math functions on runtime values: sqrt, sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh, exp, log, log10, log2, pow, floor, ceil, trunc, fabs, copysign, fmod, remainder, degrees, radians, hypot, factorial, gcd, isnan, isinf, isfinite, with CPython's domain and range errors; results are musl libm's, bit for bit (CPython on WASI's)",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::math_functions"
-      },
-      {
-        "name": "random module, bit-identical to CPython for a seed: random, randint, randrange, uniform, choice, shuffle, sample, seed (an int, bool, float, or None for host entropy), getrandbits, gauss, normalvariate, expovariate",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::random_module"
-      },
-      {
-        "name": "json module: dumps (indent, separators, sort_keys, ensure_ascii, allow_nan), loads into the declared type with CPython's JSONDecodeError, dump, load",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::json_module"
-      },
-      {
-        "name": "json module: dumps(default=...) and loads(object_hook=...) with functions of the program, JSONEncoder (its options as fields, a subclass's default(), cls=), and JSONDecoder (object_hook, decode(), cls=)",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::json_encoder_decoder"
-      },
-      {
-        "name": "re module, compile-time folding: sub and escape over constant arguments, where the pattern is one CPython and the compiler read alike (anything else refused)",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "stdlib::re_constant_folds"
-      },
-      {
-        "name": "re module at runtime: compile, search, match, fullmatch, findall, finditer, split, sub, subn, escape, Pattern and Match objects, flags, matched as CPython's sre matches (backtracking, lookarounds, atomic and possessive repeats, conditionals, Unicode classes and case folding)",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::re_runtime"
-      },
-      {
-        "name": "re module: Pattern.groupindex (a read-only mappingproxy), \\N{name} escapes (CPython 3.13's names and aliases), finditer as a lazy iterator (a callable_iterator)",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::re_groupindex_names_finditer"
-      },
-      {
-        "name": "re module: bytes patterns (matched by ASCII's classes and case, bytes groups, findall, split, sub, escape, re.Pattern[bytes] and re.Match[bytes])",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::re_bytes_patterns"
-      },
-      {
-        "name": "re module: patterns computed at run time (a str or bytes value given to compile, search, sub, and the rest, parsed and compiled as the program runs and cached, with CPython's re.error for one it rejects; such a pattern's findall and split answer strs)",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::re_patterns_at_run_time"
-      },
-      {
-        "name": "datetime: date / time / datetime / timedelta construction, each field checked as CPython checks it",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::datetime_construction"
-      },
-      {
-        "name": "datetime: attributes, arithmetic, weekday, isoformat, fromisoformat, strftime, strptime, replace, timestamp, fromtimestamp, timezone, tzinfo, and now() / today() read at run time",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::datetime_operations"
-      },
-      {
-        "name": "collections module: namedtuple and typing.NamedTuple (classes whose fields take their types from the calls), deque, Counter, OrderedDict, defaultdict, ChainMap, each a class specialized by its element types",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::collections_classes"
-      },
-      {
-        "name": "collections module: UserDict, UserList, UserString, ordinary classes whose subclasses reach their overrides, with the methods that make an instance answering the subclass",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::collections_user_classes"
-      },
-      {
-        "name": "itertools module: count, cycle, repeat, chain, compress, dropwhile, filterfalse, groupby, islice, starmap, takewhile, tee, zip_longest, product, permutations, combinations, combinations_with_replacement, accumulate, batched, pairwise, lowered to generators (tee and zip_longest over sequences)",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::itertools_functions"
-      },
-      {
-        "name": "functools: @singledispatch with @f.register (static dispatch on the first argument's type), @total_ordering (derives the missing ordering methods)",
-        "status": "done",
-        "version": "0.17.0",
-        "test": "stdlib::singledispatch_and_total_ordering"
-      },
-      {
-        "name": "functools: @lru_cache, @cache, @wraps (accepted, no observable effect)",
-        "status": "done",
-        "version": "0.17.0",
-        "test": "stdlib::caching_decorators"
-      },
-      {
-        "name": "functools: reduce, partial, partialmethod, cmp_to_key, cached_property, singledispatchmethod (lru_cache's cache_info() and cache_clear() refused)",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::functools_functions"
-      },
-      {
-        "name": "logging module: getLogger and the logger hierarchy, debug, info, warning, error, critical, log, basicConfig, setLevel, disable, Logger, Handler, StreamHandler, FileHandler, NullHandler, Formatter (the %, {, and $ styles), Filter, LogRecord, with each record's line and function",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::logging_module"
-      },
-      {
-        "name": "logging module: exception() and exc_info (the exception's last line standing in for its traceback), extra= written out in the call and fields a filter sets, addLevelName, logging.config.dictConfig, logging.handlers' RotatingFileHandler, WatchedFileHandler, BufferingHandler, and MemoryHandler, and shutdown at exit",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::logging_handlers_and_config"
-      },
-      {
-        "name": "os functions on files, through WASI: remove(), unlink(), rename(), replace(), and os.path.getsize(), raising CPython's OSError subclasses",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::os_file_functions"
-      },
-      {
-        "name": "os functions on directories and times, through WASI: listdir() and os.path.getmtime()",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::os_listdir_and_getmtime"
-      },
-      {
-        "name": "logging module: logging.handlers.TimedRotatingFileHandler, every when and interval, backupCount, delay (local time is UTC; atTime, namer, and rotator are refused)",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::logging_timed_rotating_file_handler"
-      },
-      {
-        "name": "logging module: logging.config.fileConfig, its file read when the program is compiled and checked when it runs: formatters, handlers of logging, logging.handlers, and the program with their args and kwargs, levels, the root and named loggers, qualname, propagate, disable_existing_loggers, defaults, and the file's DEFAULT section and interpolation",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::logging_file_config"
-      },
-      {
-        "name": "heapq and bisect: heappush, heappop, heapify, heappushpop, heapreplace, nlargest, nsmallest, bisect_left / bisect_right / insort, on any element type that orders, CPython's algorithms",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::heapq_and_bisect"
-      },
-      {
-        "name": "string's constants and capwords; textwrap: wrap, fill, shorten, dedent, indent, with CPython's TextWrapper options and its word splitting",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::string_and_textwrap"
-      },
-      {
-        "name": "io.StringIO: write, getvalue, read, readline, readlines, seek, tell, iteration, and with",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::io_stringio"
-      },
-      {
-        "name": "operator: the operator functions, and itemgetter, attrgetter, and methodcaller as the functions they make",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::operator_module"
-      },
-      {
-        "name": "base64 (b64, urlsafe, b16, with binascii's errors), hashlib (md5, sha1, sha224, sha256), uuid (UUID, uuid3, uuid4, uuid5)",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::base64_hashlib_uuid"
-      },
-      {
-        "name": "urllib.parse: quote, quote_plus, unquote, urlencode, urlparse / urlsplit (with hostname, port, username, password, geturl), urljoin, parse_qs / parse_qsl",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::urllib_parse"
-      },
-      {
-        "name": "csv: reader, writer, DictReader, DictWriter over files and StringIO, with the excel dialect's quoting and CPython's parser",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::csv_module"
-      },
-      {
-        "name": "pathlib.Path: joining with /, name, suffix, suffixes, stem, parent, parts, with_name / with_suffix / with_stem, relative_to, and exists, read_text, write_text, iterdir, unlink, rename",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::pathlib_module"
-      },
-      {
-        "name": "time: time, monotonic, perf_counter, sleep, gmtime / localtime (UTC on WASI), strftime",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::time_module"
-      },
-      {
-        "name": "argparse: positional and optional arguments, store / store_true / store_false / count / append, nargs, choices, required, help and usage, and CPython's errors with exit status 2; the Namespace typed from the program's add_argument calls",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::argparse_module"
-      },
-      {
-        "name": "enum: Enum (members with name and value, lookup by value and by name, iteration, auto, methods), IntEnum and StrEnum (members as their values)",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::enum_module"
-      },
-      {
-        "name": "contextlib.suppress; copy.copy and copy.deepcopy of lists, sets, and dicts",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::contextlib_and_copy"
-      },
-      {
-        "name": "typing.TypedDict (a dict of dynamic values, made by its call) and Literal (the type its values share)",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::typing_typeddict_literal"
-      },
-      {
-        "name": "Builtins hex, oct, bin, divmod, pow(a, b, m), int(s, base), filter, next(it, default), hash; str.split(sep, maxsplit) and find / rfind / index / rindex / count with start and end",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "stdlib::python_builtins"
-      }
-    ]
-  },
-  "comprehensions": {
-    "title": "COMPREHENSIONS",
-    "status": "done",
-    "version": "0.14.0",
-    "features": [
-      {
-        "name": "List comprehensions ([x for x in list])",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "comprehensions::list_comprehension"
-      },
-      {
-        "name": "List comprehension filters ([x for x in list if condition])",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "comprehensions::comprehension_filters"
-      },
-      {
-        "name": "Dict comprehensions ({k: v for k, v in items})",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "comprehensions::dict_comprehension"
-      },
-      {
-        "name": "Set comprehensions ({x for x in list}) with dedup at construction",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "comprehensions::set_comprehension"
-      },
-      {
-        "name": "Multiple generators & nesting ([x for row in m for x in row])",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "comprehensions::nested_comprehension"
-      },
-      {
-        "name": "Generator expressions (x for x in list) as the argument of a call that walks them, built as a list",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "comprehensions::generator_expressions"
-      },
-      {
-        "name": "A generator expression kept in a variable, returned, or passed to the program's own code is refused, since the list it is built as could be told from CPython's generator",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "comprehensions::kept_generator_expressions_refused"
-      },
-      {
-        "name": "Comprehensions over generators and iterator classes (in the first for clause)",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "comprehensions::comprehension_over_generator"
-      }
-    ]
-  },
-  "functional": {
-    "title": "FUNCTIONAL PROGRAMMING",
-    "status": "done",
-    "version": "0.8.0",
-    "features": [
-      {
-        "name": "Lambda functions (lambda x: x + 1) compiled to real functions",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "functional::lambdas"
-      },
-      {
-        "name": "Closures capture the variable, not its value: a captured variable lives in a cell the enclosing function and every closure share",
-        "status": "done",
-        "version": "0.15.0",
-        "test": "functional::closures_capture_variables"
-      },
-      {
-        "name": "Closures capturing a float or a string, read back at its own type",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "functional::float_captures"
-      },
-      {
-        "name": "Lambda parameters typed from their call sites (and from a sorted() key's elements), so indexing, len(), or a method call inside a lambda works",
-        "status": "done",
-        "version": "1.0.0",
-        "issue": 115,
-        "test": "functional::typed_lambda_parameters"
-      },
-      {
-        "name": "First-class closures: returned, passed as arguments, stored in collections, nested",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "functional::first_class_closures"
-      },
-      {
-        "name": "Higher-order functions (passing functions as arguments)",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "functional::higher_order_functions"
-      },
-      {
-        "name": "Callable type tracking for function objects",
-        "status": "done",
-        "version": "0.8.0",
-        "test": "functional::callable_tracking"
-      }
-    ]
-  },
-  "generators": {
-    "title": "GENERATORS & ITERATORS",
-    "status": "done",
-    "version": "0.14.0",
-    "features": [
-      {
-        "name": "Generator functions - yield suspends and resumes with state preserved",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "generators::generator_functions"
-      },
-      {
-        "name": "yield from delegation (ranges, lists, other generators)",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "generators::yield_from"
-      },
-      {
-        "name": "next(), send() with x = yield resume values, and close()",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "generators::next_send_close"
-      },
-      {
-        "name": "Iterator protocol (__iter__, __next__) on user classes with StopIteration",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "generators::iterator_protocol"
-      },
-      {
-        "name": "Generator type tracking (Generator[T])",
-        "status": "done",
-        "version": "0.8.0",
-        "test": "generators::generator_type_tracking"
-      },
-      {
-        "name": "range() function implementation - all variants",
-        "status": "done",
-        "version": "0.8.0",
-        "test": "generators::range_variants"
-      },
-      {
-        "name": "for loop iteration over ranges with step support",
-        "status": "done",
-        "version": "0.8.0",
-        "test": "generators::range_steps"
-      },
-      {
-        "name": "Tuple targets in for loops (for a, b in pairs, star targets)",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "generators::tuple_targets"
-      },
-      {
-        "name": "enumerate(), zip(), and dict.items()/.keys()/.values() in for loops",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "generators::enumerate_zip_items"
-      },
-      {
-        "name": "for loops over .items(), .keys(), and .values() of a class that defines them, of the collections mappings, and with one target (for kv in d.items())",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "generators::view_loops"
-      },
-      {
-        "name": "yield inside try / except / finally and with, resuming inside them; close() raising GeneratorExit at the suspended yield (finally blocks and handlers run, a generator yielding instead is CPython's RuntimeError); and generator methods holding their instance",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "generators::yield_in_try"
-      },
-      {
-        "name": "len() of a generator is refused, as CPython raises TypeError",
-        "status": "done",
-        "version": "0.18.0",
-        "issue": 133,
-        "test": "generators::len_of_generator_refused"
-      },
-      {
-        "name": "zip() with a generator or iterator after its first argument, pulled one value per round in CPython's order",
-        "status": "done",
-        "version": "1.0.0",
-        "issue": 133,
-        "test": "generators::zip_generator_later"
-      }
-    ]
-  },
-  "imports": {
-    "title": "IMPORT SYSTEM",
-    "status": "done",
-    "version": "0.8.0",
-    "features": [
-      {
-        "name": "Import statement parsing & IR generation",
-        "status": "done",
-        "version": "0.8.0",
-        "test": "imports::import_statements"
-      },
-      {
-        "name": "From-import with named imports",
-        "status": "done",
-        "version": "0.8.0",
-        "test": "imports::from_imports"
-      },
-      {
-        "name": "Star imports detection (from X import *)",
-        "status": "done",
-        "version": "0.8.0",
-        "test": "imports::star_imports_refused"
-      },
-      {
-        "name": "Conditional imports in try/except blocks",
-        "status": "done",
-        "version": "0.8.0",
-        "test": "imports::conditional_imports"
-      },
-      {
-        "name": "Dynamic imports (__import__, importlib) with a constant name, in a function or at module level",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "imports::dynamic_imports"
-      },
-      {
-        "name": "Module execution and loading",
-        "status": "done",
-        "version": "0.8.0",
-        "test": "imports::module_execution"
-      },
-      {
-        "name": "User-defined module files - import mod / from mod import f resolved from sibling .py files and statically linked",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "imports::user_module_files"
-      },
-      {
-        "name": "Namespace access on user modules (mod.f(), mod.CONST, mod.ClassName()) and aliases (import mod as m, from mod import f as g)",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "imports::module_namespaces_and_aliases"
-      },
-      {
-        "name": "Module caching - a module imported through several paths compiles once",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "imports::module_caching"
-      }
-    ]
-  },
-  "fileIo": {
-    "title": "FILE I/O",
-    "status": "done",
-    "version": "0.14.0",
-    "features": [
-      {
-        "name": "open(path, mode) through WASI: path_open on the preopened directories (r, w, a, b, + modes)",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "file_io::open_with_modes"
-      },
-      {
-        "name": "read() / read(n) returning strings (64 KiB default cap per call)",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "file_io::read_and_read_n"
-      },
-      {
-        "name": "write(s) returning bytes written; close() and flush()",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "file_io::write_close_flush"
-      },
-      {
-        "name": "with open(...) as f: context-manager form (desugared to open/body/close)",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "file_io::with_open"
-      },
-      {
-        "name": "File imports emitted only when open() is used - other modules keep zero imports",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "file_io::imports_only_with_open"
-      },
-      {
-        "name": "A file open() cannot open raises CPython's exception (FileNotFoundError: [Errno 2] No such file or directory: 'x', PermissionError, IsADirectoryError, ...)",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "file_io::open_errors_raise"
-      }
-    ]
-  },
-  "errorHandling": {
-    "title": "EXCEPTION HANDLING",
-    "status": "done",
-    "version": "0.7.0",
-    "features": [
-      {
-        "name": "try / except / finally blocks",
-        "status": "done",
-        "version": "0.7.0",
-        "test": "error_handling::try_except_finally_blocks"
-      },
-      {
-        "name": "raise transfers control: it leaves the block, the try body, and the loop it is raised in",
-        "status": "done",
-        "version": "0.15.0",
-        "test": "error_handling::raise_transfers_control"
-      },
-      {
-        "name": "Propagation across calls: an exception travels out of a callee into the caller's handler",
-        "status": "done",
-        "version": "0.15.0",
-        "test": "error_handling::propagation_across_calls"
-      },
-      {
-        "name": "Handler matching by type, except (A, B) for either, except Exception for any; unmatched handlers pass it on",
-        "status": "done",
-        "version": "0.15.0",
-        "test": "error_handling::handler_matching"
-      },
-      {
-        "name": "finally and __exit__ run while an exception propagates, and on return / break / continue",
-        "status": "done",
-        "version": "0.15.0",
-        "test": "error_handling::finally_runs_on_every_path"
-      },
-      {
-        "name": "An uncaught exception unwinds out of the program and traps",
-        "status": "done",
-        "version": "0.15.0",
-        "test": "error_handling::uncaught_exception_traps"
-      },
-      {
-        "name": "Exception objects: raise E(args) raises an instance and except ... as e binds it; str(e), repr(e), e.args, user exception classes with __init__ and fields, super().__init__, raise X from Y with __cause__, and CPython's messages for the runtime's own faults",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "error_handling::exception_objects"
-      },
-      {
-        "name": "An exception the __main__ block does not catch writes the last line of CPython's report to stderr (Name: str(e)) and exits with status 1",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "error_handling::uncaught_exception_reports"
-      },
-      {
-        "name": "raise and raise e inside a handler re-raise the caught exception's type",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "error_handling::reraise_keeps_type"
-      },
-      {
-        "name": "Subclass matching: except Base catches its subclasses, along user classes and CPython's builtin hierarchy (LookupError over IndexError and KeyError, ArithmeticError over ZeroDivisionError, RuntimeError over NotImplementedError)",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "error_handling::subclass_matching"
-      },
-      {
-        "name": "Runtime faults raise catchable exceptions: IndexError for an out-of-range index, KeyError for a missing key, ZeroDivisionError",
-        "status": "done",
-        "version": "0.15.0",
-        "test": "error_handling::runtime_faults_catchable"
-      },
-      {
-        "name": "assert raises AssertionError when its condition is false, evaluating the message only then",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "error_handling::assert_statements"
-      },
-      {
-        "name": "int() of a bad string raises a catchable ValueError",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "error_handling::int_bad_string_raises"
-      },
-      {
-        "name": "Collection faults raise: list.index / list.remove of a missing value (ValueError), set.remove of a missing member (KeyError), pop out of range or from an empty list (IndexError)",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "error_handling::collection_faults_raise"
-      },
-      {
-        "name": "__exit__ receives the exception leaving a with block and suppresses it by answering true; an exception __exit__ raises replaces it, and return / break leave through __exit__(None, None, None)",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "error_handling::exit_suppresses"
-      }
-    ]
-  },
-  "advancedTypes": {
-    "title": "ADVANCED DATA TYPES",
-    "status": "done",
-    "version": "0.8.0",
-    "features": [
-      {
-        "name": "Bytes type & binary data handling",
-        "status": "done",
-        "version": "0.7.0",
-        "test": "advanced_types::bytes_values"
-      },
-      {
-        "name": "Bytes literals, indexing, slicing, concatenation",
-        "status": "done",
-        "version": "0.7.0",
-        "test": "advanced_types::bytes_operations"
-      },
-      {
-        "name": "bytearray, a mutable sequence of bytes: built from a size, bytes, another bytearray, or a list of ints; indexing and item assignment, slicing, len, iteration, in, ==, ordering, +, *, +=, *=, del, bytes(b), and append, extend, insert, pop, remove, clear, reverse, copy, count, find, index, startswith, endswith",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "advanced_types::bytearray_values"
-      },
-      {
-        "name": "bytearray's ValueError for a value that is not a byte and IndexError for an index out of range, as CPython raises them",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "advanced_types::bytearray_errors"
-      },
-      {
-        "name": "Set type ({1, 2, 3}) & literals",
-        "status": "done",
-        "version": "0.7.0",
-        "test": "advanced_types::set_literals"
-      },
-      {
-        "name": "Empty sets with type annotations",
-        "status": "done",
-        "version": "0.7.0",
-        "test": "advanced_types::empty_annotated_sets"
-      },
-      {
-        "name": "Set mutation: add, remove, discard",
-        "status": "done",
-        "version": "0.15.0",
-        "test": "advanced_types::set_add_remove_discard"
-      },
-      {
-        "name": "Set operations: union, intersection, difference, symmetric difference as methods and operators, subset and equality tests (a method takes a set argument)",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "advanced_types::set_operations"
-      },
-      {
-        "name": "The rest of the set API: update, intersection_update, difference_update, symmetric_difference_update and the in-place operators, copy, pop, clear, set(iterable), and methods taking a list or tuple as well as a set",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "advanced_types::rest_of_set_api"
-      },
-      {
-        "name": "Iterating a set (for, comprehensions, sum, sorted, min, max, pop) visits its members in CPython's order for ints, floats, and tuples of them: CPython's hashes and table algorithm",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "advanced_types::set_iteration_order"
-      },
-      {
-        "name": "Tuple literals with variable expressions (a, b, c)",
-        "status": "done",
-        "version": "0.8.0",
-        "test": "advanced_types::tuple_literals"
-      },
-      {
-        "name": "Tuple indexing with type tracking",
-        "status": "done",
-        "version": "0.8.0",
-        "test": "advanced_types::tuple_indexing"
-      },
-      {
-        "name": "Heterogeneous tuples with mixed types",
-        "status": "done",
-        "version": "0.8.0",
-        "test": "advanced_types::heterogeneous_tuples"
-      },
-      {
-        "name": "A tuple mixing int and float members ((1, 2.5)), each read at its own width: indexing, unpacking, equality, ordering, hashing, in, count, index, str()",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "collections::mixed_number_tuples"
-      },
-      {
-        "name": "Tuple unpacking & assignment (a, b = (1, 2))",
-        "status": "done",
-        "version": "0.8.0",
-        "test": "advanced_types::tuple_unpack_assign"
-      },
-      {
-        "name": "Extended (starred) unpacking (a, *b, c = xs)",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "advanced_types::starred_unpacking"
-      },
-      {
-        "name": "Tuple .count()",
-        "status": "done",
-        "version": "0.8.0",
-        "test": "advanced_types::tuple_count"
-      },
-      {
-        "name": "Tuple .index() (a missing value raises ValueError, as in CPython)",
-        "status": "done",
-        "version": "0.18.0",
-        "test": "advanced_types::tuple_index"
-      },
-      {
-        "name": "Named tuples - namedtuple() and typing.NamedTuple, defined at module level: fields by name and position, unpacking, and tuple equality",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "advanced_types::named_tuples"
-      },
-      {
-        "name": "String formatting: f-strings, .format() with automatic and positional fields, .2f-style precision",
-        "status": "done",
-        "version": "0.16.0",
-        "test": "advanced_types::string_formatting"
-      },
-      {
-        "name": "String formatting: the full format spec (width, alignment, sign, grouping, types), named .format() fields, !r / !a, runtime %",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "advanced_types::full_format_spec"
-      }
-    ]
-  },
-  "advancedOOP": {
-    "title": "ADVANCED OOP",
-    "status": "done",
-    "features": [
-      {
-        "name": "Property decorators (@property, @<name>.setter)",
-        "status": "done",
-        "version": "0.12.0",
-        "test": "advanced_o_o_p::properties"
-      },
-      {
-        "name": "Static & class methods (@staticmethod, @classmethod with cls factories)",
-        "status": "done",
-        "version": "0.12.0",
-        "test": "advanced_o_o_p::static_and_class_methods"
-      },
-      {
-        "name": "Multiple inheritance with CPython's C3 method resolution order: methods and fields from every base, cooperative super() following the instance's MRO, isinstance against every base, and an inconsistent order refused as CPython's TypeError",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "advanced_o_o_p::multiple_inheritance"
-      },
-      {
-        "name": "Metaclasses: class M(type) with metaclass=M (inherited by subclasses), M.__new__ and M.__init__ run once as each class is created, attributes they give the class, M.__call__ replacing instantiation, M's methods and class variables reached through the class; type(x), x.__class__, and __name__",
-        "status": "done",
-        "version": "1.0.0",
-        "issue": 8,
-        "test": "advanced_o_o_p::metaclasses"
-      }
-    ]
-  },
-  "memory": {
-    "title": "MEMORY MANAGEMENT",
-    "status": "done",
-    "features": [
-      {
-        "name": "Allocator with runtime memory growth",
-        "status": "done",
-        "version": "0.12.0",
-        "test": "memory::memory_growth"
-      },
-      {
-        "name": "Collections carry a capacity and reallocate instead of overflowing their region",
-        "status": "done",
-        "version": "0.14.0",
-        "test": "memory::collection_capacity"
-      },
-      {
-        "name": "Pointer identity across growth (a grown collection visible through every alias)",
-        "status": "done",
-        "version": "0.15.0",
-        "test": "memory::identity_across_growth"
-      },
-      {
-        "name": "Garbage collection: a mark-and-sweep collector frees what is unreachable, reference cycles included",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "memory::garbage_collection"
-      },
-      {
-        "name": "Leak prevention and finalizers: an object is let go of when its last reference goes, and __del__ runs then, where CPython's reference counting runs it; a generator abandoned mid-loop is closed",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "memory::finalizers"
-      },
-      {
-        "name": "Memory pools for efficient allocation: a free list per block size",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "memory::memory_pools"
-      },
-      {
-        "name": "Bounded memory: a long-running loop that builds and drops collections stays within a fixed number of pages",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "memory::bounded_memory"
-      }
-    ]
-  },
-  "graphics": {
-    "title": "GRAPHICS & CANVAS",
-    "status": "done",
-    "features": [
-      {
-        "name": "Canvas API (2D drawing)",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "graphics::canvas_2d"
-      },
-      {
-        "name": "WebGL support (3D graphics)",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "graphics::webgl"
-      },
-      {
-        "name": "Animation & rendering loops",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "graphics::animation_loop"
-      },
-      {
-        "name": "Image manipulation & processing",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "graphics::image_processing"
-      },
-      {
-        "name": "Pixels changed in place in a bytearray: a typed array's assign_to(b) copies into one, with Pyodide's errors, and assign(b) and to_js(b) take one",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "graphics::bytearray_pixels"
-      }
-    ]
-  },
-  "packages": {
-    "title": "THIRD-PARTY PACKAGES",
-    "status": "done",
-    "features": [
-      {
-        "name": "pydantic models: typed fields, lax validation of dicts and JSON text, model_dump and model_dump_json, and ValidationError as pydantic 2.14 prints it",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "packages::pydantic_models"
-      },
-      {
-        "name": "FastAPI routes on the module's functions: path, query, and JSON body parameters read by their annotations, HTTPException, FastAPI's 404, 405, and 422 bodies, and TestClient",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "packages::fastapi_routes"
-      },
-      {
-        "name": "httpx's AsyncClient over the host's fetch (a program run in JavaScript)",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "packages::httpx_async_client"
-      },
-      {
-        "name": "A client for Anthropic's Messages API in the SDK's shape (AsyncAnthropic().messages.create)",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "packages::anthropic_messages"
-      },
-      {
-        "name": "requests and Anthropic's synchronous client over WASI preview 2's outgoing HTTP (a program making requests is a component run with wasmtime -S http)",
-        "status": "done",
-        "version": "1.0.0",
-        "test": "packages::requests_over_wasi_http"
-      }
-    ]
-  }
+    "syntax": {
+        "title": "SYNTAX & CONTROL FLOW",
+        "section": "Language",
+        "features": [
+            {
+                "name": "All operators (+, -, *, /, %, //, **)",
+                "status": "done",
+                "version": "0.1.0",
+                "test": "arithmetic::all_operators"
+            },
+            {
+                "name": "/ is true division and yields a float, // is floor division (Python 3 semantics)",
+                "status": "done",
+                "version": "0.16.0",
+                "test": "arithmetic::true_and_floor_division"
+            },
+            {
+                "name": "Type coercion (int/float)",
+                "status": "done",
+                "version": "0.1.0",
+                "test": "arithmetic::int_float_coercion"
+            },
+            {
+                "name": "Bitwise operations (&, |, ^, <<, >>, ~)",
+                "status": "done",
+                "version": "0.1.0",
+                "test": "arithmetic::bitwise_operations"
+            },
+            {
+                "name": "Unary operations (-, +, not)",
+                "status": "done",
+                "version": "0.1.0",
+                "test": "arithmetic::unary_operations"
+            },
+            {
+                "name": "Integer // and % floor as Python does (they truncated for mixed-sign operands)",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "arithmetic::floored_division_and_modulo"
+            },
+            {
+                "name": "Augmented assignment shares the plain operators (string +=, /=, float %=, floored %= and //=)",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "arithmetic::augmented_assignment_operators"
+            },
+            {
+                "name": "if/elif/else statements",
+                "status": "done",
+                "version": "0.1.0",
+                "test": "control_flow::if_elif_else"
+            },
+            {
+                "name": "while loops",
+                "status": "done",
+                "version": "0.1.0",
+                "test": "control_flow::while_loops"
+            },
+            {
+                "name": "for loops with list/string iteration",
+                "status": "done",
+                "version": "0.7.0",
+                "test": "control_flow::for_over_lists_and_strings"
+            },
+            {
+                "name": "break and continue in loops",
+                "status": "done",
+                "version": "0.11.0",
+                "test": "control_flow::break_and_continue"
+            },
+            {
+                "name": "try/except/finally blocks with real exception propagation (see EXCEPTION HANDLING)",
+                "status": "done",
+                "version": "0.7.0",
+                "test": "control_flow::try_except_finally"
+            },
+            {
+                "name": "with statements over user context managers (__enter__/__exit__, nested, inherited, exit before return / break / continue)",
+                "status": "done",
+                "version": "0.14.0",
+                "issue": 5,
+                "test": "control_flow::with_context_managers"
+            },
+            {
+                "name": "Comparison operations (==, !=, <, <=, >, >=)",
+                "status": "done",
+                "version": "0.1.0",
+                "test": "control_flow::comparisons"
+            },
+            {
+                "name": "Chained comparisons (0 <= x <= 100, a < b > c), each operand read once",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "control_flow::chained_comparisons"
+            },
+            {
+                "name": "Boolean logic (and, or, not) with short-circuit",
+                "status": "done",
+                "version": "0.1.0",
+                "test": "control_flow::boolean_short_circuit"
+            },
+            {
+                "name": "else clauses on for, while, and try",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "control_flow::else_clauses"
+            },
+            {
+                "name": "Conditional expressions (a if cond else b), evaluating only the arm taken",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "control_flow::conditional_expressions"
+            },
+            {
+                "name": "Variable declarations and assignments",
+                "status": "done",
+                "version": "0.1.0",
+                "test": "variables::assignments"
+            },
+            {
+                "name": "Augmented assignment (+=, -=, *=, etc.)",
+                "status": "done",
+                "version": "0.1.0",
+                "test": "variables::augmented_assignment"
+            },
+            {
+                "name": "Attribute assignment (obj.attr = value)",
+                "status": "done",
+                "version": "0.1.0",
+                "test": "variables::attribute_assignment"
+            },
+            {
+                "name": "Type inference from usage",
+                "status": "done",
+                "version": "0.1.0",
+                "test": "variables::type_inference_from_usage"
+            },
+            {
+                "name": "Module-level definitions evaluated once at instantiation and shared (start function + globals)",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "variables::module_level_definitions"
+            },
+            {
+                "name": "Class-level variables shared by the class",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "variables::class_variables"
+            },
+            {
+                "name": "Tuple unpacking types its targets; a wrong-length value raises ValueError",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "variables::tuple_unpacking"
+            },
+            {
+                "name": "Augmented assignment through subscripts and computed objects, each target evaluated once",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "variables::augmented_assignment_targets"
+            },
+            {
+                "name": "Annotated fields: self.items: Dict[str, Item] = {}",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "variables::annotated_fields"
+            },
+            {
+                "name": "Module-level statements (a loop, a call, an if, an augmented assignment) run where they stand, in source order with the definitions, as a script's do",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "variables::module_statements_run_where_they_stand"
+            },
+            {
+                "name": "global: a function rebinds a module-level name for every reader",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "variables::global_statement"
+            },
+            {
+                "name": "del of a list index or slice and of a dict key (IndexError / KeyError when absent)",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "variables::del_statement"
+            },
+            {
+                "name": "nonlocal: a nested function rebinds a variable of the function enclosing it",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "variables::nonlocal_statement"
+            },
+            {
+                "name": "List comprehensions ([x for x in list])",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "comprehensions::list_comprehension"
+            },
+            {
+                "name": "List comprehension filters ([x for x in list if condition])",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "comprehensions::comprehension_filters"
+            },
+            {
+                "name": "Dict comprehensions ({k: v for k, v in items})",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "comprehensions::dict_comprehension"
+            },
+            {
+                "name": "Set comprehensions ({x for x in list}) with dedup at construction",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "comprehensions::set_comprehension"
+            },
+            {
+                "name": "Multiple generators & nesting ([x for row in m for x in row])",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "comprehensions::nested_comprehension"
+            },
+            {
+                "name": "Generator expressions (x for x in list) as the argument of a call that walks them, built as a list",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "comprehensions::generator_expressions"
+            },
+            {
+                "name": "A generator expression kept in a variable, returned, or passed to the program's own code is refused, since the list it is built as could be told from CPython's generator",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "comprehensions::kept_generator_expressions_refused"
+            },
+            {
+                "name": "Comprehensions over generators and iterator classes (in the first for clause)",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "comprehensions::comprehension_over_generator"
+            },
+            {
+                "name": "* and ** unpacking in comprehensions: [*xs for xs in lists], {**d for d in dicts}",
+                "status": "todo",
+                "python": "3.15",
+                "change": "new",
+                "ref": {
+                    "label": "PEP 798",
+                    "url": "https://peps.python.org/pep-0798/"
+                }
+            }
+        ]
+    },
+    "functions": {
+        "title": "FUNCTIONS & CLOSURES",
+        "section": "Language",
+        "features": [
+            {
+                "name": "Function definitions with parameters",
+                "status": "done",
+                "version": "0.1.0",
+                "test": "functions::definitions_with_parameters"
+            },
+            {
+                "name": "Type annotations (params & return types)",
+                "status": "done",
+                "version": "0.1.0",
+                "test": "functions::annotated_signatures"
+            },
+            {
+                "name": "Function calls between compiled functions",
+                "status": "done",
+                "version": "0.1.0",
+                "test": "functions::calls_between_functions"
+            },
+            {
+                "name": "Multiple functions per module",
+                "status": "done",
+                "version": "0.1.0",
+                "test": "functions::multiple_functions"
+            },
+            {
+                "name": "Keyword arguments in calls to functions and constructors, placed by name with defaults filled in",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "functions::keyword_arguments"
+            },
+            {
+                "name": "An unannotated parameter takes the type its calls pass, or Any where they pass values of several types (def show(label, value) called with an int and a str)",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "functions::untyped_parameters_take_words"
+            },
+            {
+                "name": "Nested function definitions (def inside def), typed by their annotations, closing over the enclosing variables, called directly or as values",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "functions::nested_functions"
+            },
+            {
+                "name": "*args collects extra positional arguments as a tuple, typed by its annotation; f(*xs) passes a sequence on",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "functions::star_args"
+            },
+            {
+                "name": "Keyword-only parameters, after *, passed by name with their defaults",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "functions::keyword_only_parameters"
+            },
+            {
+                "name": "**kwargs collects extra keyword arguments as a dict keyed by name",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "functions::star_star_kwargs"
+            },
+            {
+                "name": "Standard decorators applied: @staticmethod, @classmethod, @property / @x.setter, @abstractmethod, @dataclass, and the functools decorators (see their cards)",
+                "status": "done",
+                "version": "0.17.0",
+                "test": "decorators::standard_decorators"
+            },
+            {
+                "name": "Unimplemented decorators are refused (functions, methods, and classes) instead of being silently dropped",
+                "status": "done",
+                "version": "0.17.0",
+                "test": "decorators::unimplemented_decorators_refused"
+            },
+            {
+                "name": "Decorators CPython does not define (@memoize, @timer, @debug, @pure, @wasm_export, ...) are refused, as CPython raises NameError",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "decorators::undefined_decorators_refused"
+            },
+            {
+                "name": "User-written decorators applied at definition time: wrappers forwarding *args and **kwargs (with keyword arguments at the call), state the wrapper keeps through nonlocal (one per decorated function), decorator factories (@repeat(3)), stacked decorators, decorators that register and return the function, fn.__name__, and @functools.wraps",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "decorators::user_written_decorators"
+            },
+            {
+                "name": "Closure Variable Capture Analysis - detecting and capturing closure variables",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "runtime_features::closure_capture"
+            },
+            {
+                "name": "Lambda functions (lambda x: x + 1) compiled to real functions",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "functional::lambdas"
+            },
+            {
+                "name": "Closures capture the variable, not its value: a captured variable lives in a cell the enclosing function and every closure share",
+                "status": "done",
+                "version": "0.15.0",
+                "test": "functional::closures_capture_variables"
+            },
+            {
+                "name": "Closures capturing a float or a string, read back at its own type",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "functional::float_captures"
+            },
+            {
+                "name": "Lambda parameters typed from their call sites (and from a sorted() key's elements), so indexing, len(), or a method call inside a lambda works",
+                "status": "done",
+                "version": "1.0.0",
+                "issue": 115,
+                "test": "functional::typed_lambda_parameters"
+            },
+            {
+                "name": "First-class closures: returned, passed as arguments, stored in collections, nested",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "functional::first_class_closures"
+            },
+            {
+                "name": "Higher-order functions (passing functions as arguments)",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "functional::higher_order_functions"
+            },
+            {
+                "name": "Callable type tracking for function objects",
+                "status": "done",
+                "version": "0.8.0",
+                "test": "functional::callable_tracking"
+            }
+        ]
+    },
+    "classes": {
+        "title": "CLASSES & OBJECTS",
+        "section": "Language",
+        "features": [
+            {
+                "name": "Class definitions with full WASM compilation",
+                "status": "done",
+                "version": "0.7.0",
+                "test": "classes::class_definitions"
+            },
+            {
+                "name": "Instance method definitions with implicit self parameter",
+                "status": "done",
+                "version": "0.7.0",
+                "test": "classes::methods_with_self"
+            },
+            {
+                "name": "Object instantiation via constructor calls (ClassName(args))",
+                "status": "done",
+                "version": "0.7.0",
+                "test": "classes::instantiation"
+            },
+            {
+                "name": "Automatic __init__ method invocation during construction",
+                "status": "done",
+                "version": "0.7.0",
+                "test": "classes::init_runs"
+            },
+            {
+                "name": "Method calls with proper dispatch (obj.method())",
+                "status": "done",
+                "version": "0.7.0",
+                "test": "classes::method_dispatch"
+            },
+            {
+                "name": "Instance attribute access getter (obj.attr)",
+                "status": "done",
+                "version": "0.7.0",
+                "test": "classes::attribute_read"
+            },
+            {
+                "name": "Instance attribute assignment setter (obj.attr = value)",
+                "status": "done",
+                "version": "0.7.0",
+                "test": "classes::attribute_write"
+            },
+            {
+                "name": "Per-instance field storage with calculated memory offsets",
+                "status": "done",
+                "version": "0.7.0",
+                "test": "classes::field_layout"
+            },
+            {
+                "name": "Heap-allocated instances: a distinct pointer per instantiation",
+                "status": "done",
+                "version": "0.12.0",
+                "test": "classes::distinct_instances"
+            },
+            {
+                "name": "Multiple live instances of one class with independent state",
+                "status": "done",
+                "version": "0.12.0",
+                "test": "classes::independent_instances"
+            },
+            {
+                "name": "Instances as first-class values (arguments, factory returns)",
+                "status": "done",
+                "version": "0.12.0",
+                "test": "classes::instances_as_values"
+            },
+            {
+                "name": "Single inheritance with super().__init__ / super().method()",
+                "status": "done",
+                "version": "0.12.0",
+                "test": "classes::single_inheritance"
+            },
+            {
+                "name": "isinstance / issubclass over the class hierarchy",
+                "status": "done",
+                "version": "0.12.0",
+                "test": "classes::isinstance_hierarchy"
+            },
+            {
+                "name": "@dataclass with generated __init__ / __eq__ / __repr__",
+                "status": "done",
+                "version": "0.12.0",
+                "test": "classes::dataclasses"
+            },
+            {
+                "name": "Abstract base classes (abc.ABC + @abstractmethod)",
+                "status": "done",
+                "version": "0.12.0",
+                "test": "classes::abstract_base_classes"
+            },
+            {
+                "name": "Collection fields hold instances: self.items = [] filled by append keeps its element class",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "classes::collection_fields_hold_instances"
+            },
+            {
+                "name": "Collection fields grow through the field, so self.items.append(v) is visible to later reads",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "classes::collection_fields_grow"
+            },
+            {
+                "name": "Rich comparisons on instances: <, <=, >, >= call __lt__/__le__/__gt__/__ge__, with reflection",
+                "status": "done",
+                "version": "0.17.0",
+                "test": "classes::rich_comparisons"
+            },
+            {
+                "name": "Virtual dispatch: a base method calling self.method() reaches the subclass override (methods, @property getters, __eq__)",
+                "status": "done",
+                "version": "0.17.0",
+                "test": "classes::virtual_dispatch"
+            },
+            {
+                "name": "Instances of sibling classes in one list, dict, local, or field dispatch on their own class (typed as the nearest common base)",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "classes::sibling_instances"
+            },
+            {
+                "name": "A base that is not a class (a builtin such as list, an undefined name, a call) is refused instead of left out of the class",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "classes::bases_must_be_classes"
+            },
+            {
+                "name": "Property decorators (@property, @<name>.setter)",
+                "status": "done",
+                "version": "0.12.0",
+                "test": "advanced_o_o_p::properties"
+            },
+            {
+                "name": "Static & class methods (@staticmethod, @classmethod with cls factories)",
+                "status": "done",
+                "version": "0.12.0",
+                "test": "advanced_o_o_p::static_and_class_methods"
+            },
+            {
+                "name": "Multiple inheritance with CPython's C3 method resolution order: methods and fields from every base, cooperative super() following the instance's MRO, isinstance against every base, and an inconsistent order refused as CPython's TypeError",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "advanced_o_o_p::multiple_inheritance"
+            },
+            {
+                "name": "Metaclasses: class M(type) with metaclass=M (inherited by subclasses), M.__new__ and M.__init__ run once as each class is created, attributes they give the class, M.__call__ replacing instantiation, M's methods and class variables reached through the class; type(x), x.__class__, and __name__",
+                "status": "done",
+                "version": "1.0.0",
+                "issue": 8,
+                "test": "advanced_o_o_p::metaclasses"
+            }
+        ]
+    },
+    "types": {
+        "title": "TYPES",
+        "section": "Language",
+        "features": [
+            {
+                "name": "Basic types: int (32-bit two's complement, OverflowError past 32 bits rather than growing like CPython's), float (IEEE-754 double), bool",
+                "status": "done",
+                "version": "0.1.0",
+                "test": "type_system::basic_types_and_int_width"
+            },
+            {
+                "name": "Generic types (List[T], Dict[K,V], Tuple[T,...])",
+                "status": "done",
+                "version": "0.1.0",
+                "test": "type_system::generic_types"
+            },
+            {
+                "name": "Union/Optional types",
+                "status": "done",
+                "version": "0.1.0",
+                "test": "type_system::union_and_optional"
+            },
+            {
+                "name": "Optional numbers: None distinct from 0 (an Optional[int], Optional[bool], or Optional[float] is boxed), is None, arithmetic and ordering raising CPython's TypeError on None, ==, truthiness, str(), and dict.get(key) on number values",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "type_system::optional_numbers"
+            },
+            {
+                "name": "Custom class type annotations",
+                "status": "done",
+                "version": "0.1.0",
+                "test": "type_system::class_annotations"
+            },
+            {
+                "name": "Unannotated locals typed from the value: collection element types, c = C() as an instance, a method call's declared return type",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "type_system::inferred_local_types"
+            },
+            {
+                "name": "Dynamic values (typing.Any): mixed literals, json.loads with no declared type, and Any annotations hold values that answer as CPython's built-in types do (operators, indexing, iteration, printing, json.dumps), raising CPython's errors",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "type_system::dynamic_values"
+            },
+            {
+                "name": "Annotations evaluated when they are read, so a forward reference needs no quotes (annotationlib)",
+                "status": "todo",
+                "python": "3.14",
+                "change": "changed",
+                "ref": {
+                    "label": "PEP 649",
+                    "url": "https://peps.python.org/pep-0649/"
+                }
+            },
+            {
+                "name": "int | str and Union[int, str] are one type, whose repr is int | str",
+                "status": "todo",
+                "python": "3.14",
+                "change": "changed",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.14/whatsnew/3.14.html#typing"
+                }
+            }
+        ]
+    },
+    "exceptions": {
+        "title": "EXCEPTIONS",
+        "section": "Language",
+        "features": [
+            {
+                "name": "try / except / finally blocks",
+                "status": "done",
+                "version": "0.7.0",
+                "test": "error_handling::try_except_finally_blocks"
+            },
+            {
+                "name": "raise transfers control: it leaves the block, the try body, and the loop it is raised in",
+                "status": "done",
+                "version": "0.15.0",
+                "test": "error_handling::raise_transfers_control"
+            },
+            {
+                "name": "Propagation across calls: an exception travels out of a callee into the caller's handler",
+                "status": "done",
+                "version": "0.15.0",
+                "test": "error_handling::propagation_across_calls"
+            },
+            {
+                "name": "Handler matching by type, except (A, B) for either, except Exception for any; unmatched handlers pass it on",
+                "status": "done",
+                "version": "0.15.0",
+                "test": "error_handling::handler_matching"
+            },
+            {
+                "name": "finally and __exit__ run while an exception propagates, and on return / break / continue",
+                "status": "done",
+                "version": "0.15.0",
+                "test": "error_handling::finally_runs_on_every_path"
+            },
+            {
+                "name": "An uncaught exception unwinds out of the program and traps",
+                "status": "done",
+                "version": "0.15.0",
+                "test": "error_handling::uncaught_exception_traps"
+            },
+            {
+                "name": "Exception objects: raise E(args) raises an instance and except ... as e binds it; str(e), repr(e), e.args, user exception classes with __init__ and fields, super().__init__, raise X from Y with __cause__, and CPython's messages for the runtime's own faults",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "error_handling::exception_objects"
+            },
+            {
+                "name": "An exception the __main__ block does not catch writes the last line of CPython's report to stderr (Name: str(e)) and exits with status 1",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "error_handling::uncaught_exception_reports"
+            },
+            {
+                "name": "raise and raise e inside a handler re-raise the caught exception's type",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "error_handling::reraise_keeps_type"
+            },
+            {
+                "name": "Subclass matching: except Base catches its subclasses, along user classes and CPython's builtin hierarchy (LookupError over IndexError and KeyError, ArithmeticError over ZeroDivisionError, RuntimeError over NotImplementedError)",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "error_handling::subclass_matching"
+            },
+            {
+                "name": "Runtime faults raise catchable exceptions: IndexError for an out-of-range index, KeyError for a missing key, ZeroDivisionError",
+                "status": "done",
+                "version": "0.15.0",
+                "test": "error_handling::runtime_faults_catchable"
+            },
+            {
+                "name": "assert raises AssertionError when its condition is false, evaluating the message only then",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "error_handling::assert_statements"
+            },
+            {
+                "name": "int() of a bad string raises a catchable ValueError",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "error_handling::int_bad_string_raises"
+            },
+            {
+                "name": "Collection faults raise: list.index / list.remove of a missing value (ValueError), set.remove of a missing member (KeyError), pop out of range or from an empty list (IndexError)",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "error_handling::collection_faults_raise"
+            },
+            {
+                "name": "__exit__ receives the exception leaving a with block and suppresses it by answering true; an exception __exit__ raises replaces it, and return / break leave through __exit__(None, None, None)",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "error_handling::exit_suppresses"
+            },
+            {
+                "name": "except A, B: without parentheses when there is no as, catching either, as except (A, B): does",
+                "status": "todo",
+                "python": "3.14",
+                "change": "new",
+                "ref": {
+                    "label": "PEP 758",
+                    "url": "https://peps.python.org/pep-0758/"
+                }
+            }
+        ]
+    },
+    "generators": {
+        "title": "GENERATORS & ITERATORS",
+        "section": "Language",
+        "features": [
+            {
+                "name": "Generator State Management - execution context suspension/resumption",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "runtime_features::generator_state"
+            },
+            {
+                "name": "Generator functions - yield suspends and resumes with state preserved",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "generators::generator_functions"
+            },
+            {
+                "name": "yield from delegation (ranges, lists, other generators)",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "generators::yield_from"
+            },
+            {
+                "name": "next(), send() with x = yield resume values, and close()",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "generators::next_send_close"
+            },
+            {
+                "name": "Iterator protocol (__iter__, __next__) on user classes with StopIteration",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "generators::iterator_protocol"
+            },
+            {
+                "name": "Generator type tracking (Generator[T])",
+                "status": "done",
+                "version": "0.8.0",
+                "test": "generators::generator_type_tracking"
+            },
+            {
+                "name": "range() function implementation - all variants",
+                "status": "done",
+                "version": "0.8.0",
+                "test": "generators::range_variants"
+            },
+            {
+                "name": "for loop iteration over ranges with step support",
+                "status": "done",
+                "version": "0.8.0",
+                "test": "generators::range_steps"
+            },
+            {
+                "name": "Tuple targets in for loops (for a, b in pairs, star targets)",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "generators::tuple_targets"
+            },
+            {
+                "name": "enumerate(), zip(), and dict.items()/.keys()/.values() in for loops",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "generators::enumerate_zip_items"
+            },
+            {
+                "name": "for loops over .items(), .keys(), and .values() of a class that defines them, of the collections mappings, and with one target (for kv in d.items())",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "generators::view_loops"
+            },
+            {
+                "name": "yield inside try / except / finally and with, resuming inside them; close() raising GeneratorExit at the suspended yield (finally blocks and handlers run, a generator yielding instead is CPython's RuntimeError); and generator methods holding their instance",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "generators::yield_in_try"
+            },
+            {
+                "name": "len() of a generator is refused, as CPython raises TypeError",
+                "status": "done",
+                "version": "0.18.0",
+                "issue": 133,
+                "test": "generators::len_of_generator_refused"
+            },
+            {
+                "name": "zip() with a generator or iterator after its first argument, pulled one value per round in CPython's order",
+                "status": "done",
+                "version": "1.0.0",
+                "issue": 133,
+                "test": "generators::zip_generator_later"
+            }
+        ]
+    },
+    "strings": {
+        "title": "STRINGS, BYTES & FORMATTING",
+        "section": "Built-in types",
+        "features": [
+            {
+                "name": "String literals, indexing, slicing, concatenation",
+                "status": "done",
+                "version": "0.3.0",
+                "test": "strings::literals_indexing_slicing"
+            },
+            {
+                "name": "Case conversion (upper, lower, capitalize, title)",
+                "status": "done",
+                "version": "0.3.0",
+                "test": "strings::case_conversion"
+            },
+            {
+                "name": "Case conversion, the is* predicates, strip, and split over the whole of Unicode, as CPython maps and classifies it (final sigma, titlecase, ß to SS, CPython's whitespace), on literals and runtime strings alike",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "strings::unicode_case_and_classes"
+            },
+            {
+                "name": "A str is a sequence of code points: len, indexing, slicing with any step, find and index, padding, iteration, and comprehensions count characters, not UTF-8 bytes",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "strings::code_points"
+            },
+            {
+                "name": "Test methods (isdigit, isalpha, isspace, etc.), folded at compile time on a literal receiver",
+                "status": "done",
+                "version": "0.3.0",
+                "test": "strings::predicates"
+            },
+            {
+                "name": "Search methods (.find, .count, .startswith, .endswith)",
+                "status": "done",
+                "version": "0.3.0",
+                "test": "strings::search_methods"
+            },
+            {
+                "name": "Transform methods (.split, .join, .replace)",
+                "status": "done",
+                "version": "0.3.0",
+                "test": "strings::split_join_replace"
+            },
+            {
+                "name": "A method on a literal receiver answers what the same method on a variable does, .split(sep) included",
+                "status": "done",
+                "version": "0.16.0",
+                "test": "strings::literal_receiver_matches_runtime"
+            },
+            {
+                "name": "Layout methods (.ljust, .rjust, .center)",
+                "status": "done",
+                "version": "0.3.0",
+                "test": "strings::layout_methods"
+            },
+            {
+                "name": "More str methods: removeprefix, removesuffix, partition, rpartition, rfind, rindex, rsplit with maxsplit, splitlines, expandtabs, zfill, swapcase, istitle, isascii, and replace with a count",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "strings::more_methods"
+            },
+            {
+                "name": "casefold(), isprintable(), and isidentifier() over the whole of Unicode, as CPython folds and classifies it, on literals and runtime strings alike",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "strings::casefold_and_unicode_predicates"
+            },
+            {
+                "name": "translate() with a dict[int, int] or dict[int, str] table, str.maketrans(x, y), and encode() to UTF-8, ASCII, or Latin-1 (errors strict, ignore, or replace), with CPython's UnicodeEncodeError",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "strings::translate_and_encode"
+            },
+            {
+                "name": "% formatting - compile-time for constants: %s %r %d %i %x %X %o %f with flags, width, and precision (rendered as written, or in decimal for %x, before; anything else is refused)",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "strings::constant_percent_formatting"
+            },
+            {
+                "name": "% formatting on runtime values (\"%d\" % n), every conversion, flags, width, precision, %(key) mappings, and a tuple operand",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "strings::runtime_percent_formatting"
+            },
+            {
+                "name": "Repetition: s * n and n * s",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "strings::repetition"
+            },
+            {
+                "name": "Every string method works on a runtime receiver, not only a literal (case, trim, search, split/join, replace, layout, predicates)",
+                "status": "done",
+                "version": "0.16.0",
+                "test": "strings::runtime_receivers"
+            },
+            {
+                "name": ".format() interpolates runtime values - automatic {} and positional {0} fields",
+                "status": "done",
+                "version": "0.16.0",
+                "test": "strings::format_method"
+            },
+            {
+                "name": ".format() named fields, attribute and index lookups ({0.x}, {1[2]}, {2[k]}), format specs with nested fields, and !r / !s / !a conversions",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "strings::format_method_fields"
+            },
+            {
+                "name": "Strings compare by content everywhere, so a key built at runtime matches an equal one (dict keys, in over lists and sets)",
+                "status": "done",
+                "version": "0.16.0",
+                "test": "strings::content_comparison"
+            },
+            {
+                "name": "sub in text searches the string",
+                "status": "done",
+                "version": "0.16.0",
+                "test": "strings::substring_in"
+            },
+            {
+                "name": "F-strings - constant placeholders folded into the literal",
+                "status": "done",
+                "version": "0.3.0",
+                "test": "strings::fstring_constants"
+            },
+            {
+                "name": "F-strings - dynamic interpolation (every placeholder rendered and concatenated)",
+                "status": "done",
+                "version": "0.15.0",
+                "test": "strings::fstring_runtime"
+            },
+            {
+                "name": "F-string fixed-point specifier f\"{value:.2f}\"",
+                "status": "done",
+                "version": "0.16.0",
+                "test": "strings::fstring_fixed_point"
+            },
+            {
+                "name": "F-strings: the full format spec (fill, alignment, sign, z, #, 0, width, grouping, precision, every type letter), nested {x:{w}.{p}f} specs, and !r / !s / !a conversions, digit for digit with CPython",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "strings::fstring_format_spec"
+            },
+            {
+                "name": "String ordering (<, <=, >, >=) and identity (is)",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "strings::string_ordering"
+            },
+            {
+                "name": "s[i] is a real one-character string wherever it goes",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "strings::indexed_character_is_a_string"
+            },
+            {
+                "name": "for ch in s iterates characters",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "strings::iterate_characters"
+            },
+            {
+                "name": "String Transformation in WASM - full character-by-char transformations",
+                "status": "done",
+                "version": "0.16.0",
+                "test": "runtime_features::string_transformation"
+            },
+            {
+                "name": "Bytes type & binary data handling",
+                "status": "done",
+                "version": "0.7.0",
+                "test": "advanced_types::bytes_values"
+            },
+            {
+                "name": "Bytes literals, indexing, slicing, concatenation",
+                "status": "done",
+                "version": "0.7.0",
+                "test": "advanced_types::bytes_operations"
+            },
+            {
+                "name": "bytearray, a mutable sequence of bytes: built from a size, bytes, another bytearray, or a list of ints; indexing and item assignment, slicing, len, iteration, in, ==, ordering, +, *, +=, *=, del, bytes(b), and append, extend, insert, pop, remove, clear, reverse, copy, count, find, index, startswith, endswith",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "advanced_types::bytearray_values"
+            },
+            {
+                "name": "bytearray's ValueError for a value that is not a byte and IndexError for an index out of range, as CPython raises them",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "advanced_types::bytearray_errors"
+            },
+            {
+                "name": "String formatting: f-strings, .format() with automatic and positional fields, .2f-style precision",
+                "status": "done",
+                "version": "0.16.0",
+                "test": "advanced_types::string_formatting"
+            },
+            {
+                "name": "String formatting: the full format spec (width, alignment, sign, grouping, types), named .format() fields, !r / !a, runtime %",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "advanced_types::full_format_spec"
+            },
+            {
+                "name": "Template strings: t'...' makes a string.templatelib.Template of its strings and interpolations",
+                "status": "todo",
+                "python": "3.14",
+                "change": "new",
+                "ref": {
+                    "label": "PEP 750",
+                    "url": "https://peps.python.org/pep-0750/"
+                }
+            },
+            {
+                "name": "Digit grouping with _ and , in a float's fractional part (f\"{x:.6_f}\")",
+                "status": "todo",
+                "python": "3.14",
+                "change": "new",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.14/whatsnew/3.14.html#built-ins"
+                }
+            },
+            {
+                "name": "bytes.fromhex() and bytearray.fromhex() of ASCII bytes",
+                "status": "todo",
+                "python": "3.14",
+                "change": "new",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.14/whatsnew/3.14.html#built-ins"
+                }
+            },
+            {
+                "name": "bytearray.take_bytes()",
+                "status": "todo",
+                "python": "3.15",
+                "change": "new",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.15/whatsnew/3.15.html#other-language-changes"
+                }
+            },
+            {
+                "name": "bytes.replace() takes count= by keyword",
+                "status": "todo",
+                "python": "3.15",
+                "change": "new",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.15/whatsnew/3.15.html#other-language-changes"
+                }
+            }
+        ]
+    },
+    "collections": {
+        "title": "COLLECTIONS",
+        "section": "Built-in types",
+        "features": [
+            {
+                "name": "List literals with memory allocation [1, 2, 3]",
+                "status": "done",
+                "version": "0.7.0",
+                "test": "collections::list_literals"
+            },
+            {
+                "name": "List indexing (read & write) list[i] and list[i] = value",
+                "status": "done",
+                "version": "0.7.0",
+                "test": "collections::list_indexing"
+            },
+            {
+                "name": "A literal mixing element types ([1, \"a\"], {\"n\": \"bob\", \"age\": 30}) holds Any values, as CPython's does; [[], [1]] and tuples of one shape unify",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "collections::mixed_literals_hold_any"
+            },
+            {
+                "name": "List methods .append(), .pop([i]), .clear(), .insert(i, v)",
+                "status": "done",
+                "version": "0.7.0",
+                "test": "collections::list_methods"
+            },
+            {
+                "name": ".remove(v) drops the first equal element; a missing value raises a catchable ValueError",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "collections::list_remove"
+            },
+            {
+                "name": ".pop(i) removes the element at i and .index(v) answers its position; a missing value or position raises, as in Python (see EXCEPTION HANDLING)",
+                "status": "done",
+                "version": "0.16.0",
+                "test": "collections::pop_index_and_index_of"
+            },
+            {
+                "name": "A method called with the wrong number of arguments is a compile error, not a silently ignored one",
+                "status": "done",
+                "version": "0.16.0",
+                "test": "collections::method_arity_checked"
+            },
+            {
+                "name": "List search methods .index(v) & .count(v) with linear search",
+                "status": "done",
+                "version": "0.7.0",
+                "test": "collections::list_search"
+            },
+            {
+                "name": "Dict literals with memory allocation {'key': value}",
+                "status": "done",
+                "version": "0.7.0",
+                "test": "collections::dict_literals"
+            },
+            {
+                "name": "Dict indexing (read & write) dict[key] and dict[key] = value",
+                "status": "done",
+                "version": "0.7.0",
+                "test": "collections::dict_indexing"
+            },
+            {
+                "name": "Runtime growth: lists reallocate on append/extend/insert, dicts on a new key",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "collections::runtime_growth"
+            },
+            {
+                "name": "Iterating a list of instances binds a typed element (for it in items: it.field)",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "collections::iterate_instances"
+            },
+            {
+                "name": "Set mutation .add() / .remove() / .discard(), rehashing when the table fills",
+                "status": "done",
+                "version": "0.15.0",
+                "test": "collections::set_mutation"
+            },
+            {
+                "name": "List methods .sort([reverse]) and .reverse(), in place",
+                "status": "done",
+                "version": "0.16.0",
+                "test": "collections::sort_and_reverse"
+            },
+            {
+                "name": "list.sort() of strs, bytes, and tuples of them and numbers, in place and stable, in CPython's order",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "collections::sort_strs_and_tuples"
+            },
+            {
+                "name": "List slicing xs[a:b] returns a fresh list, negative indices and clamping included (a step other than 1 is rejected)",
+                "status": "done",
+                "version": "0.16.0",
+                "test": "collections::list_slicing"
+            },
+            {
+                "name": "Dict methods .get(key, default) (.get(key) on number and instance values, where None is distinct), .keys(), .values(), .items() - .items() as a value, not only a for iterable",
+                "status": "done",
+                "version": "0.16.0",
+                "test": "collections::dict_methods"
+            },
+            {
+                "name": "in searches dicts and tuples as well as lists and sets; anything unsearchable is a compile error",
+                "status": "done",
+                "version": "0.16.0",
+                "test": "collections::in_dicts_and_tuples"
+            },
+            {
+                "name": "Truthiness follows Python: an empty list, dict, set, or tuple is False",
+                "status": "done",
+                "version": "0.16.0",
+                "test": "collections::collection_truthiness"
+            },
+            {
+                "name": "A method the compiler does not implement is a compile error rather than a silent no-op",
+                "status": "done",
+                "version": "0.16.0",
+                "test": "collections::unknown_methods_refused"
+            },
+            {
+                "name": "Value equality and ordering for tuples and lists (==, !=, <, <=, >, >=)",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "collections::sequence_equality_and_ordering"
+            },
+            {
+                "name": "Tuples as set members and dict keys; sets hash strings by content",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "collections::tuples_as_keys"
+            },
+            {
+                "name": "Every evaluation of a collection literal is a new object",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "collections::fresh_literals"
+            },
+            {
+                "name": "A tuple subscript (d[(1, 2)]) is an index, not a slice",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "collections::tuple_subscript"
+            },
+            {
+                "name": "Collection writes store the element type's values and refuse others, an int in a float collection included (append, insert, item assignment, dict values, set.add)",
+                "status": "done",
+                "version": "0.17.0",
+                "test": "collections::collection_writes_convert"
+            },
+            {
+                "name": "Sequence repetition: [0] * n and (a,) * n (a tuple's count must be a constant, since its length is part of its type)",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "collections::sequence_repetition"
+            },
+            {
+                "name": "Concatenation: xs + ys for two lists or two tuples",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "collections::concatenation"
+            },
+            {
+                "name": "Dict merge: d1 | d2, in CPython's order",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "collections::dict_merge"
+            },
+            {
+                "name": "The rest of the dict API: |=, update, pop, popitem, setdefault, copy, clear, fromkeys",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "collections::rest_of_dict_api"
+            },
+            {
+                "name": "Set storage with de-duplication & membership (in / not in)",
+                "status": "done",
+                "version": "0.10.0",
+                "test": "runtime_features::set_dedup_and_membership"
+            },
+            {
+                "name": "Growable collections - lists and dicts reallocate instead of overflowing their region",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "runtime_features::growable_collections"
+            },
+            {
+                "name": "Dict index assignment with update or append (dict[key] = value)",
+                "status": "done",
+                "version": "0.10.0",
+                "test": "runtime_features::dict_update_or_append"
+            },
+            {
+                "name": "Set type ({1, 2, 3}) & literals",
+                "status": "done",
+                "version": "0.7.0",
+                "test": "advanced_types::set_literals"
+            },
+            {
+                "name": "Empty sets with type annotations",
+                "status": "done",
+                "version": "0.7.0",
+                "test": "advanced_types::empty_annotated_sets"
+            },
+            {
+                "name": "Set mutation: add, remove, discard",
+                "status": "done",
+                "version": "0.15.0",
+                "test": "advanced_types::set_add_remove_discard"
+            },
+            {
+                "name": "Set operations: union, intersection, difference, symmetric difference as methods and operators, subset and equality tests (a method takes a set argument)",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "advanced_types::set_operations"
+            },
+            {
+                "name": "The rest of the set API: update, intersection_update, difference_update, symmetric_difference_update and the in-place operators, copy, pop, clear, set(iterable), and methods taking a list or tuple as well as a set",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "advanced_types::rest_of_set_api"
+            },
+            {
+                "name": "Iterating a set (for, comprehensions, sum, sorted, min, max, pop) visits its members in CPython's order for ints, floats, and tuples of them: CPython's hashes and table algorithm",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "advanced_types::set_iteration_order"
+            },
+            {
+                "name": "Tuple literals with variable expressions (a, b, c)",
+                "status": "done",
+                "version": "0.8.0",
+                "test": "advanced_types::tuple_literals"
+            },
+            {
+                "name": "Tuple indexing with type tracking",
+                "status": "done",
+                "version": "0.8.0",
+                "test": "advanced_types::tuple_indexing"
+            },
+            {
+                "name": "Heterogeneous tuples with mixed types",
+                "status": "done",
+                "version": "0.8.0",
+                "test": "advanced_types::heterogeneous_tuples"
+            },
+            {
+                "name": "A tuple mixing int and float members ((1, 2.5)), each read at its own width: indexing, unpacking, equality, ordering, hashing, in, count, index, str()",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "collections::mixed_number_tuples"
+            },
+            {
+                "name": "Tuple unpacking & assignment (a, b = (1, 2))",
+                "status": "done",
+                "version": "0.8.0",
+                "test": "advanced_types::tuple_unpack_assign"
+            },
+            {
+                "name": "Extended (starred) unpacking (a, *b, c = xs)",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "advanced_types::starred_unpacking"
+            },
+            {
+                "name": "Tuple .count()",
+                "status": "done",
+                "version": "0.8.0",
+                "test": "advanced_types::tuple_count"
+            },
+            {
+                "name": "Tuple .index() (a missing value raises ValueError, as in CPython)",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "advanced_types::tuple_index"
+            },
+            {
+                "name": "The unhashable-type TypeError names the use: cannot use 'list' as a dict key (unhashable type: 'list')",
+                "status": "todo",
+                "python": "3.14",
+                "change": "changed",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.14/whatsnew/3.14.html#improved-error-messages"
+                }
+            },
+            {
+                "name": "frozendict, an immutable mapping, hashable when its values are",
+                "status": "todo",
+                "python": "3.15",
+                "change": "new",
+                "ref": {
+                    "label": "PEP 814",
+                    "url": "https://peps.python.org/pep-0814/"
+                }
+            }
+        ]
+    },
+    "builtins": {
+        "title": "BUILT-IN FUNCTIONS",
+        "section": "Built-in types",
+        "features": [
+            {
+                "name": "Type conversions (int(), float(), str(), bool())",
+                "status": "done",
+                "version": "0.4.0",
+                "test": "builtins::type_conversions"
+            },
+            {
+                "name": "str() and repr() of every type: floats (shortest round-trip digits), bools, None, quoted and escaped strings and bytes, ranges, nested collections, and instances through __str__ / __repr__",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "builtins::str_of_float_and_collections"
+            },
+            {
+                "name": "format() and ascii() builtins",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "builtins::format_and_ascii"
+            },
+            {
+                "name": "float() of a string, correctly rounded",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "builtins::float_of_string"
+            },
+            {
+                "name": "len() - strings, lists, and dicts",
+                "status": "done",
+                "version": "0.7.0",
+                "test": "builtins::len_of_collections"
+            },
+            {
+                "name": "len() of a range, and len() of anything without a length refused (TypeError in CPython)",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "builtins::len_of_range"
+            },
+            {
+                "name": "isinstance() against builtin types (int, float, str, bool, list, dict, set, tuple, bytes) and tuples of types",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "builtins::isinstance_builtin_types"
+            },
+            {
+                "name": "bool(x) is the truth value (it passed x through, so bool(2) + 1 was 3)",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "builtins::bool_truth_value"
+            },
+            {
+                "name": "print() writes to standard output through WASI: sep, end, file=sys.stderr, flush, every argument through str() after all are evaluated",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "builtins::print_output"
+            },
+            {
+                "name": "input([prompt]) reads a line of standard input, writing the prompt first; EOFError at the end of input",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "builtins::input_reads_a_line"
+            },
+            {
+                "name": "min() & max() - multiple arguments, all ints, all floats, or all strings, keeping the first of equals as CPython does",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "builtins::min_max_arguments"
+            },
+            {
+                "name": "min() & max() over a single iterable (a list, tuple, range, set, dict, or string), with key= (a lambda, a def, len, abs) and default=",
+                "status": "done",
+                "version": "1.0.0",
+                "issue": 118,
+                "test": "builtins::min_max_iterable"
+            },
+            {
+                "name": "sum() over lists/tuples with optional start value - real element loop",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "builtins::sum_with_start"
+            },
+            {
+                "name": "sorted(iterable[, key][, reverse]) - stable, over ints, floats, strings, and tuples (a sequence or key whose type cannot be determined is refused, not guessed)",
+                "status": "done",
+                "version": "0.16.0",
+                "test": "builtins::sorted_builtin"
+            },
+            {
+                "name": "int() parses a string, raising ValueError on bad input",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "builtins::int_parses_strings"
+            },
+            {
+                "name": "round(x[, ndigits]) exact, half-to-even, matching CPython",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "builtins::round_half_even"
+            },
+            {
+                "name": "abs()",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "builtins::abs_builtin"
+            },
+            {
+                "name": "Builtins hex, oct, bin, divmod, pow(a, b, m), int(s, base), filter, next(it, default), hash; str.split(sep, maxsplit) and find / rfind / index / rindex / count with start and end",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::python_builtins"
+            },
+            {
+                "name": "map(..., strict=True), raising ValueError when the iterables' lengths differ, as zip(strict=True) does",
+                "status": "todo",
+                "python": "3.14",
+                "change": "new",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.14/whatsnew/3.14.html#built-ins"
+                }
+            },
+            {
+                "name": "float.from_number(), raising TypeError for a value that is not a real number",
+                "status": "todo",
+                "python": "3.14",
+                "change": "new",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.14/whatsnew/3.14.html#built-ins"
+                }
+            },
+            {
+                "name": "sentinel(): unique values with a short repr",
+                "status": "todo",
+                "python": "3.15",
+                "change": "new",
+                "ref": {
+                    "label": "PEP 661",
+                    "url": "https://peps.python.org/pep-0661/"
+                }
+            },
+            {
+                "name": "iter(callable, stop_value, stop_exception=...): stop_value by keyword, and an exception that ends the iterator",
+                "status": "todo",
+                "python": "3.16",
+                "change": "new",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.16/whatsnew/3.16.html#other-language-changes"
+                }
+            }
+        ]
+    },
+    "textData": {
+        "title": "TEXT & DATA FORMATS",
+        "section": "Standard library",
+        "features": [
+            {
+                "name": "json module: dumps (indent, separators, sort_keys, ensure_ascii, allow_nan), loads into the declared type with CPython's JSONDecodeError, dump, load",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::json_module"
+            },
+            {
+                "name": "json module: dumps(default=...) and loads(object_hook=...) with functions of the program, JSONEncoder (its options as fields, a subclass's default(), cls=), and JSONDecoder (object_hook, decode(), cls=)",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::json_encoder_decoder"
+            },
+            {
+                "name": "re module, compile-time folding: sub and escape over constant arguments, where the pattern is one CPython and the compiler read alike (anything else refused)",
+                "status": "done",
+                "version": "0.18.0",
+                "test": "stdlib::re_constant_folds"
+            },
+            {
+                "name": "re module at runtime: compile, search, match, fullmatch, findall, finditer, split, sub, subn, escape, Pattern and Match objects, flags, matched as CPython's sre matches (backtracking, lookarounds, atomic and possessive repeats, conditionals, Unicode classes and case folding)",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::re_runtime"
+            },
+            {
+                "name": "re module: Pattern.groupindex (a read-only mappingproxy), \\N{name} escapes (CPython 3.13's names and aliases), finditer as a lazy iterator (a callable_iterator)",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::re_groupindex_names_finditer"
+            },
+            {
+                "name": "re module: bytes patterns (matched by ASCII's classes and case, bytes groups, findall, split, sub, escape, re.Pattern[bytes] and re.Match[bytes])",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::re_bytes_patterns"
+            },
+            {
+                "name": "re module: patterns computed at run time (a str or bytes value given to compile, search, sub, and the rest, parsed and compiled as the program runs and cached, with CPython's re.error for one it rejects; such a pattern's findall and split answer strs)",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::re_patterns_at_run_time"
+            },
+            {
+                "name": "string's constants and capwords; textwrap: wrap, fill, shorten, dedent, indent, with CPython's TextWrapper options and its word splitting",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::string_and_textwrap"
+            },
+            {
+                "name": "base64 (b64, urlsafe, b16, with binascii's errors), hashlib (md5, sha1, sha224, sha256), uuid (UUID, uuid3, uuid4, uuid5)",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::base64_hashlib_uuid"
+            },
+            {
+                "name": "urllib.parse: quote, quote_plus, unquote, urlencode, urlparse / urlsplit (with hostname, port, username, password, geturl), urljoin, parse_qs / parse_qsl",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::urllib_parse"
+            },
+            {
+                "name": "csv: reader, writer, DictReader, DictWriter over files and StringIO, with the excel dialect's quoting and CPython's parser",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::csv_module"
+            },
+            {
+                "name": "re: \\z matches at the end of the string, as \\Z does",
+                "status": "todo",
+                "python": "3.14",
+                "change": "new",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.14/whatsnew/3.14.html#re"
+                }
+            },
+            {
+                "name": "re: \\B matches the empty string, so it is always the opposite of \\b",
+                "status": "todo",
+                "python": "3.14",
+                "change": "changed",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.14/whatsnew/3.14.html#re"
+                }
+            },
+            {
+                "name": "uuid: uuid6(), uuid7(), uuid8(), and the NIL and MAX constants (RFC 9562)",
+                "status": "todo",
+                "python": "3.14",
+                "change": "new",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.14/whatsnew/3.14.html#uuid"
+                }
+            },
+            {
+                "name": "textwrap.dedent() normalizes blank lines holding tabs or other whitespace",
+                "status": "todo",
+                "python": "3.14",
+                "change": "changed",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.14/whatsnew/3.14.html#textwrap"
+                }
+            },
+            {
+                "name": "re.prefixmatch() and Pattern.prefixmatch()",
+                "status": "todo",
+                "python": "3.15",
+                "change": "new",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.15/whatsnew/3.15.html#re"
+                }
+            },
+            {
+                "name": "base64: padded=, wrapcol=, ignorechars=, and canonical=, and urlsafe_b64decode() without padding",
+                "status": "todo",
+                "python": "3.15",
+                "change": "new",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.15/whatsnew/3.15.html#base64"
+                }
+            },
+            {
+                "name": "json.loads() and json.load() take array_hook=",
+                "status": "todo",
+                "python": "3.15",
+                "change": "new",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.15/whatsnew/3.15.html#json"
+                }
+            },
+            {
+                "name": "urllib.parse: missing_as_none= for urlsplit(), urlparse(), and urldefrag(), and keep_empty= for urlunsplit() and urlunparse()",
+                "status": "todo",
+                "python": "3.15",
+                "change": "new",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.15/whatsnew/3.15.html#urllib-parse"
+                }
+            },
+            {
+                "name": "re: set operations in character classes ([A--B], [A&&B], [A||B]) and nested sets",
+                "status": "todo",
+                "python": "3.16",
+                "change": "new",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.16/whatsnew/3.16.html#re"
+                }
+            },
+            {
+                "name": "re: \\p{...} and \\P{...} Unicode property escapes",
+                "status": "todo",
+                "python": "3.16",
+                "change": "new",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.16/whatsnew/3.16.html#re"
+                }
+            },
+            {
+                "name": "urllib.parse: urlsplit() and urlparse() raise ValueError for a port that is not a number in range",
+                "status": "todo",
+                "python": "3.16",
+                "change": "changed",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.16/whatsnew/3.16.html#porting-to-python-3-16"
+                }
+            }
+        ]
+    },
+    "numbersTime": {
+        "title": "NUMBERS, DATES & TIME",
+        "section": "Standard library",
+        "features": [
+            {
+                "name": "math functions on runtime values: sqrt, sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh, exp, log, log10, log2, pow, floor, ceil, trunc, fabs, copysign, fmod, remainder, degrees, radians, hypot, factorial, gcd, isnan, isinf, isfinite, with CPython's domain and range errors; results are musl libm's, bit for bit (CPython on WASI's)",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::math_functions"
+            },
+            {
+                "name": "random module, bit-identical to CPython for a seed: random, randint, randrange, uniform, choice, shuffle, sample, seed (an int, bool, float, or None for host entropy), getrandbits, gauss, normalvariate, expovariate",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::random_module"
+            },
+            {
+                "name": "datetime: date / time / datetime / timedelta construction, each field checked as CPython checks it",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::datetime_construction"
+            },
+            {
+                "name": "datetime: attributes, arithmetic, weekday, isoformat, fromisoformat, strftime, strptime, replace, timestamp, fromtimestamp, timezone, tzinfo, and now() / today() read at run time",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::datetime_operations"
+            },
+            {
+                "name": "time: time, monotonic, perf_counter, sleep, gmtime / localtime (UTC on WASI), strftime",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::time_module"
+            },
+            {
+                "name": "datetime: date.strptime() and time.strptime()",
+                "status": "todo",
+                "python": "3.14",
+                "change": "new",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.14/whatsnew/3.14.html#datetime"
+                }
+            },
+            {
+                "name": "math.isnormal(), issubnormal(), fmax(), fmin(), and signbit()",
+                "status": "todo",
+                "python": "3.15",
+                "change": "new",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.15/whatsnew/3.15.html#math"
+                }
+            },
+            {
+                "name": "The math.integer module: comb, factorial, gcd, isqrt, lcm, perm",
+                "status": "todo",
+                "python": "3.15",
+                "change": "new",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.15/whatsnew/3.15.html#math-integer"
+                }
+            },
+            {
+                "name": "datetime: strptime() with %d and no year raises ValueError",
+                "status": "todo",
+                "python": "3.15",
+                "change": "changed",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.15/whatsnew/3.15.html#datetime"
+                }
+            },
+            {
+                "name": "math: half-turn trigonometry, cospi(), sinpi(), tanpi(), acospi(), asinpi(), atanpi(), atan2pi()",
+                "status": "todo",
+                "python": "3.16",
+                "change": "new",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.16/whatsnew/3.16.html#math"
+                }
+            },
+            {
+                "name": "datetime: the %Nf format code (1 to 6 digits of microseconds) in strftime() and strptime()",
+                "status": "todo",
+                "python": "3.16",
+                "change": "new",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.16/whatsnew/3.16.html#datetime"
+                }
+            },
+            {
+                "name": "datetime: timezone.name",
+                "status": "todo",
+                "python": "3.16",
+                "change": "new",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.16/whatsnew/3.16.html#datetime"
+                }
+            }
+        ]
+    },
+    "dataTools": {
+        "title": "DATA STRUCTURES & TOOLS",
+        "section": "Standard library",
+        "features": [
+            {
+                "name": "collections module: namedtuple and typing.NamedTuple (classes whose fields take their types from the calls), deque, Counter, OrderedDict, defaultdict, ChainMap, each a class specialized by its element types",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::collections_classes"
+            },
+            {
+                "name": "collections module: UserDict, UserList, UserString, ordinary classes whose subclasses reach their overrides, with the methods that make an instance answering the subclass",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::collections_user_classes"
+            },
+            {
+                "name": "itertools module: count, cycle, repeat, chain, compress, dropwhile, filterfalse, groupby, islice, starmap, takewhile, tee, zip_longest, product, permutations, combinations, combinations_with_replacement, accumulate, batched, pairwise, lowered to generators (tee and zip_longest over sequences)",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::itertools_functions"
+            },
+            {
+                "name": "functools: @singledispatch with @f.register (static dispatch on the first argument's type), @total_ordering (derives the missing ordering methods)",
+                "status": "done",
+                "version": "0.17.0",
+                "test": "stdlib::singledispatch_and_total_ordering"
+            },
+            {
+                "name": "functools: @lru_cache, @cache, @wraps (accepted, no observable effect)",
+                "status": "done",
+                "version": "0.17.0",
+                "test": "stdlib::caching_decorators"
+            },
+            {
+                "name": "functools: reduce, partial, partialmethod, cmp_to_key, cached_property, singledispatchmethod (lru_cache's cache_info() and cache_clear() refused)",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::functools_functions"
+            },
+            {
+                "name": "heapq and bisect: heappush, heappop, heapify, heappushpop, heapreplace, nlargest, nsmallest, bisect_left / bisect_right / insort, on any element type that orders, CPython's algorithms",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::heapq_and_bisect"
+            },
+            {
+                "name": "operator: the operator functions, and itemgetter, attrgetter, and methodcaller as the functions they make",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::operator_module"
+            },
+            {
+                "name": "enum: Enum (members with name and value, lookup by value and by name, iteration, auto, methods), IntEnum and StrEnum (members as their values)",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::enum_module"
+            },
+            {
+                "name": "contextlib.suppress; copy.copy and copy.deepcopy of lists, sets, and dicts",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::contextlib_and_copy"
+            },
+            {
+                "name": "typing.TypedDict (a dict of dynamic values, made by its call) and Literal (the type its values share)",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::typing_typeddict_literal"
+            },
+            {
+                "name": "Named tuples - namedtuple() and typing.NamedTuple, defined at module level: fields by name and position, unpacking, and tuple equality",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "advanced_types::named_tuples"
+            },
+            {
+                "name": "functools: the Placeholder sentinel for partial() and partialmethod(), and reduce(initial=) by keyword",
+                "status": "todo",
+                "python": "3.14",
+                "change": "new",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.14/whatsnew/3.14.html#functools"
+                }
+            },
+            {
+                "name": "heapq's max-heap functions: heapify_max, heappush_max, heappop_max, heapreplace_max, heappushpop_max",
+                "status": "todo",
+                "python": "3.14",
+                "change": "new",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.14/whatsnew/3.14.html#heapq"
+                }
+            },
+            {
+                "name": "operator.is_none() and operator.is_not_none()",
+                "status": "todo",
+                "python": "3.14",
+                "change": "new",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.14/whatsnew/3.14.html#operator"
+                }
+            },
+            {
+                "name": "collections: Counter's ^ and ^= (symmetric difference)",
+                "status": "todo",
+                "python": "3.15",
+                "change": "new",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.15/whatsnew/3.15.html#collections"
+                }
+            },
+            {
+                "name": "typing: TypedDict(closed=..., extra_items=...)",
+                "status": "todo",
+                "python": "3.15",
+                "change": "new",
+                "ref": {
+                    "label": "PEP 728",
+                    "url": "https://peps.python.org/pep-0728/"
+                }
+            },
+            {
+                "name": "functools.reduce() takes its function and sequence positionally only",
+                "status": "todo",
+                "python": "3.16",
+                "change": "changed",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.16/whatsnew/3.16.html#functools"
+                }
+            }
+        ]
+    },
+    "osFiles": {
+        "title": "OS, FILES & COMMAND LINE",
+        "section": "Standard library",
+        "features": [
+            {
+                "name": "Module constants: math (pi, e, tau, inf, nan), os (name, which is posix as on every CPython WebAssembly host, sep, pathsep, linesep, devnull, curdir, pardir, extsep), re flags, sys.maxsize (2**31 - 1 under 32-bit int), logging levels, datetime.MINYEAR / MAXYEAR",
+                "status": "done",
+                "version": "0.8.0",
+                "test": "stdlib::module_constants"
+            },
+            {
+                "name": "sys.argv, and sys.stdin / sys.stdout / sys.stderr: write, flush, read, readline, readlines, and iterating lines, through WASI",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::sys_streams_and_argv"
+            },
+            {
+                "name": "sys.exit([status]) raises a catchable SystemExit; one nothing catches exits with its status (an int, 0 for none or None, 1 with the message printed to stderr for anything else)",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::sys_exit"
+            },
+            {
+                "name": "sys: platform (\"wasi\", as CPython on WASI reports), version (\"3.13.0 (waspy x.y.z)\"), path (an empty list: imports are linked at compile time)",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::sys_host_strings"
+            },
+            {
+                "name": "os functions on host values, through WASI: environ and getenv() from the host's environment, urandom() from its entropy, getcwd() \"/\" and getpid() 42 (WASI has neither; wasi-libc's answers, as CPython on WASI gives them)",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::os_host_values"
+            },
+            {
+                "name": "os.path functions: join(), basename(), dirname(), split(), splitext(), normpath(), abspath(), isabs() as posixpath computes them, and exists(), isfile(), isdir() through the host",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::os_path_functions"
+            },
+            {
+                "name": "os functions on files, through WASI: remove(), unlink(), rename(), replace(), and os.path.getsize(), raising CPython's OSError subclasses",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::os_file_functions"
+            },
+            {
+                "name": "os functions on directories and times, through WASI: listdir() and os.path.getmtime()",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::os_listdir_and_getmtime"
+            },
+            {
+                "name": "io.StringIO: write, getvalue, read, readline, readlines, seek, tell, iteration, and with",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::io_stringio"
+            },
+            {
+                "name": "pathlib.Path: joining with /, name, suffix, suffixes, stem, parent, parts, with_name / with_suffix / with_stem, relative_to, and exists, read_text, write_text, iterdir, unlink, rename",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::pathlib_module"
+            },
+            {
+                "name": "argparse: positional and optional arguments, store / store_true / store_false / count / append, nargs, choices, required, help and usage, and CPython's errors with exit status 2; the Namespace typed from the program's add_argument calls",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::argparse_module"
+            },
+            {
+                "name": "open(path, mode) through WASI: path_open on the preopened directories (r, w, a, b, + modes)",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "file_io::open_with_modes"
+            },
+            {
+                "name": "read() / read(n) returning strings (64 KiB default cap per call)",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "file_io::read_and_read_n"
+            },
+            {
+                "name": "write(s) returning bytes written; close() and flush()",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "file_io::write_close_flush"
+            },
+            {
+                "name": "with open(...) as f: context-manager form (desugared to open/body/close)",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "file_io::with_open"
+            },
+            {
+                "name": "File imports emitted only when open() is used - other modules keep zero imports",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "file_io::imports_only_with_open"
+            },
+            {
+                "name": "A file open() cannot open raises CPython's exception (FileNotFoundError: [Errno 2] No such file or directory: 'x', PermissionError, IsADirectoryError, ...)",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "file_io::open_errors_raise"
+            },
+            {
+                "name": "pathlib: Path.copy(), copy_into(), move(), and move_into()",
+                "status": "todo",
+                "python": "3.14",
+                "change": "new",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.14/whatsnew/3.14.html#pathlib"
+                }
+            },
+            {
+                "name": "argparse: suggest_on_error=, a suggestion for a mistyped choice or subcommand",
+                "status": "todo",
+                "python": "3.14",
+                "change": "new",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.14/whatsnew/3.14.html#argparse"
+                }
+            },
+            {
+                "name": "os.reload_environ()",
+                "status": "todo",
+                "python": "3.14",
+                "change": "new",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.14/whatsnew/3.14.html#os"
+                }
+            },
+            {
+                "name": "UTF-8 is the default encoding where encoding= is not given",
+                "status": "todo",
+                "python": "3.15",
+                "change": "changed",
+                "ref": {
+                    "label": "PEP 686",
+                    "url": "https://peps.python.org/pep-0686/"
+                }
+            },
+            {
+                "name": "argparse suggests a correction by default, and takes dest from a single-dash long option (-foo)",
+                "status": "todo",
+                "python": "3.15",
+                "change": "changed",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.15/whatsnew/3.15.html#argparse"
+                }
+            }
+        ]
+    },
+    "logging": {
+        "title": "LOGGING",
+        "section": "Standard library",
+        "features": [
+            {
+                "name": "logging module: getLogger and the logger hierarchy, debug, info, warning, error, critical, log, basicConfig, setLevel, disable, Logger, Handler, StreamHandler, FileHandler, NullHandler, Formatter (the %, {, and $ styles), Filter, LogRecord, with each record's line and function",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::logging_module"
+            },
+            {
+                "name": "logging module: exception() and exc_info (the exception's last line standing in for its traceback), extra= written out in the call and fields a filter sets, addLevelName, logging.config.dictConfig, logging.handlers' RotatingFileHandler, WatchedFileHandler, BufferingHandler, and MemoryHandler, and shutdown at exit",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::logging_handlers_and_config"
+            },
+            {
+                "name": "logging module: logging.handlers.TimedRotatingFileHandler, every when and interval, backupCount, delay (local time is UTC; atTime, namer, and rotator are refused)",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::logging_timed_rotating_file_handler"
+            },
+            {
+                "name": "logging module: logging.config.fileConfig, its file read when the program is compiled and checked when it runs: formatters, handlers of logging, logging.handlers, and the program with their args and kwargs, levels, the root and named loggers, qualname, propagate, disable_existing_loggers, defaults, and the file's DEFAULT section and interpolation",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "stdlib::logging_file_config"
+            },
+            {
+                "name": "logging: TimedRotatingFileHandler times its first rotation from the file's creation",
+                "status": "todo",
+                "python": "3.16",
+                "change": "changed",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.16/whatsnew/3.16.html#logging"
+                }
+            }
+        ]
+    },
+    "async": {
+        "title": "ASYNC & ASYNCIO",
+        "section": "Standard library",
+        "features": [
+            {
+                "name": "Promise object representation",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "async_await::promise_representation"
+            },
+            {
+                "name": "async/await syntax support",
+                "status": "done",
+                "version": "1.0.0",
+                "issue": 7,
+                "test": "async_await::async_await_syntax"
+            },
+            {
+                "name": "Asynchronous function execution",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "async_await::asynchronous_execution"
+            },
+            {
+                "name": "Concurrent task management",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "async_await::concurrent_tasks"
+            },
+            {
+                "name": "asyncio: TaskGroup.cancel()",
+                "status": "todo",
+                "python": "3.15",
+                "change": "new",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.15/whatsnew/3.15.html#asyncio"
+                }
+            },
+            {
+                "name": "asyncio.run(eager_tasks=True) and Runner(eager_tasks=True)",
+                "status": "todo",
+                "python": "3.16",
+                "change": "new",
+                "ref": {
+                    "label": "What's New",
+                    "url": "https://docs.python.org/3.16/whatsnew/3.16.html#asyncio"
+                }
+            }
+        ]
+    },
+    "web": {
+        "title": "WEB & GRAPHICS",
+        "section": "Platform",
+        "features": [
+            {
+                "name": "JavaScript bridge & value conversion",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "web_interop::javascript_bridge"
+            },
+            {
+                "name": "DOM manipulation APIs",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "web_interop::dom_manipulation"
+            },
+            {
+                "name": "Event handling system",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "web_interop::event_handling"
+            },
+            {
+                "name": "HTTP requests (fetch API)",
+                "status": "done",
+                "version": "1.0.0",
+                "issue": 35,
+                "test": "web_interop::fetch_api"
+            },
+            {
+                "name": "Canvas API (2D drawing)",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "graphics::canvas_2d"
+            },
+            {
+                "name": "WebGL support (3D graphics)",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "graphics::webgl"
+            },
+            {
+                "name": "Animation & rendering loops",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "graphics::animation_loop"
+            },
+            {
+                "name": "Image manipulation & processing",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "graphics::image_processing"
+            },
+            {
+                "name": "Pixels changed in place in a bytearray: a typed array's assign_to(b) copies into one, with Pyodide's errors, and assign(b) and to_js(b) take one",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "graphics::bytearray_pixels"
+            }
+        ]
+    },
+    "packages": {
+        "title": "PACKAGES",
+        "section": "Platform",
+        "features": [
+            {
+                "name": "pydantic models: typed fields, lax validation of dicts and JSON text, model_dump and model_dump_json, and ValidationError as pydantic 2.14 prints it",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "packages::pydantic_models"
+            },
+            {
+                "name": "FastAPI routes on the module's functions: path, query, and JSON body parameters read by their annotations, HTTPException, FastAPI's 404, 405, and 422 bodies, and TestClient",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "packages::fastapi_routes"
+            },
+            {
+                "name": "httpx's AsyncClient over the host's fetch (a program run in JavaScript)",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "packages::httpx_async_client"
+            },
+            {
+                "name": "A client for Anthropic's Messages API in the SDK's shape (AsyncAnthropic().messages.create)",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "packages::anthropic_messages"
+            },
+            {
+                "name": "requests and Anthropic's synchronous client over WASI preview 2's outgoing HTTP (a program making requests is a component run with wasmtime -S http)",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "packages::requests_over_wasi_http"
+            }
+        ]
+    },
+    "modules": {
+        "title": "MODULES & PROJECTS",
+        "section": "Platform",
+        "features": [
+            {
+                "name": "Multi-file compilation to single WASM",
+                "status": "done",
+                "version": "0.5.0",
+                "test": "project_mgmt::multi_file_compilation"
+            },
+            {
+                "name": "Dependency analysis & circular detection",
+                "status": "done",
+                "version": "0.5.0",
+                "test": "project_mgmt::dependency_order_and_cycles"
+            },
+            {
+                "name": "Entry point detection (__main__.py)",
+                "status": "done",
+                "version": "0.5.0",
+                "test": "project_mgmt::entry_point_detection"
+            },
+            {
+                "name": "Config parsing (setup.py, pyproject.toml)",
+                "status": "done",
+                "version": "0.5.0",
+                "test": "project_mgmt::config_parsing"
+            },
+            {
+                "name": "Dynamic Module Loading - a module named at run time, loaded through the host",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "runtime_features::dynamic_module_loading"
+            },
+            {
+                "name": "Import statement parsing & IR generation",
+                "status": "done",
+                "version": "0.8.0",
+                "test": "imports::import_statements"
+            },
+            {
+                "name": "From-import with named imports",
+                "status": "done",
+                "version": "0.8.0",
+                "test": "imports::from_imports"
+            },
+            {
+                "name": "Star imports detection (from X import *)",
+                "status": "done",
+                "version": "0.8.0",
+                "test": "imports::star_imports_refused"
+            },
+            {
+                "name": "Conditional imports in try/except blocks",
+                "status": "done",
+                "version": "0.8.0",
+                "test": "imports::conditional_imports"
+            },
+            {
+                "name": "Dynamic imports (__import__, importlib) with a constant name, in a function or at module level",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "imports::dynamic_imports"
+            },
+            {
+                "name": "Module execution and loading",
+                "status": "done",
+                "version": "0.8.0",
+                "test": "imports::module_execution"
+            },
+            {
+                "name": "User-defined module files - import mod / from mod import f resolved from sibling .py files and statically linked",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "imports::user_module_files"
+            },
+            {
+                "name": "Namespace access on user modules (mod.f(), mod.CONST, mod.ClassName()) and aliases (import mod as m, from mod import f as g)",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "imports::module_namespaces_and_aliases"
+            },
+            {
+                "name": "Module caching - a module imported through several paths compiles once",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "imports::module_caching"
+            },
+            {
+                "name": "lazy import m and lazy from m import n: the module runs at its first use",
+                "status": "todo",
+                "python": "3.15",
+                "change": "new",
+                "ref": {
+                    "label": "PEP 810",
+                    "url": "https://peps.python.org/pep-0810/"
+                }
+            }
+        ]
+    },
+    "compiler": {
+        "title": "COMPILER & MEMORY",
+        "section": "Platform",
+        "features": [
+            {
+                "name": "WebAssembly optimization (Binaryen)",
+                "status": "done",
+                "version": "0.1.0",
+                "test": "optimization::binaryen_optimization"
+            },
+            {
+                "name": "Compiler options & configuration (reviewed API: optimize + verbosity)",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "optimization::compiler_options"
+            },
+            {
+                "name": "Error handling with located messages (line/column, function, hints)",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "optimization::located_errors"
+            },
+            {
+                "name": "A call to an undefined function, or an attribute read through an untyped value, is a compile error instead of answering 0",
+                "status": "done",
+                "version": "0.17.0",
+                "test": "optimization::undefined_names_refused"
+            },
+            {
+                "name": "Early validation - unsupported syntax rejected before codegen",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "optimization::early_validation"
+            },
+            {
+                "name": "A parse or lowering failure fails the build naming the file, rather than skipping it with a warning",
+                "status": "done",
+                "version": "0.16.0",
+                "test": "optimization::failures_name_the_file"
+            },
+            {
+                "name": "Integration test suite - every example compiled, run, and asserted in CI",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "optimization::every_example_compiles"
+            },
+            {
+                "name": "End-to-end programs asserted under Node and wasmtime, optimized and unoptimized, as a CI gate",
+                "status": "done",
+                "version": "0.16.0",
+                "test": "optimization::end_to_end_programs_have_checkers"
+            },
+            {
+                "name": "Comment preservation - python.comments custom section, survives optimization",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "optimization::comment_preservation"
+            },
+            {
+                "name": "Memory layout: equal string and bytes literals share one blob in the data segment",
+                "status": "done",
+                "version": "0.1.0",
+                "test": "optimization::literals_share_one_blob"
+            },
+            {
+                "name": "Allocator with runtime memory growth",
+                "status": "done",
+                "version": "0.12.0",
+                "test": "memory::memory_growth"
+            },
+            {
+                "name": "Collections carry a capacity and reallocate instead of overflowing their region",
+                "status": "done",
+                "version": "0.14.0",
+                "test": "memory::collection_capacity"
+            },
+            {
+                "name": "Pointer identity across growth (a grown collection visible through every alias)",
+                "status": "done",
+                "version": "0.15.0",
+                "test": "memory::identity_across_growth"
+            },
+            {
+                "name": "Garbage collection: a mark-and-sweep collector frees what is unreachable, reference cycles included",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "memory::garbage_collection"
+            },
+            {
+                "name": "Leak prevention and finalizers: an object is let go of when its last reference goes, and __del__ runs then, where CPython's reference counting runs it; a generator abandoned mid-loop is closed",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "memory::finalizers"
+            },
+            {
+                "name": "Memory pools for efficient allocation: a free list per block size",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "memory::memory_pools"
+            },
+            {
+                "name": "Bounded memory: a long-running loop that builds and drops collections stays within a fixed number of pages",
+                "status": "done",
+                "version": "1.0.0",
+                "test": "memory::bounded_memory"
+            }
+        ]
+    }
 }

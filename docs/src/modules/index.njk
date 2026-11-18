@@ -1,8 +1,10 @@
 ---
 layout: layouts/base.njk
-title: Development board
-description: Module development status for Waspy, the Python to WebAssembly compiler, from Python parsing to WASM output.
-permalink: /modules/
+pagination:
+  data: python
+  size: 1
+  alias: py
+permalink: "{{ '/modules/' if pagination.pageNumber == 0 else '/modules/' + py.version + '/' }}"
 wide: true
 scripts: ["/modules/modules.js"]
 head: |
@@ -26,6 +28,13 @@ head: |
 <svg class="{{ cls }}" aria-hidden="true"><use href="#board-issue"/></svg>
 {%- endmacro %}
 
+{#- The Python version this page shows, and where each version's page lives. -#}
+{% set isBase = pagination.pageNumber == 0 %}
+{% macro versionHref(entry, first) -%}
+{{ '/modules/' if first else '/modules/' + entry.version + '/' }}
+{%- endmacro %}
+{% set stateTone = { supported: "text-green", released: "text-teal", development: "text-amber" } %}
+
 <div data-board-export class="shell-wide pt-12 pb-4 sm:pt-16">
     {# Inside the exported block, so the PNG copy carries the symbols. #}
     <svg class="hidden" aria-hidden="true">
@@ -41,31 +50,54 @@ head: |
     <p class="eyebrow">Modules</p>
     <div class="mt-4 grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,38rem)] lg:items-start lg:gap-12">
         <h1 class="text-4xl font-extrabold sm:text-5xl">Development <span class="text-gradient">board</span></h1>
-        <p class="text-base leading-relaxed text-ink-1 sm:text-lg lg:pt-2">Module development status, from Python parsing to WASM output. Every completed feature is backed by a passing test that checks the compiled program against CPython's answer.</p>
+        <p class="text-base leading-relaxed text-ink-1 sm:text-lg lg:pt-2">What Waspy compiles, Python version by version. Every completed feature is backed by a passing test that checks the compiled program against CPython's answer, and what each newer version adds or changes is listed as work to do.</p>
     </div>
 
-    {# Stats #}
     {% set s = board.stats %}
+
+    {# Python version: a page each, the first one at /modules/ #}
+    <nav aria-label="Python version" class="mt-10">
+        <ul class="flex flex-wrap gap-2">
+            {% for entry in python %}
+            {% set current = entry.version == py.version %}
+            <li>
+                <a href="{{ versionHref(entry, loop.first) }}"{% if current %} aria-current="page"{% endif %} class="flex flex-col rounded-2xl border px-4 py-2.5 transition {{ 'border-honey/50 bg-honey/10' if current else 'border-line bg-surface hover:border-line-strong' }}">
+                    <span class="font-mono text-sm font-semibold {{ 'text-ink' if current else 'text-ink-1' }}">Python {{ entry.version }}</span>
+                    <span class="mt-0.5 flex items-center gap-1.5 text-xs text-ink-2"><span class="hex size-2 bg-current {{ stateTone[entry.state] }}" aria-hidden="true"></span>{{ entry.label }}</span>
+                </a>
+            </li>
+            {% endfor %}
+        </ul>
+        <p class="mt-4 max-w-3xl text-sm leading-relaxed text-ink-2">
+            {% if isBase %}
+            {{ py.note }}. The version Waspy compiles today; each newer version adds what it brings as work to do.
+            {% else %}
+            {{ py.note }}. Python {{ py.version }} adds {{ s.added }} items across {{ s.addedCards }} cards ({{ s.addedDone }} done), marked below. <a href="{{ py.whatsNew }}" target="_blank" rel="noopener" class="link">What's New in Python {{ py.version }}</a>
+            {% endif %}
+        </p>
+    </nav>
+
+    {# Stats #}
     <dl class="mt-10 grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
         <div class="glass p-5 sm:p-6">
             <dt class="font-mono text-[0.7rem] font-semibold tracking-[0.12em] text-ink-2 uppercase">Completed</dt>
             <dd class="mt-2 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
                 <span data-count="{{ s.done }}" class="font-display text-4xl font-extrabold text-green tabular-nums sm:text-5xl">{{ s.done }}</span>
-                <span class="text-sm text-ink-2">of {{ s.cards }} modules</span>
+                <span class="text-sm text-ink-2">of {{ s.cards }} cards</span>
             </dd>
         </div>
         <div class="glass p-5 sm:p-6">
             <dt class="font-mono text-[0.7rem] font-semibold tracking-[0.12em] text-ink-2 uppercase">In progress</dt>
             <dd class="mt-2 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
                 <span data-count="{{ s.progress }}" class="font-display text-4xl font-extrabold text-amber tabular-nums sm:text-5xl">{{ s.progress }}</span>
-                <span class="text-sm text-ink-2">modules</span>
+                <span class="text-sm text-ink-2">cards</span>
             </dd>
         </div>
         <div class="glass p-5 sm:p-6">
             <dt class="font-mono text-[0.7rem] font-semibold tracking-[0.12em] text-ink-2 uppercase">Todo</dt>
             <dd class="mt-2 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
                 <span data-count="{{ s.todo }}" class="font-display text-4xl font-extrabold text-teal tabular-nums sm:text-5xl">{{ s.todo }}</span>
-                <span class="text-sm text-ink-2">modules</span>
+                <span class="text-sm text-ink-2">cards</span>
             </dd>
         </div>
         <div class="glass p-5 sm:p-6">
@@ -83,7 +115,13 @@ head: |
             <li class="flex items-center gap-1.5">{{ statusIcon("done") }} Done</li>
             <li class="flex items-center gap-1.5">{{ statusIcon("progress") }} In progress</li>
             <li class="flex items-center gap-1.5">{{ statusIcon("todo") }} Todo</li>
-            <li class="flex items-center gap-1.5"><span class="chip border-teal/30 bg-teal/10 text-teal">0.14.0</span> release that shipped it</li>
+            {% if not isBase %}
+            <li class="flex items-center gap-1.5"><span class="chip border-honey/30 bg-honey/10 text-honey">New in {{ py.version }}</span> added or changed in Python {{ py.version }}</li>
+            {% endif %}
+            {% if pagination.pageNumber > 1 %}
+            <li class="flex items-center gap-1.5"><span class="chip border-line text-ink-2">New in {{ python[1].version }}</span> from an earlier Python version</li>
+            {% endif %}
+            <li class="flex items-center gap-1.5"><span class="chip border-teal/30 bg-teal/10 text-teal">0.14.0</span> Waspy release that shipped it</li>
             <li class="flex items-center gap-1.5"><span class="chip chip-progress">upcoming</span> merged, not yet released</li>
             <li class="flex items-center gap-1.5"><span class="inline-flex items-center gap-1 font-mono text-[0.72rem] text-ink-1">{{ issueIcon() }}#5</span> tracking issue</li>
         </ul>
@@ -96,11 +134,12 @@ head: |
         </div>
     </div>
 
-    {# Board #}
-    <div data-board class="mt-10 grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,2fr)] xl:gap-5">
+    {# Board: the column holding the most cards gets the wide slot #}
+    {% set wide = "progress" if (board.columns[1].cards | length) > (board.columns[2].cards | length) else "done" %}
+    <div data-board data-wide-column="{{ wide }}" class="mt-10 grid items-start gap-4 xl:gap-5 {{ 'xl:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_minmax(0,1fr)]' if wide == 'progress' else 'xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,2fr)]' }}">
         {% for column in board.columns %}
         {% set t = tone[column.status] %}
-        <section data-column="{{ column.status }}" aria-labelledby="column-{{ column.status }}" class="rounded-[1.6rem] border border-line bg-bg-1/45 p-2.5 sm:p-3">
+        <section data-column="{{ column.status }}"{% if column.status == wide %} data-wide{% endif %} aria-labelledby="column-{{ column.status }}" class="rounded-[1.6rem] border border-line bg-bg-1/45 p-2.5 sm:p-3">
             <header class="flex items-start justify-between gap-3 px-2.5 pt-2.5 pb-4">
                 <div>
                     <h2 id="column-{{ column.status }}" class="flex items-center gap-2.5 text-lg font-bold">
@@ -108,16 +147,22 @@ head: |
                     </h2>
                     <p class="mt-1 text-sm text-ink-2">{{ column.subtitle }}</p>
                 </div>
-                <span class="chip {{ t.chip }} mt-0.5 text-[0.75rem]"><span class="sr-only">{{ column.cards | length }} modules</span><span aria-hidden="true">{{ column.cards | length }}</span></span>
+                <span class="chip {{ t.chip }} mt-0.5 text-[0.75rem]"><span class="sr-only">{{ column.cards | length }} cards</span><span aria-hidden="true">{{ column.cards | length }}</span></span>
             </header>
 
-            <div data-column-cards class="grid items-start gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-1 {{ '2xl:grid-cols-2' if column.status == 'done' }}">
+            <div data-column-cards class="grid items-start gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-1 {{ '2xl:grid-cols-2' if column.status == wide }}">
                 {% for card in column.cards %}
                 <article data-card="{{ card.key }}" class="group/card glass {{ t.accent }} overflow-hidden transition-[border-color,box-shadow] duration-300 hover:border-line-strong">
                     <h3 class="text-base">
                         <button type="button" data-card-toggle aria-expanded="false" aria-controls="card-{{ card.key }}" class="flex w-full cursor-pointer items-center gap-3 rounded-[var(--radius-card)] px-4 pt-4 pb-3 text-left focus-visible:outline-offset-[-3px]">
-                            <span class="min-w-0 flex-1 font-display text-[0.95rem] font-bold tracking-[0.03em] text-ink">{{ card.title }}</span>
-                            <span class="font-mono text-xs text-ink-2 tabular-nums"><span class="sr-only">{{ t.label }}, {{ card.done }} of {{ card.total }} features done</span><span aria-hidden="true">{{ card.done }}/{{ card.total }}</span></span>
+                            <span class="min-w-0 flex-1">
+                                <span class="block font-mono text-[0.62rem] font-semibold tracking-[0.12em] text-ink-2 uppercase">{{ card.section }}</span>
+                                <span class="mt-0.5 block font-display text-[0.95rem] font-bold tracking-[0.03em] text-ink">{{ card.title }}</span>
+                            </span>
+                            {% if card.added %}
+                            <span class="chip border-honey/30 bg-honey/10 text-[0.7rem] text-honey" title="{{ card.added }} added or changed in Python {{ py.version }}" aria-hidden="true">+{{ card.added }}</span>
+                            {% endif %}
+                            <span class="font-mono text-xs text-ink-2 tabular-nums"><span class="sr-only">{{ t.label }}, {{ card.done }} of {{ card.total }} features done{% if card.added %}, {{ card.added }} new in Python {{ py.version }}{% endif %}</span><span aria-hidden="true">{{ card.done }}/{{ card.total }}</span></span>
                             <svg data-chevron class="size-4 shrink-0 text-ink-2 transition-transform duration-300 group-data-open/card:rotate-180 group-data-open/card:text-[var(--accent)]" aria-hidden="true"><use href="#board-chevron"/></svg>
                         </button>
                     </h3>
@@ -133,7 +178,22 @@ head: |
                                 {% for feature in card.features %}
                                 <li class="flex items-start gap-2.5 border-b border-line/60 py-2.5 last:border-b-0">
                                     <span class="mt-0.5 shrink-0">{{ statusIcon(feature.status) }}</span>
-                                    <span class="min-w-0 flex-1 text-[0.84rem] leading-relaxed text-ink-1"><span class="sr-only">{{ tone[feature.status].label }}: </span>{{ feature.name }}</span>
+                                    <span class="min-w-0 flex-1">
+                                        <span class="block text-[0.84rem] leading-relaxed text-ink-1"><span class="sr-only">{{ tone[feature.status].label }}: </span>{{ feature.name }}</span>
+                                        {% if feature.since %}
+                                        {# From a later Python version: which one, and where it is described #}
+                                        <span class="mt-1.5 flex flex-wrap items-center gap-1.5">
+                                            {% if feature.added %}
+                                            <span class="chip border-honey/30 bg-honey/10 text-honey">{{ "Changed" if feature.change == "changed" else "New" }} in {{ feature.since }}</span>
+                                            {% else %}
+                                            <span class="chip border-line text-ink-2">{{ "Changed" if feature.change == "changed" else "New" }} in {{ feature.since }}</span>
+                                            {% endif %}
+                                            {% if feature.ref %}
+                                            <a href="{{ feature.ref.url }}" target="_blank" rel="noopener" class="rounded-full px-1 font-mono text-[0.7rem] text-ink-2 transition hover:text-honey" title="{{ feature.ref.label }} for Python {{ feature.since }}">{{ feature.ref.label }} {{ icon("external", "inline size-3 align-[-2px]") }}</a>
+                                            {% endif %}
+                                        </span>
+                                        {% endif %}
+                                    </span>
                                     {% if feature.issue or (feature.version and feature.version != "todo") %}
                                     <span class="flex shrink-0 items-center gap-1.5 pt-0.5">
                                         {% if feature.issue %}
@@ -181,8 +241,9 @@ head: |
         background: var(--c-bg);
     }
     .board-snapshot [data-board] { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 3fr); }
+    .board-snapshot [data-board][data-wide-column="progress"] { grid-template-columns: minmax(0, 1fr) minmax(0, 3fr) minmax(0, 1fr); }
     .board-snapshot [data-column-cards] { grid-template-columns: minmax(0, 1fr); }
-    .board-snapshot [data-column="done"] [data-column-cards] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .board-snapshot [data-wide] [data-column-cards] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     .board-snapshot [data-card-body] { grid-template-rows: 1fr; }
     .board-snapshot [data-chevron],
     .board-snapshot [data-export-exclude] { display: none; }
