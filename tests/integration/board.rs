@@ -1,7 +1,10 @@
 //! The development board's features, one test each (`just board-check`).
 //!
 //! Every feature on the development board (`docs/src/_data/modules.json`)
-//! names the test here that backs it, as `card::test`. A feature marked done
+//! names the test here that backs it, as `module::test`. A module is named
+//! for the card its tests were first written for; the board's cards are
+//! categories now, and a test id stays put when a feature moves between
+//! them. A feature marked done
 //! must have one that passes; one still open may have one, marked `#[ignore]`,
 //! asserting what the feature will answer once it lands, and `just
 //! board-check` fails the moment such a test starts passing, so the board is

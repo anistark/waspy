@@ -1,22 +1,26 @@
 // `just board-check`: the development board tells the truth.
 //
 // The board's data is docs/src/_data/modules.json, which the site renders at
-// /modules/. Every feature in it names the test in tests/integration/board.rs
-// that backs it (`"test": "card::name"`). This runs that suite, ignored tests
-// included, and fails when:
+// /modules/, a page per Python version in docs/src/_data/python.json. Cards
+// are categories; a card's status is not stored, since it depends on the
+// version shown. Every feature names the test in tests/integration/board.rs
+// that backs it (`"test": "module::name"`; the module is the card the test
+// was first written for, so a test id stays put when cards are regrouped).
+// This runs that suite, ignored tests included, and fails when:
 //
 //   - a done feature names no test, or its test is missing, ignored, or fails;
 //   - an open feature's test passes (the feature is done: move it on the board);
 //   - a test in the suite backs no feature;
-//   - a card's status disagrees with its features (done: every feature done;
-//     todo: none started; progress: anything in between).
-//
-// This is the command the 1.0 gate runs: the board at 100% with this passing.
+//   - a card has no section, or a feature's `python` is not a listed version;
+//   - a feature from a version after the first has no `change` (new or
+//     changed) or no `ref` (the PEP or What's New section it comes from).
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
 const moduleData = JSON.parse(readFileSync('docs/src/_data/modules.json', 'utf8'));
+const versions = JSON.parse(readFileSync('docs/src/_data/python.json', 'utf8')).map((entry) => entry.version);
+const SECTIONS = ['Language', 'Built-in types', 'Standard library', 'Platform'];
 
 const cargo = (args) =>
     execFileSync('cargo', ['test', '--all-features', '--test', 'integration_board', '--', ...args], {
@@ -50,18 +54,24 @@ for (const match of run.matchAll(/^test (\S+) \.\.\. (ok|FAILED)$/gm)) {
 const problems = [];
 const referenced = new Set();
 let done = 0;
-for (const [card, module] of Object.entries(moduleData)) {
-    const statuses = module.features.map((feature) => feature.status);
-    const allDone = statuses.every((status) => status === 'done');
-    const allTodo = statuses.every((status) => status === 'todo');
-    const expected = allDone ? 'done' : allTodo ? 'todo' : 'progress';
-    if (module.status !== expected) {
-        problems.push(`${module.title} is marked ${module.status}, but its features make it ${expected}`);
+const later = new Map();
+for (const module of Object.values(moduleData)) {
+    if (!SECTIONS.includes(module.section)) {
+        problems.push(`${module.title} has section ${JSON.stringify(module.section)}, not one of ${SECTIONS.join(', ')}`);
     }
     for (const feature of module.features) {
         const where = `${module.title}: ${feature.name}`;
         const test = feature.test;
         if (feature.status === 'done') done++;
+        if (feature.python !== undefined) {
+            if (!versions.includes(feature.python)) {
+                problems.push(`python ${feature.python} is not in python.json: ${where}`);
+            } else if (feature.python !== versions[0]) {
+                later.set(feature.python, (later.get(feature.python) ?? 0) + 1);
+                if (feature.change !== 'new' && feature.change !== 'changed') problems.push(`no change (new or changed): ${where}`);
+                if (!feature.ref?.label || !feature.ref?.url) problems.push(`no ref (a label and a url): ${where}`);
+            }
+        }
         if (!test) {
             if (feature.status === 'done') problems.push(`done, but names no test: ${where}`);
             continue;
@@ -89,4 +99,8 @@ if (problems.length) {
     for (const problem of problems) console.error(`  ${problem}`);
     process.exit(1);
 }
-console.log(`board-check: ${done} done features, each backed by a passing test; ${referenced.size - done} open ones with a test still failing`);
+const laterItems = versions
+    .filter((version) => later.has(version))
+    .map((version) => `${later.get(version)} for ${version}`)
+    .join(', ');
+console.log(`board-check: ${done} done features, each backed by a passing test; ${referenced.size - done} open ones with a test still failing${laterItems ? `; Python's later versions add ${laterItems}` : ''}`);

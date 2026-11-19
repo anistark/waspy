@@ -1,0 +1,30 @@
+[
+    {
+        "version": "3.13",
+        "state": "supported",
+        "label": "Supported",
+        "note": "Released 7 October 2024",
+        "whatsNew": "https://docs.python.org/3.13/whatsnew/3.13.html"
+    },
+    {
+        "version": "3.14",
+        "state": "released",
+        "label": "Released",
+        "note": "Released 7 October 2025",
+        "whatsNew": "https://docs.python.org/3.14/whatsnew/3.14.html"
+    },
+    {
+        "version": "3.15",
+        "state": "released",
+        "label": "Released",
+        "note": "Released 9 October 2026",
+        "whatsNew": "https://docs.python.org/3.15/whatsnew/3.15.html"
+    },
+    {
+        "version": "3.16",
+        "state": "development",
+        "label": "In development",
+        "note": "From 3.16.0a2's What's New, a draft that can change before 3.16.0, planned for 5 October 2027",
+        "whatsNew": "https://docs.python.org/3.16/whatsnew/3.16.html"
+    }
+]

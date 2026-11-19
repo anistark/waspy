@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **The modules board is organized by Python version**: Python 3.13 is the baseline, and pages for 3.14, 3.15, and 3.16 list what each version adds or changes as work to do, in the cards they belong to (48 items, from each version's What's New, with their PEP or section linked). The 27 cards are now 19 categories in four sections (Language, Built-in types, Standard library, Platform), and every feature keeps its test
+
 ## [1.0.0](https://github.com/anistark/waspy/releases/tag/v1.0.0) - 2026-11-18
 
 ### Added
